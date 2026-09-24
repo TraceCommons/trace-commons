@@ -392,8 +392,12 @@ async fn outcomes_are_immutable_and_tenant_scoped() {
     };
     let output = ReviewOutput::rejected(result).unwrap();
     let stored = StoredPhaseResult::from_result(Phase::Review, output.result()).unwrap();
+    // Review commits through `commit_review`, not the generic `commit_phase`
+    // -- `commit_phase` no longer knows how to set the approved-content
+    // columns together with `approved_revision_id`, which is the whole
+    // point of decision D7 (see `pipeline_runs_approved_content_shape`).
     store
-        .commit_phase(&claimed, stored, None, None)
+        .commit_review(&claimed, stored, None)
         .await
         .expect("commit the rejected Review outcome");
 
@@ -555,11 +559,15 @@ fn minimal_config(include_index: bool) -> PipelineBundleConfig {
 /// Builds a service over an isolated index (as both reader and writer), the
 /// reference scorer and embedder, and `storage_rebate`/`trace_credit`
 /// recording settlement adapters with an uncapped (`u64::MAX`) cap for each,
-/// on payout rail `none`.
+/// on payout rail `none`. `crash_point`, when given, is wired through
+/// `PipelineServiceBuilder::with_crash_point` -- for tests that must observe
+/// a mid-transaction crash and prove the retry resumes from durable state
+/// alone, rather than from in-memory continuation.
 async fn test_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     config: PipelineBundleConfig,
+    crash_point: Option<PipelineCrashPoint>,
 ) -> (
     Arc<PipelineService>,
     Arc<IsolatedPipelineIndex>,
@@ -601,7 +609,7 @@ async fn test_service(
             ),
         ]),
     };
-    let service = PipelineServiceBuilder::new(
+    let mut builder = PipelineServiceBuilder::new(
         backend,
         artifact_store,
         package,
@@ -611,9 +619,11 @@ async fn test_service(
         caps,
     )
     .with_scorer(scorer)
-    .with_embedder(embedder)
-    .build()
-    .expect("build pipeline service");
+    .with_embedder(embedder);
+    if let Some(crash_point) = crash_point {
+        builder = builder.with_crash_point(crash_point);
+    }
+    let service = builder.build().expect("build pipeline service");
     (Arc::new(service), index, adapters)
 }
 
@@ -724,8 +734,13 @@ async fn receipt_replay_and_conflict_are_exact() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) =
-        test_service(backend.clone(), artifact_store(&dir), minimal_config(false)).await;
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
     let tenant = format!("replay-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
@@ -770,8 +785,13 @@ async fn tombstoned_content_is_refused_before_the_store() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) =
-        test_service(backend.clone(), artifact_store(&dir), minimal_config(false)).await;
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
     let tenant = format!("tombstone-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
@@ -864,8 +884,13 @@ async fn quota_is_counted_before_the_store_under_concurrency() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) =
-        test_service(backend.clone(), artifact_store(&dir), minimal_config(false)).await;
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
     let tenant = format!("quota-{}", uuid::Uuid::new_v4());
     let limits = PipelineAdmissionLimits {
         max_per_tenant_per_hour: 3,
@@ -909,7 +934,8 @@ async fn pool_size_one_receipt_does_not_nest_checkouts() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(backend, artifact_store(&dir), minimal_config(false)).await;
+    let (service, _, _) =
+        test_service(backend, artifact_store(&dir), minimal_config(false), None).await;
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
@@ -923,4 +949,212 @@ async fn pool_size_one_receipt_does_not_nest_checkouts() {
         result.unwrap(),
         PipelineReceiptResult::Created(_) | PipelineReceiptResult::Replayed(_)
     ));
+}
+
+/// Sets a tenant on the given client and opens a transaction for it. A tiny
+/// helper shared by the two tests below, which each need to read rows the
+/// runner wrote in a separate tenant-scoped transaction of their own.
+async fn tenant_tx<'a>(
+    client: &'a mut deadpool_postgres::Client,
+    tenant_id: &str,
+) -> deadpool_postgres::Transaction<'a> {
+    let tx = client.transaction().await.expect("open tenant tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for tx");
+    tx
+}
+
+/// Review focus item 2: the approved content commits as its own object, and
+/// its revision, object reference, derived record, and phase transition all
+/// land together with the outcome, in one transaction.
+#[tokio::test]
+async fn review_commits_approved_revision_provenance_and_transition_together() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-commit-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let request_content_hash = created.request_content_hash.clone();
+
+    let processed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the seeded run is claimable");
+
+    assert_eq!(processed.next_phase, Some(Phase::Score));
+    assert_eq!(processed.request_content_hash, request_content_hash);
+    let approved_revision_id = processed
+        .approved_revision_id
+        .expect("Review approval records a revision id");
+    let approved_object_ref_id = processed
+        .approved_object_ref_id
+        .expect("Review approval records an object ref id");
+    let approved_content_hash = processed
+        .approved_content_hash
+        .clone()
+        .expect("Review approval records a content hash");
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, processed.run_id)
+        .await
+        .unwrap();
+    let review_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review outcome recorded");
+    let evidence: ReviewEvidence = serde_json::from_value(review_outcome.evidence).unwrap();
+    assert_eq!(approved_content_hash, evidence.result_content_hash);
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT worker_version, output_object_ref_id, input_hash
+               FROM trace_derived_records
+              WHERE tenant_id = $1 AND derived_id = $2",
+            &[&tenant, &approved_revision_id],
+        )
+        .await
+        .expect("derived record for the approved revision exists");
+    tx.commit().await.unwrap();
+    let worker_version: String = row.get("worker_version");
+    let output_object_ref_id: uuid::Uuid = row.get("output_object_ref_id");
+    let input_hash: String = row.get("input_hash");
+    assert_eq!(worker_version, "minimal_review_passthrough");
+    assert_eq!(output_object_ref_id, approved_object_ref_id);
+    assert_eq!(input_hash, dependency_content_hash(&raw));
+
+    let approved_bytes = service.load_approved_bytes(&processed).await.unwrap();
+    assert_eq!(
+        dependency_content_hash(&approved_bytes),
+        approved_content_hash
+    );
+}
+
+/// Review focus item 2's crash test: a crash between the approved-content
+/// artifact write and the database commit must leave exactly one revision
+/// once the run retries, and the retry reuses the deterministic object key
+/// the crashed attempt already wrote to.
+#[tokio::test]
+async fn review_crash_after_artifact_storage_reuses_one_revision() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(PipelineCrashPoint::AfterReviewArtifactStorage),
+    )
+    .await;
+    let tenant = format!("review-crash-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let crashed = service.process_run(&tenant, created.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+
+    // Expire the lease: a direct UPDATE, a time shortcut in the test, not a
+    // processor call. The crashed attempt never called `mark_retry` or
+    // `mark_failed` (the injected crash propagates unchanged, as a real
+    // process crash would), so the run is otherwise stuck `leased` until its
+    // lease naturally expires.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let processed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the retry claims and completes Review");
+    assert_eq!(processed.next_phase, Some(Phase::Score));
+    let approved_object_ref_id = processed
+        .approved_object_ref_id
+        .expect("the retry records an approval");
+
+    // The object id -- and so the object ref id -- is derived from the run
+    // id alone, so both the crashed attempt and the retry compute the same
+    // one; the retry's `put_serialized_json` overwrote the same encrypted
+    // object the crashed attempt already wrote, rather than orphaning one.
+    let expected_object_ref_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("tracecommons:pipeline-approved-object:{}", created.run_id).as_bytes(),
+    );
+    assert_eq!(approved_object_ref_id, expected_object_ref_id);
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, processed.run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.phase == Phase::Review)
+            .count(),
+        1,
+        "exactly one Review outcome after the crash and its retry"
+    );
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let derived_rows = tx
+        .query(
+            "SELECT output_object_ref_id FROM trace_derived_records
+             WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &created.submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(derived_rows.len(), 1, "exactly one derived record");
+    let output_object_ref_id: uuid::Uuid = derived_rows[0].get("output_object_ref_id");
+    assert_eq!(output_object_ref_id, approved_object_ref_id);
+
+    let bytes = service.load_approved_bytes(&processed).await.unwrap();
+    assert_eq!(
+        dependency_content_hash(&bytes),
+        processed.approved_content_hash.unwrap()
+    );
 }

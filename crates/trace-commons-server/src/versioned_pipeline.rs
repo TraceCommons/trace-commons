@@ -16,9 +16,9 @@ use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
     BundlePackage, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
-    PrivacyRisk, ReviewDecision, ReviewEvaluation, ReviewEvidence, SchemaRef, ScoreDecision,
-    ScoreEvaluation, ScoreEvidence, SettleDecision, SettleEvaluation, SettleEvidence,
-    TenantStorageRef,
+    PrivacyRisk, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef,
+    ScoreDecision, ScoreEvaluation, ScoreEvidence, SettleDecision, SettleEvaluation,
+    SettleEvidence, TenantStorageRef,
 };
 use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope,
@@ -257,6 +257,19 @@ impl StoredPhaseResult {
             })?,
         })
     }
+}
+
+/// Approved content ready to commit with its Review outcome: the encrypted
+/// object it was written to, and the provenance `commit_review` records
+/// alongside it (decision D7 -- approved content is its own object, never a
+/// re-use of the source object ref).
+#[derive(Debug, Clone)]
+pub struct ApprovedRevision {
+    pub revision_id: Uuid,
+    pub object_ref: TraceObjectRefWrite,
+    pub content_hash: String,
+    pub source_content_hash: String,
+    pub worker_identity: String,
 }
 
 /// A run identity not yet persisted: computed deterministically from the
@@ -649,7 +662,11 @@ impl PgPipelineStore {
     }
 
     /// Commits a phase outcome, advances `next_phase`, and clears the lease.
-    // Task 10 replaces the Review branch.
+    /// Review no longer commits through here -- see `commit_review`, which
+    /// stores the approved object reference and its derived-record
+    /// provenance in the same transaction as the outcome and the
+    /// transition, rather than setting `approved_revision_id` alone (that
+    /// alone violates the `pipeline_runs_approved_content_shape` CHECK).
     pub async fn commit_phase(
         &self,
         run: &PipelineRunRecord,
@@ -687,25 +704,6 @@ impl PgPipelineStore {
         {
             return Err(stale_lease_error());
         }
-        if outcome.phase == Phase::Review {
-            if approved_revision_id.is_some() {
-                tx.execute(
-                    "UPDATE trace_submissions
-                     SET status = 'accepted', reviewed_at = NOW(), updated_at = NOW()
-                     WHERE tenant_id = $1 AND submission_id = $2",
-                    &[&run.tenant_id, &run.submission_id],
-                )
-                .await?;
-            } else {
-                tx.execute(
-                    "UPDATE trace_submissions
-                     SET status = 'rejected', reviewed_at = NOW(), updated_at = NOW()
-                     WHERE tenant_id = $1 AND submission_id = $2",
-                    &[&run.tenant_id, &run.submission_id],
-                )
-                .await?;
-            }
-        }
         insert_outcome(
             &tx,
             &run.tenant_id,
@@ -738,6 +736,142 @@ impl PgPipelineStore {
                     &phase_as_db(next_phase),
                     &state.as_db(),
                     &approved_revision_id,
+                    &lease_token,
+                ],
+            )
+            .await?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Commits the Review outcome together with its approved-content
+    /// provenance and the phase transition, in one transaction (decision
+    /// D7). On approval: the approved object ref, its `trace_derived_records`
+    /// row, the submission's `accepted` status, the outcome row, and the
+    /// run's `next_phase = score` / `approved_*` columns all commit or none
+    /// do. On rejection: only the submission's `rejected` status, the
+    /// outcome row, and the run's terminal transition commit -- the run's
+    /// `approved_*` columns stay NULL, satisfying
+    /// `pipeline_runs_approved_content_shape`.
+    pub async fn commit_review(
+        &self,
+        run: &PipelineRunRecord,
+        outcome: StoredPhaseResult,
+        approved: Option<ApprovedRevision>,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        if outcome.phase != Phase::Review || run.next_phase != Some(Phase::Review) {
+            return Err(DatabaseError::Constraint(
+                "phase does not match run transition".to_string(),
+            ));
+        }
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+
+        let (approved_revision_id, approved_object_ref_id, approved_content_hash) =
+            if let Some(approved) = &approved {
+                tx.execute(
+                    "INSERT INTO trace_object_refs (
+                        tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                        object_key, content_sha256, encryption_key_ref, size_bytes, compression,
+                        created_by_job_id
+                     ) VALUES ($1,$2,$3,'review_snapshot',$4,$5,$6,$7,$8,$9,$10)
+                     ON CONFLICT (tenant_id, submission_id, object_ref_id) DO NOTHING",
+                    &[
+                        &approved.object_ref.tenant_id,
+                        &approved.object_ref.submission_id,
+                        &approved.object_ref.object_ref_id,
+                        &approved.object_ref.object_store,
+                        &approved.object_ref.object_key,
+                        &approved.object_ref.content_sha256,
+                        &approved.object_ref.encryption_key_ref,
+                        &approved.object_ref.size_bytes,
+                        &approved.object_ref.compression,
+                        &approved.object_ref.created_by_job_id,
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    "INSERT INTO trace_derived_records (
+                        tenant_id, derived_id, submission_id, trace_id, status,
+                        worker_kind, worker_version, input_object_ref_id, input_hash,
+                        output_object_ref_id, summary_model
+                     ) VALUES ($1,$2,$3,$4,'current','summary',$5,$6,$7,$8,$5)
+                     ON CONFLICT (tenant_id, derived_id) DO NOTHING",
+                    &[
+                        &run.tenant_id,
+                        &approved.revision_id,
+                        &run.submission_id,
+                        &run.trace_id,
+                        &approved.worker_identity,
+                        &run.source_object_ref_id,
+                        &approved.source_content_hash,
+                        &approved.object_ref.object_ref_id,
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    "UPDATE trace_submissions
+                     SET status = 'accepted', reviewed_at = NOW(), updated_at = NOW()
+                     WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&run.tenant_id, &run.submission_id],
+                )
+                .await?;
+                (
+                    Some(approved.revision_id),
+                    Some(approved.object_ref.object_ref_id),
+                    Some(approved.content_hash.clone()),
+                )
+            } else {
+                tx.execute(
+                    "UPDATE trace_submissions
+                     SET status = 'rejected', reviewed_at = NOW(), updated_at = NOW()
+                     WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&run.tenant_id, &run.submission_id],
+                )
+                .await?;
+                (None, None, None)
+            };
+
+        insert_outcome(
+            &tx,
+            &run.tenant_id,
+            run.run_id,
+            run.trace_id,
+            &run.bundle_id,
+            Uuid::new_v4(),
+            outcome,
+        )
+        .await?;
+        let next_phase = approved_revision_id.map(|_| Phase::Score);
+        let terminal = next_phase.is_none();
+        let state = if terminal {
+            PipelineRunState::Complete
+        } else {
+            PipelineRunState::Pending
+        };
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                 SET next_phase = $3, state = $4,
+                     approved_revision_id = $5,
+                     approved_object_ref_id = $6,
+                     approved_content_hash = $7,
+                     lease_token = NULL, lease_expires_at = NULL,
+                     next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2
+                   AND lease_token = $8 AND lease_expires_at > NOW()
+                 RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &phase_as_db(next_phase),
+                    &state.as_db(),
+                    &approved_revision_id,
+                    &approved_object_ref_id,
+                    &approved_content_hash,
                     &lease_token,
                 ],
             )
@@ -1149,6 +1283,40 @@ async fn load_bundle_from_transaction(
 
 fn required_lease_token(run: &PipelineRunRecord) -> Result<Uuid, DatabaseError> {
     run.lease_token.ok_or_else(stale_lease_error)
+}
+
+/// Re-reads the run row `FOR UPDATE` and confirms the caller's lease is
+/// still the current one before it writes anything durable under it. Unlike
+/// `commit_phase`'s inline check, this does not re-validate `next_phase`:
+/// a phase transition always clears `lease_token`, so the token match alone
+/// already proves the lease has not moved on.
+async fn ensure_current_lease(
+    tx: &Transaction<'_>,
+    run: &PipelineRunRecord,
+    lease_token: Uuid,
+) -> Result<(), DatabaseError> {
+    let current = tx
+        .query_opt(
+            "SELECT * FROM pipeline_runs
+             WHERE tenant_id = $1 AND run_id = $2
+             FOR UPDATE",
+            &[&run.tenant_id, &run.run_id],
+        )
+        .await?
+        .ok_or_else(|| DatabaseError::NotFound {
+            entity: "pipeline_run".to_string(),
+            id: run.run_id.to_string(),
+        })?;
+    let current = pipeline_run_from_row(&current)?;
+    if current.state != PipelineRunState::Leased
+        || current.lease_token != Some(lease_token)
+        || current
+            .lease_expires_at
+            .is_none_or(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(stale_lease_error());
+    }
+    Ok(())
 }
 
 fn stale_lease_error() -> DatabaseError {
@@ -1595,7 +1763,6 @@ impl PipelineService {
 
     /// Loads and constructs the bundle a run is bound to, checking the
     /// operator-controlled runnable flag for the run's current phase.
-    #[expect(dead_code, reason = "first used by Task 10")]
     async fn load_bound_bundle(
         &self,
         run: &PipelineRunRecord,
@@ -1942,18 +2109,347 @@ impl PipelineService {
         tx.commit().await?;
         Ok(PipelineReceiptResult::Created(created))
     }
+
+    /// Loads a run's committed outcome for `phase` and decodes its decision.
+    async fn committed_decision<T: serde::de::DeserializeOwned>(
+        &self,
+        run: &PipelineRunRecord,
+        phase: Phase,
+    ) -> anyhow::Result<T> {
+        let outcome = self
+            .store
+            .list_outcomes(&run.tenant_id, run.run_id)
+            .await?
+            .into_iter()
+            .find(|outcome| outcome.phase == phase)
+            .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
+        serde_json::from_value(outcome.decision)
+            .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
+    }
+
+    /// Reads the source envelope bytes the receipt staged at Admission,
+    /// decoding the P1 wrapper back to the exact bytes Task 9 stored.
+    async fn load_source_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let object_ref = tx
+            .query_opt(
+                "SELECT object_ref.object_key, object_ref.content_sha256
+                   FROM trace_submissions submission
+                   JOIN trace_object_refs object_ref
+                     ON object_ref.tenant_id = submission.tenant_id
+                    AND object_ref.submission_id = submission.submission_id
+                  WHERE submission.tenant_id = $1
+                    AND submission.submission_id = $2
+                    AND object_ref.object_ref_id = $3
+                    AND submission.status NOT IN ('revoked', 'expired', 'purged')
+                    AND submission.revoked_at IS NULL
+                    AND submission.purged_at IS NULL
+                    AND (submission.expires_at IS NULL OR submission.expires_at > NOW())
+                    AND object_ref.invalidated_at IS NULL
+                    AND object_ref.deleted_at IS NULL
+                  FOR SHARE OF submission, object_ref",
+                &[
+                    &run.tenant_id,
+                    &run.submission_id,
+                    &run.source_object_ref_id,
+                ],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
+        let object_key: String = object_ref.get("object_key");
+        let content_sha256: String = object_ref.get("content_sha256");
+        let ciphertext_sha256 = content_sha256
+            .strip_prefix("sha256:")
+            .ok_or_else(|| anyhow::anyhow!("source artifact hash is malformed"))?;
+        let tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id);
+        let wrapper = self.artifact_store.read_json_by_object_key(
+            tenant_storage_ref.as_str(),
+            TraceArtifactKind::ContributionEnvelope,
+            &object_key,
+            ciphertext_sha256,
+        )?;
+        tx.commit().await?;
+        decode_pipeline_artifact_bytes(&wrapper)
+    }
+
+    /// Reads the approved-content object the run's Review commit wrote,
+    /// decoding the P1 wrapper and requiring the decoded bytes hash to the
+    /// `approved_content_hash` the run committed -- never trusting a
+    /// re-serialization of whatever the store handed back.
+    pub async fn load_approved_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+        let approved_object_ref_id = run
+            .approved_object_ref_id
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
+        let approved_content_hash = run
+            .approved_content_hash
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let object_ref = tx
+            .query_opt(
+                "SELECT object_ref.object_key, object_ref.content_sha256
+                   FROM trace_submissions submission
+                   JOIN trace_object_refs object_ref
+                     ON object_ref.tenant_id = submission.tenant_id
+                    AND object_ref.submission_id = submission.submission_id
+                  WHERE submission.tenant_id = $1
+                    AND submission.submission_id = $2
+                    AND object_ref.object_ref_id = $3
+                    AND submission.status NOT IN ('revoked', 'expired', 'purged')
+                    AND submission.revoked_at IS NULL
+                    AND submission.purged_at IS NULL
+                    AND (submission.expires_at IS NULL OR submission.expires_at > NOW())
+                    AND object_ref.invalidated_at IS NULL
+                    AND object_ref.deleted_at IS NULL
+                  FOR SHARE OF submission, object_ref",
+                &[&run.tenant_id, &run.submission_id, &approved_object_ref_id],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL))?;
+        let object_key: String = object_ref.get("object_key");
+        let content_sha256: String = object_ref.get("content_sha256");
+        let ciphertext_sha256 = content_sha256
+            .strip_prefix("sha256:")
+            .ok_or_else(|| anyhow::anyhow!("approved artifact hash is malformed"))?;
+        let tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id);
+        let wrapper = self.artifact_store.read_json_by_object_key(
+            tenant_storage_ref.as_str(),
+            TraceArtifactKind::ContributionEnvelope,
+            &object_key,
+            ciphertext_sha256,
+        )?;
+        tx.commit().await?;
+        let bytes = decode_pipeline_artifact_bytes(&wrapper)?;
+        anyhow::ensure!(
+            sha256_prefixed(&bytes) == approved_content_hash,
+            "approved_content_mismatch"
+        );
+        Ok(bytes)
+    }
+
+    /// Claims the next due run for `tenant_id` and advances it one phase.
+    pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
+        let Some(run) = self.store.claim_next(tenant_id).await? else {
+            return Ok(None);
+        };
+        self.process_claimed_run(run).await
+    }
+
+    /// Claims a specific run and advances it one phase.
+    pub async fn process_run(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        let Some(run) = self
+            .store
+            .claim_run(tenant_id, run_id, Duration::seconds(DEFAULT_LEASE_SECONDS))
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.process_claimed_run(run).await
+    }
+
+    /// Loads the run's bound bundle and dispatches its current phase,
+    /// mapping every outcome to a durable state change per decision P2. An
+    /// injected crash propagates unchanged: the caller is expected to have
+    /// simulated a real process crash, so nothing here gets to clean up
+    /// after it.
+    async fn process_claimed_run(
+        &self,
+        run: PipelineRunRecord,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        let bundle = match self.load_bound_bundle(&run).await {
+            Ok(bundle) => bundle,
+            Err(label) if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL => {
+                return Ok(Some(self.store.mark_retry(&run, label).await?));
+            }
+            Err(label) => {
+                self.store.mark_failed(&run, label).await?;
+                return self
+                    .store
+                    .get_run(&run.tenant_id, run.run_id)
+                    .await
+                    .map_err(Into::into);
+            }
+        };
+        match self.process_claimed(&run, &bundle).await {
+            Ok(updated) => Ok(Some(updated)),
+            Err(error) if error.to_string() == INJECTED_PIPELINE_CRASH => Err(error),
+            Err(error) => {
+                let label = error.to_string();
+                if label == PIPELINE_INDEX_CONFLICT_LABEL {
+                    self.store
+                        .mark_failed(&run, PIPELINE_INDEX_CONFLICT_LABEL)
+                        .await?;
+                    return self
+                        .store
+                        .get_run(&run.tenant_id, run.run_id)
+                        .await
+                        .map_err(Into::into);
+                }
+                // The fixed allowlist from decision P2: a charged retry
+                // (the attempt already taken by the claim stays charged)
+                // labeled with the safe message the dispatch code raised.
+                // Anything else -- including a raw, unlabeled error -- is a
+                // charged retry under the generic operational label, never
+                // the raw message itself.
+                let retry_label = match label.as_str() {
+                    "index_command_invalid"
+                    | "approved_content_mismatch"
+                    | "score_outcome_invalid"
+                    | "settlement_operation_mismatch"
+                    | "review_output_invalid"
+                    | "settlement_adapter_missing"
+                    | "submission_inoperable" => label.as_str(),
+                    _ => PIPELINE_OPERATIONAL_ERROR_LABEL,
+                };
+                Ok(Some(self.store.mark_retry(&run, retry_label).await?))
+            }
+        }
+    }
+
+    /// Runs the claimed run's current phase against its bound bundle.
+    async fn process_claimed(
+        &self,
+        run: &PipelineRunRecord,
+        bundle: &MinimalPolicyBundle,
+    ) -> anyhow::Result<PipelineRunRecord> {
+        let phase = run
+            .next_phase
+            .ok_or_else(|| anyhow::anyhow!("claimed run has no phase"))?;
+        match phase {
+            Phase::Admission => anyhow::bail!("Admission cannot run asynchronously"),
+            Phase::Review => {
+                let admission = self
+                    .committed_decision::<AdmissionDecision>(run, Phase::Admission)
+                    .await?;
+                let source_artifact = self.load_source_bytes(run).await?;
+                let source_content_hash = sha256_prefixed(&source_artifact);
+                let output = bundle
+                    .review
+                    .execute(&ReviewInput {
+                        run_id: run.run_id,
+                        tenant_storage_ref: pipeline_tenant_storage_ref(&run.tenant_id),
+                        trace_id: run.trace_id,
+                        source_content_hash: source_content_hash.clone(),
+                        source_artifact,
+                        admission,
+                        human_assessment: None,
+                    })
+                    .await?;
+                let (result, content) = output.into_parts();
+                let approved = match (&result.decision, content) {
+                    (
+                        ReviewDecision::Approved {
+                            registry_revision_id,
+                        },
+                        Some(content),
+                    ) => {
+                        anyhow::ensure!(
+                            sha256_prefixed(content.bytes()) == content.content_hash(),
+                            "review_output_invalid"
+                        );
+                        let object_id = format!("pipeline-approved-{}", run.run_id);
+                        let wrapper = encode_pipeline_artifact_bytes(content.bytes())?;
+                        let receipt = self.artifact_store.put_serialized_json(
+                            pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                            TraceArtifactKind::ContributionEnvelope,
+                            &object_id,
+                            &wrapper,
+                        )?;
+                        self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
+                        Some(ApprovedRevision {
+                            revision_id: *registry_revision_id,
+                            object_ref: approved_object_ref(run, &receipt, content.bytes().len()),
+                            content_hash: content.content_hash().to_string(),
+                            source_content_hash,
+                            worker_identity: content.worker_identity().to_string(),
+                        })
+                    }
+                    (ReviewDecision::Rejected { .. }, None) => None,
+                    _ => anyhow::bail!("review_output_invalid"),
+                };
+                let updated = self
+                    .store
+                    .commit_review(
+                        run,
+                        StoredPhaseResult::from_result(Phase::Review, &result)?,
+                        approved,
+                    )
+                    .await?;
+                self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
+                Ok(updated)
+            }
+            // Task 11 replaces this arm.
+            Phase::Score => anyhow::bail!("phase_not_implemented"),
+            // Task 12 replaces this arm.
+            Phase::Settle => anyhow::bail!("phase_not_implemented"),
+        }
+    }
 }
 
 /// Wraps `bytes` per decision P1: every byte artifact the pipeline stores
 /// (starting with the source envelope) is `put_serialized_json`'d as this
 /// fixed wrapper, so the exact bytes -- and their hash -- survive a restart
-/// unchanged. The matching decode helper is added by Task 10, at its first
-/// reader (`load_source_bytes`).
+/// unchanged. The matching decode helper is `decode_pipeline_artifact_bytes`.
 fn encode_pipeline_artifact_bytes(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::json!({
         "schema": "trace_commons.pipeline_artifact_bytes.v1",
         "bytes_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
     }))?)
+}
+
+/// Decodes the P1 wrapper back to the exact bytes it was built from. Refuses
+/// a wrong `schema` or a missing/invalid `bytes_base64` with a safe label,
+/// never a message built from the stored value.
+fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        wrapper.get("schema").and_then(serde_json::Value::as_str)
+            == Some("trace_commons.pipeline_artifact_bytes.v1"),
+        "pipeline_artifact_wrapper_invalid"
+    );
+    let encoded = wrapper
+        .get("bytes_base64")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("pipeline_artifact_wrapper_invalid"))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| anyhow::anyhow!("pipeline_artifact_wrapper_invalid"))
+}
+
+/// Builds the `trace_object_refs` write for the approved content a Review
+/// approval stores. The object ref id is derived from the run id alone, so a
+/// retry after a crash between the artifact write and the commit recomputes
+/// the identical id and overwrites the same encrypted object with equal
+/// bytes, rather than orphaning a second one.
+fn approved_object_ref(
+    run: &PipelineRunRecord,
+    receipt: &EncryptedTraceArtifactReceipt,
+    size_bytes: usize,
+) -> TraceObjectRefWrite {
+    TraceObjectRefWrite {
+        object_ref_id: Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("tracecommons:pipeline-approved-object:{}", run.run_id).as_bytes(),
+        ),
+        tenant_id: run.tenant_id.clone(),
+        submission_id: run.submission_id,
+        artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
+        object_store: "pipeline_local_encrypted".to_string(),
+        object_key: receipt.object_key.clone(),
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!(
+            "tenant:{}",
+            pipeline_tenant_storage_ref(&run.tenant_id).as_str()
+        ),
+        size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
+        compression: None,
+        created_by_job_id: None,
+    }
 }
 
 #[cfg(test)]
