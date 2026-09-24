@@ -6,12 +6,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use secrecy::SecretString;
+use sha2::{Digest, Sha256};
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, InstrumentAward, InstrumentDescriptor, InstrumentId, InstrumentKind, Phase,
-    PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
-    ScoreEvidence, TRACE_CREDIT_DECIMALS,
+    AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor, InstrumentId,
+    InstrumentKind, Phase, PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation,
+    ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision, TRACE_CREDIT_DECIMALS,
 };
-use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+use trace_commons_gate_api::{
+    IndexEntryKey, IndexUpsertResult, ReferenceEmbedder, ReferencePerplexityScorer,
+    VectorIndexWriter,
+};
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
     RecordedTraceContributionOptions, ResidualPiiRisk, TraceContributionEnvelope, TraceRedactor,
@@ -24,13 +28,13 @@ use trace_commons_server::trace_artifact_store::{
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
-    MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
-    dependency_content_hash, pipeline_operation_ref,
+    MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
+    PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
 };
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry,
 };
-use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 
 const RUNTIME_ROLE: &str = "trace_pipeline_runtime_test";
 static SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1495,4 +1499,456 @@ async fn score_crash_after_command_storage_keeps_one_command() {
         .await
         .unwrap();
     assert_eq!(settlements.len(), 2, "two settlement rows, one per award");
+}
+
+/// Drives a fresh submission through Review and Score under `service`,
+/// returning the Score-completed run (`next_phase = Settle`) and its Score
+/// evidence. Shared by the Settle tests below, all of which need a run that
+/// has already reached Settle with a real, stored index command.
+async fn run_to_settle_ready(
+    service: &PipelineService,
+    tenant: &str,
+) -> (PipelineRunRecord, ScoreEvidence) {
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let scored = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let outcomes = service
+        .store()
+        .list_outcomes(tenant, scored.run_id)
+        .await
+        .unwrap();
+    let score_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Score)
+        .expect("Score outcome recorded");
+    let evidence: ScoreEvidence = serde_json::from_value(score_outcome.evidence).unwrap();
+    (scored, evidence)
+}
+
+/// The on-disk path `LocalEncryptedTraceArtifactStore` writes an object key
+/// under (its private layout: `root/tenants/{sha256(tenant_storage_ref)}/
+/// artifacts/{object_key}.json`). Used only to delete or corrupt a stored
+/// artifact directly, to exercise Settle's fail-closed path around a
+/// binding failure (review focus item 3).
+fn artifact_file_path(
+    root: &std::path::Path,
+    tenant_storage_ref: &str,
+    object_key: &str,
+) -> std::path::PathBuf {
+    let tenant_hash = hex::encode(Sha256::digest(tenant_storage_ref.as_bytes()));
+    root.join("tenants")
+        .join(tenant_hash)
+        .join("artifacts")
+        .join(format!("{object_key}.json"))
+}
+
+/// Review focus item 3 (part 1): the live index changed after Score (an
+/// unrelated entry for the same tenant), and Settle must still apply
+/// exactly the stored command -- never re-query the reader -- so the extra
+/// entry cannot perturb its outcome.
+#[tokio::test]
+async fn settle_writes_the_stored_command_without_requerying_the_live_index() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-included-{}", uuid::Uuid::new_v4());
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    // Before Settle: the live index changes for the same tenant. Settle
+    // reads the stored command bytes only (ruling P1); it never calls
+    // `index_reader.nearest`/`snapshot` again, so this unrelated entry must
+    // not affect the result.
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let unrelated_key = IndexEntryKey {
+        tenant_storage_ref: tenant_ref.as_str().to_string(),
+        index_id: MINIMAL_INDEX_ID.to_string(),
+        revision_id: uuid::Uuid::new_v4(),
+        projection_id: MINIMAL_PROJECTION_ID.to_string(),
+        model_id: "unrelated-test-model".to_string(),
+        chunk: 0,
+    };
+    index
+        .upsert(
+            &unrelated_key,
+            &[0.25_f32; 4],
+            &dependency_content_hash(b"unrelated-entry"),
+        )
+        .unwrap();
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+    assert_eq!(settled.index_membership, "included");
+    assert_eq!(settled.index_write_state, "complete");
+    assert_eq!(service.settle_evaluations(), 1);
+
+    let command = service
+        .load_index_command(&settled, &evidence)
+        .await
+        .unwrap()
+        .expect("the stored command is retained");
+    for entry in command.entries() {
+        let key = command.entry_key(&tenant_ref, entry);
+        assert_eq!(
+            index.upsert(&key, &entry.embedding, &entry.content_hash),
+            Ok(IndexUpsertResult::Unchanged),
+            "the index already holds this exact chunk with its stored embedding"
+        );
+    }
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, settled.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    match decision.index_membership {
+        IndexMembershipDecision::Include {
+            command_hash,
+            entry_count,
+        } => {
+            assert_eq!(command_hash, command.content_hash().unwrap());
+            assert_eq!(entry_count as usize, command.entries().len());
+        }
+        IndexMembershipDecision::Exclude { .. } => panic!("expected an Include decision"),
+    }
+}
+
+/// Review focus item 3 (part 2): an index write that cannot complete
+/// (`IndexWriteError::Failed`/`Uncertain`) puts the run in retry under the
+/// safe label `index_unavailable` without recording a Settle outcome, and
+/// the retry reuses the selection already persisted -- the policy does not
+/// run a second time.
+#[tokio::test]
+async fn settle_retry_reuses_the_persisted_selection() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-retry-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    index.set_fault(IndexFault::FailBeforeApply);
+    let retried = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the Settle attempt retries rather than erroring out");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+    assert_eq!(
+        retried.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    );
+    assert!(
+        retried.settle_selection_hash.is_some(),
+        "the selection was persisted before dispatch was attempted"
+    );
+    let outcomes_after_retry = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !outcomes_after_retry
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "no Settle outcome exists after a retry"
+    );
+    let persisted_selection = service
+        .store()
+        .load_settle_selection(&retried)
+        .await
+        .unwrap()
+        .expect("the selection is durable across the retry");
+
+    // The fault is one-shot (it clears itself after the one failed call),
+    // but clear it explicitly so this test does not depend on that detail.
+    index.set_fault(IndexFault::None);
+    force_due(&backend, &tenant, run.run_id).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the retry completes Settle");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(
+        service.settle_evaluations(),
+        1,
+        "the policy did not run again on retry"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded after the retry completes");
+    let persisted_decision: SettleDecision =
+        serde_json::from_value(persisted_selection.decision).unwrap();
+    let committed_decision: SettleDecision =
+        serde_json::from_value(settle_outcome.decision).unwrap();
+    assert_eq!(committed_decision, persisted_decision);
+}
+
+/// Review focus item 3 (part 3): a stored command that is missing, corrupt,
+/// bound to another tenant, or bound to another run of the same tenant
+/// makes Settle fail closed with the safe label `index_command_invalid`,
+/// without completing the run or writing a Settle outcome.
+#[tokio::test]
+async fn stored_command_binding_failures_fail_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+
+    async fn assert_fails_closed(service: &PipelineService, tenant: &str, run_id: uuid::Uuid) {
+        let processed = service
+            .process_run(tenant, run_id)
+            .await
+            .unwrap()
+            .expect("the Settle attempt runs and fails closed rather than erroring out");
+        assert_ne!(processed.state, PipelineRunState::Complete);
+        assert_eq!(
+            processed.last_error_label.as_deref(),
+            Some("index_command_invalid")
+        );
+        assert!(
+            !service
+                .store()
+                .list_outcomes(tenant, run_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|outcome| outcome.phase == Phase::Settle),
+            "no Settle outcome is written"
+        );
+    }
+
+    // (a) delete the command file from the artifact root.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = format!("settle-binding-a-{}", uuid::Uuid::new_v4());
+        let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+        let (object_key, _) = run
+            .index_command_ref
+            .as_deref()
+            .unwrap()
+            .rsplit_once('#')
+            .unwrap();
+        let path = artifact_file_path(
+            dir.path(),
+            pipeline_tenant_storage_ref(&tenant).as_str(),
+            object_key,
+        );
+        assert!(
+            path.exists(),
+            "the command's ciphertext file must exist before deletion"
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        assert_fails_closed(&service, &tenant, run.run_id).await;
+    }
+
+    // (b) overwrite the file with other bytes.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = format!("settle-binding-b-{}", uuid::Uuid::new_v4());
+        let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+        let (object_key, _) = run
+            .index_command_ref
+            .as_deref()
+            .unwrap()
+            .rsplit_once('#')
+            .unwrap();
+        let path = artifact_file_path(
+            dir.path(),
+            pipeline_tenant_storage_ref(&tenant).as_str(),
+            object_key,
+        );
+        std::fs::write(&path, b"not a valid encrypted trace artifact").unwrap();
+
+        assert_fails_closed(&service, &tenant, run.run_id).await;
+    }
+
+    // (c) point index_command_ref at another tenant's stored command.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant_a = format!("settle-binding-c-a-{}", uuid::Uuid::new_v4());
+        let tenant_b = format!("settle-binding-c-b-{}", uuid::Uuid::new_v4());
+        let (run_a, _) = run_to_settle_ready(&service, &tenant_a).await;
+        let (run_b, _) = run_to_settle_ready(&service, &tenant_b).await;
+        let foreign_ref = run_b.index_command_ref.clone().unwrap();
+
+        // The runtime role's own tenant-scoped UPDATE is sufficient here:
+        // `reject_pipeline_run_identity_mutation` does not protect
+        // `index_command_ref`, and RLS's `WITH CHECK` only constrains
+        // `tenant_id`, which this UPDATE does not touch.
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant_a).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_command_ref = $3
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_a, &run_a.run_id, &foreign_ref],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_fails_closed(&service, &tenant_a, run_a.run_id).await;
+    }
+
+    // (d) point it at another run's command of the same tenant.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = format!("settle-binding-d-{}", uuid::Uuid::new_v4());
+        let (run_1, _) = run_to_settle_ready(&service, &tenant).await;
+        let (run_2, _) = run_to_settle_ready(&service, &tenant).await;
+        let other_ref = run_2.index_command_ref.clone().unwrap();
+
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_command_ref = $3
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run_1.run_id, &other_ref],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_fails_closed(&service, &tenant, run_1.run_id).await;
+    }
+}
+
+/// Review focus item 3 (part 4): a stored command entry whose key already
+/// exists in the index under a different embedding is a genuine content
+/// conflict (`IndexWriteError::ContentConflict`), not a silent overwrite --
+/// the run fails (not retries) under the safe label `index_key_conflict`,
+/// and no Settle outcome is written.
+#[tokio::test]
+async fn equal_key_with_different_content_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-conflict-{}", uuid::Uuid::new_v4());
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let command = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command");
+    let first_entry = command.entries().first().expect("at least one chunk");
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let key = command.entry_key(&tenant_ref, first_entry);
+
+    // Pre-insert the stored command's first entry key with a different
+    // embedding, before Settle ever dispatches to the index.
+    index
+        .upsert(
+            &key,
+            &vec![9.9_f32; first_entry.embedding.len()],
+            &dependency_content_hash(b"conflicting-content"),
+        )
+        .unwrap();
+
+    let processed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the Settle attempt runs and fails rather than erroring out");
+    assert_eq!(processed.state, PipelineRunState::Failed);
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_CONFLICT_LABEL)
+    );
+    assert!(
+        !service
+            .store()
+            .list_outcomes(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "no Settle outcome is written"
+    );
 }

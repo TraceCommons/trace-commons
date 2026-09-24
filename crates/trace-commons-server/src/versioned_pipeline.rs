@@ -13,12 +13,14 @@ use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
+use trace_commons_gate_api::IndexWriteError;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
-    BundlePackage, InstrumentAwards, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION,
-    Phase, PhaseResult, PrivacyRisk, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput,
-    SchemaRef, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand,
-    SettleDecision, SettleEvaluation, SettleEvidence, TenantStorageRef,
+    BundlePackage, IndexMembershipDecision, InstrumentAwards, PIPELINE_OUTCOME_SCHEMA_ID,
+    PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult, PrivacyRisk, ReasonCode, ReviewDecision,
+    ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision, ScoreEvaluation,
+    ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation,
+    SettleEvidence, SettleInput, TenantStorageRef,
 };
 use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope,
@@ -37,7 +39,7 @@ use crate::trace_corpus_storage::{
 use crate::versioned_pipeline_bundle::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
-    dependency_content_hash, pipeline_operation_ref,
+    dependency_content_hash, pipeline_operation_ref, pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
 
@@ -228,7 +230,11 @@ pub struct PipelineSettlementRecord {
     pub last_error_label: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// Also the shape `settle_selection` persists (decision D4): the Settle
+/// policy's raw result, durable before any external effect, so a retry can
+/// reload it (`PgPipelineStore::load_settle_selection`) instead of running
+/// the policy again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPhaseResult {
     pub phase: Phase,
     pub decision: serde_json::Value,
@@ -986,6 +992,170 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
+    /// Persists the Settle policy's raw result before any external effect
+    /// (decision D4): `settle_selection`, its hash, the decided
+    /// `index_membership`, and -- only for an include -- `index_write_state
+    /// = 'pending'`, all in one transaction, and only the first time (the
+    /// `settle_selection IS NULL` guard). A later call for the same run,
+    /// after a crash and retry, finds the guard already tripped and updates
+    /// nothing; the caller checks `load_settle_selection` first and skips
+    /// this call entirely on a retry, so that path is never exercised here.
+    pub async fn persist_settle_selection(
+        &self,
+        run: &PipelineRunRecord,
+        selection: &StoredPhaseResult,
+        selection_hash: &str,
+        membership: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let selection_json = serde_json::to_value(selection).map_err(|_| {
+            DatabaseError::Serialization("settle selection encode failed".to_string())
+        })?;
+        let index_write_state = if membership == "included" {
+            "pending"
+        } else {
+            "none"
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                 SET settle_selection = $3, settle_selection_hash = $4,
+                     index_membership = $5, index_write_state = $6, updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2
+                   AND lease_token = $7 AND lease_expires_at > NOW()
+                   AND settle_selection IS NULL
+                 RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &selection_json,
+                    &selection_hash,
+                    &membership,
+                    &index_write_state,
+                    &lease_token,
+                ],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Reloads a persisted Settle selection, if this run has one. `None`
+    /// before the first attempt has run the Settle policy.
+    pub async fn load_settle_selection(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> Result<Option<StoredPhaseResult>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT settle_selection FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+                &[&run.tenant_id, &run.run_id],
+            )
+            .await?;
+        tx.commit().await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let value: Option<serde_json::Value> = row.get("settle_selection");
+        value
+            .map(|value| {
+                serde_json::from_value::<StoredPhaseResult>(value).map_err(|_| {
+                    DatabaseError::Serialization("malformed settle selection".to_string())
+                })
+            })
+            .transpose()
+    }
+
+    /// Records progress on the run's index dispatch (port 2258 to 2285):
+    /// `pending` after `persist_settle_selection` decides an include,
+    /// `complete` once every entry has been applied, `failed` on a content
+    /// conflict, `cancelled` when the submission stopped being operable
+    /// before dispatch could run.
+    pub async fn mark_index_write_state(
+        &self,
+        run: &PipelineRunRecord,
+        index_write_state: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                 SET index_write_state = $3, updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2
+                   AND lease_token = $4 AND lease_expires_at > NOW()
+                 RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &index_write_state,
+                    &lease_token,
+                ],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Commits the Settle outcome and completes the run (port 2287 to
+    /// 2328), once every settlement operation this task handles (there are
+    /// none yet -- Task 13 adds the instrument legs) has reached a terminal
+    /// state. `index_membership` was already durable from
+    /// `persist_settle_selection`; this call sets it again on the same row
+    /// as part of the same transition guard the other `commit_*` methods
+    /// use, together with the outcome row and the terminal state change.
+    pub async fn commit_settle(
+        &self,
+        run: &PipelineRunRecord,
+        outcome: StoredPhaseResult,
+        index_membership: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        if outcome.phase != Phase::Settle || run.next_phase != Some(Phase::Settle) {
+            return Err(DatabaseError::Constraint(
+                "phase does not match run transition".to_string(),
+            ));
+        }
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+        insert_outcome(
+            &tx,
+            &run.tenant_id,
+            run.run_id,
+            run.trace_id,
+            &run.bundle_id,
+            Uuid::new_v4(),
+            outcome,
+        )
+        .await?;
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                 SET next_phase = 'none', state = 'complete',
+                     index_membership = $3,
+                     lease_token = NULL, lease_expires_at = NULL,
+                     next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2
+                   AND lease_token = $4 AND lease_expires_at > NOW()
+                 RETURNING *",
+                &[&run.tenant_id, &run.run_id, &index_membership, &lease_token],
+            )
+            .await?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn mark_failed(
         &self,
         run: &PipelineRunRecord,
@@ -1578,6 +1748,14 @@ pub struct PipelineCaps {
     pub per_instrument_atomic_units: BTreeMap<String, AtomicUnits>,
 }
 
+/// The submission-operability check Settle runs before deciding index
+/// membership and again immediately before it dispatches to the index
+/// (`PipelineService::submission_guard`).
+#[derive(Debug, Clone, Copy)]
+pub struct SubmissionGuard {
+    pub operable: bool,
+}
+
 /// Whether each held dependency is production-qualified. `scorer` and
 /// `embedder` are true only when every scorer/embedder the service holds is
 /// (decision P4); a bundle can name any one of them by content hash, so a
@@ -1746,13 +1924,19 @@ pub struct PipelineService {
     crash_point: Option<PipelineCrashPoint>,
     crash_pending: AtomicBool,
     score_evaluations: AtomicUsize,
-    #[expect(dead_code, reason = "first used by Task 12")]
     settle_evaluations: AtomicUsize,
 }
 
 impl PipelineService {
     pub fn bundle_id(&self) -> &str {
         &self.default_package.bundle_id
+    }
+
+    /// How many times the Settle policy actually ran for this service. A
+    /// retry that reuses a persisted selection (`load_settle_selection`)
+    /// does not increment this -- the policy runs at most once per run.
+    pub fn settle_evaluations(&self) -> usize {
+        self.settle_evaluations.load(Ordering::SeqCst)
     }
 
     pub fn dependency_qualification(&self) -> PipelineDependencyQualification {
@@ -1833,6 +2017,57 @@ impl PipelineService {
     fn inject_crash(&self, point: PipelineCrashPoint) -> anyhow::Result<()> {
         if self.crash_point == Some(point) && self.crash_pending.swap(false, Ordering::SeqCst) {
             anyhow::bail!(INJECTED_PIPELINE_CRASH);
+        }
+        Ok(())
+    }
+
+    /// Whether the submission behind a run is still operable right now:
+    /// accepted, not revoked, not purged, not expired, and not withdrawn.
+    /// Settle reads this fresh (under `FOR SHARE OF s`) both before it
+    /// decides index membership and again immediately before it dispatches
+    /// to the index, since the two checks can be far apart in wall-clock
+    /// time across a crash and retry.
+    async fn submission_guard(&self, run: &PipelineRunRecord) -> anyhow::Result<SubmissionGuard> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                        AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                        AND NOT EXISTS (
+                            SELECT 1 FROM trace_withdrawals w
+                             WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+                        )
+                   FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2
+                  FOR SHARE OF s",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?;
+        tx.commit().await?;
+        let operable = row.map(|row| row.get::<_, bool>(0)).unwrap_or(false);
+        Ok(SubmissionGuard { operable })
+    }
+
+    /// Confirms the lease this call still holds is the current one,
+    /// immediately before an effect on the external index that a
+    /// transaction rollback cannot undo (port line 5367). Unlike
+    /// `ensure_current_lease`, this has no open transaction to read
+    /// through -- it goes back through the store, which is the "service
+    /// level" check the port's version also is.
+    async fn ensure_live_lease(&self, run: &PipelineRunRecord) -> anyhow::Result<()> {
+        let current = self
+            .store
+            .get_run(&run.tenant_id, run.run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("pipeline lease is stale"))?;
+        if current.state != PipelineRunState::Leased
+            || current.lease_token != run.lease_token
+            || current
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at <= Utc::now())
+        {
+            anyhow::bail!("pipeline lease is stale");
         }
         Ok(())
     }
@@ -2516,8 +2751,7 @@ impl PipelineService {
                 Ok(updated)
             }
             Phase::Score => self.commit_score_phase(run, bundle).await,
-            // Task 12 replaces this arm.
-            Phase::Settle => anyhow::bail!("phase_not_implemented"),
+            Phase::Settle => self.complete_settle_phase(run, bundle).await,
         }
     }
 
@@ -2617,6 +2851,244 @@ impl PipelineService {
         self.inject_crash(PipelineCrashPoint::AfterScoreCommit)?;
         Ok(updated)
     }
+
+    /// Settle's first half (brief 3B/3C, port 4547 to 4723 under the #971
+    /// settlement shape): validates the committed Score outcome and its
+    /// seeded settlement operations, persists the Settle selection before
+    /// any external effect (decision D4), and applies the stored index
+    /// command to the index without re-querying it (ruling P1). For a run
+    /// with no settlement operations at all, this also completes the run --
+    /// Task 13 extends the final commit for the case with real per-
+    /// instrument legs (amendments-971 A9: each leg is independent).
+    async fn complete_settle_phase(
+        &self,
+        run: &PipelineRunRecord,
+        bundle: &MinimalPolicyBundle,
+    ) -> anyhow::Result<PipelineRunRecord> {
+        let mut run = run.clone();
+        let revision_id = run
+            .approved_revision_id
+            .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
+
+        // Step 1 (brief 3C): the three parts of the committed Score outcome
+        // must still agree -- each is stored as an independent JSONB
+        // column, so this is a defensive re-check, not a repeat of the
+        // `ScoreOutput::new` invariant that already held at commit time.
+        let score_outcome = self
+            .store
+            .list_outcomes(&run.tenant_id, run.run_id)
+            .await?
+            .into_iter()
+            .find(|outcome| outcome.phase == Phase::Score)
+            .ok_or_else(|| anyhow::anyhow!("score_outcome_invalid"))?;
+        let score_decision = serde_json::from_value::<ScoreDecision>(score_outcome.decision)
+            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        let score_evidence = serde_json::from_value::<ScoreEvidence>(score_outcome.evidence)
+            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        let score_evaluation = serde_json::from_value::<ScoreEvaluation>(score_outcome.evaluation)
+            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        anyhow::ensure!(
+            score_decision.awards == score_evidence.fixed_awards
+                && score_decision.awards == score_evaluation.awards,
+            "score_outcome_invalid"
+        );
+
+        // Step 2 (brief 3C, `ensure_operations_match_committed_awards`):
+        // the settlement rows Score seeded (decision D5) must still be
+        // exactly one per award.
+        let settlements = self
+            .store
+            .list_settlements(&run.tenant_id, run.run_id)
+            .await?;
+        ensure_operations_match_committed_awards(run.run_id, &score_decision.awards, &settlements)?;
+
+        // Step 3: the submission-operability guard, read fresh.
+        let mut guard = self.submission_guard(&run).await?;
+
+        // Step 4: reuse a persisted selection on retry; otherwise run the
+        // Settle policy once and persist its selection before any external
+        // effect.
+        let selection = match self.store.load_settle_selection(&run).await? {
+            Some(selection) => selection,
+            None => {
+                let index_command = self.load_index_command(&run, &score_evidence).await?;
+                let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+                self.settle_evaluations.fetch_add(1, Ordering::SeqCst);
+                let result = bundle
+                    .settle
+                    .execute(&SettleInput {
+                        run_id: run.run_id,
+                        tenant_storage_ref: tenant,
+                        trace_id: run.trace_id,
+                        registry_revision_id: revision_id,
+                        source_content_hash: run.approved_content_hash.clone().unwrap_or_default(),
+                        score: score_decision.clone(),
+                        score_evidence: score_evidence.clone(),
+                        index_command,
+                    })
+                    .await?;
+                result
+                    .decision
+                    .matches_score(&score_decision)
+                    .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                for operation in result.decision.settlement_operations() {
+                    let award = score_decision
+                        .awards
+                        .iter()
+                        .find(|award| award.instrument_id() == operation.instrument_id())
+                        .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                    anyhow::ensure!(
+                        operation.operation_ref_hash()
+                            == pipeline_operation_ref(run.run_id, award).as_str(),
+                        "settlement_operation_mismatch"
+                    );
+                    if let Some(result_ref_hash) = operation.result_ref_hash() {
+                        anyhow::ensure!(
+                            result_ref_hash == pipeline_result_ref(run.run_id, award).as_str(),
+                            "settlement_operation_mismatch"
+                        );
+                    }
+                }
+                let membership = match &result.decision.index_membership {
+                    IndexMembershipDecision::Include { command_hash, .. } if guard.operable => {
+                        anyhow::ensure!(
+                            Some(command_hash.as_str()) == run.index_command_hash.as_deref(),
+                            "index_command_invalid"
+                        );
+                        "included"
+                    }
+                    _ => "excluded",
+                };
+                let stored = StoredPhaseResult::from_result(Phase::Settle, &result)?;
+                let selection_hash = sha256_prefixed(&serde_json::to_vec(&stored)?);
+                run = self
+                    .store
+                    .persist_settle_selection(&run, &stored, &selection_hash, membership)
+                    .await?;
+                self.inject_crash(PipelineCrashPoint::AfterSettleSelection)?;
+                stored
+            }
+        };
+
+        // Step 5: dispatch to the index only when a prior attempt left it
+        // pending (an include whose entries are not yet all applied).
+        if run.index_write_state == "pending" {
+            guard = self.submission_guard(&run).await?;
+            if !guard.operable {
+                run = self.store.mark_index_write_state(&run, "cancelled").await?;
+            } else {
+                self.ensure_live_lease(&run).await?;
+                let command = self
+                    .load_index_command(&run, &score_evidence)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+                let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+                for entry in command.entries() {
+                    let key = command.entry_key(&tenant, entry);
+                    match self
+                        .index_writer
+                        .upsert(&key, &entry.embedding, &entry.content_hash)
+                    {
+                        Ok(_) => {}
+                        Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
+                            // Ruling (Task 12 ledger): the Settle code
+                            // itself retries this label -- it is not in
+                            // the P2 allowlist, and never reaches
+                            // `process_claimed_run` as an `Err`.
+                            return Ok(self
+                                .store
+                                .mark_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
+                                .await?);
+                        }
+                        Err(IndexWriteError::ContentConflict) => {
+                            self.store.mark_index_write_state(&run, "failed").await?;
+                            return Err(anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL));
+                        }
+                    }
+                }
+                self.inject_crash(PipelineCrashPoint::AfterIndexApply)?;
+                run = self.store.mark_index_write_state(&run, "complete").await?;
+            }
+        }
+
+        // Every settlement row this task handles is already terminal --
+        // there are none -- so the run can complete now. Task 13 extends
+        // `commit_settle_from_progress` for the case with real legs.
+        self.commit_settle_from_progress(&run, &selection, guard)
+            .await
+    }
+
+    /// Commits the Settle outcome once every settlement row is terminal.
+    /// This task completes only the case with no settlement rows at all (no
+    /// instrument was awarded to this run); Task 13 extends it to build the
+    /// final decision from real per-instrument outcomes (amendments-971 A9).
+    async fn commit_settle_from_progress(
+        &self,
+        run: &PipelineRunRecord,
+        selection: &StoredPhaseResult,
+        guard: SubmissionGuard,
+    ) -> anyhow::Result<PipelineRunRecord> {
+        let score_decision = self
+            .committed_decision::<ScoreDecision>(run, Phase::Score)
+            .await?;
+        let stored_decision = serde_json::from_value::<SettleDecision>(selection.decision.clone())
+            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+        let final_decision =
+            SettleDecision::new(stored_decision.index_membership, &score_decision, vec![])?;
+        let mut evidence = serde_json::from_value::<SettleEvidence>(selection.evidence.clone())
+            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+        evidence.index_command_hash = run.index_command_hash.clone();
+        evidence.index_progress = Some(run.index_write_state.clone());
+        evidence.submission_operable = Some(guard.operable);
+        evidence.guard_reason = if guard.operable {
+            None
+        } else {
+            Some(ReasonCode::new(PIPELINE_SUBMISSION_INOPERABLE_LABEL)?)
+        };
+        let evaluation = serde_json::from_value::<SettleEvaluation>(selection.evaluation.clone())
+            .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+        let final_membership = match &final_decision.index_membership {
+            IndexMembershipDecision::Include { .. } => "included",
+            IndexMembershipDecision::Exclude { .. } => "excluded",
+        };
+        let result = PhaseResult {
+            decision: final_decision,
+            evidence,
+            evaluation,
+        };
+        let outcome = StoredPhaseResult::from_result(Phase::Settle, &result)?;
+        let updated = self
+            .store
+            .commit_settle(run, outcome, final_membership)
+            .await?;
+        self.inject_crash(PipelineCrashPoint::AfterSettleCommit)?;
+        Ok(updated)
+    }
+}
+
+/// Brief 3C's `ensure_operations_match_committed_awards`: the settlement
+/// rows Score seeded (decision D5) must still be exactly one per award,
+/// each with the instrument, units, and `pipeline_operation_ref` the award
+/// determines. Anything else is the safe label `settlement_operation_mismatch`.
+fn ensure_operations_match_committed_awards(
+    run_id: Uuid,
+    awards: &InstrumentAwards,
+    settlements: &[PipelineSettlementRecord],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        awards.iter().len() == settlements.len(),
+        "settlement_operation_mismatch"
+    );
+    for award in awards.iter() {
+        let expected_ref = pipeline_operation_ref(run_id, award);
+        let matched = settlements.iter().any(|settlement| {
+            settlement.instrument_id == award.instrument_id().as_str()
+                && settlement.atomic_units == award.atomic_units()
+                && settlement.operation_ref_hash == expected_ref
+        });
+        anyhow::ensure!(matched, "settlement_operation_mismatch");
+    }
+    Ok(())
 }
 
 /// Wraps `bytes` per decision P1: every byte artifact the pipeline stores
