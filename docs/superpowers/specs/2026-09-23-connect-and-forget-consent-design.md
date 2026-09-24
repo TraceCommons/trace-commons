@@ -1,13 +1,25 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 5, 2026-09-24)
+Date: 2026-09-23 (rev 6, 2026-09-24)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
 Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 `daemon/queue.rs`, `daemon/uploader.rs`, `consent_copy.rs`), the onboarding
-surface in the Tauri client (#1003, merged as #963). No production code in this PR.
+surface in the Tauri client, named the main client for the MVP in #1003 and
+merged in #963. No production code in this PR.
 
+> **Rev 6** fixes the findings against revs 4 and 5 that do not depend on an
+> open question, and marks the two that do. The gate moves to the `AutoUpload`
+> decision -- misplaced in three consecutive revisions, each time by gating a
+> branch rather than the decision. R1 becomes an exact allowlist, because the
+> classifier suffix is stamped from configuration and `sidecar` fails open. The
+> armed-folder migration was circular and becomes disarm-with-notice.
+>
+> **Two questions are open and rev 6 does not guess at them**: where an invited
+> contributor's witness configuration comes from, and whether connecting
+> inference belongs in onboarding. Both are in Open.
+>
 > **Rev 5** reverses rev 3's conclusion for invited contributors. R3's
 > admission requirement is scoped to the `near-` and `nearai-` tenant
 > namespaces, which an invited tenant is never in, so the gate that blocks
@@ -42,7 +54,7 @@ contribute automatically, earn. **Flow 2 (Customize-and-Tailor)**: per-folder
 and per-session control. The UX review's ask is the narrower and better stated
 one: *"exclude selectively, rather than approve continuously."*
 
-The two-path structure survives all three revisions and is the part of this
+The two-path structure survives every revision and is the part of this
 design that has never been contested.
 
 ## The prior decision
@@ -66,13 +78,26 @@ claim agreement.**
 Both reversals are defensible and neither is accidental, but they are
 reversals.
 
-**Folders already armed through today's arming offer do not meet R1-R7.** The
-spec must choose: disarm them and re-ask, grandfather them with the gap
-recorded, or migrate them as each next session supplies the evidence. This
-design takes the third -- an armed folder keeps its mode, and its next session
-is held rather than sent until R1 is satisfied for it -- because disarming
-silently discards a decision the contributor did make, and grandfathering
-carries the gap forever.
+**Folders already armed through today's arming offer do not meet R1-R7.**
+
+Rev 4 proposed migrating them -- keep the mode, hold the next session until R1
+is satisfied. **That is circular and is withdrawn.** R1's evidence is a witness
+certificate, which exists only *after* the session has gone to the witness. So
+"hold until R1 is satisfied" either sends the raw session to obtain the
+evidence, bypassing the gate, or can never be satisfied at all. For an invited
+contributor with no witness it is strictly the second: the folder would show
+Automatic while holding every session indefinitely, which discards their
+decision more thoroughly than disarming would. Rev 4 also checked only R1, so a
+migrated folder could auto-contribute without R3, R6 or R7, contradicting the
+rule that the gates attach to the mode.
+
+**Rev 6 takes disarm-with-notice.** An armed folder that does not meet R1-R7
+returns to ask-first, and the contributor is told which folders moved and why,
+with re-arming one action away. It is the only option that neither sends
+ungated sessions nor leaves a folder in a state that cannot resolve.
+Grandfathering remains the coherent alternative if the disruption is judged
+worse than the gap, but it carries the gap indefinitely and should then be
+recorded per folder rather than assumed.
 
 ## What automatic contribution requires
 
@@ -93,11 +118,21 @@ certified is `redaction_pipeline_version()`: the deterministic identifier
 a `+<suffix>` when one did (`privacy-filter-near-ai-v1`, and the sidecar and
 self-hosted equivalents).
 
-- **Evidence:** a certified pipeline version carrying the deterministic
-  prefix **and** one of the named classifier suffixes.
+**A prefix match is not sufficient, because the suffix is stamped from
+configuration rather than from what ran.** The `sidecar` backend fails open: it
+catches the error, marks coverage incomplete, returns the deterministic output,
+and the certificate still carries `+privacy-filter-sidecar-v1`. The
+fail-closed test covers only the NEAR AI and self-hosted backends. A prefix
+match would also accept any future or unknown suffix.
+
+- **Evidence:** the certified pipeline version appears in an **exact
+  allowlist**, modelled on the server's
+  `WitnessBypassConfig::policy_version_allowed`. `sidecar` stays off that
+  allowlist until it fails closed.
 - **Not evidence:** the bare deterministic identifier with no suffix -- that is
-  the deterministic-only run, and it is the value an implementation guessing a
-  mapping is most likely to accept by mistake.
+  the deterministic-only run.
+- **Not evidence:** any suffix matched by prefix rather than by membership,
+  which would admit both the fail-open sidecar and anything added later.
 - **Not evidence:** `witness.is_some()`, `pii_filter == Some("near-ai")`.
 - Note `pii_filter: None` can still pick up an environment-configured filter
   (`TRACE_PRIVACY_FILTER_BACKEND`), so the config field alone reads the
@@ -114,15 +149,28 @@ The intended shape, which the spec should state rather than reverse-engineer:
   receipt covers. The receipt binds `SHA256(request_body_as_sent)` and
   `SHA256(response_body_as_received)` and the witness verifies by hashing those
   exact bytes, so pre-scrubbing them breaks verification.
-- **The consent gate for automatic sends is a fail-closed check on the
-  _pinned_ witness path, before the send**, covering every `AutoUpload` route.
+- **The consent gate for automatic sends sits at the `AutoUpload` decision, in
+  policy or the uploader, ahead of either branch.**
 
-The branch matters and rev 3 had it wrong. `submit.rs:580` bails with
-`witness_expected_measurement` when `!trust.is_pinned()`, before anything
-reaches the network, so raw sessions leave **only** on the pinned path. A gate
-on the unpinned branch would wrap a path that never sends -- the same shape as
-rev 2's standing `raw_session_confirmed`, which is read only by the interactive
-witness-preview request (`ipc.rs:3701`) and never by the automatic path.
+**Placement has been wrong in three revisions and the reason is the same each
+time: gating a branch rather than the decision.** Rev 2 put it on a standing
+`raw_session_confirmed`, read only by the interactive witness-preview request
+(`ipc.rs:3701`). Rev 3 put it on the unpinned witness branch, which never
+sends. Rev 4 put it on the pinned witness path, which misses automatic uploads
+entirely when no witness is configured -- the client then redacts locally and
+uploads without entering the witness path at all, which is exactly the route an
+invited contributor with an armed folder takes.
+
+Since the gates attach to the mode rather than the onboarding path, the only
+placement that covers every route is the decision itself, before either branch
+is chosen.
+
+For the avoidance of a fourth misplacement: `submit.rs:580` is **not** the
+automatic path. It sits inside `prepare_token_review`, the interactive
+token-distribution route. The automatic submission path's pin check is the
+`match settings.trust()` in the witness-settings arm, around `submit.rs:1263`,
+backed by `witness::witness_session`. A gate placed beside the first citation
+protects token review and leaves automatic sends open.
 
 ### R3. Admission evidence exists for the session
 
@@ -188,16 +236,20 @@ Flow 1 replaces today's consent screen, and that screen **is** the "How may
 your traces be used?" scope picker. Rev 2 dropped it from both the mandatory
 and deferred lists. NEAR AI and wallet enrollees start with empty scopes, so
 every automatic contribution would ship at the floor scope with nobody asked,
-or an implementer pre-selects scopes nobody chose. **Scope needs a named place
-in Flow 1 onboarding.**
+or an implementer pre-selects scopes nobody chose.
+
+**The placement, named rather than deferred:** the scope picker runs
+immediately after connect and before the Flow 1 / Flow 2 question, it blocks
+the grant, and it has no default. A contributor who declines to choose does not
+get a floor-scope grant -- they get no grant, and land on Flow 2.
 
 ## Where that leaves availability
 
 | Enrollment | R1 pipeline | R3 admission | R4 provenance | Flow 1 |
 |---|---|---|---|---|
-| Invite **with the witness offered at the grant** | satisfied by the enclave | **does not apply** | #1005 | **the first viable path** |
+| Invite **with a witness** | satisfiable once the client checks the certified version | **does not apply** | #1005 | **the first path R3 does not block** |
 | Invite, as shipped | no prose pass | does not apply | — | no |
-| NEAR AI login / wallet | satisfied by the enclave | **blocked by #706** | #1005 | no, until #706 |
+| NEAR AI login / wallet | satisfiable once the client checks the certified version | **blocked by #706** | #1005 | no, until #706 |
 
 **The invite path is the one that can work first, and rev 3 had this
 backwards.** R3 is scoped to two tenant namespaces and invite tenants are in
@@ -212,9 +264,13 @@ and NEAR AI-login enrollees, is not a gate an invited contributor ever passes
 through. Rev 3 marked invite "n/a" on R3 and then did not draw the conclusion.
 
 What invite lacks is R1, and that is exactly what the witness supplies: the
-enclave runs the full pipeline, which no local path does. **Offering the
-witness at the grant therefore turns invite from the least eligible enrollment
-into the only currently eligible one.**
+enclave runs the full pipeline, which no local path does. **A witness therefore removes
+invite's R1 problem, which is what leaves it the only enrollment with no
+structural blocker.**
+
+That is narrower than eligible, and rev 5 overstated it. R4 waits on #1005 and
+R5-R7 are unbuilt, so Flow 1 cannot be granted to anyone yet. And **where an
+invited contributor's witness comes from is unresolved** -- see Open.
 
 **Rev 5 reverses rev 3's conclusion for invite enrollees.** Rev 2's Addendum 4
 proposed offering the witness at the grant and pairing it with an inference
@@ -236,8 +292,11 @@ invited contributors are not. It proves neither that the session is real nor
 that it is theirs.
 
 What stands between here and Flow 1 is more than the three external items.
-External: #706's answer for automatic sends, #1005, and #507's local content
-pass. Internal to this design and not yet built: R5's post-witness hold with a
+External, and no longer uniform across enrollments: #706's answer for automatic
+sends, which blocks wallet and NEAR AI-login enrollees and does not apply to
+invited ones; #1005 for provenance; and #507's local content pass, which
+matters for an invited contributor **without** a witness and is not on the path
+for one with a witness, since the enclave supplies R1. Internal to this design and not yet built: R5's post-witness hold with a
 saved certified artifact, R6's void rule, R7's scope placement, the
 discovered-after-the-grant default with its audit row, withdrawal durability in
 every mode, and the logout rule above.
@@ -290,6 +349,16 @@ takes the second as the floor, because it holds even when the first is
 incomplete, and it fails in the safe direction: the contributor is asked again
 about folders they had already decided.
 
+**Read per session, not per folder.** A folder previously set to `Never` whose
+discovery state was wiped would otherwise have its *new* sessions counted as
+discovered after the grant and armed, which is the same defect one level down.
+
+**This rule covers arming and does not rescue withdrawal durability.** Logout
+also wipes receipts, history and the audit log, so after a re-grant a session
+the contributor withdrew is re-offered in an "Ask me" folder with no record of
+the withdrawal and can be approved again. Withdrawal durability therefore
+requires state that survives logout; a re-grant rule cannot supply it.
+
 ## Deferral does not work under Flow 1
 
 Rev 2 deferred the NEAR AI notice and token-distribution review to the point of
@@ -327,12 +396,16 @@ consent copy, so it is the wrong test to name. The one that matters is
 already requires the Tauri preview to go through `consent_copy` -- so the
 Tauri client is not unreachable by tooling, as rev 3 said.
 
-**The prerequisite is extending that test, and the Swift and C# consent-copy
-tests, to the new `AUTO_*` constants**, together with `ConsentCopy` itself,
-which carries three fields today.
+**The prerequisite is extending that test, the Swift and C# consent-copy tests,
+and GTK's `tests/shell_wording.rs`, to the new `AUTO_*` constants**, together
+with `ConsentCopy` itself, which carries three fields today. GTK re-exports
+`trace_commons_contributor::consent_copy` through
+`crates/trace-commons-contributor-gtk/src/copy.rs`, so leaving it out would let
+Linux render stale or hand-written automatic-contribution copy with nothing
+failing.
 
 ```rust
-pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. Everything else -- names, employers, a password typed into a sentence -- is removed when a model recognises it.";
+pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it.";
 
 pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover and blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
 
@@ -354,9 +427,13 @@ Three further sentences are required and not yet written:
 1. **The raw send, and both enclaves.** The session leaves unredacted for the
    witness enclave, whose classifier call then goes to NEAR AI's TEE-hosted
    privacy-filter endpoint. Two enclaves, two operators. Both are TEEs, so this
-   is not an exposure — but describing one enclave when there are two is
-   inaccurate, and the spec should say whether the witness verifies NEAR AI's
-   attestation on each classifier call.
+   is not an exposure, but describing one enclave when there are two is
+   inaccurate. **The answer, rather than the question:** the witness does not
+   verify NEAR AI's attestation on each classifier call -- it requires only a
+   TLS or loopback endpoint, and the measured witness compose file describes
+   that endpoint as outside the enclave, which places the classifier's operator
+   inside the transcript's trust boundary. The classifier receives the
+   deterministic-pass output, not the unredacted session.
 2. **How the witness got there.** NEAR AI and wallet enrollees did **not** meet
    it at signup: the witness URL, signer and pins are published by the commons
    and written silently at join, with join copy that says only *"Use the NEAR
@@ -373,22 +450,61 @@ contributed, and no sentence covers that.
 
 ## Open
 
+- **Where an invited contributor's witness configuration comes from.** Rev 5
+  proposed offering the witness at the grant, and the invite path has no source
+  for the URL, `signing_address` and measurement pins: enrollment reads them
+  from the environment only, and fetching the commons-published set at the
+  grant is the server-pushed enablement both the config field's doc and the
+  enrollment code rule out. Either a legitimate source exists -- the commons
+  publishing them and the contributor explicitly accepting them at the grant
+  may qualify, since the server would propose and the person decide -- or the
+  invite path waits on one. **This spec does not guess**, because guessing a
+  mechanism is what put the gate in the wrong place three revisions running.
+- **Whether connecting inference belongs in onboarding.** Receipts require
+  `chat_id`, which is `RoutedExchange::upstream_id` and exists only in the
+  local proxy's ledger, so a contributor not routing inference has no receipt
+  to offer. That is why the receipt proposal failed and why provenance stays
+  open. Routed inference is the only existing path to it, and it may also
+  answer the question above, since a contributor who deliberately connected to
+  NEAR AI for inference has a relationship in which the scrubbing enclave is
+  chosen rather than pushed. Against it: materially higher onboarding friction,
+  and it only works if the inference is worth routing, which is a product
+  decision. Note also that `routing/mod.rs` holds the proxy ledger to
+  attribution only -- it "must never reach a gate, a scoring input, or a credit
+  computation" -- so routing is not itself evidence; only the provider-signed
+  receipt is.
+- **Witness capacity and back-pressure.** Routing invited contributors through
+  the shared witness puts every automatic session, including pre-grant
+  backlogs, through a small fixed number of concurrent slots with a long
+  per-request timeout and limited classifier throughput, and R5 re-runs the
+  witness whenever a held session is opened. A cohort from one shared invite
+  draining backlogs at once would crowd out other enrollees' interactive
+  previews. The spec needs a stated requirement: client-side pacing, witness
+  admission control, and what a contributor sees when the witness is saturated.
 - **What stops spam on the invite path.** This is the cost of rev 5 being
   right about availability. Invited tenants sit outside the admission ledger,
   and the receipt mechanism does not substitute for it, so an invited
   contributor on Flow 1 contributes at volume with neither a per-session
-  admission step nor attested provenance until #1005. Manual review was
-  carrying part of that load and Flow 1 removes it. The honest options are to
-  gate the invite Flow 1 grant on #1005 landing, to cap automatic volume for
-  unattested tenants, or to accept the exposure and say so.
+  admission step nor attested provenance until #1005.
+
+  **Two things are settled about the shape of any answer.** It cannot be a
+  client-side consent control: per-session approval runs on the contributor's
+  own client, and an abusive invitee already has `AutoUpload`, `--mode auto`
+  and CLI `submit`, so no consent mode and no grant-time gate changes what they
+  can send. And a per-tenant cap is the wrong unit: derived invite tenants come
+  from the device key, which logout discards, and invites are multi-use, so the
+  limit resets more easily than it appears. **Volume control belongs
+  server-side, keyed on the invite, or the invite together with an account.**
+
+  Gating the grant on #1005 is weaker than it sounds for the same reason: most
+  invitees have no receipts, so the grant would open when #1005 merges while
+  those contributors stayed unattested.
 - **#706 under Flow 1**, still open for wallet and NEAR AI-login enrollees.
   Either admission evidence gets a non-per-session form, or Flow 1 stays
   unavailable to them while being available to invited contributors, which is
   an odd shape and worth deciding deliberately.
-- **Whether R1–R7 gate the mode or the flow.** This spec says the mode; it is
-  the single decision that most changes the implementation.
 - **Measurement.** How many sessions would satisfy R1 -- a certified pipeline
-  version carrying the deterministic prefix and a classifier suffix. Rev 2's plan read `trace_submissions.privacy_risk`, the server's
+  version on the exact allowlist. Rev 2's plan read `trace_submissions.privacy_risk`, the server's
   re-scored value over sessions that survived client refusals — the wrong
   population. `residual_risk_basis` (#474, V52) gives the cause breakdown.
 - **Shipped copy that this contradicts.** The arming copy's "Every future
