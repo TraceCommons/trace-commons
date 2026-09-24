@@ -661,6 +661,28 @@ pub fn verify_certificate(
     Ok(())
 }
 
+/// Recover the signer from a stored certificate without exposing its raw
+/// signature or certificate JSON to a shell.
+///
+/// A review artifact is written only after [`verify_certificate`] succeeds.
+/// This accessor gives a detail surface the public signer identity that was
+/// actually recovered from the response, rather than re-reading a current
+/// configuration value that may have changed since review.
+pub(crate) fn recover_certificate_signer(
+    response: &WitnessedEnvelope,
+) -> Result<String, WitnessTrustError> {
+    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    let signing_bytes = certificate_signing_bytes(&certificate)
+        .ok_or(WitnessTrustError::WitnessResponseMalformed)?;
+    let recovered = trace_commons_attestation::eip191::recover_eip191_signer(
+        &signing_bytes,
+        &response.signature_hex,
+    )
+    .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?;
+    Ok(format!("0x{}", hex::encode(recovered)))
+}
+
 /// Rebuild the certificate's signing preimage from its wire fields.
 ///
 /// **Length-prefixed, never JSON.** The server's `WitnessCertificate` has

@@ -196,6 +196,12 @@ Credit that has already settled stays. Credit still pending is forfeited."
     }
 }
 
+/// Confirmation before the server reports distribution reach.
+/// History rows do not carry a verified reach tier, so do not claim one.
+pub fn confirmation_prompt_unknown() -> &'static str {
+    "Withdraw this trace?\n\nIts content will be deleted from managed stores and excluded from future exports. If copies were already distributed, they cannot be recalled.\n\nCredit that has already settled stays. Credit still pending is forfeited."
+}
+
 fn classify(e: &OcError) -> WithdrawError {
     match e {
         OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {

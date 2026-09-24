@@ -11,6 +11,11 @@ storage, encrypted artifact store, upload-claim issuer, and shared protocol
 crate. Ironclaw should depend on `crates/trace-commons-protocol` when the
 client-side integration is rewired, but it does not live in this tree.
 
+It also holds the contributor side: the contributor CLI and daemon
+(`trace-commons-contributor`), the C ABI (`-contributor-ffi`), and four desktop
+shells -- macOS (`macos/`, Swift), Windows (`windows/`, C#), Linux GTK
+(`crates/trace-commons-contributor-gtk`), and Tauri (`tauri-desktop/`).
+
 There is **no Ironclaw path dependency**. Do not look for one. Do not propose
 adding one.
 
@@ -33,9 +38,8 @@ verification.
 - `docs/trace-commons-roadmap.md` — the production-gap queue and phase plan.
 - `docs/superpowers/specs/` — per-slice design specs.
 - `docs/superpowers/plans/` — per-slice implementation plans.
-- `docs/operator/README.md` — operator runbook index. Current runbooks:
-  A2.6 result handler, pilot-bootstrap first-100-traces, HF cache hygiene,
-  GPU cost ledger.
+- `docs/operator/README.md` — operator runbook index; every runbook under
+  `docs/operator/` is listed there.
 
 When in doubt about what to build next, read the **"Production Gap Queue"**
 section of the roadmap.
@@ -71,13 +75,18 @@ before claiming green. Clippy is CI-enforced — run it locally too.
 The protocol crate is `crates/trace-commons-protocol`; the server crate is
 `crates/trace-commons-server`. Migrations live in `migrations/`.
 
+Two crates are separate Cargo workspaces with their own lockfiles, so `-p`
+from the repo root does not reach them: the GTK shell
+(`--manifest-path crates/trace-commons-contributor-gtk/Cargo.toml`) and the
+Tauri app (`--manifest-path tauri-desktop/src-tauri/Cargo.toml`, plus
+`pnpm test` and `pnpm build` in `tauri-desktop/frontend`). The Tauri checks
+run in `.github/workflows/tauri-desktop.yml`.
+
 ## CI
 
 `.github/workflows/ci.yml` holds the server-side jobs and runs every one of
-them on every PR: sixteen as of 2026-09-22. The list below covers the
-long-standing ones and is not a full inventory -- read the workflow for that.
-(It said "nine" while the file held fifteen, and "eighteen" while it held
-twenty, so treat any count here as stale until re-checked.)
+them on every PR. The list below covers the long-standing ones and is not a
+full inventory -- read the workflow for that.
 
 The client shells are in `.github/workflows/clients.yml` since 2026-09-22:
 `macOS app tests`, `windows named-pipe ACL`, `windows contributor crate
@@ -87,8 +96,7 @@ tests`, `windows update conformance`, `install.ps1 against the real release`,
 every push to `main`, on `workflow_dispatch`, and on a pull request only when
 it touches a client path (its `paths:` filter). None of its jobs is a
 required status check, so a server-only PR never waits on a macOS or Windows
-runner, and a client regression surfaces on `main` after the merge. The jobs
-are unchanged: the notes on them below still apply.
+runner, and a client regression surfaces on `main` after the merge.
 
 Every job that caches `target` ends with `./.github/actions/trim-cargo-cache`,
 which deletes linked test and bin executables and `incremental/` before
@@ -96,8 +104,8 @@ actions/cache saves. The repository's caches were over GitHub's 10 GB
 ceiling and a main-written cache was evicted within minutes; a job that
 adds a `target` cache must end with that step too, or it re-creates the
 churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
-reason: a cancelled job saves no cache, and on 2026-09-09 22 of 40 main runs
-were cancelled by the next merge.
+reason: a cancelled job saves no cache, and merges to `main` land close
+together.
 
 Running is not the same as blocking. **Ten** of the sixteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
@@ -126,35 +134,35 @@ receives them times out of the queue instead of merging.
   only thing that exercises it. See #486.
 - `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
-  exercising the JSONL loader path. Do not break it.
+  exercising the JSONL loader path.
 - `operator-binaries smoke`.
 - `builds at the declared MSRV floor` — the only job that does NOT use
   `dtolnay/rust-toolchain@stable`. It reads `rust-version` out of `cargo
   metadata` (never a literal in the workflow) for both the root workspace and
   the separate GTK workspace, audits each resolved dependency graph for a crate
   demanding a newer rustc, and then checks the contributor CLI, the FFI dylib
-  and the GTK shell under the derived floor toolchain. Advisory, not required,
-  as of 2026-09-07. Every `@stable` job is structurally blind to an MSRV
-  regression -- stable is always at or above the floor -- which is why a
-  dependency bump left `main` green and failed all four
-  `contributor-v0.10.0` release jobs. Logic lives in
-  `scripts/ci/msrv-floor.sh`.
+  and the GTK shell under the derived floor toolchain. It is a required
+  check. Every `@stable` job is structurally blind to an MSRV regression --
+  stable is always at or above the floor -- so this job is the only thing
+  that catches a dependency demanding a newer rustc before a release build
+  does. Logic lives in `scripts/ci/msrv-floor.sh`.
+
+Notes on three `clients.yml` jobs (none of them is a required check):
+
 - `linux-shell desktop entry and metainfo` — `desktop-file-validate`,
   `appstreamcli validate`, the icon-name pair and the metainfo-vs-crate
   version pin, from `crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh`,
-  in about a minute. **Not yet a required check**; the weston job runs the
-  same script and stays the blocking copy until this one is promoted.
+  in about a minute. The weston job runs the same script.
 - `macOS app tests` — `swift test` in `macos/`, on `macos-26`. The only
-  thing that runs the Swift suite; before it existed those tests gated
-  nothing. Needs `cargo build -p trace-commons-contributor-ffi` first,
-  because the Swift package links that dylib.
-- `windows named-pipe ACL` — the only `windows-latest` job. Runs
-  `scripts/windows/verify-pipe-acl.ps1`, which creates a second,
-  non-administrator local account and requires it to be denied when opening
-  the contributor daemon's named pipe. That DACL is the sole access control
-  on the daemon IPC socket on Windows, and it is not observable from a
-  cross-compile, so this job is the only thing standing behind the claim
-  that it works. Do not weaken it to a smoke test.
+  thing that runs the Swift suite. Needs
+  `cargo build -p trace-commons-contributor-ffi` first, because the Swift
+  package links that dylib.
+- `windows named-pipe ACL` — runs `scripts/windows/verify-pipe-acl.ps1`,
+  which creates a second, non-administrator local account and requires it to
+  be denied when opening the contributor daemon's named pipe. That DACL is
+  the sole access control on the daemon IPC socket on Windows, and it is not
+  observable from a cross-compile, so this job is the only thing standing
+  behind the claim that it works. Do not weaken it to a smoke test.
 
 GitHub Actions runners are on Node 24; pinned actions are
 `actions/checkout@v6` and `actions/cache@v5`. Future CI edits should hold
@@ -170,8 +178,9 @@ carries the full statement of it; the essentials are repeated here.
   these crates carries a two-line copyright + SPDX header; new files need one.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
   `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
-  `-build-info`, `-attestation`). These ship inside proprietary agent harnesses
-  and must stay permissive.
+  `-build-info`, `-attestation`, and `tauri-desktop/src-tauri`
+  (`trace-commons-tauri-desktop`)). These ship inside proprietary agent
+  harnesses and must stay permissive.
 
 **Contributions are licensed inbound under `MIT OR Apache-2.0`**, including to
 the AGPL crates -- deliberately not "inbound = outbound", so the project keeps
@@ -256,10 +265,10 @@ in `license_boundary.rs` to match your diff -- those sets are the specification.
   each have their own bearer-token gate. Do not mix them.
 - Drills (`/v1/admin/*-drill`) produce hash-only evidence and feed rollout-smoke
   required checks. When you add a drill, wire it into the smoke evidence path.
-- `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` is ~61k LOC of
-  production code. Its ~60k LOC test module has been extracted to a sibling
-  file via `#[cfg(test)] #[path = "trace_commons_ingest_internal/tests.rs"] mod
-  tests;`. Reuse this pattern if other binaries need the same split; do not
+- `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` is tens of
+  thousands of lines of production code. Its test module, larger still, lives
+  in a sibling file via `#[cfg(test)] #[path =
+  "trace_commons_ingest_internal/tests.rs"] mod tests;`. Reuse this pattern if other binaries need the same split; do not
   inline the tests back.
 - Pilot-bootstrap loads JSONL session files. Parquet + arrow deps were
   removed; do not reintroduce them. See
@@ -292,9 +301,3 @@ in `license_boundary.rs` to match your diff -- those sets are the specification.
   move together -- an old dylib compared against a shell that has not added the
   new fields agrees with itself. Rebuild the dylib before trusting a shell
   suite result, green or red.
-
-## Memory
-
-Persistent memory for this project is under
-`~/.claude/projects/-Users-zakimanian-code-trace-commons-server/memory/`. Check it
-on session start for any project-specific facts not captured here.

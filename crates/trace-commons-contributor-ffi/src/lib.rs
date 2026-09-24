@@ -1197,6 +1197,7 @@ pub unsafe extern "C" fn tc_call(
                     }
                     Err(AttachError::NotListening)
                     | Err(AttachError::Disconnected)
+                    | Err(AttachError::TimedOut)
                     // Unreachable: a handle only becomes attached by a
                     // successful `connect`, and on a platform that refuses
                     // one there is never an attached handle to call. Matched

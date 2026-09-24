@@ -85,6 +85,10 @@ old behaviour, because no application has shipped against `v1` yet. See
   signed, preview-before-write Codex installation with rollback. See
   ["Session detail and publication"](#session-detail-and-publication) and
   ["Tested skill workflow"](#tested-skill-workflow).
+- `certificate_detail` provides a bounded read-only projection of a held
+  witness certificate for native review surfaces. It returns signed claims,
+  recovered signer, receipt state, and explicit expiry absence without
+  exposing the stored envelope, signature, or certificate JSON.
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -436,6 +440,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
 | `list_pending` | — | `pending[]` of queue entries | |
+| `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
@@ -2216,47 +2221,6 @@ Sentence and tone come from `tc_contribution_attestation_line` and
 `tc_contribution_attestation_tone` -- never from shell-authored branching on
 the label.
 
-### The certificate a queue entry holds
-
-| Field | Values |
-|---|---|
-| `holds_certificate` | `true` \| `false` |
-
-True when a witness certificate is held for the bytes this entry was pinned
-to. Both witness routes produce one: `POST /v1/witness` returns a
-certificate, and `POST /v1/witness/admission` returns a certificate AND
-admission evidence. The daemon stores either as a single
-`trace_commons.witness_review.v1` artifact under a single pin, so "did the
-contributor complete step 1 or step 2" is not two questions.
-
-**`holds_certificate` is ALWAYS PRESENT, on every entry, for every
-contributor** -- the `attestation` rule, not the `eligibility` one, and for
-a reason of its own. This is one fact with two readings:
-
-| Contributor | Reads `true` as |
-|---|---|
-| without an invite | this session is a candidate for submission |
-| with an invite | this session is cryptographically attested |
-
-The fact does not differ between them; only the wording does. The shell
-picks the wording from the invite status it already holds for the
-eligibility surface, and MUST NOT ask the daemon a second question to get
-it. Emitting the field only under the signup flag would put the second
-reading out of reach of exactly the contributors it is written for.
-
-**This is not `attestation`, and the two must not be conflated.**
-`attestation` answers whether the session carries a checkable copy of the
-model call that produced it. `holds_certificate` answers whether a witness
-certificate is held over the reviewed bytes. A session can have either
-without the other, and *holds a certificate*, *is attestable* and *was
-attested* are three different facts. A shell deciding what to put in a
-certificate-held list MUST read `holds_certificate` and never the mark.
-
-Derived from the pin rather than stored, so it cannot drift from it: the
-artifact is written and the pin recorded under one queue lock. An entry
-re-offered because its bytes moved loses the pin and therefore the claim --
-the certificate covered the old bytes.
-
 **There is no control accessor, and that is the contract.** The mark
 describes the trace; it offers nothing to press. A shell that drew a button
 from it would be inventing an action out of a description. Whether a row may
@@ -2323,6 +2287,81 @@ defect this surface removes reproduced one layer up.
 Both fields are additive; the schema version stays
 `trace_commons.daemon.v1_1`, and a client that ignores them behaves exactly
 as before.
+
+### The certificate a queue entry holds
+
+| Field | Values |
+|---|---|
+| `holds_certificate` | `true` \| `false` |
+
+True when a witness certificate is held for the bytes this entry was pinned
+to. Both witness routes produce one: `POST /v1/witness` returns a
+certificate, and `POST /v1/witness/admission` returns a certificate AND
+admission evidence. The daemon stores either as a single
+`trace_commons.witness_review.v1` artifact under a single pin, so "did the
+contributor complete step 1 or step 2" is not two questions.
+
+**`holds_certificate` is ALWAYS PRESENT, on every entry, for every
+contributor** -- the `attestation` rule, not the `eligibility` one, and for
+a reason of its own. This is one fact with two readings:
+
+| Contributor | Reads `true` as |
+|---|---|
+| without an invite | this session is a candidate for submission |
+| with an invite | this session is cryptographically attested |
+
+The fact does not differ between them; only the wording does. The shell
+picks the wording from the invite status it already holds for the
+eligibility surface, and MUST NOT ask the daemon a second question to get
+it. Emitting the field only under the signup flag would put the second
+reading out of reach of exactly the contributors it is written for.
+
+**This is not `attestation`, and the two must not be conflated.**
+`attestation` answers whether the session carries a checkable copy of the
+model call that produced it. `holds_certificate` answers whether a witness
+certificate is held over the reviewed bytes. A session can have either
+without the other, and *holds a certificate*, *is attestable* and *was
+attested* are three different facts. A shell deciding what to put in a
+certificate-held list MUST read `holds_certificate` and never the mark.
+
+### `certificate_detail`
+
+`certificate_detail` takes an `entry_id` for a pending entry whose
+`holds_certificate` is true. It verifies the stored artifact still matches its
+queue pin, then returns only:
+
+```json
+{
+  "state": "held",
+  "verification": "verified_at_review",
+  "redacted_sha256": "…",
+  "residual_risk_verdict": "low|medium|high",
+  "redaction_policy_version": "…",
+  "witness_measurement": "…",
+  "issued_at": 0,
+  "expires_at": null,
+  "expiry_state": "not_issued",
+  "signer": "0x…",
+  "signature_present": true,
+  "admission_evidence_present": false,
+  "inference_receipt": {"state": "certified|uncertified", "reason": "…"}
+}
+```
+
+`inference_receipt` is `null` for reviews written before the client recorded
+that fact. `expires_at` is always `null` under current certificate schema; the
+shell must not invent an expiry. Missing, malformed, stale, or unavailable
+artifacts return fixed labels and no partial certificate. The daemon never
+returns `envelope_bytes`, `signature_hex`, or `certificate_json`.
+
+Derived from the pin rather than stored, so it cannot drift from it: the
+artifact is written and the pin recorded under one queue lock. An entry
+re-offered because its bytes moved loses the pin and therefore the claim --
+the certificate covered the old bytes.
+
+No current client calls this method. It defines the read-only projection a
+future witness-certificate review surface can use without exposing raw
+artifacts or inventing a control action.
 
 ### The attested-inference record
 

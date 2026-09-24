@@ -1,0 +1,22 @@
+[package]
+name = "trace-commons-tauri-desktop"
+version = "0.1.0"
+description = "Cross-platform Tauri desktop app for Trace Commons"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+trace-commons-contributor = { path = "../../crates/trace-commons-contributor" }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
