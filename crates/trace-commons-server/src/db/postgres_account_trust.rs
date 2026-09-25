@@ -146,7 +146,8 @@ impl PgBackend {
                         (tenant_id, account_id, authority, trust_version)
                      VALUES ($1, $2, 'invited', 1)
                      ON CONFLICT (tenant_id, account_id) DO UPDATE
-                       SET trust_version = trace_account_trust.trust_version + 1,
+                       SET authority = 'invited',
+                           trust_version = trace_account_trust.trust_version + 1,
                            updated_at = now()
                      RETURNING trust_version",
                     &[&tenant, &account],
