@@ -731,11 +731,15 @@ fn encode_instrument(
     descriptor: &InstrumentDescriptor,
 ) -> Result<(), ContractError> {
     descriptor.validate()?;
-    // `Microcredits` reads a Trace Credit atomic unit as one microcredit.
-    if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID
-        && descriptor.decimals != TRACE_CREDIT_DECIMALS
-    {
-        return Err(ContractError::TraceCreditDecimals);
+    // Trace Credit is a NEP-141 token, and `Microcredits` reads one of its
+    // atomic units as one microcredit.
+    if instrument_id.as_str() == TRACE_CREDIT_INSTRUMENT_ID {
+        if descriptor.kind != InstrumentKind::Nep141 {
+            return Err(ContractError::TraceCreditKind);
+        }
+        if descriptor.decimals != TRACE_CREDIT_DECIMALS {
+            return Err(ContractError::TraceCreditDecimals);
+        }
     }
     encode_string(output, instrument_id.as_str());
     encode_string(output, descriptor.kind.as_str());
@@ -885,6 +889,8 @@ pub enum ContractError {
     NonCanonicalAtomicUnits,
     #[error("instrument descriptor does not match the form its kind requires")]
     InvalidInstrumentDescriptor,
+    #[error("the trace_credit instrument must pin a NEP-141 token")]
+    TraceCreditKind,
     #[error("the trace_credit instrument must pin six decimals")]
     TraceCreditDecimals,
     #[error("an award names an instrument that the bundle does not pin")]
@@ -3734,8 +3740,9 @@ mod tests {
             Err(ContractError::InvalidInstrumentDescriptor)
         );
 
-        // A manifest refuses a malformed descriptor, and Trace Credit must
-        // pin six decimals so one atomic unit stays one microcredit.
+        // A manifest refuses a malformed descriptor. Trace Credit must pin a
+        // NEP-141 token with six decimals, so one atomic unit stays one
+        // microcredit.
         let mut manifest = golden_manifest();
         manifest
             .instruments
@@ -3756,6 +3763,26 @@ mod tests {
             manifest.bundle_id(),
             Err(ContractError::TraceCreditDecimals)
         );
+        let other_kinds = [
+            InstrumentDescriptor {
+                decimals: TRACE_CREDIT_DECIMALS,
+                ..bat_descriptor()
+            },
+            InstrumentDescriptor {
+                kind: InstrumentKind::CreditAccount,
+                network: "trace_commons".to_string(),
+                contract: "trace_credit".to_string(),
+                decimals: TRACE_CREDIT_DECIMALS,
+            },
+        ];
+        for descriptor in other_kinds {
+            assert_eq!(descriptor.validate(), Ok(()), "{descriptor:?}");
+            let mut manifest = golden_manifest();
+            manifest
+                .instruments
+                .insert(InstrumentId::trace_credit(), descriptor);
+            assert_eq!(manifest.bundle_id(), Err(ContractError::TraceCreditKind));
+        }
     }
 
     #[test]

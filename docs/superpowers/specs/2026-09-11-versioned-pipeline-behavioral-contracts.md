@@ -440,8 +440,8 @@ stores no object.
 - Each descriptor MUST have one spelling: a NEAR account id for `nep141`, a
   decimal EIP-155 chain id and a lowercase `0x` address for `erc20`, and safe
   labels for `credit_account`. `decimals` MUST NOT exceed 38.
-- The `trace_credit` descriptor MUST pin 6 decimals, so one atomic unit is one
-  microcredit.
+- The `trace_credit` descriptor MUST pin a `nep141` token with 6 decimals, so
+  one atomic unit is one microcredit.
 - An instrument identifier MUST keep one descriptor. A change of kind,
   network, contract, or `decimals` MUST use a new instrument identifier.
 - A manifest that repeats an instrument MUST fail to load.

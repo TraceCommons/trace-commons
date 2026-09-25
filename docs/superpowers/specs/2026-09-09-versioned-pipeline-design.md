@@ -287,8 +287,9 @@ Each kind accepts one spelling of its network and contract, so equal
 descriptors give equal bundle identifiers. The descriptors are part of the
 canonical manifest bytes, so they are part of the bundle identifier.
 
-The `trace_credit` descriptor must pin 6 decimals. A manifest that repeats an
-instrument, or that has no `instruments` field, fails to load.
+The `trace_credit` descriptor must pin a `nep141` token with 6 decimals. A
+manifest that repeats an instrument, or that has no `instruments` field, fails
+to load.
 
 An award for an instrument that the bound bundle does not pin is refused. The
 runner checks Score's awards with `BundleManifest::require_pinned` before the
