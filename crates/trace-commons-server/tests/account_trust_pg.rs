@@ -263,7 +263,11 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
         "no-spend requests and replays do not audit another elevation"
     );
     let audit = admin.query_one("SELECT actor_ref, safe_metadata FROM trace_account_audit WHERE tenant_id=$1 AND action='account_invite_redeemed'", &[&tenant_a]).await.unwrap();
-    assert!(audit.get::<_, String>(0).starts_with("sha256:"));
+    assert_eq!(
+        audit.get::<_, String>(0),
+        format!("account-actor:{a}"),
+        "invite redemption audits under the same actor_ref as every other account mutation"
+    );
     assert_eq!(
         audit.get::<_, serde_json::Value>(1),
         serde_json::json!({"invite_subject_hash": first, "trust_version": 1})
