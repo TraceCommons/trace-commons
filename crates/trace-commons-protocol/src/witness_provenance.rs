@@ -1,14 +1,16 @@
 //! Closed provenance for a contribution's final declared inference call.
 //!
-//! An attested value binds one final declared call's request and response bytes
-//! to a pinned receipt signer. It does not authenticate the surrounding session,
-//! prove that no earlier calls were omitted, or prevent receipt replay.
+//! An attested value records the witness's verification of the final declared
+//! call against a pinned receipt signer. Raw inference body digests and receipt
+//! identities are deliberately absent: they enable guessing and provider-side
+//! conversation correlation. Downstream parties verify the witness statement,
+//! not the provider receipt independently. Class, model, signer and timing still
+//! disclose metadata; this is not a promise of unlinkability. The claim does not
+//! authenticate surrounding history, omitted calls, or prevent receipt replay.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 
 const V2_DOMAIN: &[u8] = b"trace_commons.redaction_witness_certificate.v2\n";
-const RECEIPT_IDENTITY_DOMAIN: &[u8] = b"trace_commons.final_call_receipt_identity.v1\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,11 +23,8 @@ pub enum AttestationClass {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct FinalCallAttestation {
     class: AttestationClass,
-    receipt_sha256: String,
     model: Option<String>,
     receipt_signer: String,
-    request_sha256: String,
-    response_sha256: String,
 }
 
 impl std::fmt::Debug for FinalCallAttestation {
@@ -33,9 +32,6 @@ impl std::fmt::Debug for FinalCallAttestation {
         formatter
             .debug_struct("FinalCallAttestation")
             .field("class", &self.class)
-            .field("receipt_sha256", &self.receipt_sha256)
-            .field("request_sha256", &self.request_sha256)
-            .field("response_sha256", &self.response_sha256)
             .finish_non_exhaustive()
     }
 }
@@ -44,8 +40,6 @@ impl std::fmt::Debug for FinalCallAttestation {
 pub enum ProvenanceError {
     #[error("an attested final call requires a provider TEE or gateway class")]
     UnattestedClass,
-    #[error("a digest must be exactly 64 lowercase hexadecimal characters")]
-    InvalidDigest,
     #[error("a receipt signer must be a nonempty lowercase hexadecimal string")]
     InvalidSigner,
     #[error("the model bound by a receipt must not be empty")]
@@ -58,20 +52,11 @@ impl FinalCallAttestation {
     /// the receipt and never infers a model from a request or route.
     pub fn new(
         class: AttestationClass,
-        receipt_sha256: String,
         model: Option<String>,
         receipt_signer: String,
-        request_sha256: String,
-        response_sha256: String,
     ) -> Result<Self, ProvenanceError> {
         if class == AttestationClass::Unattested {
             return Err(ProvenanceError::UnattestedClass);
-        }
-        if [&receipt_sha256, &request_sha256, &response_sha256]
-            .iter()
-            .any(|digest| !is_lower_hex(digest, Some(64)))
-        {
-            return Err(ProvenanceError::InvalidDigest);
         }
         // Ed25519 signer is 32 bytes; a recovered ECDSA address is 20 bytes.
         // Neither is inferred from the receipt's untrusted claimed address.
@@ -84,31 +69,19 @@ impl FinalCallAttestation {
         }
         Ok(Self {
             class,
-            receipt_sha256,
             model,
             receipt_signer,
-            request_sha256,
-            response_sha256,
         })
     }
 
     pub fn class(&self) -> AttestationClass {
         self.class
     }
-    pub fn receipt_sha256(&self) -> &str {
-        &self.receipt_sha256
-    }
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
     pub fn receipt_signer(&self) -> &str {
         &self.receipt_signer
-    }
-    pub fn request_sha256(&self) -> &str {
-        &self.request_sha256
-    }
-    pub fn response_sha256(&self) -> &str {
-        &self.response_sha256
     }
 }
 
@@ -124,12 +97,9 @@ fn is_lower_hex(value: &str, width: Option<usize>) -> bool {
 #[serde(deny_unknown_fields)]
 struct RawFinalCallAttestation {
     class: AttestationClass,
-    receipt_sha256: String,
     #[serde(deserialize_with = "deserialize_required_model")]
     model: Option<String>,
     receipt_signer: String,
-    request_sha256: String,
-    response_sha256: String,
 }
 
 fn deserialize_required_model<'de, D: Deserializer<'de>>(
@@ -141,15 +111,7 @@ fn deserialize_required_model<'de, D: Deserializer<'de>>(
 impl<'de> Deserialize<'de> for FinalCallAttestation {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = RawFinalCallAttestation::deserialize(deserializer)?;
-        Self::new(
-            raw.class,
-            raw.receipt_sha256,
-            raw.model,
-            raw.receipt_signer,
-            raw.request_sha256,
-            raw.response_sha256,
-        )
-        .map_err(serde::de::Error::custom)
+        Self::new(raw.class, raw.model, raw.receipt_signer).map_err(serde::de::Error::custom)
     }
 }
 
@@ -242,7 +204,6 @@ pub fn witness_certificate_v2_signing_bytes(
                     unreachable!("constructor rejects unattested class")
                 }
             });
-            append_length_prefixed(&mut out, call.receipt_sha256.as_bytes());
             match &call.model {
                 None => out.push(0),
                 Some(model) => {
@@ -251,47 +212,9 @@ pub fn witness_certificate_v2_signing_bytes(
                 }
             }
             append_length_prefixed(&mut out, call.receipt_signer.as_bytes());
-            append_length_prefixed(&mut out, call.request_sha256.as_bytes());
-            append_length_prefixed(&mut out, call.response_sha256.as_bytes());
         }
     }
     out
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReceiptSigningAlgorithm {
-    Ecdsa,
-    Ed25519,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReceiptSignatureKind {
-    ProviderTee,
-    Gateway,
-}
-
-/// Audit identity of the exact verified receipt inputs. The signer must be the
-/// verified signer bytes, not an address claim parsed from the wire. This hash
-/// correlates receipts; it does not establish uniqueness or prevent replay.
-pub fn receipt_identity_sha256(
-    text: &[u8],
-    signature: &[u8],
-    verified_signer: &[u8],
-    algorithm: ReceiptSigningAlgorithm,
-    kind: ReceiptSignatureKind,
-) -> String {
-    let mut bytes = RECEIPT_IDENTITY_DOMAIN.to_vec();
-    for field in [text, signature, verified_signer] {
-        append_length_prefixed(&mut bytes, field);
-    }
-    bytes.push(match algorithm {
-        ReceiptSigningAlgorithm::Ecdsa => 1,
-        ReceiptSigningAlgorithm::Ed25519 => 2,
-    });
-    bytes.push(match kind {
-        ReceiptSignatureKind::ProviderTee => 1,
-        ReceiptSignatureKind::Gateway => 2,
-    });
-    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(test)]
@@ -309,15 +232,21 @@ mod tests {
     }
 
     fn call(class: AttestationClass, model: Option<&str>) -> FinalCallAttestation {
-        FinalCallAttestation::new(
-            class,
-            "a".repeat(64),
-            model.map(str::to_string),
-            "b".repeat(64),
-            "c".repeat(64),
-            "d".repeat(64),
-        )
-        .unwrap()
+        FinalCallAttestation::new(class, model.map(str::to_string), "b".repeat(64)).unwrap()
+    }
+
+    #[test]
+    fn provenance_wire_and_debug_omit_raw_inference_correlators() {
+        let call = call(AttestationClass::ProviderTeeFinalCall, Some("secret-model"));
+        let wire = serde_json::to_value(&call).unwrap();
+        assert_eq!(wire.as_object().unwrap().len(), 3);
+        for field in ["request_sha256", "response_sha256", "receipt_sha256"] {
+            assert!(wire.get(field).is_none());
+            assert!(!format!("{call:?}").contains(field));
+            let mut with_removed_field = wire.clone();
+            with_removed_field[field] = serde_json::json!("a".repeat(64));
+            assert!(serde_json::from_value::<FinalCallAttestation>(with_removed_field).is_err());
+        }
     }
 
     #[test]
@@ -341,15 +270,7 @@ mod tests {
         let absent_model =
             InferenceProvenance::Attested(call(AttestationClass::ProviderTeeFinalCall, None));
         let original = witness_certificate_v2_signing_bytes(base(), &provider);
-        let frozen = concat!(
-            "74726163655f636f6d6d6f6e732e726564616374696f6e5f7769746e6573735f63657274696669636174652e76320a01000000000000006102000000",
-            "000000006263010000000000000064020100000000000000010140000000000000006161616161616161616161616161616161616161616161616161",
-            "61616161616161616161616161616161616161616161616161616161616161616161616161610105000000000000006d6f64656c4000000000000000",
-            "626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262",
-            "626262624000000000000000636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363",
-            "636363636363636363636363636363634000000000000000646464646464646464646464646464646464646464646464646464646464646464646464",
-            "64646464646464646464646464646464646464646464646464646464",
-        );
+        let frozen = "74726163655f636f6d6d6f6e732e726564616374696f6e5f7769746e6573735f63657274696669636174652e76320a0100000000000000610200000000000000626301000000000000006402010000000000000001010105000000000000006d6f64656c400000000000000062626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262";
         assert_eq!(hex::encode(&original), frozen);
         assert_ne!(
             original,
@@ -363,14 +284,11 @@ mod tests {
             original,
             witness_certificate_v2_signing_bytes(base(), &InferenceProvenance::Unattested)
         );
-        for field in 0..5 {
+        for field in 0..2 {
             let mut changed = call(AttestationClass::ProviderTeeFinalCall, Some("model"));
             match field {
-                0 => changed.receipt_sha256 = "e".repeat(64),
-                1 => changed.model = Some("other".to_string()),
-                2 => changed.receipt_signer = "e".repeat(64),
-                3 => changed.request_sha256 = "e".repeat(64),
-                _ => changed.response_sha256 = "e".repeat(64),
+                0 => changed.model = Some("other".to_string()),
+                _ => changed.receipt_signer = "e".repeat(64),
             }
             assert_ne!(
                 original,
@@ -439,37 +357,20 @@ mod tests {
             );
         }
         assert_eq!(
-            FinalCallAttestation::new(
-                AttestationClass::Unattested,
-                "a".repeat(64),
-                None,
-                "b".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64)
-            ),
+            FinalCallAttestation::new(AttestationClass::Unattested, None, "b".repeat(64)),
             Err(ProvenanceError::UnattestedClass)
         );
         assert_eq!(
-            FinalCallAttestation::new(
-                AttestationClass::GatewayFinalCall,
-                "A".repeat(64),
-                None,
-                "b".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64),
-            ),
-            Err(ProvenanceError::InvalidDigest)
+            FinalCallAttestation::new(AttestationClass::GatewayFinalCall, None, "B".repeat(64)),
+            Err(ProvenanceError::InvalidSigner)
         );
         assert_eq!(
             FinalCallAttestation::new(
                 AttestationClass::GatewayFinalCall,
-                "a".repeat(64),
-                None,
-                "B".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64),
+                Some(String::new()),
+                "b".repeat(64)
             ),
-            Err(ProvenanceError::InvalidSigner)
+            Err(ProvenanceError::EmptyModel)
         );
         let debug = format!(
             "{:?}",
@@ -477,40 +378,5 @@ mod tests {
         );
         assert!(!debug.contains("secret-model"));
         assert!(!debug.contains(&"b".repeat(64)));
-    }
-
-    #[test]
-    fn witness_provenance_receipt_identity_is_frozen_and_binary_sensitive() {
-        let digest = receipt_identity_sha256(
-            b"text",
-            b"\x00\xff",
-            b"signer",
-            ReceiptSigningAlgorithm::Ed25519,
-            ReceiptSignatureKind::ProviderTee,
-        );
-        assert_eq!(
-            digest,
-            "e3234c67fbcc2d5aacd91c82f294828d5b305aca4a5caa1ddc234c33ad38cf3c"
-        );
-        assert_ne!(
-            digest,
-            receipt_identity_sha256(
-                b"tex",
-                b"t\x00\xff",
-                b"signer",
-                ReceiptSigningAlgorithm::Ed25519,
-                ReceiptSignatureKind::ProviderTee
-            )
-        );
-        assert_ne!(
-            digest,
-            receipt_identity_sha256(
-                b"text",
-                b"\x00\xff",
-                b"signer",
-                ReceiptSigningAlgorithm::Ed25519,
-                ReceiptSignatureKind::Gateway
-            )
-        );
     }
 }

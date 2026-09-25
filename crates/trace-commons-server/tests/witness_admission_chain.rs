@@ -165,6 +165,9 @@ fn witness(trust: Option<AdmissionProviderTrust>) -> (axum::Router, String) {
         Arc::new(FixtureEnclave(address.clone())),
         1024 * 1024,
     )
+    .with_certificate_issuance(
+        trace_commons_server::witness_service::WitnessCertificateIssuance::V2,
+    )
     .with_contribution_redactor(Arc::new(PipelineContributionRedaction::deterministic_only(
         Vec::new(),
     )));
@@ -453,18 +456,15 @@ async fn a_client_request_admitted_by_the_witness_is_admitted_by_ingest() {
     // former, so the v2 certificate must make the conservative claim.
     assert_eq!(
         verified.inference_provenance(),
-        InferenceProvenance::Unattested
+        Some(InferenceProvenance::Unattested)
     );
     let mut tampered: serde_json::Value =
         serde_json::from_str(&witnessed.certificate_json).expect("witness certificate is JSON");
     tampered["inference_provenance"] = serde_json::to_value(InferenceProvenance::Attested(
         FinalCallAttestation::new(
             AttestationClass::ProviderTeeFinalCall,
-            "a".repeat(64),
             Some(MODEL.into()),
             provider.public_hex.clone(),
-            evidence.request_sha256.clone(),
-            evidence.response_sha256.clone(),
         )
         .expect("tampered claim is syntactically valid"),
     ))

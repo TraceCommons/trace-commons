@@ -130,6 +130,14 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
     version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 struct Args {
+    /// Certificate profile; enable v2 only after ingest and supported clients upgrade.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION",
+        default_value = "v1"
+    )]
+    certificate_version: trace_commons_server::witness_service::WitnessCertificateIssuance,
+
     /// Address to bind. Bind to the guest's own interface; the witness is
     /// reached through whatever terminates TLS in front of it.
     #[arg(
@@ -546,6 +554,7 @@ async fn main() -> Result<()> {
         enclave as Arc<dyn Enclave>,
         args.max_request_bytes,
     )
+    .with_certificate_issuance(args.certificate_version)
     .requiring_attested_inference(inference_policy)
     .with_contribution_redactor(contribution_redactor);
     if std::env::var_os("TRACE_COMMONS_WITNESS_ADMISSION_PROVIDER_SIGNERS").is_some() {
@@ -568,4 +577,64 @@ async fn main() -> Result<()> {
         .await
         .context("the witness listener stopped")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod certificate_issuance_tests {
+    use super::*;
+    use trace_commons_server::witness_service::WitnessCertificateIssuance;
+
+    #[test]
+    fn certificate_version_configuration_is_closed_and_defaults_v1() {
+        // Explicit CLI values override any developer environment configuration.
+        for (value, expected) in [
+            ("v1", WitnessCertificateIssuance::V1),
+            ("v2", WitnessCertificateIssuance::V2),
+        ] {
+            assert_eq!(
+                Args::try_parse_from([
+                    "witness",
+                    "--redaction",
+                    DETERMINISTIC_ONLY,
+                    "--certificate-version",
+                    value
+                ])
+                .unwrap()
+                .certificate_version,
+                expected
+            );
+        }
+        assert_eq!(
+            WitnessCertificateIssuance::default(),
+            WitnessCertificateIssuance::V1
+        );
+        for invalid in ["", "2", "V2", "v3", "v2 "] {
+            assert!(
+                Args::try_parse_from([
+                    "witness",
+                    "--redaction",
+                    DETERMINISTIC_ONLY,
+                    "--certificate-version",
+                    invalid
+                ])
+                .is_err()
+            );
+        }
+        use clap::CommandFactory;
+        let command = Args::command();
+        let argument = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "certificate_version")
+            .unwrap();
+        assert_eq!(
+            argument.get_default_values(),
+            &[std::ffi::OsString::from("v1")]
+        );
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new(
+                "TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION"
+            ))
+        );
+    }
 }

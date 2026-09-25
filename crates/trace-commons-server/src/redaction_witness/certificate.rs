@@ -46,19 +46,27 @@
 //! # Final-call inference provenance
 //!
 //! The v2 profile signs a closed provenance value under a distinct domain.
-//! `Attested` covers only the final declared inference call's request and
-//! response bytes and a pinned receipt signer. Provider TEE and gateway
+//! `Attested` records the witness's verification of the final declared call
+//! against a pinned receipt signer. Provider TEE and gateway
 //! signers have different classes. A gateway signature does not establish the
 //! serving model's TEE identity. This says nothing about the authenticity of
 //! the rest of the session, omitted calls, model quality, or receipt replay.
 //! The original v1 profile keeps its exact signing bytes and has unknown
 //! inference provenance.
 //!
+//! Raw inference request/response hashes and receipt identities are omitted:
+//! they can identify an upstream conversation or confirm guessed raw text.
+//! Receipt verification stays inside the witness; downstream parties verify
+//! its signed statement, not the provider receipt independently. The base
+//! `redacted_sha256` binds the exact redacted submission bytes, not raw inference
+//! bodies. Model, signer, class and timing still disclose metadata.
+//!
 //! # Logging
 //!
 //! Nothing here logs. `Debug` renders hashes, labels, and timestamps, while
-//! the provenance payload's model and signer are omitted. It stays hand-written
-//! so an identifying field cannot silently widen every `?cert` in a log.
+//! the provenance payload exposes only its class, omitting model and signer.
+//! It stays hand-written so an identifying field cannot silently widen every
+//! `?cert` in a log.
 
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 use trace_commons_protocol::witness_provenance::{
@@ -166,7 +174,7 @@ pub enum CertificateVersion {
 
 impl std::fmt::Debug for WitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Provenance's own Debug renders only class and hashes. Keep this
+        // Provenance's own Debug renders only class. Keep this
         // hand-written so additions cannot silently widen operational logs.
         formatter
             .debug_struct("WitnessCertificate")
@@ -700,15 +708,9 @@ mod tests {
         let signature = sign(&witness, &cert);
         assert_eq!(cert.verify(&signature, &address_of_key(&witness)), Ok(()));
 
-        let call = FinalCallAttestation::new(
-            AttestationClass::ProviderTeeFinalCall,
-            "c".repeat(64),
-            None,
-            "d".repeat(64),
-            "e".repeat(64),
-            "f".repeat(64),
-        )
-        .unwrap();
+        let call =
+            FinalCallAttestation::new(AttestationClass::ProviderTeeFinalCall, None, "d".repeat(64))
+                .unwrap();
         cert.version = CertificateVersion::V2(InferenceProvenance::Attested(call));
         assert_eq!(
             cert.verify(&signature, &address_of_key(&witness)),
