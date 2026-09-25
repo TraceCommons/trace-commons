@@ -804,10 +804,10 @@ async fn admission_pg_admin() -> Arc<PgBackend> {
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
     assert!(parsed.path().starts_with("/admission_test"));
     let admin = PgBackend::new(&DatabaseConfig {
-        url: SecretString::from(url),
+        url: SecretString::from(url.clone()),
         pool_size: 4,
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: None,
+        login_resolver_url: Some(SecretString::from(url)),
         gate_driver_url: None,
         pii_backstop_driver_url: None,
         invite_registry_url: None,
@@ -938,25 +938,73 @@ async fn invalid_or_withdrawn_source_session_refuses_before_budget_and_staging()
         .await
         .unwrap()
         .get(0);
-    let original = Uuid::new_v4();
+    let original = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        &principal_for(token),
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let staged_original = stage_trace_object_file(
+        state.as_ref(),
+        &tenant,
+        TraceCorpusStatus::Quarantined,
+        original,
+    );
     assert_eq!(
         db.claim_trace_source_session(&tenant, account_id, &digest, original)
             .await
             .unwrap(),
         TraceSourceSessionStatus::Active
     );
-    db.withdraw_trace_source_session(&tenant, account_id, original, Utc::now())
-        .await
-        .unwrap()
+    let mut withdraw = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/v1/account/traces/{original}/withdraw"))
+        .body(Body::empty())
         .unwrap();
+    withdraw
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    assert_eq!(
+        app(state.clone()).oneshot(withdraw).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!staged_original.exists());
 
-    let mut resumed = sample_envelope().await;
+    // Recreate both service state and PostgreSQL handles, then authenticate a
+    // new browser session. The digest must survive every one of those changes.
+    let reconnected = admission_pg_admin().await;
+    let (_restart_temp, mut restarted, _) = anchor_state(reconnected, &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut restarted).root = state.root.clone();
+    Arc::make_mut(&mut restarted).require_db_mirror_writes = true;
+    Arc::make_mut(&mut restarted).account_admission = state.account_admission.clone();
+    let mut status = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/account/source-sessions/status")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&native).unwrap()))
+        .unwrap();
+    status
+        .headers_mut()
+        .extend(account_session_headers(&restarted, token).await);
+    let status_response = app(restarted.clone()).oneshot(status).await.unwrap();
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = axum::body::to_bytes(status_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&status_body).unwrap()["status"],
+        "withdrawn"
+    );
+
+    let mut resumed = sample_envelope_with_user_input("changed content after reconnect").await;
     make_metadata_only_low_risk(&mut resumed);
+    set_metadata_only_tool_name(&mut resumed, "changed-resumed-content");
     resumed.source_session = Some(native);
     assert_ne!(resumed.submission_id, original);
     assert_eq!(
         post(
-            state.clone(),
+            restarted.clone(),
             "/v1/traces",
             serde_json::to_vec(&resumed).unwrap(),
             HeaderMap::new()
@@ -965,7 +1013,17 @@ async fn invalid_or_withdrawn_source_session_refuses_before_budget_and_staging()
         .status(),
         StatusCode::CONFLICT,
     );
-    assert!(!submission_metadata_path(&state.root, &tenant, resumed.submission_id).exists());
+    assert!(!submission_metadata_path(&restarted.root, &tenant, resumed.submission_id).exists());
+    assert!(
+        !restarted
+            .root
+            .join(trace_envelope_object_key(
+                &tenant,
+                TraceCorpusStatus::Accepted,
+                resumed.submission_id
+            ))
+            .exists()
+    );
     let reserved: i64 = client
         .query_one(
             "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",

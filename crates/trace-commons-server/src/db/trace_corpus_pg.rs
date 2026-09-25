@@ -1525,7 +1525,7 @@ async fn append_trace_audit_event_in_transaction(
         .await
         .map_err(DatabaseError::Postgres)?
         .get(0);
-    let action = enum_to_storage(audit_event.action.clone())?;
+    let action = enum_to_storage(audit_event.action)?;
     let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
         DatabaseError::Serialization(format!("trace audit metadata encode failed: {e}"))
     })?;
