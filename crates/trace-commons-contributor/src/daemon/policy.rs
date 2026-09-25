@@ -95,6 +95,20 @@ pub struct ProjectEntry {
     /// not spelled the way the disk spells it.
     #[serde(default)]
     pub display_path: Option<String>,
+    /// The terms this project was armed under, while it is `AutoUpload`.
+    ///
+    /// Compared on every watcher pass with the terms now in force; a change
+    /// that widens who sees its sessions, or what leaves with them, voids the
+    /// grant and returns the project to ask-first. See `grant_terms`.
+    ///
+    /// `None` for a project that is not armed, and for one armed before this
+    /// field existed or by a route that could not read the config at the
+    /// time. The watcher records the terms in force on its first pass over
+    /// such a project -- a baseline, not a void, because there is no record
+    /// of what was agreed to compare against. `#[serde(default)]` so an older
+    /// policy file still loads.
+    #[serde(default)]
+    pub armed_under: Option<super::grant_terms::GrantTerms>,
 }
 
 /// How many times a project must have contributed before the app offers to
@@ -113,6 +127,29 @@ pub const ARMING_SUGGESTION_THRESHOLD: u32 = 5;
 /// that never lifts would make those words a lie. Settings remains the way
 /// to arm a project at any point in between, without being asked.
 pub const ARMING_DECLINE_COOLDOWN_DAYS: i64 = 30;
+
+/// What [`ProjectPolicy::sweep_grants`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantSweep {
+    /// Projects returned to ask-first because their grant was widened.
+    pub voided: Vec<VoidedGrant>,
+    /// Armed projects that had no recorded terms and now do.
+    pub baselined: usize,
+}
+
+impl GrantSweep {
+    /// Whether the policy changed and must be saved.
+    pub fn changed(&self) -> bool {
+        !self.voided.is_empty() || self.baselined > 0
+    }
+}
+
+/// One grant voided by a sweep, and why. Labels only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoidedGrant {
+    pub project_label: String,
+    pub reasons: Vec<&'static str>,
+}
 
 /// A project the app should offer to arm, and the evidence for offering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,12 +286,19 @@ impl ProjectPolicy {
                     existing.added_at = existing.added_at.min(entry.added_at);
                     existing.label = label.clone();
                     existing.display_path = shown.clone();
+                    // Terms only mean anything while the merged project is
+                    // still armed. When it is, the surviving entry's terms
+                    // stand; when the merge made it ask-first, they go.
+                    if existing.mode != ProjectMode::AutoUpload {
+                        existing.armed_under = None;
+                    }
                 })
                 .or_insert(ProjectEntry {
                     mode: entry.mode,
                     added_at: entry.added_at,
                     label,
                     display_path: shown,
+                    armed_under: entry.armed_under,
                 });
         }
         self.projects = projects;
@@ -338,6 +382,59 @@ impl ProjectPolicy {
     /// disambiguation against colliding basenames happens at render time,
     /// so a stored label never goes stale when a colliding project appears
     /// later.
+    /// Record the terms an armed project was granted under.
+    ///
+    /// Called where the arming happens, with the terms in force at that
+    /// moment. A project that is not `AutoUpload` has no grant to record.
+    pub fn record_grant_terms(
+        &mut self,
+        project_key: &str,
+        terms: super::grant_terms::GrantTerms,
+    ) -> bool {
+        match self.projects.get_mut(project_key) {
+            Some(entry) if entry.mode == ProjectMode::AutoUpload => {
+                entry.armed_under = Some(terms);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Void every armed project whose grant no longer covers the terms in
+    /// force, and record terms for any armed project that has none.
+    ///
+    /// A voided project returns to `NotifyOnly`: it asks again rather than
+    /// carrying on under terms nobody agreed to, and arming it again records
+    /// the new terms. A project with no recorded terms is baselined rather
+    /// than voided, because there is nothing to compare against -- see
+    /// [`ProjectEntry::armed_under`].
+    pub fn sweep_grants(&mut self, current: &super::grant_terms::GrantTerms) -> GrantSweep {
+        let mut sweep = GrantSweep::default();
+        for entry in self.projects.values_mut() {
+            if entry.mode != ProjectMode::AutoUpload {
+                continue;
+            }
+            match &entry.armed_under {
+                None => {
+                    entry.armed_under = Some(current.clone());
+                    sweep.baselined += 1;
+                }
+                Some(granted) => {
+                    let reasons = current.widening_from(granted);
+                    if !reasons.is_empty() {
+                        entry.mode = ProjectMode::NotifyOnly;
+                        entry.armed_under = None;
+                        sweep.voided.push(VoidedGrant {
+                            project_label: entry.label.clone(),
+                            reasons,
+                        });
+                    }
+                }
+            }
+        }
+        sweep
+    }
+
     pub fn set_mode(
         &mut self,
         project_key: &str,
@@ -359,6 +456,9 @@ impl ProjectPolicy {
                 added_at: now,
                 label: project_label_for(shown.as_deref().unwrap_or(project_key)),
                 display_path: shown,
+                // A fresh entry on every mode change: leaving automatic
+                // clears the terms, and re-arming records new ones.
+                armed_under: None,
             },
         );
         Ok(())
@@ -709,6 +809,7 @@ mod tests {
                 added_at: now(),
                 label: "unknown".into(),
                 display_path: None,
+                armed_under: None,
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -1128,6 +1229,7 @@ mod tests {
                 added_at: now(),
                 label: "repo".to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
         p.projects.insert(
@@ -1137,6 +1239,7 @@ mod tests {
                 added_at: now(),
                 label: "inner".to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
 
@@ -1208,6 +1311,7 @@ mod tests {
                 added_at: now(),
                 label: "sub".to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
         p.save(&store).unwrap();
@@ -1228,6 +1332,7 @@ mod tests {
                 added_at: now(),
                 label: UNKNOWN_PROJECT_KEY.to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
         p.rekey();

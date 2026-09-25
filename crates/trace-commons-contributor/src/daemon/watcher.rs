@@ -152,6 +152,9 @@ fn tick_over(
     sources: Vec<Box<dyn TraceSource>>,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
+    // Before any session is visited, so a project whose grant was just
+    // voided is already ask-first when its sessions are looked at.
+    sweep_grants(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries);
     let mut out = PassOutcome::default();
 
@@ -231,6 +234,9 @@ fn tick_over_paths(
     paths: &[PathBuf],
     session_at: SessionAt<'_>,
 ) -> Result<TickReport> {
+    // Before any session is visited, so a project whose grant was just
+    // voided is already ask-first when its sessions are looked at.
+    sweep_grants(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries);
     let mut out = PassOutcome::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
@@ -249,6 +255,55 @@ fn tick_over_paths(
     }
 
     finish_pass(shared, out, false)
+}
+
+/// Void every standing grant the terms in force no longer cover.
+///
+/// R6 of the connect-and-forget design; see `grant_terms` for what widens a
+/// grant. A voided project returns to ask-first: nothing more from it is
+/// approved on the contributor's behalf until they arm it again, which
+/// records the new terms. Approvals already made under the old terms are
+/// stopped by the uploader, which re-derives `input_fingerprint` before every
+/// send -- every widening this rule checks is also a change to that
+/// fingerprint -- and revokes them to `Pending`, where the watcher, the
+/// project no longer armed, leaves them for the contributor.
+///
+/// Void first and record second. Arming records first so that a failed
+/// write blocks it; voiding is the safe direction, so it must happen even
+/// when the audit cannot be written, and a failed write is logged instead.
+/// Audit and log carry labels only.
+fn sweep_grants(shared: &DaemonShared, now: DateTime<Utc>) {
+    let Some(current) = super::grant_terms::GrantTerms::in_force(shared) else {
+        return;
+    };
+    let sweep = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let sweep = policy.sweep_grants(&current);
+        if sweep.changed() {
+            if let Err(e) = policy.save(&shared.store) {
+                tracing::warn!(error = %e, "could not persist the grant sweep");
+            }
+        }
+        sweep
+    };
+    for voided in &sweep.voided {
+        let entry = super::audit::AuditEntry {
+            at: now,
+            action: "auto-upload-voided".to_string(),
+            project_label: Some(voided.project_label.clone()),
+            detail: Some(voided.reasons.join(",")),
+        };
+        if let Err(e) = super::audit::append(&shared.store, &entry) {
+            tracing::warn!(error = %e, "could not record a voided grant");
+        }
+        tracing::info!(
+            reasons = ?voided.reasons,
+            "an automatic-contribution grant was voided; the project now asks first"
+        );
+    }
+    if !sweep.voided.is_empty() {
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
 }
 
 /// What a pass reads once, up front, and hands to every session it visits.
@@ -1442,6 +1497,99 @@ mod tests {
             0,
             "the contributor approved this one by hand; it is not retractable"
         );
+    }
+
+    fn grant_test_cfg(scopes: &[&str]) -> crate::config::ContributorConfig {
+        crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+            issuer_url: "https://issuer.invalid".to_string(),
+            ingest_url: "https://ingest.invalid".to_string(),
+            audience: "aud".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            instance_id: "instance-1".to_string(),
+            user_subject: "alice".to_string(),
+            device_key_id: "sha256:aa".to_string(),
+            consent_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+            witness: None,
+        }
+    }
+
+    fn the_only_project(f: &WatcherFixture) -> crate::daemon::policy::ProjectEntry {
+        let policy = f.shared.policy.lock().unwrap();
+        assert_eq!(policy.projects.len(), 1);
+        policy.projects.values().next().unwrap().clone()
+    }
+
+    /// R6, through the watcher. A grant is baselined on the first pass, then
+    /// a change that widens what leaves -- here the scopes gaining
+    /// `model_training` -- voids it: the project asks first, a new session is
+    /// not approved on the contributor's behalf, and the void is recorded.
+    #[tokio::test]
+    async fn widening_the_terms_voids_the_grant_and_stops_new_approvals() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let first = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(first.auto_ready, 1, "{first:?}");
+        assert!(the_only_project(&f).armed_under.is_some(), "baselined");
+
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation", "model_training"]))
+            .unwrap();
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(second.auto_ready, 0, "{second:?}");
+        let project = the_only_project(&f);
+        assert_eq!(
+            project.mode,
+            ProjectMode::NotifyOnly,
+            "the project asks first"
+        );
+        assert!(project.armed_under.is_none());
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        let voided = audit
+            .iter()
+            .find(|e| e.action == "auto-upload-voided")
+            .expect("the void is recorded");
+        assert_eq!(voided.detail.as_deref(), Some("scopes-widened"));
+    }
+
+    /// Narrowing is covered by the grant: removing a scope keeps the project
+    /// armed and approving.
+    #[tokio::test]
+    async fn narrowing_the_terms_keeps_the_grant() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation", "benchmark_only"]))
+            .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(second.auto_ready, 1, "{second:?}");
+        assert_eq!(the_only_project(&f).mode, ProjectMode::AutoUpload);
     }
 
     #[tokio::test]

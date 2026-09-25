@@ -1522,6 +1522,20 @@ one entry -- a `cancel` against a project with nothing `approved` appends
 nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
 as the single-`entry_id` form of `approve`.
 
+An `auto-upload-voided` entry records a standing `auto_upload` grant that the
+daemon voided because the terms in force widened past what it was armed under
+-- a new recipient (destination, identity, witness, classifier host or model,
+receipt endpoint) or more leaving the machine (scopes gaining an entry, a
+filter added or removed, attested bodies turning on, a witness measurement
+admitted). `project_label` names the project and `detail` is a comma-separated
+list of fixed reason labels: `destination-changed`, `identity-changed`,
+`scopes-widened`, `privacy-filter-changed`, `receipt-endpoint-changed`,
+`witness-changed`, `witness-measurement-admitted`, `attested-bodies-on`. The
+project is `notify_only` from that pass on; arming it again records the new
+terms. Narrowing voids nothing. Unlike arming, the void is written **after**
+the mode change and a failed write does not undo it, because voiding is the
+safe direction.
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --

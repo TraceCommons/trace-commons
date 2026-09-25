@@ -2525,6 +2525,11 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // sinks this crate's label-only rule exists to protect. The
     // label is now derived from the key inside `set_mode`.
     // Lock order is policy before queue, as everywhere else.
+    // The terms an arming is granted under, read before the policy lock is
+    // taken so this adds no lock ordering. See `grant_terms`.
+    let arming_terms = (mode == ProjectMode::AutoUpload)
+        .then(|| super::grant_terms::GrantTerms::in_force(shared))
+        .flatten();
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
@@ -2597,6 +2602,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
 
     if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if let Some(terms) = arming_terms {
+        policy.record_grant_terms(&key, terms);
     }
     if let Err(_e) = policy.save(&shared.store) {
         return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
@@ -6786,6 +6794,56 @@ mod tests {
                 .any(|s| s["entry_id"] == serde_json::json!(eligible)),
             "the eligible row was selected: {result}"
         );
+    }
+
+    /// Arming over the socket records the terms it was granted under, so a
+    /// later widening can be compared against what was actually agreed
+    /// rather than against a baseline taken afterwards.
+    #[test]
+    fn arming_a_project_records_the_terms_it_was_granted_under() {
+        let s = shared();
+        s.store
+            .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
+                inference_receipt_check_attestation: false,
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "https://issuer.invalid".to_string(),
+                ingest_url: "https://ingest.invalid".to_string(),
+                audience: "aud".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                instance_id: "instance-1".to_string(),
+                user_subject: "alice".to_string(),
+                device_key_id: "sha256:aa".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                pii_filter: None,
+                allowed_hosts: None,
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness: None,
+            })
+            .unwrap();
+        let key = "/tmp/armedproj";
+        seed_entry_with_eligibility(&s, key, None);
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let policy = s.policy.lock().unwrap();
+        let terms = policy
+            .projects
+            .values()
+            .find(|e| e.mode == ProjectMode::AutoUpload)
+            .and_then(|e| e.armed_under.clone())
+            .expect("the grant's terms are recorded at arming");
+        assert!(terms.consent_scopes.contains("debugging_evaluation"));
+        assert_eq!(terms.tenant_id, "tenant-1");
     }
 
     /// **The regression that must not happen.** An invited contributor has
