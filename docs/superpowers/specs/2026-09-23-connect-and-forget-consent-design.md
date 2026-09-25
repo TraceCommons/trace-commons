@@ -120,6 +120,12 @@ send within their account's server-side limits. What changes for an
 already-armed folder is its disclosure, not its mode: where R1 does not hold,
 its arming copy must not claim a model scrubs it (see "The trust model").
 
+**The contributor is told when that happens.** A folder armed under the old
+"will be scrubbed" copy whose wording becomes deterministic-only gets the same
+notice a newly automatic folder gets, stating what its arming now means.
+Changing the words under an armed folder without saying so would break the
+"nothing silently" property this design depends on.
+
 ## The trust model
 
 Adopted in review on #991 and taking precedence over the sections after it
@@ -127,8 +133,9 @@ where they disagree.
 
 1. **Every contributor has a NEAR AI login.** Settlement is in NEAR AI
    inference credits, so everyone has a NEAR account.
-2. **An armed folder whose traces have witnesses sends automatically once the
-   contributor consents.** What "have witnesses" means is open; see below.
+2. **A folder whose traces have witnesses can be armed automatically, and
+   sends once the contributor consents.** What "have witnesses" means is open;
+   see below.
 3. **An invite is full trust.** An invited contributor may arm any folder,
    with no volume limit.
 4. **Without an invite, a contributor may still arm any folder**, and sends
@@ -145,7 +152,7 @@ the server, not in a per-session step on the client.
 |---|---|---|
 | **R1** pipeline verified per session | **relaxed as a gate.** A folder without a witness may be armed and sends after deterministic redaction only. R1 still governs the **disclosure**: the model-scrub wording may be shown only where a certified full pipeline actually ran. | same as invitee: R1 governs the disclosure, not the arming. Volume is limited on the server instead |
 | **R2** pipeline specified, gate at the `AutoUpload` decision | unchanged | unchanged |
-| **R3** admission evidence | does not apply | **becomes the trust-limited volume check** (see below) |
+| **R3** admission evidence | **applies until #1020's account check is enforced.** Once invites move onto the NEAR account an invitee is in `nearai-`, where #706 still applies; after #1020 is enforced, it does not apply | **becomes the trust-limited volume check** (see below) once #1020 is enforced; until then, #706 as today |
 | **R4** provenance where claimed | unchanged: claim it only where #1005 supports it | unchanged, and it feeds account trust |
 | **R5** held for review | unchanged | unchanged |
 | **R6** void rule | unchanged; see R6 | unchanged |
@@ -185,7 +192,11 @@ is the corresponding server work. Consequences here:
 
 - R3's namespace test stops distinguishing invitees from everyone else, since
   everyone is `nearai-`. What distinguishes them is account trust, which the
-  client does not decide. The client-side gate's R3 check is withdrawn.
+  client does not decide. The client-side gate's R3 check is withdrawn **once
+  #1020's check is enforced on the server, and not before**: withdrawn
+  earlier, an armed folder's sessions go to the witness and classifier and
+  are then refused at ingest, which is what R3 exists to prevent. It is on the
+  switch-on list below.
 - The logout rule below (a re-grant arms nothing already on disk) still
   stands for folder modes, which remain local.
 
@@ -200,26 +211,38 @@ different rules:
 - **(b) Provenance:** the folder's sessions include NEAR AI-routed inference
   with receipts, attested per #1005. This is what R4 and account trust turn on.
 
-Every rule below names which it means. Which one gates automatic arming for a
-non-invitee is to be confirmed in review; it is in Open.
+Which one point 2's automatic arming turns on is to be confirmed in review;
+it is in Open. It is not a question about arming as such: any contributor may
+arm any folder (points 3 and 4).
 
 ### The client-side gate under this model
 
 The gate stays where rev 6 put it, at the decision to approve on the
-contributor's behalf, before either upload branch (#1012). Its checks change:
+contributor's behalf, before either upload branch (pending in #1012). Its
+checks change:
 
 - **R7** (scope chosen): kept.
 - **R1**: withdrawn as a gate. It moves to choosing the arming disclosure.
-- **R3**: withdrawn, as above; the server decides volume.
+- **R3**: withdrawn once #1020 is enforced, as above; the server then decides
+  volume. Kept until then.
 
 **When enforcement is switched on:** `automatic_gate::ENFORCED` ships `false`
 and is switched on only when all of these hold, so the dry run cannot become
 the permanent state by default:
 
-1. the shared pipeline-version allowlist is published (Z1, "Fail closed on
-   sidecar redaction errors and publish pipeline allowlist", #1013);
-2. the client checks the certified pipeline version against it (K6);
-3. the gate's checks are revised to the list above.
+1. #1020's account admission check is enforced on the server, so withdrawing
+   the client's R3 check sends nothing that ingest will refuse;
+2. Z2 (#1005) is in place, so R4 is claimed only where it holds;
+3. the label-only would-refuse log is live (pending in #1012), together with
+   the count of sessions an enforced gate holds and a label-only health
+   condition that every shell shows, so enforcement cannot stop an armed
+   folder without saying so;
+4. the gate's checks are revised to the list above.
+
+R1 is not on this list, because rev 8 withdraws it as a gate. It still decides
+which disclosure an armed folder gets, and the model-scrub wording needs the
+published pipeline-version allowlist (Z1, #1013, merged) and the client's check
+against it (K6); until both exist, no folder qualifies for that wording.
 
 It is switched on together with the arming-disclosure change, not with a
 disarm: under this model already-armed folders stay armed.
@@ -355,7 +378,7 @@ next poll under the new inputs. So a changed witness — URL, pins, or
 **Required:** a void rule whose identity includes `signing_address`, and which
 holds re-approval until re-consent rather than letting the next poll resume.
 
-**Specified in review, and built in #1024.** The identity is structured terms,
+**Specified in review; implementation pending in #1024.** The identity is structured terms,
 not `input_fingerprint`, which hashes the crate version and would void every
 grant on every release: the destination (ingest and issuer endpoints, audience,
 host allowlist), the identity (tenant, instance, subject, device), the consent
@@ -369,9 +392,24 @@ leaves grows**: any change of destination, identity, witness or classifier;
 scopes gaining an entry; a filter added or removed; a receipt endpoint added
 or changed; a witness measurement admitted; attested bodies turning on.
 Scopes narrowing, attested bodies off, a receipt endpoint removed and a
-measurement retired do not void. Whether admitting a measurement under an
-unchanged `signing_address` should void is open, because it happens before
-every witness rollout.
+measurement retired do not void: each is one fewer party or less content.
+
+**Admitting a measurement voids**, even under an unchanged `signing_address`,
+because different code then sees the session. It happens before every witness
+rollout, so each rollout returns every armed folder to ask-first; that is the
+accepted cost.
+
+**The invite-to-account migration re-baselines rather than voids.** Moving an
+invitee from their `tenant-…` identity to their NEAR account (#1016) changes
+the identity term, and left to the rule above it would disarm every folder
+they armed, contradicting "an invitee's armed folders stay armed". The client
+performs that migration itself, so as part of it the daemon re-records each
+armed folder's terms with the new identity and audits the re-baseline. Only
+the identity term is re-baselined: if the migration also changes anything
+else -- destination, witness, scopes -- that still voids. A general
+same-person exception in the identity term is not taken, because the client
+cannot tell "same person" from any other identity change outside this one
+step.
 
 ### R7. The data-use scope is chosen
 
@@ -391,7 +429,9 @@ get a floor-scope grant -- they get no grant, and land on Flow 2.
 > **Superseded by "The trust model".** Under it, an invitee may arm any folder
 > and a non-invitee may arm any folder within server-side limits, so
 > availability is a question of disclosure and volume rather than of the
-> table below. Kept as the record of how the design got there.
+> table below. Kept as the record of how the design got there. Its R3 column
+> describes invites in their own `tenant-…` namespace, as shipped; once
+> invites move onto the NEAR account, R3 is as the trust-model table says.
 
 | Enrollment | R1 pipeline | R3 admission | R4 provenance | Flow 1 |
 |---|---|---|---|---|
@@ -649,28 +689,28 @@ contributed, and no sentence covers that.
 Settled since rev 7 and removed from this list: where the earned-trust
 mechanism lives (the account, on the server), what stops spam on the invite
 path (server-side, keyed on the account), #706 under Flow 1 (the trust-limited
-volume check), the void rule's identity (R6), and the shipped arming and quit
-copy (#1011, #1007).
+volume check, once #1020 is enforced), the void rule's identity and
+measurement admission (R6; implementation pending in #1024), and the arming
+and quit copy (pending in #1011 and #1007; on `main` the quit copy still says
+"Nothing will be sent while nobody's approving").
 
-- **"Traces with witnesses."** Whether automatic arming for a non-invitee
-  turns on (a) a configured witness certifying redaction, or (b) NEAR
-  AI-routed inference with receipts. The rules above name which they mean;
-  this is which one gates arming.
+- **"Traces with witnesses."** Whether a folder is armed automatically (trust
+  model, point 2) because of (a) a configured witness certifying redaction, or
+  (b) NEAR AI-routed inference with receipts. Arming by the contributor is not
+  in question; any contributor may arm any folder.
 - **The deterministic-only arming disclosure.** Under full trust an invitee's
   folder without a witness may be armed, and its copy must not claim a model
   scrubs it. That wording is not yet written, and it needs the same pinning and
-  cross-shell treatment as the `AUTO_*` constants (#1008).
+  cross-shell treatment as the `AUTO_*` constants (pending in #1008).
 - **Earned-trust signals and thresholds.** Where the mechanism lives is
   settled; which signals count, what they accumulate toward and where the
   limits sit are not.
-- **Measurement admission and the void rule.** Admitting a witness measurement
-  under an unchanged `signing_address` voids every grant, and a measurement is
-  admitted before every witness rollout (#1024).
 - **Witness capacity and back-pressure.** Automatic sessions, including
   pre-grant backlogs, through a shared witness with bounded slots (#1014).
 - **Telling the contributor.** A void and a hold are audited and announced as
   events, but no shell shows the contributor a notice yet, which the "nothing
-  silently" property requires.
+  silently" property requires. The same notice is owed to an armed folder whose
+  disclosure becomes deterministic-only.
 - **Legal posture**, unchanged: a one-time grant is a different consent basis,
   and review established that withdrawing it is currently much harder than
   giving it.
