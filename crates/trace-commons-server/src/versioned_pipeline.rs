@@ -2849,7 +2849,11 @@ impl PipelineService {
                             sha256_prefixed(content.bytes()) == content.content_hash(),
                             "review_output_invalid"
                         );
-                        let object_id = format!("pipeline-approved-{}", run.run_id);
+                        let object_id = pipeline_attempt_object_id(
+                            "approved",
+                            run.run_id,
+                            required_lease_token(run)?,
+                        );
                         let wrapper = encode_pipeline_artifact_bytes(content.bytes())?;
                         let receipt = self.artifact_store.put_serialized_json(
                             pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
@@ -2919,6 +2923,7 @@ impl PipelineService {
             .manifest
             .require_pinned(&result.decision.awards)
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        let lease_token = required_lease_token(run)?;
         let command_ref = match &command {
             None => None,
             Some(command) => {
@@ -2931,7 +2936,7 @@ impl PipelineService {
                 let receipt = self.artifact_store.put_serialized_json(
                     tenant.as_str(),
                     TraceArtifactKind::VectorPayload,
-                    &format!("pipeline-index-command-{}", run.run_id),
+                    &pipeline_attempt_object_id("index-command", run.run_id, lease_token),
                     &wrapper,
                 )?;
                 Some((
@@ -2947,7 +2952,7 @@ impl PipelineService {
                 let receipt = self.artifact_store.put_serialized_json(
                     tenant.as_str(),
                     TraceArtifactKind::VectorPayload,
-                    &format!("pipeline-score-neighbors-{}", run.run_id),
+                    &pipeline_attempt_object_id("score-neighbors", run.run_id, lease_token),
                     &wrapper,
                 )?;
                 Some((
@@ -3736,11 +3741,28 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
         .map_err(|_| anyhow::anyhow!("pipeline_artifact_wrapper_invalid"))
 }
 
+/// The object id a claim stores one of its run's phase artifacts under
+/// (`artifact` is `approved`, `index-command`, or `score-neighbors`).
+///
+/// Ruling FR1: the id carries the claim's lease token, not the run id
+/// alone. Every write encrypts with a fresh salt and nonce, so two writes of
+/// equal plaintext under one key still differ in ciphertext; a worker whose
+/// lease expired during policy work must therefore never write the key a
+/// later claim committed, or the committed `content_sha256` would stop
+/// matching the stored object. The database refs a commit records stay
+/// deterministic (the approved object ref id is derived from the run id
+/// alone); only the object key moves per claim. An attempt that crashes
+/// before its commit leaves its objects unreferenced (not tracked in PR 2).
+pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uuid) -> String {
+    format!("pipeline-{artifact}-{run_id}-{lease_token}")
+}
+
 /// Builds the `trace_object_refs` write for the approved content a Review
 /// approval stores. The object ref id is derived from the run id alone, so a
-/// retry after a crash between the artifact write and the commit recomputes
-/// the identical id and overwrites the same encrypted object with equal
-/// bytes, rather than orphaning a second one.
+/// retry after a crash between the artifact write and the commit records the
+/// identical id; the object key it points at is the retry's own
+/// (`pipeline_attempt_object_id`), and `commit_review` records exactly one
+/// ref for the run.
 fn approved_object_ref(
     run: &PipelineRunRecord,
     receipt: &EncryptedTraceArtifactReceipt,

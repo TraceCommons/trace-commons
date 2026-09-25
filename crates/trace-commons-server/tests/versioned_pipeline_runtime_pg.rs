@@ -27,7 +27,7 @@ use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
-    LocalEncryptedTraceArtifactStore, TraceArtifactStore,
+    LocalEncryptedTraceArtifactStore, TraceArtifactKind, TraceArtifactStore,
 };
 use trace_commons_server::trace_corpus_storage::{
     TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite,
@@ -1504,8 +1504,10 @@ async fn review_commits_approved_revision_provenance_and_transition_together() {
 
 /// Review focus item 2's crash test: a crash between the approved-content
 /// artifact write and the database commit must leave exactly one revision
-/// once the run retries, and the retry reuses the deterministic object key
-/// the crashed attempt already wrote to.
+/// once the run retries, and the retry records the same deterministic
+/// object ref id. The object key is the retry's own (ruling FR1: it carries
+/// the claim's lease token), so the crashed attempt's object is left
+/// unreferenced rather than overwritten.
 #[tokio::test]
 async fn review_crash_after_artifact_storage_reuses_one_revision() {
     let Some(backend) = runtime_backend(4).await else {
@@ -1561,10 +1563,10 @@ async fn review_crash_after_artifact_storage_reuses_one_revision() {
         .approved_object_ref_id
         .expect("the retry records an approval");
 
-    // The object id -- and so the object ref id -- is derived from the run
-    // id alone, so both the crashed attempt and the retry compute the same
-    // one; the retry's `put_serialized_json` overwrote the same encrypted
-    // object the crashed attempt already wrote, rather than orphaning one.
+    // The object ref id is derived from the run id alone, so both the
+    // crashed attempt and the retry compute the same one. The object key is
+    // per claim (FR1): the retry wrote its own object and never touched the
+    // crashed attempt's.
     let expected_object_ref_id = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!("tracecommons:pipeline-approved-object:{}", created.run_id).as_bytes(),
@@ -1605,6 +1607,126 @@ async fn review_crash_after_artifact_storage_reuses_one_revision() {
         dependency_content_hash(&bytes),
         processed.approved_content_hash.unwrap()
     );
+}
+
+/// FR1 (C1): a worker whose lease expired during policy work may still
+/// write its artifacts after another worker committed the phase. Every
+/// phase artifact is keyed by the claim's own lease token, so the stale
+/// write lands under a key no committed row refers to: the committed
+/// approved content and index command still read and verify, and the run
+/// completes.
+#[tokio::test]
+async fn a_stale_worker_cannot_overwrite_committed_artifacts() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("stale-writer-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    // Worker A claims the run and stalls in policy work until its lease
+    // expires (a direct UPDATE: a time shortcut, not a processor call).
+    let stale_claim = service
+        .store()
+        .claim_run(&tenant, created.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("worker A claims the run");
+    let stale_token = stale_claim.lease_token.expect("a claim carries a lease");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // Worker B reclaims the run and commits Review and Score.
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("worker B commits Review");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("worker B commits Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+
+    // Worker A wakes up and writes every phase artifact under the object id
+    // its own claim uses. The ciphertext differs from the committed one
+    // whatever the plaintext is (a fresh salt and nonce per write).
+    let stale_store = artifact_store(&dir);
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let stale_bytes = serde_json::to_vec(&serde_json::json!({"stale_worker": true})).unwrap();
+    for (artifact, kind) in [
+        ("approved", TraceArtifactKind::ContributionEnvelope),
+        ("index-command", TraceArtifactKind::VectorPayload),
+        ("score-neighbors", TraceArtifactKind::VectorPayload),
+    ] {
+        stale_store
+            .put_serialized_json(
+                tenant_ref.as_str(),
+                kind,
+                &pipeline_attempt_object_id(artifact, created.run_id, stale_token),
+                &stale_bytes,
+            )
+            .expect("the stale write itself succeeds");
+    }
+
+    // The committed objects still read and verify.
+    let approved = service
+        .load_approved_bytes(&scored)
+        .await
+        .expect("the committed approved content still verifies");
+    assert_eq!(
+        dependency_content_hash(&approved),
+        scored.approved_content_hash.clone().unwrap()
+    );
+    let score_outcome = service
+        .store()
+        .list_outcomes(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Score)
+        .expect("Score outcome recorded");
+    let evidence: ScoreEvidence = serde_json::from_value(score_outcome.evidence).unwrap();
+    service
+        .load_index_command(&scored, &evidence)
+        .await
+        .expect("the committed index command still verifies")
+        .expect("Score proposed a command");
+
+    // And the run completes.
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
 }
 
 /// Score stores the exact index command it proposed, and seeds one pending
@@ -1794,8 +1916,8 @@ async fn empty_awards_still_continue_to_settle() {
 /// Review focus item 2's crash test, applied to Score: a crash between the
 /// index command's artifact write and the database commit must leave
 /// exactly one Score outcome, one command reference, and one settlement row
-/// per award once the run retries -- the retry reuses the stored bytes
-/// rather than double-committing.
+/// per award once the run retries -- the retry stores the command under its
+/// own claim's key (FR1) and commits once, never twice.
 #[tokio::test]
 async fn score_crash_after_command_storage_keeps_one_command() {
     let Some(backend) = runtime_backend(4).await else {
