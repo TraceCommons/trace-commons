@@ -1180,6 +1180,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
+    envelope.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     let body = serde_json::to_vec(&envelope).unwrap();
     assert_eq!(
         post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new())
@@ -1238,6 +1244,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     });
     let mut fixed_first = sample_envelope().await;
     make_metadata_only_low_risk(&mut fixed_first);
+    fixed_first.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     assert_eq!(
         post(
             state.clone(),
@@ -1251,6 +1263,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     );
     let mut fixed_second = sample_envelope().await;
     make_metadata_only_low_risk(&mut fixed_second);
+    fixed_second.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     let fixed_refusal = post(
         state.clone(),
         "/v1/traces",
@@ -1338,6 +1356,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     assert_eq!(status_json["ready"], true);
     let mut invited = sample_envelope().await;
     make_metadata_only_low_risk(&mut invited);
+    invited.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     assert_eq!(
         post(
             state.clone(),
