@@ -311,21 +311,6 @@ struct Args {
     gateway_receipt_key_pins: Option<String>,
 }
 
-#[cfg(test)]
-mod reserved_interactive_tests {
-    use super::resolved_reserved_interactive_slots;
-
-    #[test]
-    fn default_and_explicit_reservations_respect_global_limit() {
-        assert_eq!(resolved_reserved_interactive_slots(4, None), Ok(1));
-        assert_eq!(resolved_reserved_interactive_slots(4, Some(0)), Ok(0));
-        assert_eq!(resolved_reserved_interactive_slots(1, None), Ok(0));
-        assert!(resolved_reserved_interactive_slots(1, Some(1)).is_err());
-        assert!(resolved_reserved_interactive_slots(4, Some(4)).is_err());
-        assert!(resolved_reserved_interactive_slots(0, None).is_err());
-    }
-}
-
 fn resolved_reserved_interactive_slots(
     max_concurrent_requests: usize,
     configured: Option<usize>,
@@ -610,4 +595,19 @@ async fn main() -> Result<()> {
         .await
         .context("the witness listener stopped")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reserved_interactive_tests {
+    use super::resolved_reserved_interactive_slots;
+
+    #[test]
+    fn default_and_explicit_reservations_respect_global_limit() {
+        assert_eq!(resolved_reserved_interactive_slots(4, None), Ok(1));
+        assert_eq!(resolved_reserved_interactive_slots(4, Some(0)), Ok(0));
+        assert_eq!(resolved_reserved_interactive_slots(1, None), Ok(0));
+        assert!(resolved_reserved_interactive_slots(1, Some(1)).is_err());
+        assert!(resolved_reserved_interactive_slots(4, Some(4)).is_err());
+        assert!(resolved_reserved_interactive_slots(0, None).is_err());
+    }
 }
