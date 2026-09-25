@@ -231,7 +231,11 @@ and is switched on only when all of these hold, so the dry run cannot become
 the permanent state by default:
 
 1. #1020's account admission check is enforced on the server, so withdrawing
-   the client's R3 check sends nothing that ingest will refuse;
+   the client's R3 check sends nothing that ingest will refuse. "Enforced"
+   means every ingest replica runs with the account switch on, attested by
+   the operator. It does not mean one `contribution-status` response saying
+   `bounded` or `invited`: the switch is per process, so during a rolling
+   deploy another replica may still require evidence;
 2. Z2 (#1005) is in place, so R4 is claimed only where it holds;
 3. the label-only would-refuse log is live (pending in #1012), together with
    the count of sessions an enforced gate holds and a label-only health
