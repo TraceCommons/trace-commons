@@ -77,6 +77,12 @@ pub struct TickReport {
     /// Sessions that reached `TraceSource::load` and could not be read, for
     /// any reason. Every one of these used to be a bare `continue`.
     pub unloadable: usize,
+    /// Unattended approvals made this pass that the automatic-contribution
+    /// gate would have refused, had it been enforced. Counted within
+    /// `auto_ready`, not apart from it. While the gate ships unenforced this
+    /// is how far today's behaviour is from what the gate will allow; see
+    /// `automatic_gate`.
+    pub gate_would_refuse: usize,
     /// The subset of `unloadable` the source declined by name over its own
     /// byte budget, rather than failed to read. See
     /// `source::SessionTooLarge` for why the two are counted apart.
@@ -165,7 +171,9 @@ fn tick_over(
         }
     }
 
-    finish_pass(shared, out, true)
+    let report = finish_pass(shared, out, true)?;
+    report_gate(&ctx.gate, &report);
+    Ok(report)
 }
 
 /// Maps a path something happened at to the session that owns it, without
@@ -248,7 +256,27 @@ fn tick_over_paths(
         }
     }
 
-    finish_pass(shared, out, false)
+    let report = finish_pass(shared, out, false)?;
+    report_gate(&ctx.gate, &report);
+    Ok(report)
+}
+
+// Lets a test exercise the enforced gate while it ships unenforced.
+//
+// Thread-local rather than a shared flag because tests run in parallel and a
+// global would leak between them; each `#[tokio::test]` runs on its own
+// current-thread runtime. Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static ENFORCE_GATE_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn gate_enforced() -> bool {
+    #[cfg(test)]
+    if ENFORCE_GATE_FOR_TEST.with(std::cell::Cell::get) {
+        return true;
+    }
+    super::automatic_gate::ENFORCED
 }
 
 /// What a pass reads once, up front, and hands to every session it visits.
@@ -261,6 +289,10 @@ struct PassContext {
     /// invited contributor, whose entries carry no eligibility at all -- see
     /// `QueueEntry::eligibility`.
     admission_evidence: bool,
+    /// Whether an unattended approval may happen this pass. Evaluated once,
+    /// with the config, because every requirement it checks today is about
+    /// the contributor rather than a particular session.
+    gate: super::automatic_gate::GateVerdict,
 }
 
 impl PassContext {
@@ -292,12 +324,14 @@ impl PassContext {
             .as_ref()
             .and_then(|c| c.witness.as_ref())
             .is_some_and(|w| w.admission_evidence);
+        let gate = super::automatic_gate::evaluate(cfg.as_ref(), gate_enforced());
         Self {
             now,
             max_queue_entries,
             consent_scopes,
             approval_inputs,
             admission_evidence,
+            gate,
         }
     }
 }
@@ -456,7 +490,9 @@ fn visit_session(
         // it can never resurrect a dismissed, expired or uploaded
         // entry. Preserved here so skipping the load costs nothing
         // but the load.
-        if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
+        // Through the automatic-contribution gate, like every other approval
+        // made on the contributor's behalf. See `automatic_gate`.
+        if mode == ProjectMode::AutoUpload && state == QueueState::Pending && !ctx.gate.blocks() {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
                 entry_id,
@@ -465,6 +501,9 @@ fn visit_session(
             ) {
                 out.changed = true;
                 out.report.auto_ready += 1;
+                if ctx.gate.would_refuse() {
+                    out.report.gate_would_refuse += 1;
+                }
             }
         }
         return;
@@ -586,9 +625,14 @@ fn visit_session(
     // window has elapsed (site above), and a session that grows in the
     // meantime supersedes this entry -- free, where the same growth after an
     // upload would cost one of three re-uploads and a duplicate penalty.
+    // Through the automatic-contribution gate. `armed` decides both paths
+    // below that approve on the contributor's behalf -- a fresh entry created
+    // `Approved`, and an already-queued one re-approved -- so gating it here
+    // gates both. See `automatic_gate`.
     let armed = mode == ProjectMode::AutoUpload
         && !from_staging
-        && armed_settle_elapsed(obs.modified_at, ctx.now);
+        && armed_settle_elapsed(obs.modified_at, ctx.now)
+        && !ctx.gate.blocks();
 
     // Two questions off one transcript load. The mark is answered for every
     // contributor; the eligibility verdict is a derivation from it that stays
@@ -695,6 +739,9 @@ fn visit_session(
                 out.changed = true;
                 if armed {
                     out.report.auto_ready += 1;
+                    if ctx.gate.would_refuse() {
+                        out.report.gate_would_refuse += 1;
+                    }
                 } else {
                     out.report.queued += 1;
                 }
@@ -736,6 +783,9 @@ fn visit_session(
                 {
                     out.changed = true;
                     out.report.auto_ready += 1;
+                    if ctx.gate.would_refuse() {
+                        out.report.gate_would_refuse += 1;
+                    }
                 }
                 // This path returns Ok without checking capacity, so
                 // it does not prove space is available. Do not
@@ -755,6 +805,22 @@ fn visit_session(
 /// The single implementation of the epilogue, and it runs once per pass, not
 /// once per session -- `queue.save` and `state.save` each rewrite a whole
 /// file, and the publish is a wake-up for every subscribed shell.
+/// Say what the unenforced gate would have refused, once per pass.
+///
+/// Only on a pass that made such an approval, so a daemon with nothing armed
+/// logs nothing. The reasons are labels, never paths or content.
+fn report_gate(gate: &super::automatic_gate::GateVerdict, report: &TickReport) {
+    if report.gate_would_refuse == 0 {
+        return;
+    }
+    let reasons: Vec<&str> = gate.unmet.iter().map(|u| u.reason).collect();
+    tracing::info!(
+        approvals = report.gate_would_refuse,
+        unmet = ?reasons,
+        "approved on the contributor's behalf; the automatic-contribution gate would have refused these"
+    );
+}
+
 fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
     let PassOutcome {
         report,
@@ -1442,6 +1508,43 @@ mod tests {
             0,
             "the contributor approved this one by hand; it is not retractable"
         );
+    }
+
+    /// Report-only, which is how the gate ships: the approval goes ahead as
+    /// before, and is counted as one the gate would have refused.
+    #[tokio::test]
+    async fn the_unenforced_gate_approves_as_before_and_counts_what_it_would_refuse() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        assert_eq!(report.gate_would_refuse, 1, "{report:?}");
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Approved);
+    }
+
+    /// Enforced, every route to an unattended approval stops: a fresh
+    /// settled session is created waiting, not approved, and stays waiting
+    /// when it is seen again. Nobody passes the gate today, so this is what
+    /// switching it on without K5 would do to every armed folder.
+    #[tokio::test]
+    async fn the_enforced_gate_stops_every_approval_on_the_contributors_behalf() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let first = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let again = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(first.auto_ready, 0, "{first:?}");
+        assert_eq!(again.auto_ready, 0, "{again:?}");
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Pending, "waits for the contributor");
+        assert!(!e.approved_unattended);
     }
 
     #[tokio::test]

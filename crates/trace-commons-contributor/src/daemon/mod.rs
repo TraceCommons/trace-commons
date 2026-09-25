@@ -26,6 +26,7 @@ pub mod approved_envelope;
 pub mod attached;
 pub mod attestation_mark;
 pub mod audit;
+pub mod automatic_gate;
 pub mod client;
 pub(crate) mod cloud_credential_lifecycle;
 #[cfg(test)]
