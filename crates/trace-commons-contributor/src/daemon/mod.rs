@@ -1442,6 +1442,7 @@ mod tests {
         _dir: tempfile::TempDir,
         shared: Arc<ipc::DaemonShared>,
         session_path: std::path::PathBuf,
+        project_cwd: String,
         classifier_status: Arc<AtomicU16>,
         classifier_delay_ms: Arc<AtomicU64>,
         uploads: Arc<AtomicUsize>,
@@ -1559,12 +1560,24 @@ mod tests {
             let claude_root = dir.path().join("projects");
             let project_dir = claude_root.join("-Users-testuser-code-myproj");
             std::fs::create_dir_all(&project_dir).unwrap();
+            let cwd = dir.path().join("myproj");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let project_cwd = cwd.to_string_lossy().into_owned();
             let session_path = project_dir.join("7c7c7c7c-7c7c-7c7c-7c7c-7c7c7c7c7c7c.jsonl");
             std::fs::write(
                 &session_path,
-                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fix the parser please\"},\
-                 \"cwd\":\"/Users/testuser/code/myproj\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
-                 \"version\":\"2.0.1\",\"sessionId\":\"7c7c7c7c-7c7c-7c7c-7c7c-7c7c7c7c7c7c\",\"uuid\":\"a1\"}\n",
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "user",
+                        "message": {"role": "user", "content": "fix the parser please"},
+                        "cwd": project_cwd,
+                        "timestamp": "2026-08-08T10:00:00Z",
+                        "version": "2.0.1",
+                        "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c-7c7c7c7c7c7c",
+                        "uuid": "a1"
+                    })
+                ),
             )
             .unwrap();
             let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
@@ -1582,15 +1595,13 @@ mod tests {
                 });
             }
             shared.store.ensure_near_ai_notice_shown().unwrap();
+            let project_key = policy::project_key_for(Some(&project_cwd));
+            assert_ne!(project_key, policy::UNKNOWN_PROJECT_KEY);
             shared
                 .policy
                 .lock()
                 .unwrap()
-                .set_mode(
-                    &policy::project_key_for(Some("/Users/testuser/code/myproj")),
-                    policy::ProjectMode::AutoUpload,
-                    Self::now(),
-                )
+                .set_mode(&project_key, policy::ProjectMode::AutoUpload, Self::now())
                 .unwrap();
             for _ in 0..2 {
                 watcher::tick(&shared, Self::now()).await.unwrap();
@@ -1603,6 +1614,7 @@ mod tests {
                 _dir: dir,
                 shared,
                 session_path,
+                project_cwd,
                 classifier_status,
                 classifier_delay_ms,
                 uploads,
@@ -1981,9 +1993,19 @@ mod tests {
             .open(&h.session_path)
             .unwrap();
         file.write_all(
-            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"new work\"},\
-              \"cwd\":\"/Users/testuser/code/myproj\",\"timestamp\":\"2026-08-08T11:00:00Z\",\
-              \"version\":\"2.0.1\",\"sessionId\":\"7c7c7c7c-7c7c-7c7c-7c7c-7c7c7c7c7c7c\",\"uuid\":\"a2\"}\n",
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "message": {"role": "user", "content": "new work"},
+                    "cwd": h.project_cwd,
+                    "timestamp": "2026-08-08T11:00:00Z",
+                    "version": "2.0.1",
+                    "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c7c7c7c7c",
+                    "uuid": "a2"
+                })
+            )
+            .as_bytes(),
         )
         .unwrap();
         h.classifier_status.store(0, Ordering::SeqCst);
