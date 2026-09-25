@@ -152,10 +152,12 @@ fn tick_over(
     sources: Vec<Box<dyn TraceSource>>,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
-    // Before any session is visited, so a project whose grant was just
-    // voided is already ask-first when its sessions are looked at.
-    sweep_grants(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries);
+    // Before any session is visited, so a project whose grant was just
+    // voided is already ask-first when its sessions are looked at -- and
+    // against the same config snapshot the pass uses, so a widening written
+    // between two reads cannot be missed by the sweep and used by the pass.
+    sweep_grants(shared, &ctx);
     let mut out = PassOutcome::default();
 
     for source in &sources {
@@ -234,10 +236,12 @@ fn tick_over_paths(
     paths: &[PathBuf],
     session_at: SessionAt<'_>,
 ) -> Result<TickReport> {
-    // Before any session is visited, so a project whose grant was just
-    // voided is already ask-first when its sessions are looked at.
-    sweep_grants(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries);
+    // Before any session is visited, so a project whose grant was just
+    // voided is already ask-first when its sessions are looked at -- and
+    // against the same config snapshot the pass uses, so a widening written
+    // between two reads cannot be missed by the sweep and used by the pass.
+    sweep_grants(shared, &ctx);
     let mut out = PassOutcome::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
@@ -272,17 +276,17 @@ fn tick_over_paths(
 /// write blocks it; voiding is the safe direction, so it must happen even
 /// when the audit cannot be written, and a failed write is logged instead.
 /// Audit and log carry labels only.
-fn sweep_grants(shared: &DaemonShared, now: DateTime<Utc>) {
-    let Some(current) = super::grant_terms::GrantTerms::in_force(shared) else {
+fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
+    let Some(current) = ctx.grant_terms.as_ref() else {
         return;
     };
+    let now = ctx.now;
     let sweep = {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let sweep = policy.sweep_grants(&current);
-        if sweep.changed() {
-            if let Err(e) = policy.save(&shared.store) {
-                tracing::warn!(error = %e, "could not persist the grant sweep");
-            }
+        let sweep = policy.sweep_grants(current);
+        // Fixed labels, never the error: its context can carry a path.
+        if sweep.changed() && policy.save(&shared.store).is_err() {
+            tracing::warn!("could not persist the grant sweep");
         }
         sweep
     };
@@ -293,8 +297,8 @@ fn sweep_grants(shared: &DaemonShared, now: DateTime<Utc>) {
             project_label: Some(voided.project_label.clone()),
             detail: Some(voided.reasons.join(",")),
         };
-        if let Err(e) = super::audit::append(&shared.store, &entry) {
-            tracing::warn!(error = %e, "could not record a voided grant");
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record a voided grant");
         }
         tracing::info!(
             reasons = ?voided.reasons,
@@ -316,6 +320,9 @@ struct PassContext {
     /// invited contributor, whose entries carry no eligibility at all -- see
     /// `QueueEntry::eligibility`.
     admission_evidence: bool,
+    /// The grant terms in force, from the same config and settings this pass
+    /// reads. `None` without a config. See `sweep_grants`.
+    grant_terms: Option<super::grant_terms::GrantTerms>,
 }
 
 impl PassContext {
@@ -336,12 +343,20 @@ impl PassContext {
             .as_ref()
             .map(|c| c.consent_scopes.clone())
             .unwrap_or_default();
+        let (near_ai, attested_bodies) = {
+            let s = shared.settings.lock().expect("settings lock");
+            (s.near_ai.clone(), s.ironwire_attested_bodies)
+        };
         let approval_inputs = cfg.as_ref().map(|c| {
-            let (near_ai, attested_bodies) = {
-                let s = shared.settings.lock().expect("settings lock");
-                (s.near_ai.clone(), s.ironwire_attested_bodies)
-            };
             crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
+        });
+        let grant_terms = cfg.as_ref().map(|c| {
+            super::grant_terms::GrantTerms::current(
+                c,
+                near_ai.as_ref(),
+                attested_bodies,
+                &super::grant_terms::env_filter_backend(),
+            )
         });
         let admission_evidence = cfg
             .as_ref()
@@ -353,6 +368,7 @@ impl PassContext {
             consent_scopes,
             approval_inputs,
             admission_evidence,
+            grant_terms,
         }
     }
 }
@@ -1566,6 +1582,69 @@ mod tests {
             .find(|e| e.action == "auto-upload-voided")
             .expect("the void is recorded");
         assert_eq!(voided.detail.as_deref(), Some("scopes-widened"));
+    }
+
+    /// Arm and baseline a project under `cfg`, apply `widen`, run a pass,
+    /// and require that the grant was voided with `label`.
+    async fn assert_widening_voids(
+        cfg: crate::config::ContributorConfig,
+        widen: impl FnOnce(&WatcherFixture),
+        label: &str,
+    ) {
+        let f = WatcherFixture::new();
+        f.shared.store.save_config(&cfg).unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert!(the_only_project(&f).armed_under.is_some(), "baselined");
+
+        widen(&f);
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let project = the_only_project(&f);
+        assert_eq!(project.mode, ProjectMode::NotifyOnly, "{label}");
+        assert!(project.armed_under.is_none(), "{label}");
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        let voided = audit
+            .iter()
+            .find(|e| e.action == "auto-upload-voided")
+            .unwrap_or_else(|| panic!("{label}: the void is recorded"));
+        assert_eq!(voided.detail.as_deref(), Some(label));
+    }
+
+    /// Turning attested bodies on sends trace bodies to a party that did not
+    /// see them when the project was armed.
+    #[tokio::test]
+    async fn turning_attested_bodies_on_voids_the_grant() {
+        assert_widening_voids(
+            grant_test_cfg(&["debugging_evaluation"]),
+            |f| f.shared.settings.lock().unwrap().ironwire_attested_bodies = true,
+            crate::daemon::grant_terms::VOID_ATTESTED_BODIES,
+        )
+        .await;
+    }
+
+    /// Pointing the client at a different witness changes who vouches for
+    /// what leaves.
+    #[tokio::test]
+    async fn changing_the_witness_voids_the_grant() {
+        let witness = |url: &str| crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: url.to_string(),
+            signing_address: "0x0000000000000000000000000000000000000001".to_string(),
+            expected_measurements: Vec::new(),
+        };
+        let mut cfg = grant_test_cfg(&["debugging_evaluation"]);
+        cfg.witness = Some(witness("https://witness-a.invalid"));
+        let mut moved = cfg.clone();
+        moved.witness = Some(witness("https://witness-b.invalid"));
+        assert_widening_voids(
+            cfg,
+            move |f| f.shared.store.save_config(&moved).unwrap(),
+            crate::daemon::grant_terms::VOID_WITNESS,
+        )
+        .await;
     }
 
     /// Narrowing is covered by the grant: removing a scope keeps the project

@@ -328,6 +328,17 @@ pub fn input_fingerprint(
     // is about. The switch is the consent-relevant fact.
     h.update(b"\x00attested_bodies\x00");
     h.update(if attested_bodies { "on" } else { "off" }.as_bytes());
+    // A privacy filter the environment attaches (`TRACE_PRIVACY_FILTER_BACKEND`)
+    // whatever the config says. Adding, changing or removing one changes who
+    // reads the prose, so an approval taken under one setting must not be
+    // sent under another. Hashed only when one is attached: a daemon without
+    // one keeps the fingerprints it already had, so an upgrade re-offers
+    // nothing.
+    let env_backend = super::grant_terms::env_filter_backend();
+    if env_backend != "none" {
+        h.update(b"\x00env_filter\x00");
+        h.update(env_backend.as_bytes());
+    }
     format!("sha256:{:x}", h.finalize())
 }
 

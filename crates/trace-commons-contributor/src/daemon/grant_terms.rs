@@ -43,6 +43,14 @@ use crate::envelope::NearAiSettings;
 
 /// Everything whose change could put a standing grant's sessions in front of
 /// someone new, or send more of them.
+/// The environment-attached privacy-filter backend, as a label.
+pub fn env_filter_backend() -> String {
+    match trace_commons_protocol::trace_contribution::privacy_filter_backend_from_env() {
+        Ok(tag) => tag.label().to_string(),
+        Err(_) => "invalid".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantTerms {
     pub ingest_url: String,
@@ -55,6 +63,12 @@ pub struct GrantTerms {
     pub device_key_id: String,
     pub consent_scopes: BTreeSet<String>,
     pub pii_filter: Option<String>,
+    /// The privacy-filter backend the environment attaches on its own
+    /// (`TRACE_PRIVACY_FILTER_BACKEND`), resolved as the redactor resolves it:
+    /// `DeterministicTraceRedactor::new` adds that filter whatever
+    /// `pii_filter` says, so the config field alone misses it. `"invalid"`
+    /// for a backend named without its credentials.
+    pub env_filter_backend: String,
     pub classifier_base_url: Option<String>,
     pub classifier_model: Option<String>,
     pub classifier_present: bool,
@@ -84,7 +98,12 @@ impl GrantTerms {
             let s = shared.settings.lock().expect("settings lock");
             (s.near_ai.clone(), s.ironwire_attested_bodies)
         };
-        Some(Self::current(&cfg, near_ai.as_ref(), attested_bodies))
+        Some(Self::current(
+            &cfg,
+            near_ai.as_ref(),
+            attested_bodies,
+            &env_filter_backend(),
+        ))
     }
 
     /// The terms in force now.
@@ -92,6 +111,7 @@ impl GrantTerms {
         cfg: &ContributorConfig,
         near_ai: Option<&NearAiSettings>,
         attested_bodies: bool,
+        env_filter_backend: &str,
     ) -> Self {
         let witness = cfg.witness.as_ref();
         Self {
@@ -105,6 +125,7 @@ impl GrantTerms {
             device_key_id: cfg.device_key_id.clone(),
             consent_scopes: cfg.consent_scopes.iter().cloned().collect(),
             pii_filter: cfg.pii_filter.clone(),
+            env_filter_backend: env_filter_backend.to_string(),
             classifier_present: near_ai.is_some(),
             classifier_base_url: near_ai.and_then(|n| n.base_url.clone()),
             classifier_model: near_ai.and_then(|n| n.model.clone()),
@@ -143,6 +164,7 @@ impl GrantTerms {
         // party, removed scrubs less, and a different host or model is a
         // different operator reading it.
         if self.pii_filter != granted.pii_filter
+            || self.env_filter_backend != granted.env_filter_backend
             || self.classifier_present != granted.classifier_present
             || self.classifier_base_url != granted.classifier_base_url
             || self.classifier_model != granted.classifier_model
@@ -191,6 +213,7 @@ mod tests {
                 .map(String::from)
                 .collect(),
             pii_filter: None,
+            env_filter_backend: "none".into(),
             classifier_present: false,
             classifier_base_url: None,
             classifier_model: None,
@@ -207,6 +230,89 @@ mod tests {
         let mut now = base();
         change(&mut now);
         now.widening_from(&granted)
+    }
+
+    /// Every widening that voids a grant also changes `input_fingerprint`,
+    /// so an entry approved under the old terms is re-offered rather than
+    /// sent under the new ones. Driven from the inputs both are derived from,
+    /// not from `GrantTerms`, so a term added to one and not the other fails
+    /// here. The environment's filter backend is left out: varying it means
+    /// mutating the process environment, and both read it from the same
+    /// `env_filter_backend`.
+    #[test]
+    fn every_widening_also_changes_the_input_fingerprint() {
+        use crate::daemon::preview::input_fingerprint;
+        let cfg = ContributorConfig {
+            inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+            issuer_url: "https://issuer.invalid".to_string(),
+            ingest_url: "https://ingest.invalid".to_string(),
+            audience: "aud".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            instance_id: "instance-1".to_string(),
+            user_subject: "alice".to_string(),
+            device_key_id: "sha256:aa".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+            witness: None,
+        };
+        let classifier = NearAiSettings {
+            api_key: "k".to_string(),
+            base_url: Some("https://classifier.invalid".to_string()),
+            model: Some("m".to_string()),
+        };
+        let witness = crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: "https://witness.invalid".to_string(),
+            signing_address: "0x0000000000000000000000000000000000000001".to_string(),
+            expected_measurements: Vec::new(),
+        };
+        type Inputs = (ContributorConfig, Option<NearAiSettings>, bool);
+        let changes: Vec<(&str, Box<dyn Fn(&mut Inputs)>)> = vec![
+            (
+                "destination",
+                Box::new(|i| i.0.ingest_url = "https://other.invalid".into()),
+            ),
+            ("identity", Box::new(|i| i.0.tenant_id = "tenant-2".into())),
+            (
+                "scopes",
+                Box::new(|i| i.0.consent_scopes.push("model_training".into())),
+            ),
+            (
+                "pii filter",
+                Box::new(|i| i.0.pii_filter = Some("other".into())),
+            ),
+            (
+                "receipt endpoint",
+                Box::new(|i| i.0.inference_receipt_endpoint = Some("https://r.invalid".into())),
+            ),
+            ("witness", {
+                let witness = witness.clone();
+                Box::new(move |i| i.0.witness = Some(witness.clone()))
+            }),
+            ("classifier", {
+                let classifier = classifier.clone();
+                Box::new(move |i| i.1 = Some(classifier.clone()))
+            }),
+            ("attested bodies", Box::new(|i| i.2 = true)),
+        ];
+        let terms = |i: &Inputs| GrantTerms::current(&i.0, i.1.as_ref(), i.2, "none");
+        let fingerprint = |i: &Inputs| input_fingerprint(&i.0, i.1.as_ref(), i.2);
+        let base: Inputs = (cfg, None, false);
+        for (name, change) in &changes {
+            let mut now = base.clone();
+            change(&mut now);
+            assert!(
+                !terms(&now).widening_from(&terms(&base)).is_empty(),
+                "{name}: expected a widening"
+            );
+            assert_ne!(fingerprint(&now), fingerprint(&base), "{name}");
+        }
     }
 
     #[test]
@@ -269,6 +375,21 @@ mod tests {
         let mut removed = granted.clone();
         removed.classifier_present = false;
         removed.classifier_model = None;
+        assert_eq!(removed.widening_from(&granted), [VOID_FILTER]);
+    }
+
+    /// Reviewed on #1024: a filter attached from the environment is a filter
+    /// all the same, and so is one taken away by config alone.
+    #[test]
+    fn an_environment_filter_and_a_removed_config_filter_both_void() {
+        assert_eq!(
+            widening(|t| t.env_filter_backend = "sidecar".into()),
+            [VOID_FILTER]
+        );
+        let mut granted = base();
+        granted.pii_filter = Some("near-ai".into());
+        let mut removed = granted.clone();
+        removed.pii_filter = None;
         assert_eq!(removed.widening_from(&granted), [VOID_FILTER]);
     }
 

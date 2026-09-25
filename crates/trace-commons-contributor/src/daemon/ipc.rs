@@ -2584,6 +2584,15 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // concurrent `set_project_mode` can only interleave two
     // record-then-arm sequences, never produce an armed policy with
     // no record.
+    // Fail closed: a grant needs terms to be a grant of. Arming with none --
+    // no config yet, or one that could not be read -- would leave the next
+    // watcher pass to adopt whatever config then exists as what was agreed,
+    // for example after enrolling with a different commons. Refused before
+    // the audit record, so a refusal records nothing.
+    // The unknown bucket is left to `set_mode`, whose refusal says why.
+    if mode == ProjectMode::AutoUpload && arming_terms.is_none() && key != UNKNOWN_PROJECT_KEY {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    }
     if mode == ProjectMode::AutoUpload {
         drop(policy);
         if let Err(_e) = audit::append(
@@ -5359,6 +5368,16 @@ mod tests {
         DaemonShared::load(store).unwrap()
     }
 
+    /// `shared()` with a config saved, for tests that arm a project: arming
+    /// records the terms in force and is refused without a config.
+    fn enrolled_shared() -> DaemonShared {
+        let s = shared();
+        s.store
+            .save_config(&crate::commands::unenrolled_preview_config())
+            .unwrap();
+        s
+    }
+
     #[test]
     fn refresh_history_request_schedules_poll_without_postponing_earlier_request() {
         let shared = shared();
@@ -6071,7 +6090,7 @@ mod tests {
         // would in fact be a worse channel for an attacker than doing it
         // itself (rate-limited, capped, redacted, delivered somewhere it
         // cannot read back). See the module doc's "Authorization" section.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         let r = handle_request(
             &s,
@@ -6092,7 +6111,7 @@ mod tests {
         // The audit log is what replaced the removed gate: not a control,
         // but a local record a contributor can read to see when autonomy
         // was granted.
-        let s = shared();
+        let s = enrolled_shared();
         let r = handle_request(
             &s,
             &req(
@@ -6648,7 +6667,7 @@ mod tests {
         // `daemon-audit.jsonl` -- the two sinks the label-only rule exists
         // to protect. The label is now derived from the key; the param is
         // accepted and ignored.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("myproj");
         let injected = "ghp_fakeinjectedtoken/and/a/path";
         let r = handle_request(
@@ -6844,6 +6863,40 @@ mod tests {
             .expect("the grant's terms are recorded at arming");
         assert!(terms.consent_scopes.contains("debugging_evaluation"));
         assert_eq!(terms.tenant_id, "tenant-1");
+    }
+
+    /// Arming over the socket and then widening voids: the comparison is
+    /// against the terms recorded at arming. Were they not recorded, the
+    /// next sweep would baseline the new destination as if it had been
+    /// agreed.
+    #[test]
+    fn a_grant_armed_over_the_socket_is_voided_when_its_destination_moves() {
+        let s = enrolled_shared();
+        let key = "/tmp/armedthenmoved";
+        seed_entry_with_eligibility(&s, key, None);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let mut moved = s.store.load_config().unwrap().unwrap();
+        moved.ingest_url = "https://elsewhere.invalid".to_string();
+        s.store.save_config(&moved).unwrap();
+        let current = crate::daemon::grant_terms::GrantTerms::in_force(&s).unwrap();
+
+        let mut policy = s.policy.lock().unwrap();
+        let sweep = policy.sweep_grants(&current);
+        assert_eq!(sweep.baselined, 0, "the grant already had its terms");
+        assert_eq!(sweep.voided.len(), 1);
+        assert_eq!(
+            sweep.voided[0].reasons,
+            vec![crate::daemon::grant_terms::VOID_DESTINATION]
+        );
+        assert_eq!(policy.resolve(key), ProjectMode::NotifyOnly);
     }
 
     /// **The regression that must not happen.** An invited contributor has
@@ -7098,7 +7151,7 @@ mod tests {
 
     #[test]
     fn a_project_id_from_list_projects_is_accepted_by_set_project_mode() {
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         seed_entry(&s, &key);
 
@@ -7377,7 +7430,7 @@ mod tests {
         // The original injection fix must survive the new entry point: the
         // id path resolves to a key the daemon already holds, so the label
         // is still derived and a caller's strings still reach neither sink.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("myproj");
         seed_entry(&s, &key);
         let id = super::super::policy::project_id_for(&key);
@@ -7441,7 +7494,7 @@ mod tests {
         // terminal-only restriction. A best-effort append reduced a
         // disk-full or permissions failure to a warning while the call
         // still returned success, silently defeating the whole replacement.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         break_the_audit_log(&s.store);
 
@@ -10086,7 +10139,7 @@ mod tests {
 
     #[test]
     fn list_audit_reads_back_what_set_project_mode_appended() {
-        let s = shared();
+        let s = enrolled_shared();
         handle_request(
             &s,
             &req(
@@ -10104,7 +10157,7 @@ mod tests {
     fn list_audit_honors_a_limit_and_reports_the_most_recent_entries() {
         // The log is append-by-whole-file-rewrite and otherwise unbounded,
         // same reason list_history caps.
-        let s = shared();
+        let s = enrolled_shared();
         for key in [tmp_project("a"), tmp_project("b"), tmp_project("c")] {
             handle_request(
                 &s,
@@ -10124,7 +10177,7 @@ mod tests {
 
     #[test]
     fn list_audit_caps_an_oversize_limit_at_one_thousand() {
-        let s = shared();
+        let s = enrolled_shared();
         handle_request(
             &s,
             &req(

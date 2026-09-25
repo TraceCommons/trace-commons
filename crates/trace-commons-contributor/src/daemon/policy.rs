@@ -367,21 +367,6 @@ impl ProjectPolicy {
         stored
     }
 
-    /// Record a mode for `project_key`.
-    ///
-    /// The label is **derived here**, from the key, and is never a caller
-    /// argument. It used to be one, and `set_project_mode` passed straight
-    /// through whatever a socket client sent -- so any client could write
-    /// an arbitrary string (a full filesystem path, a token, a fragment of
-    /// somebody's transcript) into `list_projects` output and into
-    /// `daemon-audit.jsonl`, the two sinks this crate's label-only rule
-    /// exists to protect. Deriving it removes the injection path by
-    /// construction rather than by validation.
-    ///
-    /// The stored label is the bare basename (`project_label_for`);
-    /// disambiguation against colliding basenames happens at render time,
-    /// so a stored label never goes stale when a colliding project appears
-    /// later.
     /// Record the terms an armed project was granted under.
     ///
     /// Called where the arming happens, with the terms in force at that
@@ -435,6 +420,21 @@ impl ProjectPolicy {
         sweep
     }
 
+    /// Record a mode for `project_key`.
+    ///
+    /// The label is **derived here**, from the key, and is never a caller
+    /// argument. It used to be one, and `set_project_mode` passed straight
+    /// through whatever a socket client sent -- so any client could write
+    /// an arbitrary string (a full filesystem path, a token, a fragment of
+    /// somebody's transcript) into `list_projects` output and into
+    /// `daemon-audit.jsonl`, the two sinks this crate's label-only rule
+    /// exists to protect. Deriving it removes the injection path by
+    /// construction rather than by validation.
+    ///
+    /// The stored label is the bare basename (`project_label_for`);
+    /// disambiguation against colliding basenames happens at render time,
+    /// so a stored label never goes stale when a colliding project appears
+    /// later.
     pub fn set_mode(
         &mut self,
         project_key: &str,
