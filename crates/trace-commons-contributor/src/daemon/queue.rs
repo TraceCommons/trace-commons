@@ -15,7 +15,7 @@
 //! is not the contributor declining to upload, and letting a two-week clock
 //! run through one would silently discard traces nobody chose to discard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -872,12 +872,37 @@ impl Queue {
     /// satisfied, so it is asked for again rather than carried over. In an
     /// `auto_upload` folder the watcher re-approves it on its next pass; in
     /// any other folder the contributor decides again.
-    pub fn reoffer_refused_for_reason(&mut self, reason_label: &str) -> usize {
+    ///
+    /// Two further conditions, both from review:
+    ///
+    /// - The re-offer is dated `now`. Expiry counts from `discovered_at`, and
+    ///   the gate's health label held expiry off the whole time these waited,
+    ///   so an entry refused on day 0 and re-offered on day 15 would otherwise
+    ///   be expired on the next tick, before anyone saw it -- losing the
+    ///   sessions that waited longest, which this exists to recover.
+    /// - An entry is skipped when its file already has a live entry. If the
+    ///   session grew while this one sat refused, the watcher has already
+    ///   offered the new content; reviving the old entry would put a second
+    ///   card beside it describing bytes that no longer exist.
+    pub fn reoffer_refused_for_reason(&mut self, reason_label: &str, now: DateTime<Utc>) -> usize {
+        let live_paths: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                )
+            })
+            .map(|e| e.path.clone())
+            .collect();
         let ids: Vec<Uuid> = self
             .entries
             .iter()
             .filter(|e| {
-                e.state == QueueState::Refused && e.reason_label.as_deref() == Some(reason_label)
+                e.state == QueueState::Refused
+                    && e.reason_label.as_deref() == Some(reason_label)
+                    && !live_paths.contains(&e.path)
             })
             .map(|e| e.entry_id)
             .collect();
@@ -887,6 +912,7 @@ impl Queue {
                 // A fresh offer, not one that still names the gate: the gate
                 // is open now, and a label saying otherwise would be false.
                 e.reason_label = None;
+                e.discovered_at = now;
             }
         }
         ids.len()
@@ -2774,7 +2800,7 @@ mod tests {
             ..entry_in("/w/alpha", QueueState::Uploaded)
         });
 
-        assert_eq!(q.reoffer_refused_for_reason("gate-closed"), 1);
+        assert_eq!(q.reoffer_refused_for_reason("gate-closed", Utc::now()), 1);
 
         let e = q.all().iter().find(|e| e.entry_id == gated_id).unwrap();
         assert_eq!(e.state, QueueState::Pending);
@@ -2792,6 +2818,46 @@ mod tests {
             states.contains(&QueueState::Uploaded),
             "only Refused entries move"
         );
+    }
+
+    /// Reviewed as High on #1009. The gate's health label held expiry off
+    /// while these waited, so a re-offer that kept its original date would be
+    /// expired on the next tick -- losing the sessions that waited longest.
+    #[test]
+    fn a_re_offer_is_dated_now_and_survives_the_next_expiry() {
+        let now = Utc::now();
+        let mut q = Queue::default();
+        let long_ago = QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            discovered_at: now - Duration::days(20),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        q.push_for_test(long_ago);
+
+        assert_eq!(q.reoffer_refused_for_reason("gate-closed", now), 1);
+        assert_eq!(q.expire(now, 14, false), 0, "a fresh offer is not expired");
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+        assert_eq!(q.all()[0].discovered_at, now);
+    }
+
+    /// A refused entry is not revived beside a newer live one for the same
+    /// file: the watcher has already offered the grown session, and the old
+    /// entry describes bytes that no longer exist.
+    #[test]
+    fn a_re_offer_skips_a_file_that_already_has_a_live_entry() {
+        let mut q = Queue::default();
+        let stale = QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        let path = stale.path.clone();
+        q.push_for_test(stale);
+        q.push_for_test(QueueEntry {
+            path,
+            ..entry_in("/w/alpha", QueueState::Pending)
+        });
+
+        assert_eq!(q.reoffer_refused_for_reason("gate-closed", Utc::now()), 0);
     }
 
     #[test]

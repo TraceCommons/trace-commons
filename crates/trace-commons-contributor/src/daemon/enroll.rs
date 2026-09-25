@@ -242,13 +242,15 @@ pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Req
             // acknowledgment is the event the refusal was waiting for.
             let reoffered = {
                 let mut queue = shared.queue.lock().expect("queue lock");
-                let moved = queue.reoffer_refused_for_reason(LABEL_NEAR_AI_NOTICE_PENDING);
+                let moved =
+                    queue.reoffer_refused_for_reason(LABEL_NEAR_AI_NOTICE_PENDING, Utc::now());
                 if moved > 0 {
-                    if let Err(e) = queue.save(&shared.store) {
+                    if queue.save(&shared.store).is_err() {
                         // The acknowledgment itself stands; it is already
                         // audited and on disk. The re-offer is held in memory
-                        // and persists with the next save.
-                        tracing::warn!(error = %e, "could not persist re-offered entries");
+                        // and persists with the next save. A fixed label, not
+                        // the error: its context can carry a filesystem path.
+                        tracing::warn!("could not persist re-offered entries");
                     }
                 }
                 moved

@@ -543,6 +543,25 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         return Ok(());
     }
 
+    // The NEAR AI notice can be acknowledged outside the app: the CLI shows
+    // it and writes the same marker. Only the app's acknowledge handler
+    // re-offered what the gate had refused, so a CLI acknowledgment opened the
+    // gate and left those sessions refused for good. Doing it here as well
+    // covers every route: once the gate is open, nothing sits refused for it.
+    // The re-offer is idempotent, so the handler's immediate one and this one
+    // can both run.
+    if shared.store.near_ai_notice_shown() {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let moved = q.reoffer_refused_for_reason(health::LABEL_NEAR_AI_NOTICE_PENDING, now);
+        if moved > 0 {
+            if q.save(&shared.store).is_err() {
+                tracing::warn!("could not persist re-offered entries");
+            }
+            drop(q);
+            shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        }
+    }
+
     // The post-approval hold. An entry approved a moment ago is skipped
     // until its hold elapses, so the undo a client offers after `approve`
     // is a real window rather than a race against this pass -- see
@@ -1613,6 +1632,44 @@ mod tests {
             Some(queue::REASON_PROJECT_IGNORED)
         );
         assert_eq!(entry_id, e.entry_id);
+    }
+
+    /// Reviewed as Medium on #1009. The CLI writes the same notice marker the
+    /// app's acknowledge does, without going through the handler that
+    /// re-offers. The upload pass now re-offers whenever the gate is open, so
+    /// the route to the acknowledgment does not decide whether the refused
+    /// sessions come back.
+    #[tokio::test]
+    async fn a_notice_acknowledged_outside_the_app_still_re_offers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let e = queue::QueueEntry {
+                entry_id: uuid::Uuid::new_v4(),
+                session_hash: "sha256:cliack".to_string(),
+                ..Default::default()
+            };
+            let id = e.entry_id;
+            q.upsert(e, 100).unwrap();
+            q.set_state(
+                id,
+                queue::QueueState::Refused,
+                Some(health::LABEL_NEAR_AI_NOTICE_PENDING.to_string()),
+            );
+            id
+        };
+        // What the CLI does: the marker, and nothing else.
+        shared.store.ensure_near_ai_notice_shown().unwrap();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(e.entry_id, id);
+        assert_eq!(e.state, queue::QueueState::Pending);
     }
 
     #[tokio::test]
