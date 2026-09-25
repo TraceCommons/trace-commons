@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod canonical_json;
 pub mod community_handle;
+pub mod inference_connection;
 pub mod insights;
 pub mod insights_cards;
 pub mod insights_pricing;
