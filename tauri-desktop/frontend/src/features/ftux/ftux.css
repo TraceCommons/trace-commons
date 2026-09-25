@@ -1,0 +1,1137 @@
+/* Glass style for the first-run flows, transcribed from the WYSIWYG design.
+   Everything is scoped under .ftux so it cannot leak into the rest of the app. */
+
+.ftux {
+  --ftux-text: #f2f2f4;
+  --ftux-text-2: #c9c9d0;
+  --ftux-text-3: #a9a9b0;
+  --ftux-link: #c9b3ff;
+  --ftux-green: #3ddc84;
+  --ftux-yellow: #f5c142;
+  --ftux-purple: #6d14f3;
+  --ftux-purple-fill: linear-gradient(
+    180deg,
+    rgba(138, 61, 255, 0.8),
+    rgba(109, 20, 243, 0.7)
+  );
+  --ftux-mono: "SF Mono", ui-monospace, Menlo, monospace;
+
+  position: relative;
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  color: var(--ftux-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-wrap: pretty;
+  background:
+    radial-gradient(
+      60% 70% at 15% 10%,
+      rgba(138, 61, 255, 0.35) 0%,
+      rgba(138, 61, 255, 0) 60%
+    ),
+    radial-gradient(
+      50% 60% at 90% 90%,
+      rgba(61, 220, 132, 0.22) 0%,
+      rgba(61, 220, 132, 0) 60%
+    ),
+    linear-gradient(160deg, #5d6a7a 0%, #2b3340 55%, #1a1e26 100%);
+}
+
+.ftux *,
+.ftux *::before,
+.ftux *::after {
+  box-sizing: border-box;
+}
+
+.ftux :focus-visible {
+  outline: 2px solid var(--ftux-link);
+  outline-offset: 2px;
+}
+
+.ftux-mono {
+  font-family: var(--ftux-mono);
+}
+
+/* Window --------------------------------------------------------------- */
+
+.ftux-window {
+  position: relative;
+  width: min(100%, 460px);
+  height: min(640px, calc(100vh - 64px));
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 22px;
+  border: 0.5px solid rgba(255, 255, 255, 0.24);
+  background: linear-gradient(
+    160deg,
+    rgba(70, 80, 96, 0.78) 0%,
+    rgba(34, 38, 48, 0.82) 50%,
+    rgba(22, 24, 31, 0.88) 100%
+  );
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 30px 60px rgba(0, 0, 0, 0.35);
+}
+
+.ftux-window-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 14px 16px 0;
+}
+
+.ftux-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ftux-text-3);
+}
+
+.ftux-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px 18px;
+}
+
+.ftux-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 -4px;
+  padding: 0 4px 2px;
+}
+
+.ftux-title {
+  margin: 0;
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ftux-title .ftux-light {
+  font-weight: 400;
+}
+
+.ftux-lede {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--ftux-text-2);
+}
+
+.ftux-lede b {
+  color: var(--ftux-text);
+}
+
+.ftux-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.ftux-footer-split {
+  justify-content: space-between;
+}
+
+/* Stepper -------------------------------------------------------------- */
+
+.ftux-stepper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 18px 0;
+}
+
+.ftux-stepper-track {
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.ftux-stepper-line {
+  flex: 1;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.ftux-stepper-line[data-done="true"] {
+  background: var(--ftux-purple);
+}
+
+.ftux-stepper-dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.ftux-stepper-dot[data-state="current"] {
+  border: 0;
+  background: linear-gradient(180deg, #ffffff, #d9d9e2);
+  box-shadow:
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 0 0 3px rgba(255, 255, 255, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.ftux-stepper-dot[data-state="done"] {
+  border: 0;
+  background: var(--ftux-purple-fill);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 0 0 3px rgba(109, 20, 243, 0.3);
+}
+
+.ftux-stepper-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ftux-text-3);
+}
+
+.ftux-stepper-labels [data-state="done"] {
+  color: var(--ftux-text-2);
+}
+
+.ftux-stepper-labels [data-state="current"] {
+  color: var(--ftux-text);
+  font-weight: 700;
+}
+
+/* Cards ---------------------------------------------------------------- */
+
+.ftux-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.09),
+    rgba(255, 255, 255, 0.04)
+  );
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+}
+
+.ftux-card-tight {
+  padding: 10px 12px;
+}
+
+.ftux-card[data-done="true"] {
+  border-color: rgba(61, 220, 132, 0.45);
+}
+
+.ftux-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ftux-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ftux-text-3);
+}
+
+.ftux-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ftux-card-text {
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ftux-text-2);
+}
+
+.ftux-muted {
+  color: var(--ftux-text-3);
+}
+
+.ftux-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ftux-text-2);
+}
+
+.ftux-status[data-tone="ok"] {
+  color: var(--ftux-green);
+}
+
+.ftux-status[data-tone="error"] {
+  color: #ff8a80;
+}
+
+.ftux-well {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ftux-text-2);
+  background: rgba(0, 0, 0, 0.22);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.ftux-input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-family: var(--ftux-mono);
+  font-size: 12px;
+  color: var(--ftux-text);
+  background: rgba(0, 0, 0, 0.28);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+  outline: none;
+}
+
+.ftux-input::placeholder {
+  color: var(--ftux-text-3);
+}
+
+/* Tool rows ------------------------------------------------------------ */
+
+.ftux-badge {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ftux-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ftux-tool-name {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.ftux-tool-path {
+  font-family: var(--ftux-mono);
+  font-size: 11px;
+  color: var(--ftux-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ftux-tool-meta {
+  font-size: 11px;
+  color: var(--ftux-text-3);
+  white-space: nowrap;
+}
+
+.ftux-tool-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.ftux-tool-hint {
+  flex: 1;
+  font-size: 11px;
+  color: var(--ftux-text-3);
+}
+
+.ftux-add-tool {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.28);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ftux-add-tool[data-dragging="true"] {
+  border-color: var(--ftux-link);
+  background: rgba(138, 61, 255, 0.12);
+}
+
+.ftux-add-tool .ftux-badge {
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--ftux-text-3);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Buttons -------------------------------------------------------------- */
+
+.ftux-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--ftux-text);
+  text-decoration: none;
+  cursor: pointer;
+  border: 0.5px solid rgba(255, 255, 255, 0.3);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.16),
+    rgba(255, 255, 255, 0.08)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.ftux-btn-primary {
+  padding: 0 16px;
+  font-weight: 700;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.4);
+  background: linear-gradient(
+    180deg,
+    rgba(138, 61, 255, 0.72),
+    rgba(109, 20, 243, 0.62)
+  );
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.2),
+    0 4px 12px rgba(109, 20, 243, 0.3);
+}
+
+.ftux-btn:disabled,
+.ftux-btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  font-weight: 700;
+  color: var(--ftux-text-3);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.1),
+    rgba(255, 255, 255, 0.05)
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: none;
+}
+
+.ftux-btn-small {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.ftux-btn-install {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: #fff;
+  border-color: rgba(201, 179, 255, 0.45);
+  background: linear-gradient(
+    180deg,
+    rgba(74, 14, 166, 0.6),
+    rgba(50, 8, 120, 0.55)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.ftux-btn-block {
+  width: 100%;
+  height: 40px;
+  font-size: 14px;
+}
+
+.ftux-btn-outline {
+  font-weight: 700;
+  border: 1.5px solid rgba(255, 255, 255, 0.7);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.22),
+    rgba(255, 255, 255, 0.12)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 0 0 3px rgba(255, 255, 255, 0.12);
+}
+
+.ftux-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ftux-link);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.ftux-link:hover {
+  text-decoration: underline;
+}
+
+.ftux-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  animation: ftux-spin 0.8s linear infinite;
+}
+
+@keyframes ftux-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Pill select ---------------------------------------------------------- */
+
+.ftux-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 0.5px solid rgba(255, 255, 255, 0.28);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.16),
+    rgba(255, 255, 255, 0.08)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.ftux-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 2px 0 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ftux-text);
+  cursor: pointer;
+}
+
+.ftux-select select option {
+  color: #1d1d1f;
+}
+
+.ftux-select[data-placeholder="true"] select {
+  color: var(--ftux-text-3);
+}
+
+.ftux-select:has(select:focus-visible) {
+  outline: 2px solid var(--ftux-link);
+  outline-offset: 2px;
+}
+
+.ftux-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ftux-text-3);
+}
+
+.ftux-dot[data-tone="green"] {
+  background: var(--ftux-green);
+}
+
+.ftux-dot[data-tone="yellow"] {
+  background: var(--ftux-yellow);
+}
+
+/* Checkbox and switch -------------------------------------------------- */
+
+.ftux-check {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  padding: 0;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+  transition: background 0.15s;
+}
+
+.ftux-check[aria-checked="true"],
+.ftux-check[aria-checked="mixed"] {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: var(--ftux-purple-fill);
+}
+
+.ftux-check:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.ftux-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.ftux-check-row strong {
+  font-weight: 600;
+  color: var(--ftux-text);
+}
+
+.ftux-always-on {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  font-family: var(--ftux-mono);
+  font-size: 11px;
+  color: var(--ftux-green);
+}
+
+.ftux-always-on::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ftux-green);
+}
+
+.ftux-switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  border: 0.5px solid rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.35),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+  transition: background 0.2s;
+}
+
+.ftux-switch[aria-checked="true"] {
+  background: var(--ftux-purple-fill);
+}
+
+.ftux-switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #fff, #dcdce4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: left 0.2s;
+}
+
+.ftux-switch[aria-checked="true"]::after {
+  left: 19px;
+}
+
+/* Disclosure (details/summary) ----------------------------------------- */
+
+.ftux-disclosure {
+  flex: 1;
+  min-width: 0;
+}
+
+.ftux-disclosure > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  line-height: 17px;
+}
+
+.ftux-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ftux-disclosure > summary svg {
+  transition: transform 0.15s;
+}
+
+.ftux-disclosure[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.ftux-disclosure-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+}
+
+/* Repo rules ----------------------------------------------------------- */
+
+.ftux-repo-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.ftux-repo-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ftux-repo-name > :first-child {
+  font-family: var(--ftux-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ftux-session-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 25px;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+/* Popups --------------------------------------------------------------- */
+
+.ftux-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(10, 12, 16, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.ftux-popup {
+  position: relative;
+  width: min(100%, 380px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px 22px 20px;
+  border-radius: 22px;
+  overflow: hidden;
+  color: var(--ftux-text);
+  border: 0.5px solid rgba(255, 255, 255, 0.24);
+  background: linear-gradient(
+    160deg,
+    rgba(70, 80, 96, 0.82) 0%,
+    rgba(34, 38, 48, 0.86) 50%,
+    rgba(22, 24, 31, 0.9) 100%
+  );
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 30px 60px rgba(0, 0, 0, 0.4);
+}
+
+.ftux-popup-wide {
+  width: min(100%, 400px);
+}
+
+.ftux-popup-icon {
+  align-self: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ftux-link);
+  background: rgba(109, 20, 243, 0.35);
+  border: 0.5px solid rgba(255, 255, 255, 0.25);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.ftux-popup-icon[data-tone="green"] {
+  color: var(--ftux-green);
+  background: rgba(61, 220, 132, 0.22);
+}
+
+.ftux-popup-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+
+.ftux-popup-title {
+  margin: 0;
+  font-size: 19px;
+  line-height: 24px;
+  font-weight: 600;
+}
+
+.ftux-popup-note {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ftux-text-3);
+}
+
+.ftux-icon-btn {
+  position: absolute;
+  top: 14px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--ftux-text-2);
+  background: rgba(255, 255, 255, 0.1);
+  border: 0.5px solid rgba(255, 255, 255, 0.2);
+}
+
+.ftux-icon-btn[data-side="left"] {
+  left: 14px;
+}
+
+.ftux-icon-btn[data-side="right"] {
+  right: 14px;
+}
+
+.ftux-name-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.ftux-name-field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  color: var(--ftux-text);
+}
+
+.ftux-clear {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #0c0c0e;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.ftux-warning {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 17px;
+  color: #f0d99a;
+  background: rgba(245, 193, 66, 0.12);
+  border: 0.5px solid rgba(245, 193, 66, 0.35);
+}
+
+.ftux-warning svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--ftux-yellow);
+}
+
+/* Simulated macOS system sheets. The real ones are drawn by the OS; these
+   stand in until WebAuthn is wired. */
+
+.ftux-sheet {
+  width: min(100%, 380px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 20px 18px;
+  border-radius: 16px;
+  color: var(--ftux-text);
+  background: rgba(44, 44, 48, 0.94);
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.45);
+}
+
+.ftux-sheet-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ftux-sheet-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ftux-text-2);
+}
+
+.ftux-sheet-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 0;
+  margin: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ftux-sheet-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ftux-sheet-option input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+}
+
+.ftux-sheet-option input:checked {
+  background: #0a84ff;
+  border: 5px solid #0a84ff;
+  box-shadow: inset 0 0 0 3px #fff;
+}
+
+.ftux-app-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #f5c142, #3ddc84, #3aa0ff);
+}
+
+.ftux-app-icon[data-app="1password"] {
+  background: #1a73e8;
+}
+
+.ftux-sheet-buttons {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ftux-sheet-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.ftux-sheet-btn[data-default="true"] {
+  background: #0a84ff;
+}
+
+.ftux-touch-id {
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 2px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ftux-text);
+  cursor: pointer;
+}
+
+.ftux-touch-id svg {
+  color: #ff5f57;
+}
+
+.ftux-touch-id[data-busy="true"] svg {
+  animation: ftux-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes ftux-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.ftux-preview-tag {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-family: var(--ftux-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ftux-yellow);
+  background: rgba(245, 193, 66, 0.12);
+  border: 0.5px solid rgba(245, 193, 66, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ftux-spinner,
+  .ftux-touch-id[data-busy="true"] svg {
+    animation: none;
+  }
+
+  .ftux-check,
+  .ftux-switch,
+  .ftux-switch::after,
+  .ftux-disclosure > summary svg {
+    transition: none;
+  }
+}
+
+/* Text fields show focus on their well rather than with an outline. */
+.ftux .ftux-input:focus-visible,
+.ftux .ftux-name-field input:focus-visible {
+  outline: none;
+}
+
+.ftux .ftux-input:focus,
+.ftux .ftux-name-field:focus-within {
+  border-color: rgba(201, 179, 255, 0.6);
+}
+
+.ftux .ftux-select select:focus-visible {
+  outline: none;
+}
