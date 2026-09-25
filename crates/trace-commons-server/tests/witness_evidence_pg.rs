@@ -22,8 +22,8 @@ use trace_commons_server::redaction_witness::verification::{
     WitnessPin, verify_witness_certificate,
 };
 use trace_commons_server::trace_corpus_storage::{
-    TraceCorpusStatus, TraceCorpusStore, TraceSubmissionWrite,
-    TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceCoverage,
+    TraceCorpusStatus, TraceCorpusStore, TraceObjectArtifactKind, TraceObjectRefWrite,
+    TraceSubmissionWrite, TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceCoverage,
 };
 use uuid::Uuid;
 
@@ -64,6 +64,24 @@ fn signed_evidence(
     artifact: &str,
     legacy: bool,
 ) -> (TraceWitnessCertificateEvidenceWrite, Vec<u8>, Vec<u8>) {
+    signed_evidence_at(
+        tenant,
+        submission,
+        class,
+        artifact,
+        legacy,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+fn signed_evidence_at(
+    tenant: &str,
+    submission: Uuid,
+    class: AttestationClass,
+    artifact: &str,
+    legacy: bool,
+    issued: i64,
+) -> (TraceWitnessCertificateEvidenceWrite, Vec<u8>, Vec<u8>) {
     let key = SigningKey::from_slice(&Keccak256::digest(b"z2 evidence test key")).unwrap();
     let point = key.verifying_key().to_encoded_point(false);
     let signer = format!(
@@ -87,7 +105,6 @@ fn signed_evidence(
         )
     };
     let body_digest = hex::encode(Sha256::digest(BODY));
-    let issued = chrono::Utc::now().timestamp();
     let details = CertificateDetails {
         residual_risk_verdict: ResidualPiiRisk::Low,
         redaction_policy_version: "full-pipeline".into(),
@@ -181,12 +198,144 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
     )
     .await
     .expect("exact retry");
+    assert_eq!(
+        db.witness_retry_identity_matches(
+            &tenant_a,
+            submission,
+            Some(&original_cert),
+            Some(&original_sig),
+            BODY,
+        )
+        .await
+        .unwrap(),
+        Some(true),
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(&tenant_a, submission, None, None, BODY)
+            .await
+            .unwrap(),
+        Some(true),
+        "an exact-body receipt read can omit expired witness headers",
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(&tenant_a, submission, Some(&original_cert), None, BODY)
+            .await
+            .unwrap(),
+        Some(false),
+        "a partial offered witness pair cannot claim the old evidence",
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(&tenant_a, submission, None, None, b"changed")
+            .await
+            .unwrap(),
+        Some(false),
+        "even a headerless receipt read must match the original raw body",
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(
+            &tenant_a,
+            submission,
+            Some(&original_cert),
+            Some(&original_sig),
+            b"changed",
+        )
+        .await
+        .unwrap(),
+        Some(false),
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(
+            &tenant_b,
+            submission,
+            Some(&original_cert),
+            Some(&original_sig),
+            BODY,
+        )
+        .await
+        .unwrap(),
+        None,
+    );
     let claim = db
         .get_verified_witness_evidence(&tenant_a, submission, &artifact)
         .await
         .unwrap();
     assert_eq!(claim.class, AttestationClass::ProviderTeeFinalCall);
     assert_eq!(claim.coverage, TraceWitnessEvidenceCoverage::VerifiedV2);
+    let issued = serde_json::from_slice::<serde_json::Value>(&original_cert).unwrap()["timestamp"]
+        .as_i64()
+        .unwrap();
+    let (same_signed_source_new_ciphertext, cert_again, sig_again) = signed_evidence_at(
+        &tenant_a,
+        submission,
+        AttestationClass::ProviderTeeFinalCall,
+        &"d".repeat(64),
+        false,
+        issued,
+    );
+    assert_eq!(cert_again, original_cert);
+    assert_eq!(sig_again, original_sig);
+    db.upsert_trace_submission_with_witness(
+        sample_submission(&tenant_a, submission),
+        Some(same_signed_source_new_ciphertext),
+    )
+    .await
+    .expect("same signed source with new ciphertext digest is a valid retry");
+    assert_eq!(
+        db.get_verified_witness_evidence(&tenant_a, submission, &artifact)
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::ArtifactMismatch,
+    );
+    assert_eq!(
+        db.get_verified_witness_evidence(&tenant_a, submission, &"d".repeat(64))
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::VerifiedV2,
+    );
+    assert_eq!(
+        db.get_current_verified_witness_evidence(&tenant_a, submission)
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::ArtifactMismatch,
+        "without a selected DB object ref there is no current-object claim",
+    );
+    let mut current_object = TraceObjectRefWrite {
+        object_ref_id: Uuid::new_v4(),
+        tenant_id: tenant_a.clone(),
+        submission_id: submission,
+        artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: "test-encrypted".into(),
+        object_key: "first".into(),
+        content_sha256: format!("sha256:{}", "d".repeat(64)),
+        encryption_key_ref: "tenant:test".into(),
+        size_bytes: 10,
+        compression: None,
+        created_by_job_id: None,
+    };
+    db.append_trace_object_ref(current_object.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        db.get_current_verified_witness_evidence(&tenant_a, submission)
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::VerifiedV2,
+    );
+    current_object.object_key = "rescrubbed".into();
+    current_object.content_sha256 = format!("sha256:{}", "f".repeat(64));
+    db.append_trace_object_ref(current_object).await.unwrap();
+    assert_eq!(
+        db.get_current_verified_witness_evidence(&tenant_a, submission)
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::ArtifactMismatch,
+        "rescrubbed current object cannot inherit historical source class",
+    );
     assert_eq!(
         db.get_verified_witness_evidence(&tenant_b, submission, &artifact)
             .await
@@ -233,6 +382,14 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
             .unwrap()
             .coverage,
         TraceWitnessEvidenceCoverage::Inactive
+    );
+    assert_eq!(
+        db.get_current_verified_witness_evidence(&tenant_a, submission)
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::Inactive,
+        "revocation must defeat even a previously matching current-object ref",
     );
 
     for (class, legacy, expected_class, coverage) in [
@@ -316,14 +473,50 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
         .query_one(
             "SELECT c.relrowsecurity, c.relforcerowsecurity,
                 has_table_privilege('trace_witness_evidence_runtime', c.oid, 'SELECT') AS can_read,
-                has_table_privilege('trace_witness_evidence_runtime', c.oid, 'UPDATE') AS can_update
+                has_column_privilege('trace_witness_evidence_runtime', c.oid, 'artifact_sha256', 'UPDATE') AS can_rebind,
+                has_column_privilege('trace_witness_evidence_runtime', c.oid, 'certificate_json', 'UPDATE') AS can_rewrite_certificate
          FROM pg_class c WHERE c.oid = 'trace_witness_certificate_evidence'::regclass",
             &[],
         )
         .await
         .unwrap();
     assert!(row.get::<_, bool>(0) && row.get::<_, bool>(1));
-    assert!(row.get::<_, bool>(2) && !row.get::<_, bool>(3));
+    assert!(row.get::<_, bool>(2) && row.get::<_, bool>(3));
+    assert!(!row.get::<_, bool>(4));
+    let insert_target = Uuid::new_v4();
+    db.upsert_trace_submission(sample_submission(&tenant_a, insert_target))
+        .await
+        .unwrap();
+    let (_, insert_cert, insert_sig) = signed_evidence(
+        &tenant_a,
+        insert_target,
+        AttestationClass::ProviderTeeFinalCall,
+        &artifact,
+        false,
+    );
+    let tx = client.transaction().await.unwrap();
+    tx.batch_execute("SET LOCAL ROLE trace_witness_evidence_runtime")
+        .await
+        .unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_a],
+    )
+    .await
+    .unwrap();
+    let count: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_witness_certificate_evidence WHERE tenant_id=$1",
+            &[&tenant_a],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        count > 0,
+        "restricted role must see its own tenant's evidence"
+    );
+    tx.rollback().await.unwrap();
     let tx = client.transaction().await.unwrap();
     tx.batch_execute("SET LOCAL ROLE trace_witness_evidence_runtime")
         .await
@@ -343,6 +536,29 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
         .unwrap()
         .get(0);
     assert_eq!(count, 0, "tenant C must not see A or B's exact headers");
+    let denied = tx
+        .execute(
+            "INSERT INTO trace_witness_certificate_evidence (
+            tenant_id, submission_id, certificate_json, signature_header, raw_body_sha256,
+            artifact_sha256, certificate_version, inference_class, receipt_signer,
+            receipt_sha256, issued_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,2,'provider_tee_final_call',$7,$8,NOW())",
+            &[
+                &tenant_a,
+                &insert_target,
+                &insert_cert,
+                &insert_sig,
+                &hex::encode(Sha256::digest(BODY)),
+                &artifact,
+                &"b".repeat(64),
+                &"c".repeat(64),
+            ],
+        )
+        .await;
+    assert!(
+        denied.is_err(),
+        "tenant C role cannot insert tenant A evidence"
+    );
     tx.rollback().await.unwrap();
 }
 

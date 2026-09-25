@@ -1320,7 +1320,11 @@ measurement pin while that bypass remains off.
 The server rescrubs a submission after verification. A matching stored-object
 digest links the active rescrubbed artifact to the historical certificate; it
 does not mean the witness signed the rescrubbed bytes. Policy consumers use the
-tenant-scoped evidence read with an active submission and a trusted current
-object digest. Missing evidence, v1, inactive or revoked submissions, and
+tenant-scoped `get_current_verified_witness_evidence` read, which selects the
+current object reference and active submission state in the same database
+transaction without trusting a caller-supplied digest. The object loader must
+verify the selected object's bytes before use. Exact signed-source retries may
+rebind the derived object digest without changing original certificate or body
+evidence. Missing evidence, v1, inactive or revoked submissions, and
 object-digest mismatches do not expose an attested class. File-only ingestion
 has no durable inference-provenance read and makes no such claim.

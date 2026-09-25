@@ -561,7 +561,9 @@ enabling provenance-dependent policy. The pin controls verification even when
 own explicit policy-version allowlist. A half-configured pin refuses ingest
 startup. Apply V76 and grant the ingest database login membership in
 `trace_witness_evidence_runtime` when it is not the migration owner. The table
-uses forced tenant RLS and grants no update privilege to that role.
+uses forced tenant RLS. The runtime role may update only the derived
+`artifact_sha256` link after an exact signed-source retry; it cannot rewrite
+the original certificate, signature, or received-body identity.
 
 For each verified submission, ingest persists the original certificate and
 signature header bytes, raw submitted body SHA-256, certificate issue time,
@@ -577,7 +579,10 @@ model.
 The server rescrubs after verifying the original request body. The resulting
 stored artifact has a separate digest. Evidence tied to that stored object is
 historical proof of the received body; the rescrubbed bytes were not signed by
-the witness. Gate, credit, and export integrations must pass the current
-object's trusted digest to the tenant-scoped read API and use its coverage
-label. An inactive, revoked, or mismatched object cannot receive an attested
-policy class. This release does not assign new scoring or credit weights.
+the witness. Gate, credit, and export integrations use the tenant-scoped
+`get_current_verified_witness_evidence` read, which joins the active submission,
+historical evidence, and selected current object reference in one database
+transaction. The caller does not supply an object digest. The object loader must
+still verify stored bytes against that reference before consuming them. An
+inactive, revoked, or mismatched object cannot receive an attested source
+class. This release does not assign new scoring or credit weights.

@@ -2473,15 +2473,44 @@ pub trait TraceCorpusStore: Send + Sync {
         self.upsert_trace_submission(submission).await
     }
 
-    /// Conservative policy seam for gate, credit and export. The caller must
-    /// supply the digest of the artifact it is evaluating from trusted storage;
-    /// a rescrubbed artifact cannot inherit the source body's signature.
+    /// Low-level diagnostic lookup. Its caller-provided digest is not an
+    /// authorization boundary; policy consumers use the current-object read
+    /// below, which obtains the object reference from the database itself.
     async fn get_verified_witness_evidence(
         &self,
         _tenant_id: &str,
         _submission_id: Uuid,
         _current_artifact_sha256: &str,
     ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Policy read with the current submitted object selected by the database
+    /// in the same tenant transaction as evidence and active submission state.
+    async fn get_current_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Compare an idempotent retry to exact signed-source bytes already stored.
+    /// `None` means no durable evidence exists for this submission; `Some(false)`
+    /// is a conflict. Both witness headers may be omitted for an exact-body
+    /// receipt read, but a partial pair or changed offered evidence conflicts.
+    async fn witness_retry_identity_matches(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _certificate_json: Option<&[u8]>,
+        _signature_header: Option<&[u8]>,
+        _raw_body: &[u8],
+    ) -> Result<Option<bool>, DatabaseError> {
         Err(DatabaseError::Query(
             "WitnessEvidenceStorageUnavailable".into(),
         ))

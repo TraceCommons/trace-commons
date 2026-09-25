@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
@@ -355,6 +356,63 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
             .map(|value| json_array_strings(value, "residual_risk_basis"))
             .transpose()?,
     })
+}
+
+fn witness_claim_from_row(
+    row: Option<Row>,
+    current_artifact_sha256: Option<&str>,
+) -> TraceWitnessEvidenceClaim {
+    use trace_commons_protocol::witness_provenance::AttestationClass;
+    let missing = || TraceWitnessEvidenceClaim {
+        class: AttestationClass::Unattested,
+        coverage: TraceWitnessEvidenceCoverage::Missing,
+        raw_body_sha256: None,
+        receipt_sha256: None,
+    };
+    let Some(row) = row else {
+        return missing();
+    };
+    let Some(version) = row.get::<_, Option<i16>>(4) else {
+        return missing();
+    };
+    let raw_body_sha256: Option<String> = row.get(6);
+    let receipt_sha256: Option<String> = row.get(8);
+    let conservative = |coverage| TraceWitnessEvidenceClaim {
+        class: AttestationClass::Unattested,
+        coverage,
+        raw_body_sha256: raw_body_sha256.clone(),
+        receipt_sha256: receipt_sha256.clone(),
+    };
+    if version == 1 {
+        return conservative(TraceWitnessEvidenceCoverage::LegacyV1);
+    }
+    let class = match row.get::<_, Option<String>>(5).as_deref() {
+        Some("provider_tee_final_call") => AttestationClass::ProviderTeeFinalCall,
+        Some("gateway_final_call") => AttestationClass::GatewayFinalCall,
+        _ => return conservative(TraceWitnessEvidenceCoverage::ExplicitUnattested),
+    };
+    let status: String = row.get(0);
+    let revoked_at: Option<DateTime<Utc>> = row.get(1);
+    let purged_at: Option<DateTime<Utc>> = row.get(2);
+    let expires_at: Option<DateTime<Utc>> = row.get(3);
+    if status != "accepted"
+        || revoked_at.is_some()
+        || purged_at.is_some()
+        || expires_at.is_some_and(|at| at <= Utc::now())
+    {
+        return conservative(TraceWitnessEvidenceCoverage::Inactive);
+    }
+    if current_artifact_sha256.is_none()
+        || row.get::<_, Option<String>>(7).as_deref() != current_artifact_sha256
+    {
+        return conservative(TraceWitnessEvidenceCoverage::ArtifactMismatch);
+    }
+    TraceWitnessEvidenceClaim {
+        class,
+        coverage: TraceWitnessEvidenceCoverage::VerifiedV2,
+        raw_body_sha256,
+        receipt_sha256,
+    }
 }
 
 fn row_to_tenant_policy(row: &Row) -> Result<TraceTenantPolicyRecord, DatabaseError> {
@@ -1707,23 +1765,37 @@ impl TraceCorpusStore for PgBackend {
                         certificate_version, inference_class, bound_model, receipt_signer,
                         receipt_sha256, issued_at
                  FROM trace_witness_certificate_evidence
-                 WHERE tenant_id = $1 AND submission_id = $2",
+                 WHERE tenant_id = $1 AND submission_id = $2
+                 FOR UPDATE",
                     &[&evidence.tenant_id, &evidence.submission_id],
                 )
                 .await
                 .map_err(DatabaseError::Postgres)?;
-            let identical = existing.get::<_, Vec<u8>>(0) == evidence.certificate_json
+            let same_signed_source = existing.get::<_, Vec<u8>>(0) == evidence.certificate_json
                 && existing.get::<_, Vec<u8>>(1) == evidence.signature_header
                 && existing.get::<_, String>(2) == evidence.raw_body_sha256
-                && existing.get::<_, String>(3) == evidence.artifact_sha256
                 && existing.get::<_, i16>(4) == evidence.certificate_version
                 && existing.get::<_, String>(5) == class
                 && existing.get::<_, Option<String>>(6) == evidence.bound_model
                 && existing.get::<_, Option<String>>(7) == evidence.receipt_signer
                 && existing.get::<_, Option<String>>(8) == evidence.receipt_sha256
                 && existing.get::<_, DateTime<Utc>>(9) == evidence.issued_at;
-            if !identical {
+            if !same_signed_source {
                 return Err(DatabaseError::Query("WitnessEvidenceConflict".into()));
+            }
+            if existing.get::<_, String>(3) != evidence.artifact_sha256 {
+                tx.execute(
+                    "UPDATE trace_witness_certificate_evidence
+                     SET artifact_sha256 = $3
+                     WHERE tenant_id = $1 AND submission_id = $2",
+                    &[
+                        &evidence.tenant_id,
+                        &evidence.submission_id,
+                        &evidence.artifact_sha256,
+                    ],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
             }
         }
         tx.commit().await.map_err(DatabaseError::Postgres)?;
@@ -1736,7 +1808,6 @@ impl TraceCorpusStore for PgBackend {
         submission_id: Uuid,
         current_artifact_sha256: &str,
     ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
-        use trace_commons_protocol::witness_provenance::AttestationClass;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
@@ -1753,58 +1824,79 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        let missing = || TraceWitnessEvidenceClaim {
-            class: AttestationClass::Unattested,
-            coverage: TraceWitnessEvidenceCoverage::Missing,
-            raw_body_sha256: None,
-            receipt_sha256: None,
-        };
-        let Some(row) = row else {
-            return Ok(missing());
-        };
-        let Some(version) = row.get::<_, Option<i16>>(4) else {
-            return Ok(missing());
-        };
-        let raw_body_sha256: Option<String> = row.get(6);
-        let receipt_sha256: Option<String> = row.get(8);
-        let conservative = |coverage| TraceWitnessEvidenceClaim {
-            class: AttestationClass::Unattested,
-            coverage,
-            raw_body_sha256: raw_body_sha256.clone(),
-            receipt_sha256: receipt_sha256.clone(),
-        };
-        if version == 1 {
-            return Ok(conservative(TraceWitnessEvidenceCoverage::LegacyV1));
-        }
-        let class = match row.get::<_, Option<String>>(5).as_deref() {
-            Some("provider_tee_final_call") => AttestationClass::ProviderTeeFinalCall,
-            Some("gateway_final_call") => AttestationClass::GatewayFinalCall,
-            _ => {
-                return Ok(conservative(
-                    TraceWitnessEvidenceCoverage::ExplicitUnattested,
-                ));
-            }
-        };
-        let status: String = row.get(0);
-        let revoked_at: Option<DateTime<Utc>> = row.get(1);
-        let purged_at: Option<DateTime<Utc>> = row.get(2);
-        let expires_at: Option<DateTime<Utc>> = row.get(3);
-        if status != "accepted"
-            || revoked_at.is_some()
-            || purged_at.is_some()
-            || expires_at.is_some_and(|at| at <= Utc::now())
-        {
-            return Ok(conservative(TraceWitnessEvidenceCoverage::Inactive));
-        }
-        if row.get::<_, Option<String>>(7).as_deref() != Some(current_artifact_sha256) {
-            return Ok(conservative(TraceWitnessEvidenceCoverage::ArtifactMismatch));
-        }
-        Ok(TraceWitnessEvidenceClaim {
-            class,
-            coverage: TraceWitnessEvidenceCoverage::VerifiedV2,
-            raw_body_sha256,
-            receipt_sha256,
-        })
+        Ok(witness_claim_from_row(row, Some(current_artifact_sha256)))
+    }
+
+    async fn get_current_verified_witness_evidence(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
+                    e.certificate_version, e.inference_class, e.raw_body_sha256,
+                    e.artifact_sha256, e.receipt_sha256,
+                    current_object.content_sha256 AS current_object_sha256
+             FROM trace_submissions s
+             LEFT JOIN trace_witness_certificate_evidence e
+               ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
+             LEFT JOIN LATERAL (
+                 SELECT content_sha256 FROM trace_object_refs o
+                 WHERE o.tenant_id = s.tenant_id AND o.submission_id = s.submission_id
+                   AND o.artifact_kind = 'submitted_envelope'
+                   AND o.invalidated_at IS NULL AND o.deleted_at IS NULL
+                 ORDER BY o.updated_at DESC, o.created_at DESC LIMIT 1
+             ) current_object ON true
+             WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let selected_digest = row
+            .as_ref()
+            .and_then(|r| r.get::<_, Option<String>>(9))
+            .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_string));
+        let claim = witness_claim_from_row(row, selected_digest.as_deref());
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(claim)
+    }
+
+    async fn witness_retry_identity_matches(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        certificate_json: Option<&[u8]>,
+        signature_header: Option<&[u8]>,
+        raw_body: &[u8],
+    ) -> Result<Option<bool>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT certificate_json, signature_header, raw_body_sha256
+                 FROM trace_witness_certificate_evidence
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|stored| {
+            let body_matches = stored.get::<_, String>(2) == hex::encode(Sha256::digest(raw_body));
+            let witness_matches = match (certificate_json, signature_header) {
+                // A receipt read can omit expired/unavailable witness headers.
+                // It makes no new witness claim and cannot change durable evidence.
+                (None, None) => true,
+                (Some(cert), Some(sig)) => {
+                    stored.get::<_, Vec<u8>>(0) == cert && stored.get::<_, Vec<u8>>(1) == sig
+                }
+                _ => false,
+            };
+            body_matches && witness_matches
+        }))
     }
 
     async fn get_trace_submission(

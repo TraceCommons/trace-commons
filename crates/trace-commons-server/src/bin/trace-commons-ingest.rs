@@ -13247,6 +13247,36 @@ fn verified_witness_for_submission(
     }
 }
 
+async fn reject_conflicting_witness_retry(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> ApiResult<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    let result = db
+        .witness_retry_identity_matches(
+            tenant_id,
+            submission_id,
+            headers
+                .get(trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER)
+                .map(HeaderValue::as_bytes),
+            headers
+                .get(trace_commons_server::redaction_witness::request::SIGNATURE_HEADER)
+                .map(HeaderValue::as_bytes),
+            raw_body,
+        )
+        .await
+        .map_err(internal_error)?;
+    if result == Some(false) {
+        return Err(api_error(StatusCode::CONFLICT, "witness evidence conflict"));
+    }
+    Ok(())
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13299,6 +13329,14 @@ async fn submit_trace_handler(
         .as_ref()
         .is_some_and(admission::Attempt::is_completed)
     {
+        reject_conflicting_witness_retry(
+            state.as_ref(),
+            tenant.tenant_id(),
+            envelope.submission_id,
+            &headers,
+            &raw_body,
+        )
+        .await?;
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
             .map_err(internal_error)?
@@ -13339,6 +13377,14 @@ async fn submit_trace_handler(
             if principal_can_remediate_quarantined(tenant.auth(), &existing) {
                 Some(existing)
             } else {
+                reject_conflicting_witness_retry(
+                    state.as_ref(),
+                    tenant.tenant_id(),
+                    envelope.submission_id,
+                    &headers,
+                    &raw_body,
+                )
+                .await?;
                 let gate_decision = gate_credit_decision_for_record(state.as_ref(), &existing)
                     .await
                     .map_err(internal_error)?;

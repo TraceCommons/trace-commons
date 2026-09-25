@@ -47,3 +47,7 @@ END $$;
 GRANT USAGE ON SCHEMA public TO trace_witness_evidence_runtime;
 GRANT SELECT, INSERT ON trace_witness_certificate_evidence
     TO trace_witness_evidence_runtime;
+-- Only the derived selected-object association may move after a retry of the
+-- exact signed source. Certificate/signature/body identity stays immutable.
+GRANT UPDATE (artifact_sha256) ON trace_witness_certificate_evidence
+    TO trace_witness_evidence_runtime;
