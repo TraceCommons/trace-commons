@@ -1444,6 +1444,59 @@ mod tests {
         );
     }
 
+    /// The loop this closes, driven through the watcher.
+    ///
+    /// With token distributions on, the uploader revokes an unattended
+    /// approval with `token-distribution-review-required`, which only a
+    /// person's review of that session can satisfy. The watcher used to
+    /// re-approve it on the next poll without asking why it was revoked, the
+    /// uploader revoked it again, and the session never uploaded.
+    #[tokio::test]
+    async fn a_session_held_for_a_person_is_not_re_approved_on_their_behalf() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+
+        // What `drain_approved` does with the uploader's ApprovalStale.
+        assert!(f.shared.queue.lock().unwrap().revoke_approval(
+            id,
+            crate::daemon::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED
+        ));
+
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Pending, "held, not re-approved");
+        assert!(e.held_for_review());
+    }
+
+    /// The hold is narrow. A revocation the standing opt-in can satisfy is
+    /// still re-applied: re-approving under changed scopes is what arming
+    /// means.
+    #[tokio::test]
+    async fn a_scopes_changed_revocation_is_still_re_approved() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+        assert!(
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .revoke_approval(id, crate::daemon::queue::REASON_SCOPES_CHANGED)
+        );
+
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Approved);
+        assert!(!e.held_for_review());
+    }
+
     #[tokio::test]
     async fn repeated_ticks_do_not_duplicate_an_entry() {
         let f = WatcherFixture::new();

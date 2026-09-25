@@ -406,6 +406,16 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
+    /// Whether this entry is waiting on a person and must not be approved on
+    /// anyone's behalf. See [`REASONS_NEEDING_A_PERSON`].
+    pub fn held_for_review(&self) -> bool {
+        self.state == QueueState::Pending
+            && self
+                .reason_label
+                .as_deref()
+                .is_some_and(|reason| REASONS_NEEDING_A_PERSON.contains(&reason))
+    }
+
     /// Whether a witness certificate is held for the bytes this entry was
     /// pinned to.
     ///
@@ -516,6 +526,26 @@ pub const REASON_TOO_LARGE: &str = "envelope-too-large";
 /// "Ask again" is the whole point, so borrowing the dismissal label would
 /// make the recovery route a lie.
 pub const REASON_PROJECT_IGNORED: &str = "project-ignored";
+
+/// A pending entry revoked because its upload needs a per-session review by
+/// a person: token distributions are on, and they clear only through a
+/// witness review of that one session.
+pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-review-required";
+
+/// Revocation reasons that no unattended re-approval can satisfy.
+///
+/// An entry revoked for one of these is *held for review*: the watcher does
+/// not re-approve it under a standing `auto_upload` opt-in, and a group
+/// approve leaves it out. Before this the watcher re-approved it on the next
+/// poll without asking why it had been revoked, the uploader revoked it
+/// again, and the pair looped forever -- the session never uploaded, and
+/// flipped between Approved and Pending too quickly for the digest to count
+/// it.
+///
+/// Deliberately narrow. A reason belongs here only if re-approving without a
+/// person cannot succeed. `scopes-changed` does not: re-applying the standing
+/// opt-in under the new scopes is exactly what arming means.
+pub const REASONS_NEEDING_A_PERSON: &[&str] = &[REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
@@ -967,6 +997,16 @@ impl Queue {
         scopes: &[String],
         inputs: Option<&str>,
     ) -> bool {
+        // Checked here rather than at each caller: nobody may approve a held
+        // entry on a contributor's behalf, and a check at the call sites is
+        // one a future caller can leave out.
+        if self
+            .entries
+            .iter()
+            .any(|e| e.entry_id == entry_id && e.held_for_review())
+        {
+            return false;
+        }
         if !self.approve(entry_id, scopes, inputs, None, None, None) {
             return false;
         }
@@ -2717,6 +2757,27 @@ mod tests {
         let e = e.expect("entry present");
         assert_eq!(e.state, QueueState::Refused);
         assert_eq!(e.reason_label.as_deref(), Some(REASON_PROJECT_IGNORED));
+    }
+
+    #[test]
+    fn a_held_entry_is_approved_by_a_person_and_never_on_their_behalf() {
+        let mut q = Queue::default();
+        let e = QueueEntry {
+            reason_label: Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string()),
+            ..entry_in("/w/alpha", QueueState::Pending)
+        };
+        let id = e.entry_id;
+        q.push_for_test(e);
+        assert!(q.all()[0].held_for_review());
+
+        assert!(!q.approve_unattended(id, &[], None), "not on their behalf");
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+        assert!(
+            !q.all()[0].held_for_review(),
+            "an approved entry is not held"
+        );
     }
 
     #[test]
