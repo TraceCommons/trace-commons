@@ -22,19 +22,36 @@ public struct ConsentCopy: Decodable, Equatable, Sendable {
     /// applies, because a branch kept in three shells drifts the same way
     /// words do.
     public let notPinnedHelp: String
+    /// What runs on every automatically contributed session, for the Flow 1
+    /// grant screen. Not rendered yet; decoded so this shell has it before
+    /// that screen exists, rather than writing its own.
+    public let autoScrubScope: String
+    /// The limit of both halves of the scrubbing.
+    public let autoScrubLimit: String
+    /// That no one reviews a session before it is sent. The sentence the
+    /// product will most want to soften; this shell never rewrites it.
+    public let autoNoReview: String
 
     enum CodingKeys: String, CodingKey {
         case gateStatement = "gate_statement"
         case readyHelp = "ready_help"
         case notPinnedHelp = "not_pinned_help"
+        case autoScrubScope = "auto_scrub_scope"
+        case autoScrubLimit = "auto_scrub_limit"
+        case autoNoReview = "auto_no_review"
     }
 
     /// The payload fields this shell decodes, by wire name. Compared against
     /// the live export by `TCBridgeTests`.
-    public static let consumedFields = ["gate_statement", "ready_help", "not_pinned_help"]
+    public static let consumedFields = [
+        "gate_statement", "ready_help", "not_pinned_help",
+        "auto_scrub_scope", "auto_scrub_limit", "auto_no_review",
+    ]
 
     /// Every sentence, for the refuse-on-any-empty-field check.
-    public var sentences: [String] { [gateStatement, readyHelp, notPinnedHelp] }
+    public var sentences: [String] {
+        [gateStatement, readyHelp, notPinnedHelp, autoScrubScope, autoScrubLimit, autoNoReview]
+    }
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
     ///

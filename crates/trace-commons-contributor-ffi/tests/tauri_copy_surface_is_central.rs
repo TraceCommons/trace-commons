@@ -104,6 +104,17 @@ fn tauri_commands_project_shared_contributor_copy() {
     assert!(disclosure.contains("privacy_scan_copy::privacy_scan_copy"));
     assert!(disclosure.contains("onboarding_copy::onboarding_copy"));
 
+    // The automatic-contribution sentences come from the consent payload,
+    // field by field, and are never written in the client.
+    let automatic = rust_function(&native_flows, "fn automatic_contribution_copy");
+    assert!(automatic.contains("consent_copy::consent_copy"));
+    for field in ["auto_scrub_scope", "auto_scrub_limit", "auto_no_review"] {
+        assert!(
+            automatic.contains(&format!("copy.{field}")),
+            "Tauri must take `{field}` from the shared consent payload"
+        );
+    }
+
     let witness = rust_function(&native_flows, "fn witness_review_copy");
     assert!(witness.contains("witness_copy::witness_copy"));
     assert!(witness.contains(".review"));
