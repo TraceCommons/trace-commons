@@ -186,7 +186,7 @@ struct RawPolicy {
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum RawPeriod {
-    Lifetime,
+    Lifetime {},
     Fixed { seconds: i64 },
 }
 
@@ -216,7 +216,7 @@ pub fn parse_bounded_policy(
         return Err(PolicyError);
     }
     let period = match raw.period {
-        RawPeriod::Lifetime => PolicyPeriod::Lifetime,
+        RawPeriod::Lifetime {} => PolicyPeriod::Lifetime,
         RawPeriod::Fixed { seconds } if seconds > 0 && seconds.checked_mul(1000).is_some() => {
             PolicyPeriod::Fixed { seconds }
         }

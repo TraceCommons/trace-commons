@@ -102,7 +102,7 @@ impl PgBackend {
         // The row is read from the durable registry, never from its cache.
         let invite = tx
             .query_opt(
-                "SELECT consumed_uses, max_uses FROM onboarding_invite_grants
+                "SELECT consumed_uses, max_uses, tenant_mode, fixed_tenant_id FROM onboarding_invite_grants
                   WHERE invite_subject_hash = $1 AND revoked_at IS NULL FOR UPDATE",
                 &[&invite_hash],
             )
@@ -122,21 +122,39 @@ impl PgBackend {
             )
             .await?
             .get(0);
-        if !live {
+        let tenant_mode: String = invite.get(2);
+        let fixed_tenant: Option<String> = invite.get(3);
+        if !live || (tenant_mode == "fixed" && fixed_tenant.as_deref() != Some(tenant)) {
             return Ok(AccountInviteRedemption::InvalidInvite);
         }
+        let consumed: i32 = invite.get(0);
+        let maximum: i32 = invite.get(1);
+        if consumed >= maximum {
+            let already_redeemed: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_account_invite_grants
+                  WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3)",
+                    &[&tenant, &account, &invite_hash],
+                )
+                .await?
+                .get(0);
+            if !already_redeemed {
+                return Ok(AccountInviteRedemption::InvalidInvite);
+            }
+        }
+        // Validate the presented grant before short-circuiting. An account
+        // already elevated to invited has no further authority to gain, so it
+        // must not consume another cohort's allowance or advance its version.
         let existing = tx
             .query_opt(
-                "SELECT trust_version FROM trace_account_invite_grants
-                  WHERE tenant_id = $1 AND account_id = $2 AND invite_subject_hash = $3",
-                &[&tenant, &account, &invite_hash],
+                "SELECT trust_version FROM trace_account_trust
+                  WHERE tenant_id = $1 AND account_id = $2 AND authority = 'invited'",
+                &[&tenant, &account],
             )
             .await?;
         let version = if let Some(existing) = existing {
             existing.get::<_, i64>(0)
         } else {
-            let consumed: i32 = invite.get(0);
-            let maximum: i32 = invite.get(1);
             if consumed >= maximum {
                 return Ok(AccountInviteRedemption::InvalidInvite);
             }
@@ -177,6 +195,21 @@ impl PgBackend {
                 // grant inserts if the clock crossed expiry during this call.
                 return Ok(AccountInviteRedemption::InvalidInvite);
             }
+            let actor_hash = format!("sha256:{}", hex::encode(Sha256::digest(account.as_bytes())));
+            tx.execute(
+                "INSERT INTO trace_account_audit
+                    (tenant_id, action, actor_ref, outcome, safe_metadata)
+                 VALUES ($1, 'account_invite_redeemed', $2, 'invited', $3)",
+                &[
+                    &tenant,
+                    &actor_hash,
+                    &serde_json::json!({
+                        "invite_subject_hash": invite_hash,
+                        "trust_version": next_version,
+                    }),
+                ],
+            )
+            .await?;
             next_version
         };
         tx.execute(
