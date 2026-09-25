@@ -169,6 +169,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenant_policies",
     "trace_tenant_access_grants",
     "trace_submissions",
+    "trace_witness_certificate_evidence",
     "trace_object_refs",
     "trace_derived_records",
     "trace_audit_events",
@@ -1346,6 +1347,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         74,
         "public_run_function_acl",
         include_str!("../../../../migrations/V74__public_run_function_acl.sql"),
+    ),
+    (
+        76,
+        "trace_witness_certificate_evidence",
+        include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
     ),
 ];
 
@@ -6997,6 +7003,7 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7019,6 +7026,7 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

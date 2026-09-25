@@ -71,11 +71,11 @@ use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
 use trace_commons_server::redaction_witness::config::{
-    WitnessBypassConfig, witness_bypass_config_from_env,
+    WitnessBypassConfig, witness_bypass_config_from_env, witness_capture_pin_from_env,
 };
 use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
-    VerifiedWitnessCertificate, verify_witness_certificate,
+    VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
@@ -1703,6 +1703,7 @@ struct AppState {
     /// verifying against all three keeps a submission out of the hold. It
     /// lifts no quarantine and never means the trace is clean.
     witness_bypass: Option<WitnessBypassConfig>,
+    witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
@@ -3894,6 +3895,8 @@ impl AppState {
         // which is not an acceptance of anything.
         let witness_bypass = witness_bypass_config_from_env()
             .map_err(|err| anyhow::anyhow!("witness bypass configuration refused: {err}"))?;
+        let witness_capture_pin = witness_capture_pin_from_env()
+            .map_err(|err| anyhow::anyhow!("witness capture configuration refused: {err}"))?;
         let admission = admission::config_from_env(
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
@@ -4207,6 +4210,7 @@ impl AppState {
             perplexity_score_driver,
             pii_backstop_driver,
             witness_bypass,
+            witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some(),
             admission,
             benchmark_registry_scheduler,
@@ -13222,7 +13226,10 @@ fn verified_witness_for_submission(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Option<VerifiedWitnessCertificate> {
-    let bypass = state.witness_bypass.as_ref()?;
+    let pin = state
+        .witness_capture_pin
+        .as_ref()
+        .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))?;
     let (certificate, signature) = match witness_headers(headers) {
         Ok(Some(pair)) => pair,
         Ok(None) => return None,
@@ -13231,7 +13238,7 @@ fn verified_witness_for_submission(
             return None;
         }
     };
-    match verify_witness_certificate(certificate, &signature, Some(bypass.pin()), body) {
+    match verify_witness_certificate(certificate, &signature, Some(pin), body) {
         Ok(verified) => Some(verified),
         Err(err) => {
             tracing::debug!(?err, "witness certificate did not verify; holding as usual");
@@ -13534,7 +13541,8 @@ async fn submit_trace_handler(
         };
         if state.require_db_mirror_writes {
             let mirror_result =
-                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
+                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope,
+                    witness.as_ref().map(|verified| (verified, &headers, raw_body.as_ref())))
                     .await;
             if let Err(error) = &mirror_result {
                 tracing::warn!(
@@ -13557,7 +13565,8 @@ async fn submit_trace_handler(
             append_audit_event(&state.root, tenant.tenant_id(), audit_event)
                 .map_err(internal_error)?;
             let mirror_result =
-                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
+                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope,
+                    witness.as_ref().map(|verified| (verified, &headers, raw_body.as_ref())))
                     .await;
             if let Err(error) = &mirror_result {
                 tracing::warn!(
@@ -20361,7 +20370,7 @@ async fn operator_rescrub_quarantined_submission(
 
     if state.require_db_mirror_writes {
         let mirror_result =
-            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope, None).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -20396,7 +20405,7 @@ async fn operator_rescrub_quarantined_submission(
 
     if !state.require_db_mirror_writes {
         let mirror_result =
-            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope, None).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -58854,8 +58863,10 @@ async fn mirror_submission_to_db(
     record: &TraceCommonsSubmissionRecord,
     derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
+    witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
 ) -> anyhow::Result<()> {
-    mirror_submission_to_db_with_options(state, tenant, record, derived_record, envelope, true)
+    mirror_submission_to_db_with_options(state, tenant, record, derived_record, envelope, true,
+        witness_input)
         .await
 }
 
@@ -58866,6 +58877,7 @@ async fn mirror_submission_to_db_with_options(
     derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
     append_submit_audit: bool,
+    witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -58887,11 +58899,23 @@ async fn mirror_submission_to_db_with_options(
         .or_else(|| record.contributor_pseudonym.clone())
         .unwrap_or_else(|| record.auth_principal_ref.clone());
 
-    db.upsert_trace_submission(storage_submission_write_from_record(
+    let witness_evidence = witness_input
+        .map(|(verified, headers, raw_body)| {
+            trace_commons_server::trace_corpus_storage::TraceWitnessCertificateEvidenceWrite::from_verified(
+                &record.tenant_id,
+                record.submission_id,
+                verified,
+                headers,
+                raw_body,
+                content_sha256.strip_prefix("sha256:").unwrap_or(&content_sha256),
+            )
+        })
+        .transpose()?;
+    db.upsert_trace_submission_with_witness(storage_submission_write_from_record(
         record,
         envelope,
         Some(derived_record.canonical_summary_hash.clone()),
-    )?)
+    )?, witness_evidence)
     .await
     .context("failed to mirror trace submission metadata")?;
 
@@ -66787,6 +66811,7 @@ async fn backfill_db_mirror_from_files(
             derived_record,
             &envelope,
             false,
+            None,
         )
         .await
         {

@@ -50,7 +50,8 @@ use crate::trace_corpus_storage::{
     TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
     TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWithdrawalRecord, TraceWorkerKind,
+    TraceWithdrawalRecord, TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim,
+    TraceWitnessEvidenceCoverage, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -1548,6 +1549,22 @@ impl TraceCorpusStore for PgBackend {
         &self,
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        self.upsert_trace_submission_with_witness(submission, None)
+            .await
+    }
+
+    async fn upsert_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        if evidence.as_ref().is_some_and(|e| {
+            e.tenant_id != submission.tenant_id || e.submission_id != submission.submission_id
+        }) {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceSubmissionMismatch".into(),
+            ));
+        }
         self.ensure_trace_tenant(&submission.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
@@ -1654,8 +1671,140 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         let record = row_to_submission(&row)?;
+        if let Some(evidence) = evidence {
+            let class = match evidence.inference_class {
+                trace_commons_protocol::witness_provenance::AttestationClass::Unattested => "unattested",
+                trace_commons_protocol::witness_provenance::AttestationClass::ProviderTeeFinalCall => "provider_tee_final_call",
+                trace_commons_protocol::witness_provenance::AttestationClass::GatewayFinalCall => "gateway_final_call",
+            };
+            tx.execute(
+                "INSERT INTO trace_witness_certificate_evidence (
+                    tenant_id, submission_id, certificate_json, signature_header,
+                    raw_body_sha256, artifact_sha256, certificate_version, inference_class,
+                    bound_model, receipt_signer, receipt_sha256, issued_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+                &[
+                    &evidence.tenant_id,
+                    &evidence.submission_id,
+                    &evidence.certificate_json,
+                    &evidence.signature_header,
+                    &evidence.raw_body_sha256,
+                    &evidence.artifact_sha256,
+                    &evidence.certificate_version,
+                    &class,
+                    &evidence.bound_model,
+                    &evidence.receipt_signer,
+                    &evidence.receipt_sha256,
+                    &evidence.issued_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            let existing = tx
+                .query_one(
+                    "SELECT certificate_json, signature_header, raw_body_sha256, artifact_sha256,
+                        certificate_version, inference_class, bound_model, receipt_signer,
+                        receipt_sha256, issued_at
+                 FROM trace_witness_certificate_evidence
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                    &[&evidence.tenant_id, &evidence.submission_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            let identical = existing.get::<_, Vec<u8>>(0) == evidence.certificate_json
+                && existing.get::<_, Vec<u8>>(1) == evidence.signature_header
+                && existing.get::<_, String>(2) == evidence.raw_body_sha256
+                && existing.get::<_, String>(3) == evidence.artifact_sha256
+                && existing.get::<_, i16>(4) == evidence.certificate_version
+                && existing.get::<_, String>(5) == class
+                && existing.get::<_, Option<String>>(6) == evidence.bound_model
+                && existing.get::<_, Option<String>>(7) == evidence.receipt_signer
+                && existing.get::<_, Option<String>>(8) == evidence.receipt_sha256
+                && existing.get::<_, DateTime<Utc>>(9) == evidence.issued_at;
+            if !identical {
+                return Err(DatabaseError::Query("WitnessEvidenceConflict".into()));
+            }
+        }
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)
+    }
+
+    async fn get_verified_witness_evidence(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        current_artifact_sha256: &str,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        use trace_commons_protocol::witness_provenance::AttestationClass;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
+                    e.certificate_version, e.inference_class, e.raw_body_sha256,
+                    e.artifact_sha256, e.receipt_sha256
+             FROM trace_submissions s
+             LEFT JOIN trace_witness_certificate_evidence e
+               ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
+             WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        let missing = || TraceWitnessEvidenceClaim {
+            class: AttestationClass::Unattested,
+            coverage: TraceWitnessEvidenceCoverage::Missing,
+            raw_body_sha256: None,
+            receipt_sha256: None,
+        };
+        let Some(row) = row else {
+            return Ok(missing());
+        };
+        let Some(version) = row.get::<_, Option<i16>>(4) else {
+            return Ok(missing());
+        };
+        let raw_body_sha256: Option<String> = row.get(6);
+        let receipt_sha256: Option<String> = row.get(8);
+        let conservative = |coverage| TraceWitnessEvidenceClaim {
+            class: AttestationClass::Unattested,
+            coverage,
+            raw_body_sha256: raw_body_sha256.clone(),
+            receipt_sha256: receipt_sha256.clone(),
+        };
+        if version == 1 {
+            return Ok(conservative(TraceWitnessEvidenceCoverage::LegacyV1));
+        }
+        let class = match row.get::<_, Option<String>>(5).as_deref() {
+            Some("provider_tee_final_call") => AttestationClass::ProviderTeeFinalCall,
+            Some("gateway_final_call") => AttestationClass::GatewayFinalCall,
+            _ => {
+                return Ok(conservative(
+                    TraceWitnessEvidenceCoverage::ExplicitUnattested,
+                ));
+            }
+        };
+        let status: String = row.get(0);
+        let revoked_at: Option<DateTime<Utc>> = row.get(1);
+        let purged_at: Option<DateTime<Utc>> = row.get(2);
+        let expires_at: Option<DateTime<Utc>> = row.get(3);
+        if status != "accepted"
+            || revoked_at.is_some()
+            || purged_at.is_some()
+            || expires_at.is_some_and(|at| at <= Utc::now())
+        {
+            return Ok(conservative(TraceWitnessEvidenceCoverage::Inactive));
+        }
+        if row.get::<_, Option<String>>(7).as_deref() != Some(current_artifact_sha256) {
+            return Ok(conservative(TraceWitnessEvidenceCoverage::ArtifactMismatch));
+        }
+        Ok(TraceWitnessEvidenceClaim {
+            class,
+            coverage: TraceWitnessEvidenceCoverage::VerifiedV2,
+            raw_body_sha256,
+            receipt_sha256,
+        })
     }
 
     async fn get_trace_submission(

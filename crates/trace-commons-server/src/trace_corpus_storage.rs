@@ -11,10 +11,122 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use trace_commons_protocol::trace_contribution::ResidualRiskCondition;
+use trace_commons_protocol::witness_provenance::{AttestationClass, InferenceProvenance};
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
+use crate::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+use crate::redaction_witness::verification::VerifiedWitnessCertificate;
+
+/// Private exact-byte evidence. The only constructor requires the completed
+/// signature, freshness, pin and raw-body verification result. The original
+/// headers are compared to that result before they can be persisted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TraceWitnessCertificateEvidenceWrite {
+    pub(crate) tenant_id: String,
+    pub(crate) submission_id: Uuid,
+    pub(crate) certificate_json: Vec<u8>,
+    pub(crate) signature_header: Vec<u8>,
+    pub(crate) raw_body_sha256: String,
+    pub(crate) artifact_sha256: String,
+    pub(crate) certificate_version: i16,
+    pub(crate) inference_class: AttestationClass,
+    pub(crate) bound_model: Option<String>,
+    pub(crate) receipt_signer: Option<String>,
+    pub(crate) receipt_sha256: Option<String>,
+    pub(crate) issued_at: DateTime<Utc>,
+}
+
+impl TraceWitnessCertificateEvidenceWrite {
+    pub fn from_verified(
+        tenant_id: &str,
+        submission_id: Uuid,
+        verified: &VerifiedWitnessCertificate,
+        headers: &axum::http::HeaderMap,
+        raw_body: &[u8],
+        artifact_sha256: &str,
+    ) -> Result<Self, DatabaseError> {
+        let raw_body_sha256 = hex::encode(Sha256::digest(raw_body));
+        if !verified.matches_received_headers(headers)
+            || !verified
+                .redacted_sha256()
+                .eq_ignore_ascii_case(&raw_body_sha256)
+            || artifact_sha256.len() != 64
+            || !artifact_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceBindingMismatch".into(),
+            ));
+        }
+        let issued_at = DateTime::<Utc>::from_timestamp(verified.issued_at_unix_seconds(), 0)
+            .ok_or_else(|| DatabaseError::Query("WitnessEvidenceTimestampInvalid".into()))?;
+        let certificate_json = headers
+            .get(CERTIFICATE_HEADER)
+            .expect("matched verified headers have certificate")
+            .as_bytes()
+            .to_vec();
+        let signature_header = headers
+            .get(SIGNATURE_HEADER)
+            .expect("matched verified headers have signature")
+            .as_bytes()
+            .to_vec();
+        let (inference_class, bound_model, receipt_signer, receipt_sha256) =
+            match verified.inference_provenance() {
+                InferenceProvenance::Unattested => (AttestationClass::Unattested, None, None, None),
+                InferenceProvenance::Attested(call) => (
+                    call.class(),
+                    call.model().map(str::to_string),
+                    Some(call.receipt_signer().to_string()),
+                    Some(call.receipt_sha256().to_string()),
+                ),
+            };
+        Ok(Self {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            certificate_json,
+            signature_header,
+            raw_body_sha256,
+            artifact_sha256: artifact_sha256.to_string(),
+            certificate_version: verified.certificate_version(),
+            inference_class,
+            bound_model,
+            receipt_signer,
+            receipt_sha256,
+            issued_at,
+        })
+    }
+
+    pub fn raw_body_sha256(&self) -> &str {
+        &self.raw_body_sha256
+    }
+
+    pub fn certificate_version(&self) -> i16 {
+        self.certificate_version
+    }
+}
+
+/// A policy-facing read never carries private certificate or signature bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceWitnessEvidenceCoverage {
+    Missing,
+    LegacyV1,
+    ExplicitUnattested,
+    Inactive,
+    ArtifactMismatch,
+    VerifiedV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceWitnessEvidenceClaim {
+    pub class: AttestationClass,
+    pub coverage: TraceWitnessEvidenceCoverage,
+    pub raw_body_sha256: Option<String>,
+    pub receipt_sha256: Option<String>,
+}
 
 fn default_trace_ranking_min_label_source_count() -> u32 {
     1
@@ -2345,6 +2457,35 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError>;
+
+    /// Commit submission metadata and its optional verified witness evidence
+    /// together. Stores lacking this transaction must refuse evidence writes.
+    async fn upsert_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        if evidence.is_some() {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceStorageUnavailable".into(),
+            ));
+        }
+        self.upsert_trace_submission(submission).await
+    }
+
+    /// Conservative policy seam for gate, credit and export. The caller must
+    /// supply the digest of the artifact it is evaluating from trusted storage;
+    /// a rescrubbed artifact cannot inherit the source body's signature.
+    async fn get_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _current_artifact_sha256: &str,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
 
     async fn get_trace_submission(
         &self,

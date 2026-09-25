@@ -1343,3 +1343,23 @@ deploy, and read the manifest back afterwards.
 Note that toggling either flag changes `compose_hash`, and therefore the
 measurement. Re-read the measurement after any such change before publishing
 it.
+
+## V2 final-call inference provenance
+
+The v2 certificate signs a closed `inference_provenance` field. An attested
+value covers the final declared inference call's original request and response
+body bytes plus the verified, pinned receipt signer. `provider_tee_final_call`
+and `gateway_final_call` remain distinct; an unbound model stays absent.
+`unattested` is an explicit v2 value. Legacy v1 remains verifiable for its old
+redaction claim, but carries no inference provenance. No certificate establishes
+whole-session authenticity, receipt replay prevention, or model correctness.
+
+Roll out the witness and its new measured image first, re-pin its signing
+address and measurement, then update clients that forward the exact response
+body and certificate/signature headers, and finally update ingest with V76
+storage. Keep the ingest PII-backstop bypass decision separate: a configured
+verification pin can capture provenance while the bypass stays off. A
+rescrubbed server artifact is linked to the original certificate but is not
+itself signed by that certificate. See
+[`docs/operator/attested-inference.md`](../../docs/operator/attested-inference.md)
+for the storage read contract and operator checks.
