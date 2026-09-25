@@ -2517,7 +2517,9 @@ fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
         Some(grant) => serde_json::json!({
             "granted": true,
             "granted_at": grant.granted_at,
-            "on_disk_recorded": grant.on_disk.is_some(),
+            // A source recorded, not every source: each is recorded on its
+            // own first successful discovery under the grant.
+            "on_disk_recorded": !grant.recorded_sources.is_empty(),
         }),
         None => serde_json::json!({ "granted": false }),
     }

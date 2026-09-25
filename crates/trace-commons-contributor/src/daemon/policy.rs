@@ -185,22 +185,38 @@ pub struct ProjectPolicy {
     /// it. See [`AutomaticGrant`].
     #[serde(default)]
     pub automatic_grant: Option<AutomaticGrant>,
+    /// Every session path any automatic grant found on disk, per source, when
+    /// it recorded that source. Kept after the grant is withdrawn or voided,
+    /// because a project the grant armed stays armed and must still never
+    /// send what predates the grant. Cleared only with the rest of this file,
+    /// at logout.
+    #[serde(default)]
+    pub sessions_on_disk_at_grant: BTreeSet<String>,
+    /// Projects an automatic grant armed, as opposed to the contributor.
+    /// A session in `sessions_on_disk_at_grant` is never approved unattended
+    /// in one of these, whichever project it reads as now. Leaves the set when
+    /// the contributor sets the project's mode themselves.
+    #[serde(default)]
+    pub armed_by_grant: BTreeSet<String>,
 }
 
 /// The Flow 1 grant: "contribute automatically from projects discovered from
 /// now on".
 ///
-/// **It arms nothing already on disk** (the spec's logout rule). What was on
-/// disk is recorded by the first full watcher pass after the grant, as the
-/// set of session paths and the set of projects they belong to, and until
-/// then nothing is armed by it at all. A project with any session in that
-/// record keeps asking, and so does every session in it; only a project
-/// first seen afterwards, with no policy entry of its own, is armed.
+/// **It arms nothing already on disk** (the spec's logout rule), recorded
+/// **per source**. A source's first successful discovery under the grant
+/// records its sessions and their projects and arms nothing from that pass;
+/// until a source is recorded none of its sessions arms anything. So a
+/// harness connected after the grant -- the normal onboarding order -- or
+/// pointed at another root, or whose discovery failed on the first pass, is
+/// recorded before it can arm, rather than having its history counted as
+/// new. A project with a session on disk in any recorded source keeps asking,
+/// and a session on disk at a grant is never approved unattended in a project
+/// the grant armed (`sessions_on_disk_at_grant`, `armed_by_grant`).
 ///
-/// That is what makes a re-grant after logout safe. Logout wipes this file,
-/// so a Never folder's decision and the grant's own record go with it; the
-/// re-grant records what is on disk again, and every folder that already
-/// had sessions -- the Never folder included -- asks rather than being
+/// That is also what makes a re-grant after logout safe. Logout wipes this
+/// file, a Never folder's decision with it; the re-grant records the disk
+/// again, so every folder that already had sessions asks rather than being
 /// counted as new.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutomaticGrant {
@@ -209,16 +225,12 @@ pub struct AutomaticGrant {
     /// itself as well as the projects it armed (R6), or it would go on arming
     /// new projects under terms nobody agreed to.
     pub granted_under: super::grant_terms::GrantTerms,
-    /// `None` until the first full pass after the grant has recorded it.
+    /// Sources recorded so far, by name and root.
     #[serde(default)]
-    pub on_disk: Option<OnDiskAtGrant>,
-}
-
-/// What was on disk when an [`AutomaticGrant`] was given.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OnDiskAtGrant {
-    pub sessions: BTreeSet<String>,
-    pub projects: BTreeSet<String>,
+    pub recorded_sources: BTreeSet<String>,
+    /// Projects with a session on disk in a recorded source.
+    #[serde(default)]
+    pub projects_on_disk: BTreeSet<String>,
 }
 
 impl Default for ProjectPolicy {
@@ -235,39 +247,59 @@ impl ProjectPolicy {
             contributed: BTreeMap::new(),
             arming_declined_at: BTreeMap::new(),
             automatic_grant: None,
+            sessions_on_disk_at_grant: BTreeSet::new(),
+            armed_by_grant: BTreeSet::new(),
         }
     }
 
     /// Give the Flow 1 grant, replacing any earlier one. Arms nothing until
-    /// what is on disk has been recorded.
+    /// a source has been recorded, and then nothing from that source's
+    /// recording pass.
     pub fn grant_automatic(&mut self, now: DateTime<Utc>, terms: super::grant_terms::GrantTerms) {
         self.automatic_grant = Some(AutomaticGrant {
             granted_at: now,
             granted_under: terms,
-            on_disk: None,
+            recorded_sources: BTreeSet::new(),
+            projects_on_disk: BTreeSet::new(),
         });
     }
 
     /// Withdraw the Flow 1 grant. Projects it already armed keep their own
-    /// entries; withdrawing a project is `set_mode`. Returns whether one was
-    /// in force.
+    /// entries, and still never send what was on disk at it; withdrawing a
+    /// project is `set_mode`. Returns whether one was in force.
     pub fn withdraw_automatic_grant(&mut self) -> bool {
         self.automatic_grant.take().is_some()
     }
 
-    /// Whether a grant is waiting for its record of what is on disk.
-    pub fn needs_on_disk_record(&self) -> bool {
-        self.automatic_grant
-            .as_ref()
-            .is_some_and(|g| g.on_disk.is_none())
+    /// Which grant is in force, by the instant it was given. A pass reads
+    /// this before it lists anything, and records only for the grant it
+    /// read, so a grant given while discovery was walking the disk is
+    /// recorded from a later listing, not that one.
+    pub fn grant_id(&self) -> Option<DateTime<Utc>> {
+        self.automatic_grant.as_ref().map(|g| g.granted_at)
     }
 
-    /// Record what was on disk for the grant waiting on it. A no-op when no
-    /// grant is waiting, so a record cannot replace an earlier one.
-    pub fn record_on_disk(&mut self, on_disk: OnDiskAtGrant) -> bool {
+    /// Whether `source_key` still has to be recorded for the grant `grant`.
+    pub fn needs_source_record(&self, grant: DateTime<Utc>, source_key: &str) -> bool {
+        self.automatic_grant
+            .as_ref()
+            .is_some_and(|g| g.granted_at == grant && !g.recorded_sources.contains(source_key))
+    }
+
+    /// Record what one source had on disk, for the grant `grant` only, and
+    /// only once per source. Returns whether anything was recorded.
+    pub fn record_source(
+        &mut self,
+        grant: DateTime<Utc>,
+        source_key: &str,
+        sessions: BTreeSet<String>,
+        projects: BTreeSet<String>,
+    ) -> bool {
         match self.automatic_grant.as_mut() {
-            Some(grant) if grant.on_disk.is_none() => {
-                grant.on_disk = Some(on_disk);
+            Some(g) if g.granted_at == grant && !g.recorded_sources.contains(source_key) => {
+                g.recorded_sources.insert(source_key.to_string());
+                g.projects_on_disk.extend(projects);
+                self.sessions_on_disk_at_grant.extend(sessions);
                 true
             }
             _ => false,
@@ -275,21 +307,39 @@ impl ProjectPolicy {
     }
 
     /// Whether the grant arms `project_key` on seeing the session at
-    /// `session_path`: a grant with its on-disk record, a real project with
-    /// no entry of its own, and neither the project nor the session on disk
-    /// when the grant was given.
-    pub fn arms_by_default(&self, project_key: &str, session_path: &str) -> bool {
-        let Some(on_disk) = self
-            .automatic_grant
-            .as_ref()
-            .and_then(|g| g.on_disk.as_ref())
-        else {
+    /// `session_path` from `source_key`: a recorded source, a real project
+    /// with no entry of its own, and neither the project nor the session on
+    /// disk when the grant recorded it.
+    pub fn arms_by_default(&self, project_key: &str, session_path: &str, source_key: &str) -> bool {
+        let Some(grant) = self.automatic_grant.as_ref() else {
             return false;
         };
-        project_key != UNKNOWN_PROJECT_KEY
+        grant.recorded_sources.contains(source_key)
+            && project_key != UNKNOWN_PROJECT_KEY
             && !self.projects.contains_key(project_key)
-            && !on_disk.projects.contains(project_key)
-            && !on_disk.sessions.contains(session_path)
+            && !grant.projects_on_disk.contains(project_key)
+            && !self.sessions_on_disk_at_grant.contains(session_path)
+    }
+
+    /// Whether the session at `session_path` must not be approved unattended
+    /// in `project_key`: the grant armed the project, and the session was on
+    /// disk at a grant. It waits for the contributor instead.
+    pub fn holds_back_unattended(&self, project_key: &str, session_path: &str) -> bool {
+        self.armed_by_grant.contains(project_key)
+            && self.sessions_on_disk_at_grant.contains(session_path)
+    }
+
+    /// Arm `project_key` on the grant's behalf.
+    pub fn arm_by_grant(
+        &mut self,
+        project_key: &str,
+        now: DateTime<Utc>,
+        terms: super::grant_terms::GrantTerms,
+    ) -> Result<()> {
+        self.set_mode(project_key, ProjectMode::AutoUpload, now)?;
+        self.record_grant_terms(project_key, terms);
+        self.armed_by_grant.insert(project_key.to_string());
+        Ok(())
     }
 
     /// Count one successful upload against its project.
@@ -550,6 +600,9 @@ impl ProjectPolicy {
                  per-project opt-in can apply to them"
             );
         }
+        // A mode set here is the contributor's own decision about the project,
+        // not the grant's; `arm_by_grant` re-adds it after calling this.
+        self.armed_by_grant.remove(project_key);
         let shown = display_path_for_key(project_key);
         self.projects.insert(
             project_key.to_string(),
@@ -1173,21 +1226,22 @@ mod tests {
         super::super::grant_terms::GrantTerms::current(&cfg, None, false, "none")
     }
 
+    const SRC: &str = "claude-code /root";
+
+    fn set_of(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
     fn granted_with_disk(projects: &[&str], sessions: &[&str]) -> ProjectPolicy {
         let mut p = ProjectPolicy::new();
-        p.grant_automatic(
-            t("2026-09-25T00:00:00Z"),
-            grant_terms_with("https://ingest.invalid"),
-        );
-        assert!(p.record_on_disk(OnDiskAtGrant {
-            projects: projects.iter().map(|s| s.to_string()).collect(),
-            sessions: sessions.iter().map(|s| s.to_string()).collect(),
-        }));
+        let at = t("2026-09-25T00:00:00Z");
+        p.grant_automatic(at, grant_terms_with("https://ingest.invalid"));
+        assert!(p.record_source(at, SRC, set_of(sessions), set_of(projects)));
         p
     }
 
     /// The grant arms only a real project, new since the grant, with no
-    /// entry of its own -- and never before the disk is recorded.
+    /// entry of its own, from a source it has recorded.
     #[test]
     fn the_grant_arms_only_a_project_new_since_it() {
         let mut p = ProjectPolicy::new();
@@ -1196,37 +1250,97 @@ mod tests {
             grant_terms_with("https://ingest.invalid"),
         );
         assert!(
-            !p.arms_by_default("/w/new", "/s/new.jsonl"),
-            "not before the record"
+            !p.arms_by_default("/w/new", "/s/new.jsonl", SRC),
+            "not before a record"
         );
 
         let mut p = granted_with_disk(&["/w/old"], &["/s/live.jsonl"]);
-        assert!(p.arms_by_default("/w/new", "/s/new.jsonl"));
+        assert!(p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
         assert!(
-            !p.arms_by_default("/w/old", "/s/other.jsonl"),
+            !p.arms_by_default("/w/old", "/s/other.jsonl", SRC),
             "on disk at the grant"
         );
         assert!(
-            !p.arms_by_default("/w/moved", "/s/live.jsonl"),
+            !p.arms_by_default("/w/moved", "/s/live.jsonl", SRC),
             "a session on disk at the grant, whatever project it reads as now"
         );
-        assert!(!p.arms_by_default(UNKNOWN_PROJECT_KEY, "/s/u.jsonl"));
+        assert!(!p.arms_by_default(UNKNOWN_PROJECT_KEY, "/s/u.jsonl", SRC));
         p.set_mode("/w/new", ProjectMode::Ignore, t("2026-09-25T01:00:00Z"))
             .unwrap();
         assert!(
-            !p.arms_by_default("/w/new", "/s/new2.jsonl"),
+            !p.arms_by_default("/w/new", "/s/new2.jsonl", SRC),
             "its own entry wins"
         );
     }
 
-    /// What was on disk is recorded once per grant; a later pass cannot
-    /// replace it with a record that no longer contains what was there.
+    /// Per source: a source the grant has not recorded -- connected after
+    /// it, re-rooted, or whose discovery failed -- arms nothing, and
+    /// recording it later puts its history on disk rather than counting it
+    /// as new.
     #[test]
-    fn the_on_disk_record_is_written_once_per_grant() {
-        let mut p = granted_with_disk(&["/w/old"], &[]);
-        assert!(!p.record_on_disk(OnDiskAtGrant::default()));
-        assert!(!p.arms_by_default("/w/old", "/s/x.jsonl"));
-        assert!(!ProjectPolicy::new().record_on_disk(OnDiskAtGrant::default()));
+    fn a_source_arms_nothing_until_it_is_recorded() {
+        let mut p = granted_with_disk(&[], &[]);
+        let at = p.grant_id().unwrap();
+        let late = "codex /other-root";
+        assert!(!p.arms_by_default("/w/codex-proj", "/c/old.jsonl", late));
+        assert!(p.needs_source_record(at, late));
+        assert!(p.record_source(
+            at,
+            late,
+            set_of(&["/c/old.jsonl"]),
+            set_of(&["/w/codex-proj"])
+        ));
+        assert!(!p.needs_source_record(at, late));
+        assert!(
+            !p.arms_by_default("/w/codex-proj", "/c/new.jsonl", late),
+            "its project was on disk"
+        );
+        assert!(
+            !p.record_source(at, late, BTreeSet::new(), BTreeSet::new()),
+            "once per source"
+        );
+    }
+
+    /// A pass records only for the grant it read before listing anything, so
+    /// a grant given during discovery is not recorded from that listing.
+    #[test]
+    fn a_record_is_only_for_the_grant_read_before_the_listing() {
+        let mut p = granted_with_disk(&[], &[]);
+        let earlier = p.grant_id().unwrap();
+        p.grant_automatic(
+            t("2026-09-25T02:00:00Z"),
+            grant_terms_with("https://ingest.invalid"),
+        );
+        assert!(!p.needs_source_record(earlier, SRC));
+        assert!(!p.record_source(earlier, SRC, BTreeSet::new(), BTreeSet::new()));
+        assert!(
+            !p.arms_by_default("/w/new", "/s/new.jsonl", SRC),
+            "the new grant is unrecorded"
+        );
+    }
+
+    /// A session on disk at the grant is never approved unattended in a
+    /// project the grant armed, even after the grant is withdrawn; a project
+    /// the contributor armed themselves is theirs to send.
+    #[test]
+    fn a_pre_grant_session_is_held_back_in_a_project_the_grant_armed() {
+        let mut p = granted_with_disk(&["/w/old"], &["/s/pre.jsonl"]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.arm_by_grant("/w/new", now, grant_terms_with("https://ingest.invalid"))
+            .unwrap();
+        assert!(p.holds_back_unattended("/w/new", "/s/pre.jsonl"));
+        assert!(!p.holds_back_unattended("/w/new", "/s/fresh.jsonl"));
+        assert!(p.withdraw_automatic_grant());
+        assert!(
+            p.holds_back_unattended("/w/new", "/s/pre.jsonl"),
+            "outlives the grant"
+        );
+
+        p.set_mode("/w/new", ProjectMode::AutoUpload, now).unwrap();
+        assert!(
+            !p.holds_back_unattended("/w/new", "/s/pre.jsonl"),
+            "armed by the contributor"
+        );
     }
 
     /// R6 reaches the grant itself: widened terms void it, so it cannot go
@@ -1246,7 +1360,7 @@ mod tests {
         );
         assert!(moved.changed());
         assert!(p.automatic_grant.is_none());
-        assert!(!p.arms_by_default("/w/new", "/s/new.jsonl"));
+        assert!(!p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
     }
 
     fn armed_policy() -> ProjectPolicy {

@@ -1568,14 +1568,25 @@ when there is no config to record terms from, and with `audit-write-failed`
 when its `automatic-granted` entry cannot be written, in which case nothing is
 granted. A second call replaces the first, and records what is on disk again.
 
-**It arms nothing already on disk.** The first full watcher pass after the
-grant records every session on disk and the project each belongs to, and
-`on_disk_recorded` turns true. Until then the grant arms nothing. After it, a
-session in a project that is not in that record, has no policy entry of its
-own, and is not the unknown-project bucket arms its project: an explicit
-`auto_upload` entry, the terms it is granted under, and an `armed-by-default`
-audit row written first. A project with any session on disk at the grant keeps
-asking, for its new sessions too.
+**It arms nothing already on disk**, recorded per source. Each source's first
+successful discovery in a full watcher pass under the grant records every
+session in it and the project each belongs to, and arms nothing from them. So
+a harness connected after the grant, one pointed at another root, and one whose
+discovery failed on an earlier pass are all recorded before they can arm
+anything; until a source is recorded, none of its sessions arms a project.
+`on_disk_recorded` is true once any source has been recorded. A grant given
+while a pass is listing the disk is recorded by a later pass.
+
+After a source is recorded, a session from it in a project that no recorded
+source had on disk, with no policy entry of its own, and not the
+unknown-project bucket, arms its project: an explicit `auto_upload` entry, the
+terms it is granted under, and an `armed-by-default` audit row written first.
+A project with any session on disk at the grant keeps asking, for its new
+sessions too. And a session that was on disk at the grant is **never approved
+unattended in a project the grant armed**, whichever project it reads as now;
+it waits for the contributor. That holds after the grant is withdrawn or
+voided, and stops holding for a project once the contributor sets its mode
+themselves.
 
 That is what makes a re-grant after logout safe. Logout wipes the policy,
 including a project set to `ignore`; a re-grant records the disk again, so that
