@@ -41,12 +41,14 @@ CREATE TRIGGER trace_submission_session_immutable
 
 ALTER TABLE trace_source_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_source_sessions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_source_sessions;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_source_sessions
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE trace_submission_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_submission_sessions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_submission_sessions;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_submission_sessions
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
