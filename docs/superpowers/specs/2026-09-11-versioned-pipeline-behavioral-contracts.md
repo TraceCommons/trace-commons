@@ -445,6 +445,8 @@ stores no object.
 - An instrument identifier MUST keep one descriptor. A change of kind,
   network, contract, or `decimals` MUST use a new instrument identifier.
 - A manifest that repeats an instrument MUST fail to load.
+- Loading a manifest MUST apply every check that the bundle identifier
+  applies. A manifest with a malformed descriptor MUST fail to load.
 - The bundle identifier MUST be the canonical hash of the manifest, including
   the pinned descriptors.
 - The bundle hash MUST exclude mutable external state.
@@ -453,7 +455,8 @@ stores no object.
 **Acceptance:** Use golden manifests. Change each identity input separately.
 Change the format version and each policy identifier. Change each descriptor
 field. Confirm the expected bundle identifiers. Load a manifest that repeats
-an instrument key, and a manifest with no instruments. Both must fail.
+an instrument key, a manifest with no instruments, and a manifest with a
+malformed descriptor. Each must fail.
 
 ### BND-002: Package integrity
 

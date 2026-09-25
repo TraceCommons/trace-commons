@@ -585,6 +585,7 @@ impl InstrumentDescriptor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "BundleManifestFields")]
 pub struct BundleManifest {
     pub format_version: u32,
     pub admission: PolicyRef,
@@ -593,8 +594,39 @@ pub struct BundleManifest {
     pub settle: PolicyRef,
     /// The instruments that this bundle can award, each pinned to one
     /// descriptor. An award for an instrument that is not here is refused.
-    #[serde(deserialize_with = "unique_instruments")]
     pub instruments: BTreeMap<InstrumentId, InstrumentDescriptor>,
+}
+
+/// Loaded `BundleManifest` fields. Loading applies every check that
+/// `bundle_id` applies, so a reader that uses `instrument` or
+/// `require_pinned` without the bundle identifier still gets only valid
+/// descriptors.
+#[derive(Deserialize)]
+struct BundleManifestFields {
+    format_version: u32,
+    admission: PolicyRef,
+    review: PolicyRef,
+    score: PolicyRef,
+    settle: PolicyRef,
+    #[serde(deserialize_with = "unique_instruments")]
+    instruments: BTreeMap<InstrumentId, InstrumentDescriptor>,
+}
+
+impl TryFrom<BundleManifestFields> for BundleManifest {
+    type Error = ContractError;
+
+    fn try_from(fields: BundleManifestFields) -> Result<Self, Self::Error> {
+        let manifest = Self {
+            format_version: fields.format_version,
+            admission: fields.admission,
+            review: fields.review,
+            score: fields.score,
+            settle: fields.settle,
+            instruments: fields.instruments,
+        };
+        manifest.canonical_bytes()?;
+        Ok(manifest)
+    }
 }
 
 /// Loads the pinned instruments and refuses a repeated instrument. A plain
@@ -3829,6 +3861,68 @@ mod tests {
         );
         assert_ne!(repeated, text);
         assert!(from_str::<BundleManifest>(&repeated).is_err());
+    }
+
+    #[test]
+    fn manifest_loading_repeats_the_bundle_identity_checks() {
+        use serde_json::{Value, from_value, json, to_value};
+
+        let stored = to_value(golden_manifest()).unwrap();
+        assert_eq!(
+            from_value::<BundleManifest>(stored.clone()).unwrap(),
+            golden_manifest()
+        );
+
+        let refused: [(fn(&mut Value), ContractError); 7] = [
+            (
+                |manifest| {
+                    manifest["instruments"]["trace_credit"] = json!({
+                        "kind": "erc20",
+                        "network": "0",
+                        "contract": "NOPE",
+                        "decimals": 200,
+                    })
+                },
+                ContractError::InvalidInstrumentDescriptor,
+            ),
+            (
+                |manifest| manifest["instruments"]["bat"]["network"] = json!("0"),
+                ContractError::InvalidInstrumentDescriptor,
+            ),
+            (
+                |manifest| {
+                    manifest["instruments"]["trace_credit"] = json!({
+                        "kind": "erc20",
+                        "network": "1",
+                        "contract": "0x0d8775f648430679a709e98d2b0cb6250d2887ef",
+                        "decimals": 6,
+                    })
+                },
+                ContractError::TraceCreditKind,
+            ),
+            (
+                |manifest| manifest["instruments"]["trace_credit"]["decimals"] = json!(18),
+                ContractError::TraceCreditDecimals,
+            ),
+            (
+                |manifest| manifest["format_version"] = json!(2),
+                ContractError::UnsupportedManifestVersion,
+            ),
+            (
+                |manifest| manifest["score"]["policy_id"] = json!(""),
+                ContractError::MissingPolicyIdentity,
+            ),
+            (
+                |manifest| manifest["score"]["projection_ids"] = json!(["p", "p"]),
+                ContractError::DuplicatePolicyListEntry,
+            ),
+        ];
+        for (change, expected) in refused {
+            let mut manifest = stored.clone();
+            change(&mut manifest);
+            let error = from_value::<BundleManifest>(manifest).unwrap_err();
+            assert_eq!(error.to_string(), expected.to_string());
+        }
     }
 
     #[test]

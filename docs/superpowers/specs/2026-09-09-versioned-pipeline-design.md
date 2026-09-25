@@ -289,7 +289,10 @@ canonical manifest bytes, so they are part of the bundle identifier.
 
 The `trace_credit` descriptor must pin a `nep141` token with 6 decimals. A
 manifest that repeats an instrument, or that has no `instruments` field, fails
-to load.
+to load. Loading a manifest applies every check that the bundle identifier
+applies, so a manifest with a malformed descriptor also fails to load. A
+reader that uses a loaded manifest's descriptors without its bundle identifier
+gets only valid descriptors.
 
 An award for an instrument that the bound bundle does not pin is refused. The
 runner checks Score's awards with `BundleManifest::require_pinned` before the
