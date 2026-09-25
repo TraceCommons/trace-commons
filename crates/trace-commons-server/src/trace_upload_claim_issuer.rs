@@ -2049,7 +2049,9 @@ impl TraceUploadClaimIssuerState {
             })?;
             // The cache answers first for latency; only used to short-circuit
             // an obviously-unknown code before paying for the database
-            // round trip below.
+            // round trip below. A use in the separate ingest process may leave
+            // this entry cached, but onboard_device_key's final transaction
+            // still enforces the durable global use counter.
             match registry.lookup(&subject_hash) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
