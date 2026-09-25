@@ -17,7 +17,9 @@ use serde_json::json;
 
 use super::audit::{self, AuditEntry};
 use super::health::LABEL_NEAR_AI_NOTICE_PENDING;
-use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
+use super::ipc::{
+    DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, EVENT_QUEUE_CHANGED, Request, Response,
+};
 use crate::commands::{EnrollOutcome, enroll_core};
 use crate::consent::{VALID_SCOPES, validate_scopes};
 
@@ -234,7 +236,30 @@ pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Req
                 .lock()
                 .expect("health lock")
                 .resolve(LABEL_NEAR_AI_NOTICE_PENDING);
-            Response::ok(req.id, json!({ "acknowledged": true }))
+            // Every session refused while the notice was outstanding was
+            // refused for timing, not for anything about the session, and
+            // nothing else will ever move it again -- so re-offer them. The
+            // acknowledgment is the event the refusal was waiting for.
+            let reoffered = {
+                let mut queue = shared.queue.lock().expect("queue lock");
+                let moved = queue.reoffer_refused_for_reason(LABEL_NEAR_AI_NOTICE_PENDING);
+                if moved > 0 {
+                    if let Err(e) = queue.save(&shared.store) {
+                        // The acknowledgment itself stands; it is already
+                        // audited and on disk. The re-offer is held in memory
+                        // and persists with the next save.
+                        tracing::warn!(error = %e, "could not persist re-offered entries");
+                    }
+                }
+                moved
+            };
+            if reoffered > 0 {
+                shared.publish(EVENT_QUEUE_CHANGED, json!({}));
+            }
+            Response::ok(
+                req.id,
+                json!({ "acknowledged": true, "reoffered": reoffered }),
+            )
         }
         Err(_e) => Response::err(req.id, ERR_UNAVAILABLE, "notice-write-failed"),
     }
@@ -439,6 +464,68 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(s.store.near_ai_notice_shown());
         assert!(s.health.lock().unwrap().ok());
+    }
+
+    /// Sessions refused while the notice was outstanding come back once it
+    /// is acknowledged.
+    ///
+    /// Before this they were lost: `Refused`, which nothing moves, and the
+    /// watcher does not re-offer a session whose file has not changed. A
+    /// refusal for any other reason is about the session and is left alone.
+    #[test]
+    fn acknowledging_the_notice_re_offers_the_sessions_it_had_blocked() {
+        let s = shared();
+        let blocked = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        {
+            let mut q = s.queue.lock().unwrap();
+            for (id, hash) in [(blocked, "sha256:blocked"), (other, "sha256:other")] {
+                q.upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id: id,
+                        session_hash: hash.to_string(),
+                        approved_scopes: Some(vec!["debugging_evaluation".to_string()]),
+                        ..Default::default()
+                    },
+                    100,
+                )
+                .unwrap();
+            }
+            q.set_state(
+                blocked,
+                crate::daemon::queue::QueueState::Refused,
+                Some(LABEL_NEAR_AI_NOTICE_PENDING.to_string()),
+            );
+            q.set_state(
+                other,
+                crate::daemon::queue::QueueState::Refused,
+                Some("secret-leak-detected".to_string()),
+            );
+        }
+        let mut events = s.events.subscribe();
+
+        let r =
+            handle_acknowledge_near_ai_notice(&s, &req("acknowledge_near_ai_notice", json!({})));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.as_ref().unwrap()["reoffered"], 1);
+
+        let q = s.queue.lock().unwrap();
+        let back = q.all().iter().find(|e| e.entry_id == blocked).unwrap();
+        assert_eq!(back.state, crate::daemon::queue::QueueState::Pending);
+        assert_eq!(
+            back.reason_label, None,
+            "the gate is open; the label may not say otherwise"
+        );
+        assert_eq!(
+            back.approved_scopes, None,
+            "an approval given before the notice is asked for again, not carried over"
+        );
+        let untouched = q.all().iter().find(|e| e.entry_id == other).unwrap();
+        assert_eq!(untouched.state, crate::daemon::queue::QueueState::Refused);
+        drop(q);
+
+        let published = events.try_recv().expect("a queue-changed event");
+        assert_eq!(published.event, EVENT_QUEUE_CHANGED);
     }
 
     fn enrolled_shared() -> DaemonShared {

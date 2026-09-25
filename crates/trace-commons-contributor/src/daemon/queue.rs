@@ -856,6 +856,42 @@ impl Queue {
         retracted
     }
 
+    /// Re-offer every entry refused for `reason_label`, returning how many
+    /// moved.
+    ///
+    /// For a refusal that says nothing about the session itself -- a gate
+    /// that was closed at the moment of the send and has since been opened.
+    /// Such an entry is stuck otherwise: it is `Refused`, nothing moves a
+    /// refused entry, and the watcher does not re-offer a session whose file
+    /// has not changed. So the send is lost, although the only thing wrong
+    /// with it was timing.
+    ///
+    /// The entry goes back to `Pending`, not `Approved`, with every term of
+    /// its old approval cleared -- the same reset `revoke_approval` does.
+    /// The approval was given before the gate it depended on had been
+    /// satisfied, so it is asked for again rather than carried over. In an
+    /// `auto_upload` folder the watcher re-approves it on its next pass; in
+    /// any other folder the contributor decides again.
+    pub fn reoffer_refused_for_reason(&mut self, reason_label: &str) -> usize {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.state == QueueState::Refused && e.reason_label.as_deref() == Some(reason_label)
+            })
+            .map(|e| e.entry_id)
+            .collect();
+        for id in &ids {
+            self.revoke_approval(*id, reason_label);
+            if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == *id) {
+                // A fresh offer, not one that still names the gate: the gate
+                // is open now, and a label saying otherwise would be false.
+                e.reason_label = None;
+            }
+        }
+        ids.len()
+    }
+
     /// Drop every `project-ignored` refusal belonging to `project_key`,
     /// returning how many went. The inverse of
     /// `refuse_pending_for_project`, and the thing that makes "You can undo
@@ -2717,6 +2753,45 @@ mod tests {
         let e = e.expect("entry present");
         assert_eq!(e.state, QueueState::Refused);
         assert_eq!(e.reason_label.as_deref(), Some(REASON_PROJECT_IGNORED));
+    }
+
+    #[test]
+    fn a_refusal_for_a_since_opened_gate_is_re_offered_and_no_other_is() {
+        let mut q = Queue::default();
+        let gated = QueueEntry {
+            approved_unattended: true,
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        let gated_id = gated.entry_id;
+        q.push_for_test(gated);
+        q.push_for_test(QueueEntry {
+            reason_label: Some("secret-leak-detected".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        });
+        q.push_for_test(QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Uploaded)
+        });
+
+        assert_eq!(q.reoffer_refused_for_reason("gate-closed"), 1);
+
+        let e = q.all().iter().find(|e| e.entry_id == gated_id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(e.reason_label, None);
+        assert!(
+            !e.approved_unattended,
+            "the old approval's terms are cleared"
+        );
+        let states: Vec<_> = q.all().iter().map(|e| e.state).collect();
+        assert!(
+            states.contains(&QueueState::Refused),
+            "another reason is left alone"
+        );
+        assert!(
+            states.contains(&QueueState::Uploaded),
+            "only Refused entries move"
+        );
     }
 
     #[test]
