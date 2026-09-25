@@ -209,3 +209,42 @@ GRANT EXECUTE ON FUNCTION trace_account_admission_live_device(TEXT,UUID,TEXT),
     trace_account_admission_active_grant(TEXT,UUID),
     trace_record_account_trust_fact(TEXT,UUID,TEXT,UUID) TO trace_account_admission_runtime;
 REVOKE trace_account_admission_guard FROM CURRENT_USER;
+
+-- A cutover must not strand an already authorized V59 submission after its
+-- lease is released or expires. Reuse that ledger's original authority and
+-- charge rules; never create a second account-ledger row for the same UUID.
+-- The guard has tenant RLS and only the legacy table privileges from V59.
+GRANT trace_admission_guard TO CURRENT_USER;
+GRANT CREATE ON SCHEMA public TO trace_admission_guard;
+CREATE OR REPLACE FUNCTION trace_resume_legacy_admission(
+    p_tenant TEXT, p_anchor TEXT, p_submission UUID, p_body TEXT,
+    p_lease UUID, p_lease_seconds BIGINT
+) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+DECLARE prior public.trace_admission_submissions%ROWTYPE;
+    attempt_limit BIGINT; account_limit BIGINT; global_limit BIGINT;
+BEGIN
+    IF p_tenant IS DISTINCT FROM public.trace_current_tenant_id()
+       OR p_anchor !~ '^[0-9a-f]{64}$' OR p_body !~ '^[0-9a-f]{64}$'
+       OR p_lease_seconds < 1 OR p_lease_seconds > 86400 THEN RETURN 'refused'; END IF;
+    SELECT * INTO prior FROM public.trace_admission_submissions
+      WHERE tenant_id=p_tenant AND submission_id=p_submission;
+    IF NOT FOUND THEN RETURN 'refused'; END IF;
+    IF prior.anchor_hash<>p_anchor OR prior.body_hash<>p_body THEN RETURN 'conflict'; END IF;
+    SELECT a.attempt_limit,a.cost_limit INTO attempt_limit,account_limit
+      FROM public.trace_admission_accounts a
+      WHERE a.tenant_id=p_tenant AND a.anchor_hash=p_anchor;
+    IF NOT FOUND THEN RETURN 'refused'; END IF;
+    SELECT g.cost_limit INTO global_limit FROM public.trace_admission_global_budget g
+      WHERE g.singleton=TRUE;
+    IF NOT FOUND THEN RETURN 'refused'; END IF;
+    RETURN public.trace_reserve_admission(p_tenant,p_anchor,p_submission,p_body,
+      prior.receipt_hash,prior.challenge_hash,attempt_limit,account_limit,
+      global_limit,prior.last_cost_bound,p_lease,p_lease_seconds);
+END $$;
+ALTER FUNCTION trace_resume_legacy_admission(TEXT,TEXT,UUID,TEXT,UUID,BIGINT)
+    OWNER TO trace_admission_guard;
+REVOKE CREATE ON SCHEMA public FROM trace_admission_guard;
+REVOKE ALL ON FUNCTION trace_resume_legacy_admission(TEXT,TEXT,UUID,TEXT,UUID,BIGINT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION trace_resume_legacy_admission(TEXT,TEXT,UUID,TEXT,UUID,BIGINT)
+    TO trace_account_admission_runtime;
+REVOKE trace_admission_guard FROM CURRENT_USER;

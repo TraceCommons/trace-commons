@@ -365,6 +365,100 @@ async fn account_admission_atomicity_replay_and_revocation() {
         Some(TrustFactOutcome::EvaluatedNotAccepted),
         "declined/quarantined work gets no positive outcome"
     );
+
+    // Cutover recovery stays on V59's original authority. Released work had
+    // refunded its bound; a crashed processing lease retains its old charge.
+    let legacy_anchor = anchor.strip_prefix("sha256:").unwrap();
+    let legacy_submission = Uuid::new_v4();
+    let legacy_body = "b".repeat(64);
+    admin.execute("INSERT INTO trace_admission_global_budget(singleton,cost_limit,cost_bound_used) VALUES(TRUE,100,0)", &[]).await.unwrap();
+    admin.execute("INSERT INTO trace_admission_accounts(tenant_id,anchor_hash,attempt_limit,cost_limit) VALUES($1,$2,10,100)", &[&tenant,&legacy_anchor]).await.unwrap();
+    admin.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','released',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&legacy_submission,&legacy_anchor,&legacy_body,&Uuid::new_v4()]).await.unwrap();
+    let first_legacy_lease = Uuid::new_v4();
+    assert_eq!(
+        restarted
+            .resume_legacy_admission(
+                &tenant,
+                legacy_anchor,
+                legacy_submission,
+                &legacy_body,
+                first_legacy_lease,
+                60
+            )
+            .await
+            .unwrap(),
+        D::Reserved,
+        "released legacy reservation is reclaimable without account authority"
+    );
+    assert_eq!(
+        restarted
+            .resume_legacy_admission(
+                &tenant,
+                legacy_anchor,
+                legacy_submission,
+                &legacy_body,
+                Uuid::new_v4(),
+                60
+            )
+            .await
+            .unwrap(),
+        D::Busy,
+        "unexpired legacy lease is not stolen"
+    );
+    assert_eq!(
+        restarted
+            .resume_legacy_admission(
+                &tenant,
+                legacy_anchor,
+                legacy_submission,
+                &"c".repeat(64),
+                Uuid::new_v4(),
+                60
+            )
+            .await
+            .unwrap(),
+        D::Conflict,
+        "the old UUID never changes exact-body identity"
+    );
+    let charged_once: i64 = admin
+        .query_one(
+            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(charged_once, 10);
+    admin.execute("UPDATE trace_admission_submissions SET status='processing',ever_processed=TRUE,lease_expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&legacy_submission]).await.unwrap();
+    assert_eq!(
+        restarted
+            .resume_legacy_admission(
+                &tenant,
+                legacy_anchor,
+                legacy_submission,
+                &legacy_body,
+                Uuid::new_v4(),
+                60
+            )
+            .await
+            .unwrap(),
+        D::Reserved,
+        "expired processing lease is retried under V59 while old charge remains"
+    );
+    let charged_twice: i64 = admin
+        .query_one(
+            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(charged_twice, 20, "one bound per actual processing attempt");
+    let account_rows: i64 = admin.query_one("SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&legacy_submission]).await.unwrap().get(0);
+    assert_eq!(
+        account_rows, 0,
+        "legacy retry cannot create a second authority"
+    );
 }
 
 #[tokio::test]

@@ -295,6 +295,17 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
+    async fn resume_legacy_admission(
+        &self,
+        _tenant: &str,
+        _anchor: &str,
+        _submission: uuid::Uuid,
+        _body_hash: &str,
+        _lease: uuid::Uuid,
+        _lease_seconds: i64,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
     async fn acquire_admission_processing_lock(
         &self,
         _tenant: &str,

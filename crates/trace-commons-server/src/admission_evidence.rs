@@ -541,6 +541,25 @@ pub fn verify_admission_evidence(
     Ok(())
 }
 
+/// A previously admitted row already bound the challenge and receipt. A
+/// cutover retry may repeat its signed evidence after first-use expiry; this
+/// verifies the signature and shape only. Callers must compare every stored
+/// identity binding before resuming the old ledger.
+pub fn verify_stored_admission_signature(
+    evidence: &AdmissionEvidence,
+    signature: &str,
+    witness_pin: &WitnessPin,
+) -> Result<(), AdmissionEvidenceError> {
+    let bytes = evidence
+        .signing_bytes()
+        .map_err(|_| AdmissionEvidenceError)?;
+    if witness_pin.verifies_detached(&bytes, signature) {
+        Ok(())
+    } else {
+        Err(AdmissionEvidenceError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -104,6 +104,8 @@ pub struct LegacyAdmissionRecord {
     pub anchor_hash: String,
     pub body_hash: String,
     pub status: String,
+    pub receipt_hash: Option<String>,
+    pub challenge_hash: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionDecision {
@@ -161,13 +163,55 @@ impl PgBackend {
             .await
             .map_err(|_| database_refused())?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let row = tx.query_opt("SELECT anchor_hash,body_hash,status FROM trace_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&submission]).await.map_err(|_|database_refused())?;
+        let row = tx.query_opt("SELECT anchor_hash,body_hash,status,receipt_hash,challenge_hash FROM trace_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&submission]).await.map_err(|_|database_refused())?;
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(row.map(|row| LegacyAdmissionRecord {
             anchor_hash: row.get(0),
             body_hash: row.get(1),
             status: row.get(2),
+            receipt_hash: row.get(3),
+            challenge_hash: row.get(4),
         }))
+    }
+    pub async fn resume_legacy_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: Uuid,
+        body_hash: &str,
+        lease: Uuid,
+        lease_seconds: i64,
+    ) -> Result<AdmissionDecision, DatabaseError> {
+        let mut client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx
+            .query_one(
+                "SELECT trace_resume_legacy_admission($1,$2,$3,$4,$5,$6)",
+                &[
+                    &tenant,
+                    &anchor,
+                    &submission,
+                    &body_hash,
+                    &lease,
+                    &lease_seconds,
+                ],
+            )
+            .await
+            .map_err(|_| database_refused())?;
+        let decision = match row.get::<_, &str>(0) {
+            "reserved" => AdmissionDecision::Reserved,
+            "completed" => AdmissionDecision::Completed,
+            "busy" => AdmissionDecision::Busy,
+            "budget_exhausted" | "window_exhausted" => AdmissionDecision::Exhausted,
+            "conflict" => AdmissionDecision::Conflict,
+            _ => AdmissionDecision::Refused,
+        };
+        tx.commit().await.map_err(|_| database_refused())?;
+        Ok(decision)
     }
     /// Advisory only. The submit transaction repeats every identity and budget
     /// check; this read never promises a processing lease.

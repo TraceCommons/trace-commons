@@ -9,7 +9,9 @@ use trace_commons_protocol::admission::{
 use trace_commons_server::account_trust::{
     BoundedPolicy, TrustAccount, parse_bounded_policy, resolve_contribution_account,
 };
-use trace_commons_server::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
+use trace_commons_server::admission_evidence::{
+    AdmissionProviderTrust, verify_admission_evidence, verify_stored_admission_signature,
+};
 use trace_commons_server::admission_ledger::{
     AccountAdmissionReservation, AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard,
     AdmissionReservation,
@@ -465,20 +467,99 @@ async fn reserve_account(
                 AdmissionRefusal::IdentityConflict.label(),
             ));
         }
-        if legacy.status != "completed" {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                AdmissionRefusal::InProgress.label(),
-            ));
+        if legacy.status == "completed" {
+            // The submit handler still checks receipt ownership.
+            return Ok(Attempt {
+                tenant_id: tenant.tenant_id().into(),
+                submission_id: submission,
+                lease_id: Uuid::new_v4(),
+                _guard: guard,
+                processing: false,
+                completed: true,
+                account: None,
+                invited: false,
+            });
         }
-        // The submit handler still checks receipt ownership.
+        // A replay uses the original V59 authority. Offered evidence cannot
+        // replace that authority: verify its original signed binding without
+        // imposing the now-expired first-use time window. A headerless replay
+        // derives no new proof and is bound by the stored anchor/body instead.
+        if evidence_plan(headers) == EvidencePlan::Verify {
+            let read = |name: &str| -> ApiResult<&str> {
+                let values = headers.get_all(name);
+                if values.iter().count() != 1 {
+                    return Err(denied());
+                }
+                let value = values
+                    .iter()
+                    .next()
+                    .ok_or_else(denied)?
+                    .to_str()
+                    .map_err(|_| denied())?;
+                if value.len() > 8192 {
+                    return Err(denied());
+                }
+                Ok(value)
+            };
+            let evidence: AdmissionEvidence =
+                serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
+            let pin = state
+                .witness_capture_pin
+                .as_ref()
+                .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))
+                .ok_or_else(denied)?;
+            verify_stored_admission_signature(&evidence, read(SIGNATURE_HEADER)?, pin)
+                .map_err(|_| denied())?;
+            if evidence.account_anchor_sha256 != legacy_anchor
+                || legacy.receipt_hash.as_deref() != Some(evidence.receipt_sha256.as_str())
+                || legacy.challenge_hash.as_deref() != Some(evidence.challenge_sha256.as_str())
+                || evidence.artifact_sha256 != hash_hex(body)
+            {
+                return Err(denied());
+            }
+        }
+        let lease = Uuid::new_v4();
+        let decision = db
+            .resume_legacy_admission(
+                tenant.tenant_id(),
+                &legacy_anchor,
+                submission,
+                &hash_hex(body),
+                lease,
+                config.lease_seconds,
+            )
+            .await
+            .map_err(|_| denied())?;
+        let completed = match decision {
+            AdmissionDecision::Reserved => false,
+            AdmissionDecision::Completed => true,
+            AdmissionDecision::Busy => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    AdmissionRefusal::InProgress.label(),
+                ));
+            }
+            AdmissionDecision::Conflict => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    AdmissionRefusal::IdentityConflict.label(),
+                ));
+            }
+            AdmissionDecision::Exhausted => {
+                return Err(api_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    AdmissionRefusal::LimitReached.label(),
+                ));
+            }
+            AdmissionDecision::Refused => return Err(denied()),
+        };
         return Ok(Attempt {
             tenant_id: tenant.tenant_id().into(),
             submission_id: submission,
-            lease_id: Uuid::new_v4(),
+            lease_id: lease,
             _guard: guard,
             processing: false,
-            completed: true,
+            completed,
             account: None,
             invited: false,
         });

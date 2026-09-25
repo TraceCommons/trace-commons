@@ -110,6 +110,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     client.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='admission_ingest_runtime') THEN CREATE ROLE admission_ingest_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
       GRANT USAGE ON SCHEMA public TO admission_ingest_runtime;
       GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO admission_ingest_runtime;
+      GRANT trace_account_admission_runtime TO admission_ingest_runtime;
       REVOKE ALL ON trace_admission_receipts,trace_admission_global_budget FROM admission_ingest_runtime;
       GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO admission_ingest_runtime;
       GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),trace_transition_admission(TEXT,UUID,UUID,TEXT) TO admission_ingest_runtime;").await.unwrap();
@@ -379,6 +380,12 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             ..Default::default()
         },
     );
+    raw.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     const METADATA_SENTINEL: &str = "witness-sentinel@example.com";
     raw.conversation_id = Some(METADATA_SENTINEL.into());
     raw.ironclaw
@@ -552,6 +559,116 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         account_rows, 0,
         "legacy retry and conflict never reserve account budget"
     );
+    let admitted: TraceContributionEnvelope =
+        serde_json::from_slice(&response.envelope_bytes).unwrap();
+    // Simulate a process crash after the trace receipt landed but before V59
+    // marked its lease completed. The old charge stays; retrying with the
+    // original signed headers acquires a new V59 lease, never account debt.
+    client.execute("UPDATE trace_admission_submissions SET status='processing',lease_expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&admitted.submission_id]).await.unwrap();
+    let mut changed_signature = headers.clone();
+    changed_signature.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        HeaderValue::from_static("invalid-replay-signature"),
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            response.envelope_bytes.clone(),
+            changed_signature
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "an offered changed replay signature cannot replace stored authority"
+    );
+    let resumed = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            response.envelope_bytes.clone(),
+            headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        accepted, resumed,
+        "expired legacy lease resumes with original headers"
+    );
+    let legacy_charge_after_expiry: i64 = client
+        .query_one(
+            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        legacy_charge_after_expiry, 20,
+        "V59 retains the crashed processing charge"
+    );
+
+    let mut released = sample_envelope().await;
+    make_metadata_only_low_risk(&mut released);
+    released.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
+    let released_body = serde_json::to_vec(&released).unwrap();
+    let released_hash = hash_hex(&released_body);
+    client.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','reserved',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&released.submission_id,&anchor,&released_hash,&Uuid::new_v4()]).await.unwrap();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            released_body.clone(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "a live legacy lease remains busy after cutover"
+    );
+    client.execute("UPDATE trace_admission_submissions SET status='released' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&released.submission_id]).await.unwrap();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            released_body.clone(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "released legacy reservation is reclaimable under the old ledger"
+    );
+    let total_legacy_charge: i64 = client
+        .query_one(
+            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        total_legacy_charge, 30,
+        "released retry contributes one new bound"
+    );
+    let account_rows: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        account_rows, 0,
+        "no legacy recovery creates account authority"
+    );
     Arc::make_mut(&mut state).account_admission = None;
     let artifact: TraceContributionEnvelope =
         serde_json::from_slice(&response.envelope_bytes).unwrap();
@@ -654,8 +771,16 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         )
         .await
         .unwrap();
-    assert_eq!(row.get::<_, i64>(0), 0);
-    assert_eq!(row.get::<_, i64>(1), 10);
+    assert_eq!(
+        row.get::<_, i64>(0),
+        1,
+        "released window recovery consumes one trial attempt"
+    );
+    assert_eq!(
+        row.get::<_, i64>(1),
+        30,
+        "original, crashed retry and released retry each retain their correct bound"
+    );
     assert!(
         !db.lookup_completed_submission_admission(
             &tenant,

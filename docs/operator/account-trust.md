@@ -44,6 +44,17 @@ allowance exhaustion returns HTTP 429 with `account_limit_reached`; a live
 device or account revocation returns 403, and in-progress and body-conflict
 retries remain distinct 409 responses.
 
+Submission UUIDs already present in the V59 evidence ledger stay on that
+ledger after cutover. Exact completed retries read the old receipt without a
+new debit. A released or expired lease for the same authenticated account,
+anchor, and exact body resumes under V59's stored receipt/challenge, limits,
+and cost bound; a live lease returns 409. An expired processing attempt keeps
+its prior charge when it reserves another attempt. No account-ledger row is
+created for that UUID. A recovery may omit expired first-use evidence; if it
+offers admission evidence, its signature and stored binding must match.
+Partial or altered offered evidence is refused. Recovery never treats a new
+proof as a new authority.
+
 Before enabling, record read-only counts of legacy invite tenants, wallet
 accounts, NEAR AI accounts, ambiguous links, and unlinked devices. Those counts
 are **unknown** until measured on the target deployment. Verify control of

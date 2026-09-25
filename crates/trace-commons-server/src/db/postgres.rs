@@ -1389,6 +1389,19 @@ impl Database for PgBackend {
     ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
         PgBackend::legacy_admission_record(self, tenant, submission).await
     }
+    async fn resume_legacy_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: Uuid,
+        body_hash: &str,
+        lease: Uuid,
+        lease_seconds: i64,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        PgBackend::resume_legacy_admission(
+            self, tenant, anchor, submission, body_hash, lease, lease_seconds,
+        ).await
+    }
     async fn reserve_account_admission(
         &self,
         request: &crate::admission_ledger::AccountAdmissionReservation,
