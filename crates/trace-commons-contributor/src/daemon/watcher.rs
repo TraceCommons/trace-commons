@@ -83,12 +83,18 @@ pub struct TickReport {
     /// is how far today's behaviour is from what the gate will allow; see
     /// `automatic_gate`.
     pub gate_would_refuse: usize,
-    /// Sessions in armed folders that an enforced gate held waiting this
-    /// pass instead of approving. A level rather than an event: an entry the
-    /// gate holds is counted again on every pass that sees it, so this is
-    /// how much armed work is waiting on the gate now. Always zero while the
-    /// gate is unenforced. See `automatic_gate`.
-    pub gate_blocked: usize,
+    /// Sessions in armed folders that an enforced gate is holding waiting
+    /// instead of approving. A level rather than an event: an entry the gate
+    /// holds is counted again on every pass that sees it, so this is how
+    /// much armed work is waiting on the gate now.
+    ///
+    /// `None` on a scoped pass. That pass visits only the sessions some
+    /// paths resolved to, so its count says nothing about the rest of the
+    /// corpus; reporting it as a level would drop to zero on every unrelated
+    /// file change while work is still held. Only a full pass measures it,
+    /// the same rule `finish_pass` applies to retracting health conditions.
+    /// `Some(0)` while the gate is unenforced. See `automatic_gate`.
+    pub gate_blocked: Option<usize>,
     /// The subset of `unloadable` the source declined by name over its own
     /// byte budget, rather than failed to read. See
     /// `source::SessionTooLarge` for why the two are counted apart.
@@ -178,7 +184,7 @@ fn tick_over(
     }
 
     let report = finish_pass(shared, out, true)?;
-    report_gate(&ctx.gate, &report);
+    report_gate(shared, &ctx.gate, &report);
     Ok(report)
 }
 
@@ -263,7 +269,7 @@ fn tick_over_paths(
     }
 
     let report = finish_pass(shared, out, false)?;
-    report_gate(&ctx.gate, &report);
+    report_gate(shared, &ctx.gate, &report);
     Ok(report)
 }
 
@@ -354,6 +360,10 @@ struct PassOutcome {
     /// condition it is testing rather than as a count.
     too_large: bool,
     unsupported_export_version: bool,
+    /// Sessions the gate held this pass. Kept out of `report` until the
+    /// epilogue knows whether the pass was exhaustive; see
+    /// `TickReport::gate_blocked`.
+    gate_blocked: usize,
 }
 
 /// Everything one session costs: observe, evaluate, ask the queue, and load
@@ -499,7 +509,7 @@ fn visit_session(
         // Through the automatic-contribution gate, like every other approval
         // made on the contributor's behalf. See `automatic_gate`.
         if mode == ProjectMode::AutoUpload && state == QueueState::Pending && ctx.gate.blocks() {
-            out.report.gate_blocked += 1;
+            out.gate_blocked += 1;
         } else if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
@@ -756,7 +766,7 @@ fn visit_session(
                 } else {
                     out.report.queued += 1;
                     if gate_held {
-                        out.report.gate_blocked += 1;
+                        out.gate_blocked += 1;
                     }
                 }
                 // A new entry passed the capacity check: there is
@@ -805,7 +815,7 @@ fn visit_session(
                         .get(entry_id)
                         .is_some_and(|e| e.state == QueueState::Pending)
                 {
-                    out.report.gate_blocked += 1;
+                    out.gate_blocked += 1;
                 }
                 // This path returns Ok without checking capacity, so
                 // it does not prove space is available. Do not
@@ -819,18 +829,32 @@ fn visit_session(
     }
 }
 
-/// Say what the gate refused, or would have refused, once per pass.
+/// Say what the gate refused, or would have refused.
 ///
-/// Only on a pass where it mattered, so a daemon with nothing armed logs
-/// nothing. The reasons are labels, never paths or content.
-fn report_gate(gate: &super::automatic_gate::GateVerdict, report: &TickReport) {
+/// Only when it mattered, so a daemon with nothing armed logs nothing. What
+/// the gate holds is a level, so it is logged when a full pass finds it
+/// changed rather than on every poll: one session held for a day would
+/// otherwise log the same line every poll interval. The reasons are labels,
+/// never paths or content.
+fn report_gate(
+    shared: &DaemonShared,
+    gate: &super::automatic_gate::GateVerdict,
+    report: &TickReport,
+) {
     let reasons: Vec<&str> = gate.unmet.iter().map(|u| u.reason).collect();
-    if report.gate_blocked > 0 {
-        tracing::info!(
-            held = report.gate_blocked,
-            unmet = ?reasons,
-            "the automatic-contribution gate is holding sessions in armed folders for the contributor"
-        );
+    if let Some(held) = report.gate_blocked {
+        let before = shared
+            .gate_held_logged
+            .swap(held, std::sync::atomic::Ordering::Relaxed);
+        if held != before && held > 0 {
+            tracing::info!(
+                held,
+                unmet = ?reasons,
+                "the automatic-contribution gate is holding sessions in armed folders for the contributor"
+            );
+        } else if held != before {
+            tracing::info!("the automatic-contribution gate is no longer holding any sessions");
+        }
     }
     if report.gate_would_refuse > 0 {
         tracing::info!(
@@ -849,11 +873,13 @@ fn report_gate(gate: &super::automatic_gate::GateVerdict, report: &TickReport) {
 /// file, and the publish is a wake-up for every subscribed shell.
 fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
     let PassOutcome {
-        report,
+        mut report,
         mut changed,
         too_large,
         unsupported_export_version,
+        gate_blocked,
     } = out;
+    report.gate_blocked = exhaustive.then_some(gate_blocked);
 
     // Retract the unreadable-session flag only from a pass that asked every
     // source what it has and found nothing it could not read. A scoped pass
@@ -1547,7 +1573,7 @@ mod tests {
 
         assert_eq!(report.auto_ready, 1, "{report:?}");
         assert_eq!(report.gate_would_refuse, 1, "{report:?}");
-        assert_eq!(report.gate_blocked, 0, "unenforced, it holds nothing");
+        assert_eq!(report.gate_blocked, Some(0), "unenforced, it holds nothing");
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Approved);
     }
@@ -1570,11 +1596,36 @@ mod tests {
         assert_eq!(first.auto_ready, 0, "{first:?}");
         assert_eq!(again.auto_ready, 0, "{again:?}");
         // Not silently: each pass counts what the gate is holding.
-        assert_eq!(first.gate_blocked, 1, "{first:?}");
-        assert_eq!(again.gate_blocked, 1, "{again:?}");
+        assert_eq!(first.gate_blocked, Some(1), "{first:?}");
+        assert_eq!(again.gate_blocked, Some(1), "{again:?}");
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Pending, "waits for the contributor");
         assert!(!e.approved_unattended);
+    }
+
+    /// What the gate holds is a level only a full pass can measure. A scoped
+    /// pass over an unrelated session must not report the held work as
+    /// gone, or a health condition read from it would clear on every file
+    /// change while the session is still waiting.
+    #[tokio::test]
+    async fn only_a_full_pass_reports_what_the_gate_is_holding() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let full = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let unrelated = f.write_session("other", "22222222-2222-2222-2222-222222222222", 0);
+        let (l, d) = (loads(), loads());
+        let scoped = f.settle_paths(
+            Utc::now() + chrono::Duration::hours(31),
+            &l,
+            &d,
+            std::slice::from_ref(&unrelated),
+        );
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(full.gate_blocked, Some(1), "{full:?}");
+        assert_eq!(scoped.gate_blocked, None, "{scoped:?}");
     }
 
     #[tokio::test]
