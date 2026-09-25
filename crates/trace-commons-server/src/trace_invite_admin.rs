@@ -210,7 +210,16 @@ async fn create_invite_handler(
         &request.fixed_tenant_id,
         &request.tenant_template_id,
     ) {
-        ("fixed", Some(t), None) => (InviteTenantMode::Fixed, Some(t.clone()), None),
+        ("fixed", Some(t), None) => {
+            let normalized = t.trim();
+            if normalized.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "InviteFixedTenantMalformed" })),
+                );
+            }
+            (InviteTenantMode::Fixed, Some(normalized.to_string()), None)
+        }
         ("derived", None, Some(t)) => (InviteTenantMode::Derived, None, Some(t.clone())),
         _ => {
             return (
@@ -677,6 +686,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invite_fixed_tenant_reserved_is_refused_without_database_access() {
+        let state = test_invite_admin_state_without_database().await;
+        let token = state.test_admin_token();
+        let app = invite_admin_router(state.inner);
+
+        for tenant_id in [
+            "near-abc",
+            "nearai-abc",
+            "NeAr-Ai!",
+            "NEARAI-",
+            " near-abc",
+            "\tnearai-abc ",
+            " NeAr-Ai! ",
+        ] {
+            let body = serde_json::json!({
+                "tenant_mode": "fixed",
+                "fixed_tenant_id": tenant_id,
+            })
+            .to_string();
+            let response = app
+                .clone()
+                .oneshot(route_request(
+                    "POST",
+                    "/v1/admin/invites",
+                    Some(&body),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{tenant_id:?}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({ "error": "InviteFixedTenantReserved" }),
+                "{tenant_id:?}"
+            );
+        }
+
+        for tenant_id in ["", "   ", "\t\n"] {
+            let body = serde_json::json!({
+                "tenant_mode": "fixed",
+                "fixed_tenant_id": tenant_id,
+            })
+            .to_string();
+            let response = app
+                .clone()
+                .oneshot(route_request(
+                    "POST",
+                    "/v1/admin/invites",
+                    Some(&body),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({ "error": "InviteFixedTenantMalformed" })
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn invite_fixed_tenant_reserved_is_refused_before_any_write() {
         let Some(state) = test_invite_admin_state().await else {
             eprintln!("skipping: no test database configured");
@@ -686,7 +765,7 @@ mod tests {
         let backend = state.inner.backend.clone();
         let app = invite_admin_router(state.inner);
 
-        for tenant_id in ["near-abc", "nearai-abc", "NeAr-Ai!", "NEARAI-"] {
+        for tenant_id in ["near-abc", "nearai-abc", "NeAr-Ai!", "NEARAI-", " near-abc"] {
             let note_label = format!("reserved-z3-{}-{tenant_id}", std::process::id());
             let body = serde_json::json!({
                 "tenant_mode": "fixed",
@@ -739,6 +818,28 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CREATED);
         }
+
+        let response = app
+            .oneshot(route_request(
+                "POST",
+                "/v1/admin/invites",
+                Some(r#"{"tenant_mode":"fixed","fixed_tenant_id":" tenant-zaki-pilot "}"#),
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let hash = json["invite_subject_hash"].as_str().expect("invite hash");
+        let entries = backend.list_invite_grants().await.expect("list");
+        let stored = entries
+            .iter()
+            .find(|entry| entry.invite_subject_hash == hash)
+            .expect("stored invite");
+        assert_eq!(stored.fixed_tenant_id.as_deref(), Some("tenant-zaki-pilot"));
     }
 
     #[tokio::test]
@@ -1026,6 +1127,45 @@ mod tests {
             },
             signing_pem: private_pem,
         })
+    }
+
+    /// Pool construction is lazy. The unreachable local port means a 400
+    /// response proves the route refused the request before any DB operation.
+    async fn test_invite_admin_state_without_database() -> TestInviteAdminState {
+        use crate::config::{DatabaseConfig, SslMode};
+        use secrecy::SecretString;
+        use std::time::Duration;
+
+        let url = "postgresql://127.0.0.1:1/trace_invite_no_database";
+        let config = DatabaseConfig {
+            url: SecretString::from(url.to_string()),
+            invite_registry_url: Some(SecretString::from(url.to_string())),
+            pool_size: 1,
+            ssl_mode: SslMode::Prefer,
+            login_resolver_url: None,
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("lazy backend"));
+        let registry = Arc::new(DbInviteRegistry::unwarmed_for_test(
+            backend.clone(),
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+        ));
+        let (private_pem, public_pem) = generate_test_ed25519_pem();
+        TestInviteAdminState {
+            inner: InviteAdminState {
+                backend,
+                registry,
+                decoding_key: Arc::new(
+                    DecodingKey::from_ed_pem(public_pem.as_bytes()).expect("decoding key"),
+                ),
+                expected_iss: ISS.to_string(),
+                expected_aud: AUD.to_string(),
+                default_policy_label: "test-pool".to_string(),
+            },
+            signing_pem: private_pem,
+        }
     }
 
     /// Wrapper carrying the private key so tests can mint their own tokens.
