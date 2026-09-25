@@ -165,6 +165,41 @@ impl std::fmt::Debug for SourceSessionIdentity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSessionIdentityError {
+    UnsupportedAdapter,
+    InvalidNativeId,
+}
+
+/// Validates the bounded shape before a source ID can bypass prose redaction.
+/// This is a syntax contract only; it cannot prove which local file supplied
+/// the adapter-native ID or authorize an account.
+pub fn validate_source_session_identity(
+    identity: &SourceSessionIdentity,
+) -> Result<(), SourceSessionIdentityError> {
+    let requires_uuid = match identity.adapter.as_str() {
+        "codex" | "claude-code" => true,
+        "opencode" | "cline" | "gemini-cli" => false,
+        _ => return Err(SourceSessionIdentityError::UnsupportedAdapter),
+    };
+    let native_id = identity.native_id.as_bytes();
+    if native_id.is_empty()
+        || native_id.len() > 128
+        || !native_id
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+    {
+        return Err(SourceSessionIdentityError::InvalidNativeId);
+    }
+    if requires_uuid {
+        match Uuid::parse_str(&identity.native_id) {
+            Ok(parsed) if parsed.hyphenated().to_string() == identity.native_id => {}
+            _ => return Err(SourceSessionIdentityError::InvalidNativeId),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
     pub schema_version: String,
@@ -4679,6 +4714,15 @@ impl DeterministicTraceRedactor {
         trace: RawTraceContribution,
         mut maps: Option<&mut BTreeMap<Uuid, crate::private_edit_map::PrivateRedactionEdits>>,
     ) -> Result<TraceContributionEnvelope, TraceContributionError> {
+        if trace
+            .source_session
+            .as_ref()
+            .is_some_and(|identity| validate_source_session_identity(identity).is_err())
+        {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: "source_session_invalid".into(),
+            });
+        }
         let mut report = RedactionReport::default();
         let mut state = RedactionState::default();
         let mut privacy_filter_summary = None;
@@ -11045,6 +11089,39 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("source_session");
         let parsed: super::TraceContributionEnvelope = serde_json::from_value(legacy).unwrap();
         assert!(parsed.source_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_source_session_is_refused_before_classifier_bypass() {
+        use super::{TraceContributionError, TraceRedactor};
+        for (adapter, native_id) in [
+            ("unknown", "ses_123".to_string()),
+            (
+                "patient Alice Smith lives at 123 Maple Street",
+                "ses_123".to_string(),
+            ),
+            ("opencode", "../private".to_string()),
+            ("opencode", "private@example.com".to_string()),
+            ("opencode", "é".to_string()),
+            ("opencode", "x".repeat(129)),
+            ("codex", "not-a-uuid".to_string()),
+        ] {
+            let mut raw = raw_contribution_with_content("safe content");
+            raw.source_session = Some(super::SourceSessionIdentity {
+                adapter: adapter.into(),
+                native_id,
+            });
+            let filter = std::sync::Arc::new(RecordingFilter::default());
+            let error = super::DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .with_privacy_filter(filter.clone(), super::PrivacyFilterBackendTag::SelfHosted)
+                .redact_trace(raw)
+                .await
+                .expect_err("invalid identity must be rejected before classifier bypass");
+            assert!(
+                matches!(error, TraceContributionError::RedactionFailed { reason } if reason == "source_session_invalid")
+            );
+            assert!(filter.0.lock().unwrap().is_empty());
+        }
     }
 
     /// A guard, not a formality: an emitter-declared id that reached a gate

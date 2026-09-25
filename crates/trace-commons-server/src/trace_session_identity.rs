@@ -4,8 +4,11 @@
 //! Canonical source-session identity for account-scoped withdrawal equality.
 
 use sha2::{Digest, Sha256};
-use trace_commons_protocol::trace_contribution::SourceSessionIdentity;
-use uuid::Uuid;
+use trace_commons_protocol::trace_contribution::{
+    SourceSessionIdentity, validate_source_session_identity,
+};
+
+pub use trace_commons_protocol::trace_contribution::SourceSessionIdentityError as SourceSessionError;
 
 const DIGEST_DOMAIN: &[u8] = b"trace-commons:source-session:v1\0";
 
@@ -25,35 +28,10 @@ impl std::fmt::Debug for CanonicalSourceSession {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceSessionError {
-    UnsupportedAdapter,
-    InvalidNativeId,
-}
-
 pub fn canonical_source_session(
     identity: &SourceSessionIdentity,
 ) -> Result<CanonicalSourceSession, SourceSessionError> {
-    let requires_uuid = match identity.adapter.as_str() {
-        "codex" | "claude-code" => true,
-        "opencode" | "cline" | "gemini-cli" => false,
-        _ => return Err(SourceSessionError::UnsupportedAdapter),
-    };
-    let native_id = identity.native_id.as_bytes();
-    if native_id.is_empty()
-        || native_id.len() > 128
-        || !native_id
-            .iter()
-            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
-    {
-        return Err(SourceSessionError::InvalidNativeId);
-    }
-    if requires_uuid {
-        match Uuid::parse_str(&identity.native_id) {
-            Ok(parsed) if parsed.hyphenated().to_string() == identity.native_id => {}
-            _ => return Err(SourceSessionError::InvalidNativeId),
-        }
-    }
+    validate_source_session_identity(identity)?;
     Ok(CanonicalSourceSession {
         adapter: identity.adapter.clone(),
         native_id: identity.native_id.clone(),
