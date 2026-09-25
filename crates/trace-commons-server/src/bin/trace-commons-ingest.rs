@@ -7711,12 +7711,20 @@ fn app(state: Arc<AppState>) -> Router {
             post(near_provision_start_handler),
         )
         .route(
+            "/v1/account/near/provision/start/v2",
+            post(near_provisioning::near_provision_start_v2_handler),
+        )
+        .route(
             "/account/near/provision/wallet",
             get(near_provisioning::wallet_page),
         )
         .route(
             "/v1/account/near/provision/finish",
             post(near_provision_finish_handler),
+        )
+        .route(
+            "/v1/account/near/provision/finish/v2",
+            post(near_provisioning::near_provision_finish_v2_handler),
         )
         // The NEAR AI login ceremony (#836). A sibling of the wallet pair
         // above, not a mode of it: it proves possession of a NEAR AI session
@@ -7727,8 +7735,16 @@ fn app(state: Arc<AppState>) -> Router {
             post(near_ai_provision_start_handler),
         )
         .route(
+            "/v1/account/near-ai/provision/start/v2",
+            post(near_provisioning::near_ai_provision_start_v2_handler),
+        )
+        .route(
             "/v1/account/near-ai/provision/finish",
             post(near_ai_provision_finish_handler),
+        )
+        .route(
+            "/v1/account/near-ai/provision/finish/v2",
+            post(near_provisioning::near_ai_provision_finish_v2_handler),
         )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL

@@ -38,8 +38,12 @@ credential lifetime.
 
 Keep the existing enrollment capability and response shape for old clients.
 `GET /v1/account/near/provision/capabilities/v2` is the opt-in contract. It
-reports login readiness and the authenticated connection route paths without
-returning installable witness fields. Route clients to this contract only after
+reports wallet and NEAR AI login readiness independently of the legacy
+`TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`, and returns versioned wallet
+and NEAR AI start/finish paths plus the authenticated connection route paths.
+The v2 login responses contain no installable witness fields. Legacy paths
+still require the legacy witness and preserve their response shape. Route
+clients to this contract only after
 they implement explicit selection and installation. K12 must
 prove login alone writes no witness, decline leaves it disabled, a selected
 response is installed exactly, existing local explicit configuration survives,
@@ -50,3 +54,13 @@ Client eligibility must use Z1's exact full-pipeline allowlist. Production
 activation depends on K12/K8 migration, the settled account-trust eligibility
 policy, and Z1/Z2 provenance verification. Provider provisioning needs its own
 credential and revocation contract before any `connected` claim.
+
+Before enabling the selection routes in production, grant the ingest database
+login membership in `trace_inference_connection_runtime` and verify the grant
+using that non-superuser login. Migration V79 creates the role and restricts its
+column privileges; it does not assign the application login to the role.
+For example, an administrator grants `GRANT trace_inference_connection_runtime
+TO ingest_login;` with the deployment's actual login role in place of
+`ingest_login`. Connect as that login and require
+`SELECT pg_has_role(current_user, 'trace_inference_connection_runtime',
+'member');` to return `true` before enabling the routes.

@@ -104,6 +104,19 @@ fn published_witness(state: &AppState) -> Option<PublishedWitness> {
 /// Includes the identity controls used by wallet completion, so a client is
 /// not invited to sign a ceremony this commons cannot finish.
 fn published_witness_named(state: &AppState) -> Result<PublishedWitness, &'static str> {
+    wallet_readiness_named(state, ProvisionContract::Legacy)?.ok_or(control::WITNESS_JSON_ABSENT)
+}
+
+#[derive(Clone, Copy)]
+enum ProvisionContract {
+    Legacy,
+    ExplicitSelection,
+}
+
+fn wallet_readiness_named(
+    state: &AppState,
+    contract: ProvisionContract,
+) -> Result<Option<PublishedWitness>, &'static str> {
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }
@@ -130,7 +143,10 @@ fn published_witness_named(state: &AppState) -> Result<PublishedWitness, &'stati
     }
     account_near_config(state).map_err(|_| control::NEAR_SIGN_IN)?;
     account_db(state).map_err(|_| control::ACCOUNT_REGISTRY_DB)?;
-    let witness = published_witness_material_named()?;
+    let witness = match contract {
+        ProvisionContract::Legacy => Some(published_witness_material_named()?),
+        ProvisionContract::ExplicitSelection => None,
+    };
     published_issuer().ok_or(control::ISSUER)?;
     Ok(witness)
 }
@@ -196,6 +212,13 @@ fn near_ai_login_ready(state: &AppState) -> bool {
 /// Both paths require [`control::NEAR_ACCOUNT_IDENTITY`], while wallet-only
 /// configuration remains outside this predicate.
 fn near_ai_login_ready_named(state: &AppState) -> Result<(), &'static str> {
+    near_ai_login_readiness_named(state, ProvisionContract::Legacy)
+}
+
+fn near_ai_login_readiness_named(
+    state: &AppState,
+    contract: ProvisionContract,
+) -> Result<(), &'static str> {
     if !state.near_provisioning_enabled {
         return Err(control::PROVISIONING_ENABLED);
     }
@@ -206,9 +229,26 @@ fn near_ai_login_ready_named(state: &AppState) -> Result<(), &'static str> {
     if state.near_account_identity.is_none() {
         return Err(control::NEAR_ACCOUNT_IDENTITY);
     }
-    published_witness_material_named()?;
+    if matches!(contract, ProvisionContract::Legacy) {
+        published_witness_material_named()?;
+    }
     published_issuer().ok_or(control::ISSUER)?;
     Ok(())
+}
+
+fn ready_for(state: &AppState, contract: ProvisionContract, wallet: bool) -> bool {
+    let result = if wallet {
+        wallet_readiness_named(state, contract).map(|_| ())
+    } else {
+        near_ai_login_readiness_named(state, contract)
+    };
+    match result {
+        Ok(()) => true,
+        Err(control) => {
+            report_declined_control(control);
+            false
+        }
+    }
 }
 
 /// The original `Option` shape, kept as the reference the equivalence test
@@ -352,14 +392,18 @@ pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::re
 pub(super) async fn capabilities_v2(
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let wallet_ready = published_witness(&state).is_some() && published_issuer().is_some();
-    let login_ready = near_ai_login_ready(&state);
+    let wallet_ready = ready_for(&state, ProvisionContract::ExplicitSelection, true);
+    let login_ready = ready_for(&state, ProvisionContract::ExplicitSelection, false);
     let network = account_near_config(&state).ok().map(|c| c.network.clone());
     response(serde_json::json!({
         "contract_version": "near-provision-capabilities-v2",
         "ready": wallet_ready,
         "near_ai_login_ready": login_ready,
         "network": network,
+        "wallet_start_path": "/v1/account/near/provision/start/v2",
+        "wallet_finish_path": "/v1/account/near/provision/finish/v2",
+        "near_ai_start_path": "/v1/account/near-ai/provision/start/v2",
+        "near_ai_finish_path": "/v1/account/near-ai/provision/finish/v2",
         "inference_connection_selection_required": true,
         "inference_connection_offers_path": "/v1/account/inference-connection/offers",
         "inference_connection_selection_path": "/v1/account/inference-connection",
@@ -432,7 +476,17 @@ pub(super) async fn near_provision_start_handler(
     body: Result<Json<StartRequest>, JsonRejection>,
 ) -> axum::response::Response {
     let began = std::time::Instant::now();
-    let result = start(state, headers, body).await;
+    let result = start(state, headers, body, ProvisionContract::Legacy).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+pub(super) async fn near_provision_start_v2_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<StartRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let began = std::time::Instant::now();
+    let result = start(state, headers, body, ProvisionContract::ExplicitSelection).await;
     sleep_to_redeem_floor(began).await;
     result.unwrap_or_else(native_generic_deny)
 }
@@ -440,8 +494,9 @@ async fn start(
     state: Arc<AppState>,
     headers: HeaderMap,
     body: Result<Json<StartRequest>, JsonRejection>,
+    contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if published_witness(&state).is_none() || limited(&headers, "start") {
+    if !ready_for(&state, contract, true) || limited(&headers, "start") {
         return None;
     }
     let Json(body) = body.ok()?;
@@ -496,7 +551,17 @@ pub(super) async fn near_provision_finish_handler(
     body: Result<Json<FinishRequest>, JsonRejection>,
 ) -> axum::response::Response {
     let began = std::time::Instant::now();
-    let result = finish(state, headers, body).await;
+    let result = finish(state, headers, body, ProvisionContract::Legacy).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+pub(super) async fn near_provision_finish_v2_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<FinishRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let began = std::time::Instant::now();
+    let result = finish(state, headers, body, ProvisionContract::ExplicitSelection).await;
     sleep_to_redeem_floor(began).await;
     result.unwrap_or_else(native_generic_deny)
 }
@@ -504,8 +569,9 @@ async fn finish(
     state: Arc<AppState>,
     headers: HeaderMap,
     body: Result<Json<FinishRequest>, JsonRejection>,
+    contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if published_witness(&state).is_none() || limited(&headers, "finish") {
+    if !ready_for(&state, contract, true) || limited(&headers, "finish") {
         return None;
     }
     let Json(body) = body.ok()?;
@@ -1007,7 +1073,17 @@ pub(super) async fn near_ai_provision_start_handler(
     body: Result<Json<NearAiStartRequest>, JsonRejection>,
 ) -> axum::response::Response {
     let began = std::time::Instant::now();
-    let result = near_ai_start(state, headers, body).await;
+    let result = near_ai_start(state, headers, body, ProvisionContract::Legacy).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+pub(super) async fn near_ai_provision_start_v2_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiStartRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let began = std::time::Instant::now();
+    let result = near_ai_start(state, headers, body, ProvisionContract::ExplicitSelection).await;
     sleep_to_redeem_floor(began).await;
     result.unwrap_or_else(native_generic_deny)
 }
@@ -1016,11 +1092,12 @@ async fn near_ai_start(
     state: Arc<AppState>,
     headers: HeaderMap,
     body: Result<Json<NearAiStartRequest>, JsonRejection>,
+    contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
     // The login path's own readiness, not the wallet's: `published_witness`
     // refuses without the NEP-413 sign-in config and the wallet redirect
     // origin, neither of which this ceremony has or needs.
-    if !near_ai_login_ready(&state) || limited(&headers, "near-ai-start") {
+    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-start") {
         return None;
     }
     let Json(body) = body.ok()?;
@@ -1071,7 +1148,17 @@ pub(super) async fn near_ai_provision_finish_handler(
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
 ) -> axum::response::Response {
     let began = std::time::Instant::now();
-    let result = near_ai_finish(state, headers, body).await;
+    let result = near_ai_finish(state, headers, body, ProvisionContract::Legacy).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+pub(super) async fn near_ai_provision_finish_v2_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let began = std::time::Instant::now();
+    let result = near_ai_finish(state, headers, body, ProvisionContract::ExplicitSelection).await;
     sleep_to_redeem_floor(began).await;
     result.unwrap_or_else(native_generic_deny)
 }
@@ -1080,8 +1167,9 @@ async fn near_ai_finish(
     state: Arc<AppState>,
     headers: HeaderMap,
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+    contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !near_ai_login_ready(&state) || limited(&headers, "near-ai-finish") {
+    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-finish") {
         return None;
     }
     let Json(body) = body.ok()?;
