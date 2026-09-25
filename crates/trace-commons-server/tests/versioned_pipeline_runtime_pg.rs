@@ -605,6 +605,96 @@ async fn attempts_exhaust_to_failed_but_transient_retries_do_not_charge() {
     );
 }
 
+/// Moves a run's clock back by `by`: `phase_started_at` and
+/// `next_attempt_at` both move `by` into the past, as if that much time had
+/// passed since the last transient retry was scheduled. A time shortcut in
+/// the test, never a processor call.
+async fn age_run(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid, by: chrono::Duration) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .unwrap();
+    let milliseconds = by.num_milliseconds();
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET phase_started_at = phase_started_at - ($3::bigint * INTERVAL '1 millisecond'),
+                next_attempt_at = next_attempt_at - ($3::bigint * INTERVAL '1 millisecond')
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id, &milliseconds],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// FR3 (I2): `mark_transient_retry` schedules the next attempt after the
+/// time the run has spent in its current phase, clamped to [1 s, 1 h]. With
+/// no counter, the delay doubles on each retry (the next retry happens that
+/// much later, so the phase is twice as old) and caps at one retry per hour.
+#[tokio::test]
+async fn transient_retry_backoff_doubles_from_the_phase_start_and_caps_at_one_hour() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("backoff-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    // A phase that started just now waits the one-second floor.
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    let first = store
+        .mark_transient_retry(&claimed, "embedder_unavailable")
+        .await
+        .unwrap();
+    assert_eq!(
+        first.next_attempt_at - first.updated_at,
+        chrono::Duration::seconds(1)
+    );
+
+    // The phase is 10 s old at the next retry; from then on each retry
+    // happens when the previous delay has passed.
+    age_run(&backend, &tenant, run.run_id, chrono::Duration::seconds(10)).await;
+    let mut previous = chrono::Duration::zero();
+    let one_hour = chrono::Duration::hours(1);
+    for retry in 0..12 {
+        let claimed = store
+            .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("retry {retry}: the run is due"));
+        let released = store
+            .mark_transient_retry(&claimed, "embedder_unavailable")
+            .await
+            .unwrap();
+        assert_eq!(released.state, PipelineRunState::Retry);
+        assert_eq!(released.attempt_count, 0, "retry {retry} is uncharged");
+        let delay = released.next_attempt_at - released.updated_at;
+        assert!(
+            delay <= one_hour,
+            "retry {retry}: delay {delay} exceeds one hour"
+        );
+        if previous < one_hour {
+            assert!(
+                delay > previous,
+                "retry {retry}: delay {delay} did not grow past {previous}"
+            );
+        } else {
+            assert_eq!(delay, one_hour, "retry {retry}: the delay stays capped");
+        }
+        previous = delay;
+        age_run(&backend, &tenant, run.run_id, delay).await;
+    }
+    assert_eq!(previous, one_hour, "the delay reached the one-hour cap");
+}
+
 fn artifact_store(root: &tempfile::TempDir) -> Arc<dyn TraceArtifactStore> {
     Arc::new(LocalEncryptedTraceArtifactStore::new(
         root.path(),
@@ -2438,6 +2528,154 @@ async fn settle_retry_reuses_the_persisted_selection() {
     assert_eq!(committed_decision, persisted_decision);
 }
 
+/// FR3 (I1): a Settle index outage (`IndexWriteError::Failed`/`Uncertain`)
+/// is a dependency failure like Score's `index_unavailable`, not the
+/// trace's fault. An outage that lasts more retries than the run's whole
+/// attempt budget leaves the run waiting in retry, uncharged, and the run
+/// completes once the index is back.
+#[tokio::test]
+async fn a_settle_index_outage_longer_than_the_attempt_budget_does_not_fail_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-index-outage-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    for attempt in 1..=run.max_attempts + 2 {
+        index.set_fault(IndexFault::FailBeforeApply);
+        force_due(&backend, &tenant, run.run_id).await;
+        let retried = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("the Settle attempt waits for the index");
+        assert_eq!(retried.state, PipelineRunState::Retry, "attempt {attempt}");
+        assert_eq!(
+            retried.last_error_label.as_deref(),
+            Some(PIPELINE_INDEX_UNAVAILABLE_LABEL),
+            "attempt {attempt}"
+        );
+        assert_eq!(
+            retried.attempt_count, run.attempt_count,
+            "attempt {attempt}: an index outage never charges the run"
+        );
+    }
+
+    index.set_fault(IndexFault::None);
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes once the index is back");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
+    assert_eq!(service.settle_evaluations(), 1);
+}
+
+/// FR3: a service that holds no settlement adapter for an instrument a run
+/// awards cannot seed or dispatch that leg. That is a deployment gap, not
+/// the trace's fault: at Score and at Settle the run waits in retry under
+/// `settlement_adapter_missing` without being charged, and a service that
+/// holds the adapter completes it.
+#[tokio::test]
+async fn a_missing_settlement_adapter_waits_without_charging() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let shared_artifacts = artifact_store(&dir);
+    let (full, _, _) = test_service(
+        backend.clone(),
+        shared_artifacts.clone(),
+        scored_config(false),
+        None,
+    )
+    .await;
+    // Same package (same config), but no storage_rebate adapter.
+    let missing = test_service_with_adapters(
+        backend.clone(),
+        shared_artifacts,
+        scored_config(false),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+    )
+    .await;
+    assert_eq!(full.bundle_id(), missing.bundle_id());
+    let tenant = format!("settle-adapter-missing-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = full
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = full
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+
+    // Score under the service without the adapter: no settlement row can be
+    // seeded, so the run waits, uncharged.
+    let waited = missing
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score waits for the adapter");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    assert_eq!(waited.next_phase, Some(Phase::Score));
+    assert_eq!(
+        waited.last_error_label.as_deref(),
+        Some("settlement_adapter_missing")
+    );
+    assert_eq!(waited.attempt_count, reviewed.attempt_count);
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let scored = full
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score completes under the full service");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+
+    // Settle under the service without the adapter: the leg cannot be
+    // dispatched, so the run waits, uncharged.
+    let waited = missing
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle waits for the adapter");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    assert_eq!(
+        waited.last_error_label.as_deref(),
+        Some("settlement_adapter_missing")
+    );
+    assert_eq!(waited.attempt_count, scored.attempt_count);
+
+    force_due(&backend, &tenant, created.run_id).await;
+    let settled = full
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes under the full service");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+}
+
 /// Review focus item 3 (part 3): a stored command that is missing, corrupt,
 /// bound to another tenant, or bound to another run of the same tenant
 /// makes Settle fail closed with the safe label `index_command_invalid`,
@@ -2871,13 +3109,34 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
     let tenant = format!("settle-instruments-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
-    rebate.fail_next();
-    let retried = service
-        .process_run(&tenant, run.run_id)
-        .await
-        .unwrap()
-        .expect("Settle retries while one leg is blocked");
-    assert_eq!(retried.state, PipelineRunState::Retry);
+    // FR3 (I1): an adapter call error is a dependency failure, not the
+    // trace's fault -- an uncharged retry, however many times it repeats,
+    // including more times than the run's whole attempt budget.
+    let mut retried = None;
+    for attempt in 1..=run.max_attempts + 2 {
+        rebate.fail_next();
+        force_due(&backend, &tenant, run.run_id).await;
+        let current = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle retries while one leg is blocked");
+        assert_eq!(current.state, PipelineRunState::Retry, "attempt {attempt}");
+        assert_eq!(
+            current.last_error_label.as_deref(),
+            Some("settlement_operation_retry"),
+            "attempt {attempt}"
+        );
+        assert_eq!(
+            current.attempt_count, run.attempt_count,
+            "attempt {attempt}: an adapter call error never charges the run"
+        );
+        retried = Some(current);
+    }
+    assert_eq!(
+        retried.expect("at least one retry").state,
+        PipelineRunState::Retry
+    );
 
     let settlements = service
         .store()
@@ -3231,6 +3490,32 @@ async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complet
         held.last_error_label.as_deref(),
         Some(PIPELINE_CREDIT_HELD_LABEL)
     );
+    // FR3 (C3): a hold is a suspension, not a charged retry. The run stays
+    // in retry with its attempt count unchanged for more retries than its
+    // whole attempt budget, so the credit is never lost to exhaustion.
+    assert_eq!(held.attempt_count, run.attempt_count);
+    for attempt in 1..=run.max_attempts + 2 {
+        force_due(&backend, &tenant, run.run_id).await;
+        let still_held = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle keeps waiting while the account is held");
+        assert_eq!(
+            still_held.state,
+            PipelineRunState::Retry,
+            "held retry {attempt}"
+        );
+        assert_eq!(
+            still_held.last_error_label.as_deref(),
+            Some(PIPELINE_CREDIT_HELD_LABEL),
+            "held retry {attempt}"
+        );
+        assert_eq!(
+            still_held.attempt_count, run.attempt_count,
+            "held retry {attempt}: a hold never charges the run"
+        );
+    }
 
     let settlements = service
         .store()
@@ -3604,6 +3889,9 @@ async fn adapter_result_that_differs_from_the_selection_fails_closed() {
         result.last_error_label.as_deref(),
         Some("settlement_operation_retry")
     );
+    // FR3: unlike an adapter call error, a result that differs from the
+    // selection fails closed and stays charged.
+    assert_eq!(result.attempt_count, run.attempt_count + 1);
 
     let settlements = service
         .store()

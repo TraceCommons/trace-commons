@@ -74,10 +74,11 @@ pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 pub const INJECTED_PIPELINE_CRASH: &str = "injected_pipeline_crash";
 const DEFAULT_LEASE_SECONDS: i64 = 30;
 const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
-/// Delay before a transient (dependency-failure) retry. Short and fixed,
-/// unlike `mark_retry`'s exponential backoff, because the failure is not the
-/// run's fault and the attempt budget is not charged for it (decision D9).
-const TRANSIENT_RETRY_MILLISECONDS: i64 = 1_000;
+/// Label for an adapter call error or a charged settlement blocker; the leg
+/// waits and the run retries (`complete_settle_phase`).
+const PIPELINE_SETTLEMENT_RETRY_LABEL: &str = "settlement_operation_retry";
+/// Label for a settlement adapter the service does not hold.
+const PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL: &str = "settlement_adapter_missing";
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
@@ -978,7 +979,7 @@ impl PgPipelineStore {
         for award in awards.iter() {
             let instrument_id = award.instrument_id().as_str();
             let payout_rail = payout_rails.get(instrument_id).ok_or_else(|| {
-                DatabaseError::Constraint("settlement_adapter_missing".to_string())
+                DatabaseError::Constraint(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL.to_string())
             })?;
             let payout_state = if payout_rail == "none" {
                 "disabled"
@@ -1278,8 +1279,19 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
-    /// A dependency failure: release the claim and schedule a retry without
-    /// charging the attempt the claim took.
+    /// The one suspension path (ruling FR3): a failure that is not the
+    /// trace's fault -- a dependency outage, a missing or not-runnable bound
+    /// dependency, a credit hold, pending human review -- releases the claim
+    /// and schedules a retry without charging the attempt the claim took.
+    ///
+    /// The delay is `clamp(NOW() - phase_started_at, 1 second, 1 hour)`:
+    /// the time the run has spent in its current phase. `phase_started_at`
+    /// is set at receipt and reset by every phase commit, and nothing else
+    /// moves it, so without a retry counter each retry lands when the phase
+    /// is twice as old as at the previous one -- the delay doubles -- and it
+    /// caps at one retry per hour. There is no terminal bound: a hold or a
+    /// pending review must stay retryable ("suspension leaves work
+    /// retryable"), so the bound is on work per hour, not on attempts.
     pub async fn mark_transient_retry(
         &self,
         run: &PipelineRunRecord,
@@ -1293,18 +1305,15 @@ impl PgPipelineStore {
                 "UPDATE pipeline_runs
                     SET state = 'retry', lease_token = NULL, lease_expires_at = NULL,
                         attempt_count = GREATEST(attempt_count - 1, 0),
-                        next_attempt_at = NOW() + ($4::bigint * INTERVAL '1 millisecond'),
+                        next_attempt_at = NOW() + LEAST(
+                            GREATEST(NOW() - phase_started_at, INTERVAL '1 second'),
+                            INTERVAL '1 hour'
+                        ),
                         last_error_label = $3, updated_at = NOW()
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
-                    AND lease_token = $5 AND lease_expires_at > NOW()
+                    AND lease_token = $4 AND lease_expires_at > NOW()
                   RETURNING *",
-                &[
-                    &run.tenant_id,
-                    &run.run_id,
-                    &error_label,
-                    &TRANSIENT_RETRY_MILLISECONDS,
-                    &lease_token,
-                ],
+                &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
             )
             .await?
             .ok_or_else(stale_lease_error)?;
@@ -1348,7 +1357,11 @@ impl PgPipelineStore {
     /// to a value (never overwritten or cleared); `payout_state` is written
     /// only when the caller supplies one. `attempt_count` increments on
     /// `'retry'`/`'failed'` (not `'forfeited'` -- forfeiture is not a
-    /// dispatch failure); `next_attempt_at` only moves on `'retry'`.
+    /// dispatch failure) and saturates at the row's `max_attempts`: it is a
+    /// diagnostic count, and an adapter outage is an uncharged run retry
+    /// with no terminal bound (ruling FR3), so the row's own
+    /// `attempt_count <= max_attempts` CHECK must never refuse the update;
+    /// `next_attempt_at` only moves on `'retry'`.
     async fn update_settlement(
         &self,
         run: &PipelineRunRecord,
@@ -1424,7 +1437,8 @@ async fn update_settlement_on_tx(
                         payout_state = COALESCE($8, s.payout_state),
                         last_error_label = $9,
                         attempt_count = CASE
-                            WHEN $4 IN ('retry', 'failed') THEN s.attempt_count + 1
+                            WHEN $4 IN ('retry', 'failed')
+                                THEN LEAST(s.attempt_count + 1, s.max_attempts)
                             ELSE s.attempt_count
                         END,
                         next_attempt_at = CASE
@@ -2765,10 +2779,10 @@ impl PipelineService {
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let bundle = match self.load_bound_bundle(&run).await {
             Ok(bundle) => bundle,
-            // D9: a dependency the service does not hold, or a bundle whose
-            // operator-controlled runnable flag is off, is not this run's
-            // fault -- it waits in retry without the claim's attempt being
-            // charged, per `mark_transient_retry`.
+            // D9 / FR3: a dependency the service does not hold, or a bundle
+            // whose operator-controlled runnable flag is off, is not this
+            // run's fault -- it waits in retry without the claim's attempt
+            // being charged, with `mark_transient_retry`'s backoff.
             Err(label)
                 if label == PIPELINE_DEPENDENCY_MISSING_LABEL
                     || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
@@ -2799,13 +2813,13 @@ impl PipelineService {
                         .await
                         .map_err(Into::into);
                 }
-                // D9 (Task 15): a typed `PolicyError` raised while a phase
-                // runs is budgeted by kind, ahead of the P2 string allowlist
-                // below -- a transient dependency failure (an outage, a
-                // timeout) releases the run without charging the claim's
-                // attempt, exactly like a missing bound dependency (Task
-                // 14); a permanent policy failure is charged like any other
-                // labeled retry.
+                // D9 (Task 15) / FR3: a typed `PolicyError` raised while a
+                // phase runs is budgeted by kind, ahead of the P2 string
+                // allowlist below -- a transient failure (an outage, a
+                // timeout, a quarantine awaiting human review) is the
+                // uncharged suspension with backoff, exactly like a missing
+                // bound dependency; a permanent policy failure is charged
+                // like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
                     return Ok(Some(if policy.is_transient() {
                         self.store
@@ -2814,6 +2828,16 @@ impl PipelineService {
                     } else {
                         self.store.mark_retry(&run, policy.label()).await?
                     }));
+                }
+                // Ruling FR3: a settlement adapter the service does not hold
+                // is a deployment gap, not the trace's fault -- the same
+                // uncharged suspension as a missing bound dependency.
+                if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL {
+                    return Ok(Some(
+                        self.store
+                            .mark_transient_retry(&run, PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL)
+                            .await?,
+                    ));
                 }
                 // The fixed allowlist from decision P2: a charged retry
                 // (the attempt already taken by the claim stays charged)
@@ -2827,7 +2851,6 @@ impl PipelineService {
                     | "score_outcome_invalid"
                     | "settlement_operation_mismatch"
                     | "review_output_invalid"
-                    | "settlement_adapter_missing"
                     | "submission_inoperable" => label.as_str(),
                     _ => PIPELINE_OPERATIONAL_ERROR_LABEL,
                 };
@@ -3006,8 +3029,10 @@ impl PipelineService {
                 // ("Constraint violation: ..."), which would not match
                 // decision P2's fixed allowlist verbatim; re-raise the one
                 // label the allowlist expects as a bare anyhow error.
-                DatabaseError::Constraint(label) if label == "settlement_adapter_missing" => {
-                    anyhow::anyhow!("settlement_adapter_missing")
+                DatabaseError::Constraint(label)
+                    if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL =>
+                {
+                    anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL)
                 }
                 _ => anyhow::Error::from(error),
             })?;
@@ -3154,13 +3179,14 @@ impl PipelineService {
                     {
                         Ok(_) => {}
                         Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
-                            // Ruling (Task 12 ledger): the Settle code
-                            // itself retries this label -- it is not in
-                            // the P2 allowlist, and never reaches
-                            // `process_claimed_run` as an `Err`.
+                            // Ruling FR3 (I1): an index outage is a
+                            // dependency failure, like Score's own
+                            // `index_unavailable` -- an uncharged
+                            // suspension, which the Settle code records
+                            // itself rather than returning an `Err`.
                             return Ok(self
                                 .store
-                                .mark_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
+                                .mark_transient_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
                                 .await?);
                         }
                         Err(IndexWriteError::ContentConflict) => {
@@ -3218,7 +3244,12 @@ impl PipelineService {
             let selection_decision =
                 serde_json::from_value::<SettleDecision>(selection.decision.clone())
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+            // Why legs this attempt leaves non-terminal are waiting: a hold,
+            // an adapter call error (both suspensions, FR3), or a charged
+            // blocker (a result that differs from the selection, or an
+            // amount over the cap -- both fail closed).
             let mut held = false;
+            let mut adapter_unavailable = false;
             let mut settlement_blocked = false;
             for settlement in settlements.clone() {
                 if matches!(
@@ -3232,7 +3263,7 @@ impl PipelineService {
                 let adapter = self
                     .settlement_adapters
                     .get(&instrument_id)
-                    .ok_or_else(|| anyhow::anyhow!("settlement_adapter_missing"))?;
+                    .ok_or_else(|| anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL))?;
                 let cap = self
                     .caps
                     .per_instrument_atomic_units
@@ -3281,7 +3312,6 @@ impl PipelineService {
                             )
                             .await?;
                         held = true;
-                        settlement_blocked = true;
                         continue;
                     }
                     Some(account_ref)
@@ -3337,7 +3367,7 @@ impl PipelineService {
                                 },
                             )
                             .await?;
-                        settlement_blocked = true;
+                        adapter_unavailable = true;
                         continue;
                     }
                 };
@@ -3364,7 +3394,6 @@ impl PipelineService {
                                 )
                                 .await?;
                             held = true;
-                            settlement_blocked = true;
                             continue;
                         }
                     },
@@ -3387,19 +3416,25 @@ impl PipelineService {
                 }
                 self.inject_crash(PipelineCrashPoint::AfterInstrumentOperation)?;
             }
+            // Every non-terminal row this attempt leaves behind is retried
+            // together (decision P2's mechanics: the Settle code records the
+            // retry itself, never returning `Err` for this case). A charged
+            // blocker fails closed and is charged, whatever else happened;
+            // otherwise a hold or an adapter call error is an uncharged
+            // suspension (ruling FR3), labeled by the hold when there is one.
             if settlement_blocked {
-                // Every non-terminal row this attempt leaves behind is
-                // retried together, under whichever label best explains why
-                // (decision P2's mechanics: the Settle code calls
-                // `mark_retry` itself here, never returning `Err` for this
-                // case, so it never reaches `process_claimed_run`'s
-                // allowlist).
+                return Ok(self
+                    .store
+                    .mark_retry(&run, PIPELINE_SETTLEMENT_RETRY_LABEL)
+                    .await?);
+            }
+            if held || adapter_unavailable {
                 let label = if held {
                     PIPELINE_CREDIT_HELD_LABEL
                 } else {
-                    "settlement_operation_retry"
+                    PIPELINE_SETTLEMENT_RETRY_LABEL
                 };
-                return Ok(self.store.mark_retry(&run, label).await?);
+                return Ok(self.store.mark_transient_retry(&run, label).await?);
             }
         }
 
