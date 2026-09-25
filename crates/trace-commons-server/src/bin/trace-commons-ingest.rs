@@ -3,6 +3,8 @@
 
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/file_witness.rs"]
+mod file_witness;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -13274,6 +13276,13 @@ async fn reject_conflicting_witness_retry(
     raw_body: &[u8],
 ) -> ApiResult<()> {
     let Some(db) = state.db_mirror.as_ref() else {
+        if let Some(record) =
+            read_submission_record(&state.root, tenant_id, submission_id).map_err(internal_error)?
+            && let Some(evidence) = record.witness_evidence.as_ref()
+            && !evidence.retry_matches(headers, raw_body)
+        {
+            return Err(api_error(StatusCode::CONFLICT, "witness evidence conflict"));
+        }
         return Ok(());
     };
     let result = db
@@ -13346,6 +13355,26 @@ async fn submit_trace_handler(
     } else {
         authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?
     };
+    // File-only ownership spans read, rescrub, artifact creation and durable
+    // metadata commit. DB admission keeps its existing transactional ownership.
+    let _file_submit_lock = if state.db_mirror.is_none() {
+        Some(
+            file_witness::lock(
+                &state.root,
+                tenant.tenant_id(),
+                envelope.submission_id,
+                "submission-locks",
+            )
+            .map_err(|_| {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "submission file ownership unavailable",
+                )
+            })?,
+        )
+    } else {
+        None
+    };
     // A completed admission is an idempotent read, including quarantined
     // records. Re-running remediation here would bypass the processing ledger.
     if admission
@@ -13400,6 +13429,24 @@ async fn submit_trace_handler(
                 ));
             }
             if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+                // Changed-body headerless remediation retains historical proof.
+                // Supplied proof must still be the immutable original identity.
+                if state.db_mirror.is_none()
+                    && (headers.contains_key(
+                        trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
+                    ) || headers.contains_key(
+                        trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
+                    ))
+                {
+                    reject_conflicting_witness_retry(
+                        state.as_ref(),
+                        tenant.tenant_id(),
+                        envelope.submission_id,
+                        &headers,
+                        &raw_body,
+                    )
+                    .await?;
+                }
                 Some(existing)
             } else {
                 reject_conflicting_witness_retry(
@@ -13573,6 +13620,7 @@ async fn submit_trace_handler(
             .map(|prior| prior.auth_principal_ref.clone())
             .unwrap_or_else(|| tenant.principal_ref().to_string());
         let mut record = TraceCommonsSubmissionRecord {
+            witness_evidence: None,
             tenant_id: tenant.tenant_id().to_string(),
             tenant_storage_ref: tenant.tenant_storage_ref(),
             auth_principal_ref,
@@ -13606,6 +13654,17 @@ async fn submit_trace_handler(
             artifact_receipt: stored_envelope.artifact_receipt,
             artifact_object_store: stored_envelope.artifact_object_store,
         };
+        if state.db_mirror.is_none() {
+            record.witness_evidence = file_witness::for_submission(
+                &envelope,
+                &record,
+                remediating_prior.as_ref(),
+                witness.as_ref(),
+                &headers,
+                &raw_body,
+            )
+            .map_err(internal_error)?;
+        }
         // Remediating a quarantined row always clears any outstanding review lease;
         // the prior assessment is obsolete.
         clear_review_lease_metadata(&mut record);
@@ -57462,6 +57521,7 @@ fn trace_commons_record_from_storage_submission(
     Some((|| {
         let object_key = trace_envelope_object_key(&record.tenant_id, status, record.submission_id);
         Ok(TraceCommonsSubmissionRecord {
+            witness_evidence: None,
             tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
             tenant_id: record.tenant_id,
             auth_principal_ref: record.auth_principal_ref,
@@ -62044,8 +62104,7 @@ fn write_submission_record(
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
     ensure_submission_record_tenant(record, &record.tenant_id)?;
-    let path = submission_metadata_path(root, &record.tenant_id, record.submission_id);
-    write_json_file(&path, record, "trace contribution metadata")
+    file_witness::write_record(root, record)
 }
 
 fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
@@ -70235,6 +70294,9 @@ impl TraceCorpusStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCommonsSubmissionRecord {
+    /// Private original source proof, never part of an envelope or receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_evidence: Option<file_witness::Evidence>,
     tenant_id: String,
     tenant_storage_ref: String,
     #[serde(default = "legacy_principal_ref")]

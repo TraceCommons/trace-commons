@@ -93820,6 +93820,633 @@ mod witness_receipt {
     }
 
     #[tokio::test]
+    async fn file_witness_persists_original_bytes_across_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        let response =
+            post_through_the_real_router(state, body.clone(), Some((&certificate, &signature)))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(submission_metadata_path(
+                temp.path(),
+                "tenant-a",
+                envelope.submission_id,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted["witness_evidence"]["certificate_json"],
+            serde_json::json!(certificate.as_bytes())
+        );
+        assert_eq!(
+            persisted["witness_evidence"]["signature_header"],
+            serde_json::json!(signature.as_bytes())
+        );
+        assert_eq!(
+            persisted["witness_evidence"]["raw_body_sha256"],
+            hex::encode(Sha256::digest(&body))
+        );
+        assert_ne!(
+            body,
+            stored_envelope_bytes(temp.path(), envelope.submission_id)
+        );
+        let restarted = witnessed_state(temp.path().to_path_buf());
+        assert_eq!(
+            post_through_the_real_router(restarted.clone(), body.clone(), None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut changed = body;
+        changed.push(b' ');
+        assert_eq!(
+            post_through_the_real_router(restarted, changed, None)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn file_witness_retries_preserve_first_proof() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let path = submission_metadata_path(temp.path(), "tenant-a", envelope.submission_id);
+        let original = std::fs::read(&path).unwrap();
+        // Re-signing even the same body must not substitute the first immutable proof.
+        let mut stale: serde_json::Value = serde_json::from_str(&certificate).unwrap();
+        stale["timestamp"] = serde_json::json!(1);
+        let (changed_certificate, changed_signature) = sign_certificate_json(stale);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&changed_certificate, &changed_signature))
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(AUTHORIZATION, "Bearer token-a")
+            .header(CONTENT_TYPE, "application/json")
+            .header(CERTIFICATE_HEADER, &certificate)
+            .body(Body::from(body.clone()))
+            .unwrap();
+        assert_eq!(
+            app(state.clone()).oneshot(request).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            post_through_the_real_router(state, body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    fn file_claim(
+        state: &AppState,
+        submission_id: Uuid,
+    ) -> trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceClaim {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
+        let tenant = authenticate_ctx(state, &headers).unwrap();
+        file_witness::current_claim(state, &tenant, submission_id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_witness_current_claim_uses_durable_state_and_object() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        let response =
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let receipt_text = String::from_utf8_lossy(&receipt_bytes);
+        assert!(!receipt_text.contains("certificate_json"));
+        assert!(!receipt_text.contains("witness_evidence"));
+        assert!(!receipt_text.contains(&signature));
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::VerifiedV2
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        assert!(!format!("{record:?}").contains(&signature));
+        assert!(!format!("{record:?}").contains(&certificate));
+        let path = temp.path().join(&record.object_key);
+        let original = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("certificate_json"));
+        let mut changed = original.clone();
+        changed.push(b' ');
+        std::fs::write(&path, changed).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::ArtifactMismatch
+        );
+        std::fs::write(&path, original).unwrap();
+        for status in [
+            TraceCorpusStatus::Revoked,
+            TraceCorpusStatus::Purged,
+            TraceCorpusStatus::Quarantined,
+        ] {
+            record.status = status;
+            write_submission_record(temp.path(), &record).unwrap();
+            assert_eq!(
+                file_claim(&state, envelope.submission_id).coverage,
+                Coverage::Inactive
+            );
+        }
+        record.status = TraceCorpusStatus::Accepted;
+        record.expires_at = Some(Utc::now() - Duration::seconds(1));
+        write_submission_record(temp.path(), &record).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::Inactive
+        );
+        record.expires_at = None;
+        write_submission_record(temp.path(), &record).unwrap();
+        write_revocation(
+            temp.path(),
+            &TraceCommonsRevocation {
+                tenant_id: "tenant-a".into(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id: envelope.submission_id,
+                revoked_at: Utc::now(),
+                reason: "owner_self_revocation".into(),
+                redaction_hash: None,
+                canonical_summary_hash: None,
+            },
+        )
+        .unwrap();
+        // A stale concurrent metadata writer cannot undo the durable tombstone.
+        write_submission_record(temp.path(), &record).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::Inactive
+        );
+    }
+
+    #[tokio::test]
+    async fn file_witness_invalid_legacy_and_capture_only_are_conservative() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        for case in ["invalid", "legacy", "capture_only", "unattested", "gateway"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut state = witnessed_state(temp.path().to_path_buf());
+            if case == "capture_only" {
+                let state_mut = Arc::get_mut(&mut state).unwrap();
+                state_mut.witness_capture_pin =
+                    Some(state_mut.witness_bypass.as_ref().unwrap().pin().clone());
+                state_mut.witness_bypass = None;
+            }
+            let envelope = holdable_envelope().await;
+            let body = serde_json::to_vec(&envelope).unwrap();
+            let (mut certificate, mut signature) = certificate_v2_over(&body);
+            if case == "invalid" {
+                signature = "0x00".into();
+            }
+            if case == "legacy" {
+                (certificate, signature) = certificate_over(&body, "low");
+            }
+            if case == "unattested" || case == "gateway" {
+                let mut json: serde_json::Value = serde_json::from_str(&certificate).unwrap();
+                if case == "unattested" {
+                    json["inference_provenance"] = serde_json::json!({"status": "unattested"});
+                } else {
+                    json["inference_provenance"]["final_call"]["class"] =
+                        serde_json::json!("gateway_final_call");
+                }
+                (certificate, signature) = sign_certificate_json(json);
+            }
+            assert_eq!(
+                post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let expected = match case {
+                "invalid" => Coverage::Missing,
+                "legacy" => Coverage::LegacyV1,
+                "capture_only" => Coverage::Inactive,
+                "unattested" => Coverage::ExplicitUnattested,
+                _ => Coverage::VerifiedV2,
+            };
+            assert_eq!(
+                file_claim(&state, envelope.submission_id).coverage,
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn file_witness_changed_remediation_keeps_only_historical_proof() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let mut envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let mut prior = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        prior.status = TraceCorpusStatus::Quarantined;
+        write_submission_record(temp.path(), &prior).unwrap();
+        set_metadata_only_user_message(&mut envelope, "please explain this changed trace");
+        let changed_body = serde_json::to_vec(&envelope).unwrap();
+        assert_ne!(body, changed_body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), changed_body, None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut remediated =
+            read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+                .unwrap()
+                .unwrap();
+        let evidence = serde_json::to_value(&remediated).unwrap()["witness_evidence"].clone();
+        assert_eq!(
+            evidence["raw_body_sha256"],
+            hex::encode(Sha256::digest(body))
+        );
+        assert_eq!(
+            evidence["certificate_json"],
+            serde_json::json!(certificate.as_bytes())
+        );
+        // Even a subsequent approval cannot promote the old proof to changed content.
+        remediated.status = TraceCorpusStatus::Accepted;
+        write_submission_record(temp.path(), &remediated).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::ArtifactMismatch
+        );
+        // An older writer with no evidence cannot erase the first source proof.
+        remediated.witness_evidence = None;
+        write_submission_record(temp.path(), &remediated).unwrap();
+        let persisted = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(persisted).unwrap()["witness_evidence"],
+            evidence
+        );
+    }
+
+    #[tokio::test]
+    async fn file_witness_submission_ownership_and_write_failure_are_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        let held = file_witness::lock(
+            temp.path(),
+            "tenant-a",
+            envelope.submission_id,
+            "submission-locks",
+        )
+        .unwrap();
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(
+            read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        // A failed durable commit cannot produce an OK response or partial proof.
+        let held = file_witness::lock(
+            temp.path(),
+            "tenant-a",
+            envelope.submission_id,
+            "metadata-locks",
+        )
+        .unwrap();
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(
+            read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        assert_eq!(
+            post_through_the_real_router(state, body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let path = submission_metadata_path(temp.path(), "tenant-a", envelope.submission_id);
+        let original = std::fs::read(&path).unwrap();
+        let held = file_witness::lock(
+            temp.path(),
+            "tenant-a",
+            envelope.submission_id,
+            "metadata-locks",
+        )
+        .unwrap();
+        record.status = TraceCorpusStatus::Purged;
+        assert!(write_submission_record(temp.path(), &record).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn file_witness_legacy_records_and_tenant_isolation() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer token-b".parse().unwrap());
+        let other_tenant = authenticate_ctx(&state, &headers).unwrap();
+        assert_eq!(
+            file_witness::current_claim(&state, &other_tenant, envelope.submission_id)
+                .unwrap()
+                .coverage,
+            Coverage::Missing
+        );
+        let path = submission_metadata_path(temp.path(), "tenant-a", envelope.submission_id);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("witness_evidence");
+        std::fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::Missing
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_witness_atomic_replace_failure_preserves_complete_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state, body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let path = submission_metadata_path(temp.path(), "tenant-a", envelope.submission_id);
+        let original = std::fs::read(&path).unwrap();
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        record.status = TraceCorpusStatus::Purged;
+        let parent = path.parent().unwrap();
+        let permissions = std::fs::metadata(parent).unwrap().permissions();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = write_submission_record(temp.path(), &record);
+        std::fs::set_permissions(parent, permissions).unwrap();
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_witness_concurrent_different_sources_cannot_replace_first_proof() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let mut changed = body.clone();
+        changed.push(b' ');
+        let mut tasks = Vec::new();
+        for bytes in [body.clone(), changed.clone()] {
+            let state = state.clone();
+            tasks.push(tokio::spawn(async move {
+                let (certificate, signature) = certificate_v2_over(&bytes);
+                post_through_the_real_router(state, bytes, Some((&certificate, &signature)))
+                    .await
+                    .status()
+            }));
+        }
+        let outcomes = [
+            tasks.remove(0).await.unwrap(),
+            tasks.remove(0).await.unwrap(),
+        ];
+        assert_eq!(outcomes.iter().filter(|s| **s == StatusCode::OK).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|s| **s == StatusCode::CONFLICT)
+                .count(),
+            1
+        );
+        let record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let digest =
+            serde_json::to_value(record).unwrap()["witness_evidence"]["raw_body_sha256"].clone();
+        let winner = if outcomes[0] == StatusCode::OK {
+            body
+        } else {
+            changed
+        };
+        assert_eq!(digest, hex::encode(Sha256::digest(winner)));
+    }
+
+    #[tokio::test]
+    async fn file_witness_exact_source_remediation_refreshes_object_association() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let old_object = record.object_key.clone();
+        record.status = TraceCorpusStatus::Quarantined;
+        write_submission_record(temp.path(), &record).unwrap();
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        assert_ne!(record.object_key, old_object);
+        record.status = TraceCorpusStatus::Accepted;
+        write_submission_record(temp.path(), &record).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::VerifiedV2
+        );
+    }
+
+    #[tokio::test]
+    async fn file_witness_encrypted_object_must_remain_available_and_verified() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = witnessed_state(temp.path().to_path_buf());
+        Arc::get_mut(&mut state).unwrap().artifact_store = Some(
+            ConfiguredTraceArtifactStore::legacy(test_artifact_store(temp.path())),
+        );
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::VerifiedV2
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        record.artifact_receipt.as_mut().unwrap().ciphertext_sha256 = "f".repeat(64);
+        write_submission_record(temp.path(), &record).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::ArtifactMismatch
+        );
+        // An absent encrypted store must never fall back to the compatibility plaintext file.
+        Arc::get_mut(&mut state).unwrap().artifact_store = None;
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::ArtifactMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn file_witness_association_never_certifies_a_concurrent_object_replacement() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(CERTIFICATE_HEADER, certificate.parse().unwrap());
+        headers.insert(SIGNATURE_HEADER, signature.parse().unwrap());
+        let verified = verified_witness_for_submission(&state, &headers, &body).unwrap();
+        let transformed = read_envelope_by_record(&state, &record).unwrap();
+        let path = temp.path().join(&record.object_key);
+        let mut replaced = std::fs::read(&path).unwrap();
+        replaced.push(b' ');
+        std::fs::write(path, replaced).unwrap();
+        // Model another writer replacing the object between store_envelope and
+        // evidence construction; only this handler's own transformed bytes bind.
+        record.witness_evidence = file_witness::for_submission(
+            &transformed,
+            &record,
+            None,
+            Some(&verified),
+            &headers,
+            &body,
+        )
+        .unwrap();
+        write_submission_record(temp.path(), &record).unwrap();
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::ArtifactMismatch
+        );
+    }
+
+    #[tokio::test]
     async fn real_router_persists_exact_v2_evidence_and_rejects_conflicting_retry() {
         let Some(backend) = postgres_backend_for_ingest_test().await else {
             return;

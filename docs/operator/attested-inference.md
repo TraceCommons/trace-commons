@@ -586,3 +586,35 @@ transaction. The caller does not supply an object digest. The object loader must
 still verify stored bytes against that reference before consuming them. An
 inactive, revoked, or mismatched object cannot receive an attested source
 class. This release does not assign new scoring or credit weights.
+
+For file-only ingest (no database mirror), verified original certificate and
+signature header bytes and the received body digest are stored privately in the
+submission metadata. The evidence and metadata are replaced atomically; Unix
+also syncs the parent directory after replacement. A metadata failure refuses
+the submission response. A crash can leave an unreferenced envelope, but cannot
+publish a partial metadata/evidence pair. Temporary metadata files use private
+permissions. Windows uses the existing `tempfile` atomic replacement primitive;
+parent-directory fsync is Unix-only.
+
+`file_witness::current_claim` is an internal, currently unused policy seam. It
+accepts authenticated tenant context and a submission ID, reads current durable
+status and revocation tombstones, and verifies the associated stored object's
+actual digest (including encrypted-store receipt verification). It returns no
+active attested class for inaccessible, absent, legacy, inactive, expired,
+revoked, missing-object or mismatched-object evidence. The raw proof is never in
+an exported envelope, public receipt, audit event or Debug output. Old metadata
+without evidence remains unknown.
+
+A same-ID file-only retry must preserve the original received body and either
+supply the exact original headers or omit both. Changed or partial supplied
+proof conflicts, including stale replacement certificates. Headerless quarantine
+remediation can change content, but retains the first proof only as history;
+only identical source bytes can refresh its transformed-object association.
+File locks give same-ID submissions cross-process ownership through commit;
+concurrent attempts receive a conflict and may retry. A separate metadata lock
+preserves immutable proof against stale metadata writers. Locks are released on
+process exit, and empty lock files are retained to avoid inode races. Other
+existing mutation paths retain their existing synchronization; a stale status
+write cannot override a durable revocation tombstone in this reader. File-only
+mode does not supply database account admission or session-wide withdrawal, and
+this change activates no scoring, credit or export policy.
