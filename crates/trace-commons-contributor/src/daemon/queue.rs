@@ -886,6 +886,29 @@ impl Queue {
         retracted
     }
 
+    /// Release every hold for `reason_label`, returning how many moved.
+    ///
+    /// For a hold whose cause is gone. A hold is keyed on the label it was
+    /// revoked with, not on the setting that produced it, so turning token
+    /// distributions off would otherwise leave every held session held: an
+    /// armed project's finished sessions sat `Pending` until expiry took
+    /// them, and the standing opt-in quietly stopped applying.
+    ///
+    /// The entry stays `Pending` with the label cleared, so the watcher can
+    /// approve it again under a standing opt-in, and it is dated `now`, since
+    /// expiry counts from `discovered_at` and the hold may have lasted weeks.
+    pub fn release_holds_for_reason(&mut self, reason_label: &str, now: DateTime<Utc>) -> usize {
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Pending && e.reason_label.as_deref() == Some(reason_label) {
+                e.reason_label = None;
+                e.discovered_at = now;
+                released += 1;
+            }
+        }
+        released
+    }
+
     /// Drop every `project-ignored` refusal belonging to `project_key`,
     /// returning how many went. The inverse of
     /// `refuse_pending_for_project`, and the thing that makes "You can undo
