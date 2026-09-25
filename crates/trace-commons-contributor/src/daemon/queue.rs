@@ -856,6 +856,49 @@ impl Queue {
         retracted
     }
 
+    /// Return every unattended approval for `project_key` to waiting,
+    /// returning how many moved.
+    ///
+    /// For turning automatic contributing off. The sibling
+    /// `retract_unattended_for_project` refuses them, which is right for
+    /// `Ignore` -- the contributor said not to offer this project at all.
+    /// Turning automatic off says something narrower: stop sending without
+    /// asking, and ask instead. So these become ordinary waiting cards, with
+    /// the old approval's terms cleared, for the contributor to decide.
+    ///
+    /// Without this, turning automatic off left every session it had already
+    /// approved uploading, which the confirmation that turned it on promised
+    /// it would not.
+    pub fn return_unattended_to_waiting_for_project(&mut self, project_key: &str) -> usize {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.project_key == project_key
+                    && e.state == QueueState::Approved
+                    && e.approved_unattended
+            })
+            .map(|e| e.entry_id)
+            .collect();
+        for id in &ids {
+            self.return_to_waiting(*id);
+        }
+        ids.len()
+    }
+
+    /// Put one entry back to a fresh offer: `Pending`, every term of its old
+    /// approval cleared, and no reason label left naming a condition that no
+    /// longer holds.
+    pub fn return_to_waiting(&mut self, entry_id: Uuid) -> bool {
+        if !self.revoke_approval(entry_id, "") {
+            return false;
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.reason_label = None;
+        }
+        true
+    }
+
     /// Drop every `project-ignored` refusal belonging to `project_key`,
     /// returning how many went. The inverse of
     /// `refuse_pending_for_project`, and the thing that makes "You can undo

@@ -582,18 +582,27 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     // A contributor-made approval is deliberately not re-checked. That is a
     // decision they took about these bytes, and `refuse_pending_for_project`
     // does not retract those either.
-    let ignored_ids: Vec<uuid::Uuid> = {
+    //
+    // Any mode other than automatic stops an unattended send, not only
+    // `Ignore`: turning automatic off to ask-first is the same "stop sending
+    // without asking", and the same race applies to it. An ignored project's
+    // entries are refused; an ask-first project's go back to waiting. A key
+    // policy cannot resolve falls back to ask-first, so a lookup miss now
+    // asks rather than sends -- the safe direction.
+    let (ignored_ids, returned_ids): (Vec<uuid::Uuid>, Vec<uuid::Uuid>) = {
         let policy = shared.policy.lock().expect("policy lock");
-        candidates
-            .iter()
-            .filter(|e| {
-                e.approved_unattended
-                    && policy.resolve(&e.project_key) == policy::ProjectMode::Ignore
-            })
-            .map(|e| e.entry_id)
-            .collect()
+        let mut ignored = Vec::new();
+        let mut returned = Vec::new();
+        for e in candidates.iter().filter(|e| e.approved_unattended) {
+            match policy.resolve(&e.project_key) {
+                policy::ProjectMode::AutoUpload => {}
+                policy::ProjectMode::Ignore => ignored.push(e.entry_id),
+                policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
+            }
+        }
+        (ignored, returned)
     };
-    if !ignored_ids.is_empty() {
+    if !ignored_ids.is_empty() || !returned_ids.is_empty() {
         {
             let mut q = shared.queue.lock().expect("queue lock");
             for id in &ignored_ids {
@@ -602,6 +611,9 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                     queue::QueueState::Refused,
                     Some(queue::REASON_PROJECT_IGNORED.to_string()),
                 );
+            }
+            for id in &returned_ids {
+                q.return_to_waiting(*id);
             }
             if let Err(e) = q.save(&shared.store) {
                 tracing::warn!(error = %e, "could not persist project-ignored refusals");
@@ -626,7 +638,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     }
     let approved: Vec<queue::QueueEntry> = candidates
         .into_iter()
-        .filter(|e| !ignored_ids.contains(&e.entry_id))
+        .filter(|e| !ignored_ids.contains(&e.entry_id) && !returned_ids.contains(&e.entry_id))
         .collect();
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
@@ -1535,6 +1547,57 @@ mod tests {
             history_refresh_decision(at("2026-08-08T12:00:00Z"), None, None, interval()),
             HistoryRefresh::OnInterval
         );
+    }
+
+    /// The send-time check covers turning automatic off, not only `Ignore`.
+    ///
+    /// An unattended approval whose project is now ask-first -- set so after
+    /// the approval, or claimed and released around the change -- goes back to
+    /// waiting instead of uploading, and the apps are told.
+    #[tokio::test]
+    async fn an_unattended_approval_is_not_sent_once_its_project_is_ask_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let entry_id = {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let e = queue::QueueEntry {
+                entry_id: uuid::Uuid::new_v4(),
+                session_hash: "sha256:askfirst".to_string(),
+                project_key: "/w/alpha".to_string(),
+                ..Default::default()
+            };
+            let id = e.entry_id;
+            q.upsert(e, 100).unwrap();
+            assert!(q.approve_unattended(id, &[], None));
+            id
+        };
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .set_mode(
+                "/w/alpha",
+                policy::ProjectMode::NotifyOnly,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut events = shared.events.subscribe();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(e.entry_id, entry_id);
+        assert_eq!(
+            e.state,
+            queue::QueueState::Pending,
+            "automatic is off, so it waits for the contributor"
+        );
+        assert_eq!(e.reason_label, None);
+        let published = events.try_recv().expect("a queue-changed event");
+        assert_eq!(published.event, ipc::EVENT_QUEUE_CHANGED);
     }
 
     #[tokio::test]
