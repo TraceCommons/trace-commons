@@ -429,6 +429,17 @@ impl std::fmt::Debug for VerifiedWitnessCertificate {
 }
 
 impl VerifiedWitnessCertificate {
+    /// The signed provenance claim. Legacy v1 certificates carry no such claim.
+    pub fn inference_provenance(
+        &self,
+    ) -> trace_commons_protocol::witness_provenance::InferenceProvenance {
+        match self.certificate.version() {
+            super::certificate::CertificateVersion::V1 => {
+                trace_commons_protocol::witness_provenance::InferenceProvenance::Unattested
+            }
+            super::certificate::CertificateVersion::V2(provenance) => provenance.clone(),
+        }
+    }
     /// Lowercase hex SHA-256 of the artifact this certificate covers, which
     /// verification has proven is the artifact the caller passed.
     pub fn redacted_sha256(&self) -> &str {

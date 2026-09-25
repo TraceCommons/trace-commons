@@ -738,13 +738,21 @@ pub fn certificate_json(
     certificate: &WitnessCertificate,
     verdict: ResidualPiiRisk,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "redacted_sha256": certificate.claimed_redacted_sha256(),
         "residual_risk_verdict": verdict_label(verdict),
         "redaction_policy_version": certificate.claimed_redaction_policy_version(),
         "witness_measurement": certificate.claimed_witness_measurement(),
         "timestamp": certificate.claimed_timestamp(),
-    })
+    });
+    if let crate::redaction_witness::certificate::CertificateVersion::V2(provenance) =
+        certificate.version()
+    {
+        json["version"] = serde_json::json!(2);
+        json["inference_provenance"] =
+            serde_json::to_value(provenance).expect("closed provenance serializes");
+    }
+    json
 }
 
 /// The wire spelling of a verdict.

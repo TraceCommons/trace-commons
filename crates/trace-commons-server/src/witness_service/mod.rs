@@ -88,6 +88,7 @@ use crate::witness_service::inference::{
     InferenceAttestationPolicy, WitnessedSession, check_inference_attestation,
     strip_inference_bodies,
 };
+use trace_commons_protocol::witness_provenance::InferenceProvenance;
 
 /// What the contributor sends: the raw transcript and the consent flags that
 /// declare what it carries.
@@ -587,7 +588,7 @@ pub async fn witness(
     let proof = check_correspondence(&redacted, &redacted, &[])
         .map_err(|_| WitnessError::ArtifactBindingFailed)?;
 
-    let certificate = WitnessCertificate::from_proof(
+    let certificate = WitnessCertificate::from_proof_v2(
         proof,
         CertificateDetails {
             residual_risk_verdict,
@@ -598,6 +599,7 @@ pub async fn witness(
                 .map_err(|SeamUnavailable| WitnessError::MeasurementUnavailable)?,
             timestamp: chrono::Utc::now().timestamp(),
         },
+        InferenceProvenance::Unattested,
     );
 
     let signature_hex = signer
@@ -901,7 +903,7 @@ pub async fn witness_contribution(
 ) -> Result<WitnessContributionResponse, WitnessError> {
     // Before the redaction pass, and onto the raw contribution, for the
     // reasons `witness` gives above.
-    check_inference_attestation(
+    let inference_outcome = check_inference_attestation(
         policy,
         request.offered_receipt.as_ref(),
         &WitnessedSession::Contribution(&request.raw_contribution),
@@ -964,7 +966,7 @@ pub async fn witness_contribution(
     let proof = check_correspondence(&serialised, &serialised, &[])
         .map_err(|_| WitnessError::ArtifactBindingFailed)?;
 
-    let certificate = WitnessCertificate::from_proof(
+    let certificate = WitnessCertificate::from_proof_v2(
         proof,
         CertificateDetails {
             residual_risk_verdict,
@@ -975,6 +977,10 @@ pub async fn witness_contribution(
                 .map_err(|SeamUnavailable| WitnessError::MeasurementUnavailable)?,
             timestamp: chrono::Utc::now().timestamp(),
         },
+        inference_outcome.final_call.map_or(
+            InferenceProvenance::Unattested,
+            InferenceProvenance::Attested,
+        ),
     );
 
     let signature_hex = signer
@@ -2035,6 +2041,79 @@ mod tests {
                 failure_modes: Vec::new(),
             });
         request
+    }
+
+    #[tokio::test]
+    async fn one_witness_issues_attested_and_unattested_v2_from_exact_returned_bytes() {
+        use ring::signature::KeyPair as _;
+        use trace_commons_protocol::witness_provenance::{AttestationClass, InferenceProvenance};
+        let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[11; 32]).unwrap();
+        let provider_key = hex::encode(provider.public_key().as_ref());
+        let policy = InferenceAttestationPolicy::not_required()
+            .pinning_model_keys(std::collections::BTreeMap::from([(
+                "m".into(),
+                vec![provider_key.clone()],
+            )]))
+            .unwrap();
+        let signer = TestSigner::new("provenance-witness");
+        let mut attested_request = contribution_with_exchange();
+        let event = attested_request.raw_contribution.events.last().unwrap();
+        let request_body = event.structured_payload["request"]["body"]
+            .as_str()
+            .unwrap();
+        let response_body = event.content.as_deref().unwrap();
+        let receipt_text = format!(
+            "m:{}:{}",
+            hex::encode(Sha256::digest(request_body.as_bytes())),
+            hex::encode(Sha256::digest(response_body.as_bytes()))
+        );
+        attested_request.offered_receipt = Some(ReceiptPayload {
+            text: receipt_text.clone(),
+            signature: hex::encode(provider.sign(receipt_text.as_bytes()).as_ref()),
+            signing_address: provider_key.clone(),
+            signing_algo: crate::near_attestation::receipt::ReceiptAlgo::Ed25519,
+            signature_kind: crate::near_attestation::receipt::ReceiptSignatureKind::ProviderTee,
+        });
+        let unattested_request = contribution_with_exchange();
+        let attested = super::witness_contribution(
+            attested_request,
+            &policy,
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .unwrap();
+        let unattested = super::witness_contribution(
+            unattested_request,
+            &policy,
+            &contribution_redactor(),
+            &signer,
+            &TestEnclave,
+        )
+        .await
+        .unwrap();
+        use crate::redaction_witness::certificate::CertificateVersion;
+        assert!(
+            matches!(attested.certificate.version(), CertificateVersion::V2(InferenceProvenance::Attested(call)) if call.class() == AttestationClass::ProviderTeeFinalCall && call.receipt_signer() == provider_key)
+        );
+        assert!(matches!(
+            unattested.certificate.version(),
+            CertificateVersion::V2(InferenceProvenance::Unattested)
+        ));
+        for response in [&attested, &unattested] {
+            verify_witness_certificate(
+                response.certificate.clone(),
+                &response.signature_hex,
+                Some(&pin(&signer)),
+                &response.envelope_bytes,
+            )
+            .unwrap();
+            assert_eq!(
+                response.certificate.claimed_redacted_sha256(),
+                hex::encode(Sha256::digest(&response.envelope_bytes))
+            );
+        }
     }
 
     /// The artifact a contributor receives carries no inference body and no

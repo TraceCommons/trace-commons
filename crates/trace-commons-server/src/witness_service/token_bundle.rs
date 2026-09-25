@@ -251,7 +251,7 @@ pub async fn witness_token_bundle(
     let manifest_bytes = manifest.canonical_bytes().map_err(|_| refuse())?;
     let text = std::str::from_utf8(&manifest_bytes).map_err(|_| refuse())?;
     let proof = check_correspondence(text, text, &[]).map_err(|_| refuse())?;
-    let certificate = WitnessCertificate::from_proof(
+    let certificate = WitnessCertificate::from_proof_v2(
         proof,
         CertificateDetails {
             residual_risk_verdict: contribution.residual_risk_verdict(),
@@ -262,6 +262,7 @@ pub async fn witness_token_bundle(
                 .map_err(|_| WitnessError::MeasurementUnavailable)?,
             timestamp: chrono::Utc::now().timestamp(),
         },
+        trace_commons_protocol::witness_provenance::InferenceProvenance::Unattested,
     );
     let signature_hex = signer
         .sign_eip191(&certificate.signing_bytes())
