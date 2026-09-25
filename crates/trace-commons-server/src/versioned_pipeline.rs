@@ -29,6 +29,7 @@ use trace_commons_protocol::trace_contribution::{
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
+use crate::db::{insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx};
 use crate::error::DatabaseError;
 use crate::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, TraceArtifactKind, TraceArtifactStore,
@@ -107,6 +108,8 @@ pub enum PipelineCrashPoint {
     AfterSettleSelection,
     AfterIndexApply,
     AfterInstrumentOperation,
+    AfterCreditLedgerInsert,
+    AfterCreditBatchFinalize,
     AfterSettleCommit,
 }
 
@@ -239,16 +242,26 @@ pub struct PipelineSettlementRecord {
 }
 
 /// The result of `PipelineService::settle_internal_credit`: either the
-/// Trace Credit leg settled into the ledger (its credit event and the
-/// finalized batch that carries it), or an active hold on the account kept
-/// it pending -- `PgPipelineStore::update_settlement` records the row as
-/// `held` and no ledger row is written.
+/// Trace Credit leg settled (its ledger row, the finalized batch that
+/// carries it, and the completed settlement row committed together), or a
+/// hold on the account, found under the account lock, rolled the credit
+/// transaction back -- the caller then records the row as `held` and no
+/// ledger row is written.
 enum InternalCreditResult {
-    Complete {
-        credit_event_id: Uuid,
-        settlement_batch_id: Uuid,
-    },
+    Complete,
     Held,
+}
+
+/// The settlement-row update for a leg an active credit hold keeps waiting.
+fn held_settlement_update() -> SettlementUpdate<'static> {
+    SettlementUpdate {
+        operation_state: "held",
+        result_ref_hash: None,
+        credit_event_id: None,
+        settlement_batch_id: None,
+        payout_state: None,
+        error_label: Some(PIPELINE_CREDIT_HELD_LABEL),
+    }
 }
 
 /// `PgPipelineStore::update_settlement`'s per-call update. `credit_event_id`
@@ -1345,49 +1358,8 @@ impl PgPipelineStore {
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        let row = tx
-            .query_opt(
-                "UPDATE pipeline_run_settlements s
-                    SET operation_state = $4,
-                        result_ref_hash = CASE
-                            WHEN $4 IN ('forfeited', 'retry') THEN NULL
-                            ELSE COALESCE(s.result_ref_hash, $5)
-                        END,
-                        credit_event_id = COALESCE(s.credit_event_id, $6),
-                        settlement_batch_id = COALESCE(s.settlement_batch_id, $7),
-                        payout_state = COALESCE($8, s.payout_state),
-                        last_error_label = $9,
-                        attempt_count = CASE
-                            WHEN $4 IN ('retry', 'failed') THEN s.attempt_count + 1
-                            ELSE s.attempt_count
-                        END,
-                        next_attempt_at = CASE
-                            WHEN $4 = 'retry' THEN NOW() + INTERVAL '50 milliseconds'
-                            ELSE s.next_attempt_at
-                        END,
-                        updated_at = NOW()
-                   FROM pipeline_runs p
-                  WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
-                    AND p.tenant_id = s.tenant_id AND p.run_id = s.run_id
-                    AND p.state = 'leased' AND p.lease_token = $10
-                    AND p.lease_expires_at > NOW()
-                  RETURNING s.*, s.atomic_units::TEXT AS atomic_units_text",
-                &[
-                    &run.tenant_id,
-                    &run.run_id,
-                    &instrument_id,
-                    &update.operation_state,
-                    &update.result_ref_hash,
-                    &update.credit_event_id,
-                    &update.settlement_batch_id,
-                    &update.payout_state,
-                    &update.error_label,
-                    &lease_token,
-                ],
-            )
-            .await?
-            .ok_or_else(stale_lease_error)?;
-        let settlement = pipeline_settlement_from_row(&row)?;
+        let settlement =
+            update_settlement_on_tx(&tx, run, lease_token, instrument_id, update).await?;
         tx.commit().await?;
         Ok(settlement)
     }
@@ -1426,6 +1398,62 @@ impl PgPipelineStore {
         .await?;
         Ok(())
     }
+}
+
+/// `PgPipelineStore::update_settlement` inside the caller's tenant
+/// transaction, fenced by the same lease check (the run row must still be
+/// `leased` under `lease_token` and unexpired), so the Trace Credit leg can
+/// complete its settlement row in the same transaction as its ledger work.
+async fn update_settlement_on_tx(
+    tx: &Transaction<'_>,
+    run: &PipelineRunRecord,
+    lease_token: Uuid,
+    instrument_id: &str,
+    update: SettlementUpdate<'_>,
+) -> Result<PipelineSettlementRecord, DatabaseError> {
+    let row = tx
+        .query_opt(
+            "UPDATE pipeline_run_settlements s
+                    SET operation_state = $4,
+                        result_ref_hash = CASE
+                            WHEN $4 IN ('forfeited', 'retry') THEN NULL
+                            ELSE COALESCE(s.result_ref_hash, $5)
+                        END,
+                        credit_event_id = COALESCE(s.credit_event_id, $6),
+                        settlement_batch_id = COALESCE(s.settlement_batch_id, $7),
+                        payout_state = COALESCE($8, s.payout_state),
+                        last_error_label = $9,
+                        attempt_count = CASE
+                            WHEN $4 IN ('retry', 'failed') THEN s.attempt_count + 1
+                            ELSE s.attempt_count
+                        END,
+                        next_attempt_at = CASE
+                            WHEN $4 = 'retry' THEN NOW() + INTERVAL '50 milliseconds'
+                            ELSE s.next_attempt_at
+                        END,
+                        updated_at = NOW()
+                   FROM pipeline_runs p
+                  WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
+                    AND p.tenant_id = s.tenant_id AND p.run_id = s.run_id
+                    AND p.state = 'leased' AND p.lease_token = $10
+                    AND p.lease_expires_at > NOW()
+                  RETURNING s.*, s.atomic_units::TEXT AS atomic_units_text",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &instrument_id,
+                &update.operation_state,
+                &update.result_ref_hash,
+                &update.credit_event_id,
+                &update.settlement_batch_id,
+                &update.payout_state,
+                &update.error_label,
+                &lease_token,
+            ],
+        )
+        .await?
+        .ok_or_else(stale_lease_error)?;
+    pipeline_settlement_from_row(&row)
 }
 
 async fn insert_outcome(
@@ -3236,6 +3264,34 @@ impl PipelineService {
                     .and_then(|operation| operation.result_ref_hash())
                     .map(str::to_string)
                     .ok_or_else(|| anyhow::anyhow!("settlement result reference is missing"))?;
+                // Ruling FR2, step 1: a held Trace Credit account is checked
+                // before any external effect, so a held account never
+                // reaches its adapter.
+                let credit_account_ref = if instrument_id == InstrumentId::trace_credit() {
+                    let account_ref = self.credit_account_ref(&run).await?;
+                    if self
+                        .credit_account_is_held(&run.tenant_id, &account_ref)
+                        .await?
+                    {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                held_settlement_update(),
+                            )
+                            .await?;
+                        held = true;
+                        settlement_blocked = true;
+                        continue;
+                    }
+                    Some(account_ref)
+                } else {
+                    None
+                };
+                // FR2, step 2 (I4): every adapter dispatch is fenced by the
+                // lease this attempt still holds, the same check Step 5 runs
+                // before the index write.
+                self.ensure_live_lease(&run).await?;
                 let request = SettlementRequest {
                     tenant_id: run.tenant_id.clone(),
                     run_id: run.run_id,
@@ -3244,6 +3300,8 @@ impl PipelineService {
                     operation_ref_hash: settlement.operation_ref_hash.clone(),
                     expected_result_ref_hash: expected_result_ref_hash.clone(),
                 };
+                // FR2, step 3: the adapter's result must equal the result
+                // reference the persisted selection recorded.
                 let actual_result = match adapter.settle(&request) {
                     Ok(result) if result == expected_result_ref_hash => result,
                     Ok(_) => {
@@ -3283,53 +3341,50 @@ impl PipelineService {
                         continue;
                     }
                 };
-                let (credit_event_id, settlement_batch_id) =
-                    if instrument_id == InstrumentId::trace_credit() {
-                        match self
-                            .settle_internal_credit(&run, &settlement, score_outcome.outcome_id)
-                            .await?
-                        {
-                            InternalCreditResult::Complete {
-                                credit_event_id,
-                                settlement_batch_id,
-                            } => (Some(credit_event_id), Some(settlement_batch_id)),
-                            InternalCreditResult::Held => {
-                                self.store
-                                    .update_settlement(
-                                        &run,
-                                        instrument_id.as_str(),
-                                        SettlementUpdate {
-                                            operation_state: "held",
-                                            result_ref_hash: None,
-                                            credit_event_id: None,
-                                            settlement_batch_id: None,
-                                            payout_state: None,
-                                            error_label: Some(PIPELINE_CREDIT_HELD_LABEL),
-                                        },
-                                    )
-                                    .await?;
-                                held = true;
-                                settlement_blocked = true;
-                                continue;
-                            }
+                match credit_account_ref {
+                    // FR2, step 4: the ledger row, the finalized batch, and
+                    // the completed settlement row commit in one transaction.
+                    Some(account_ref) => match self
+                        .settle_internal_credit(
+                            &run,
+                            &settlement,
+                            score_outcome.outcome_id,
+                            &account_ref,
+                            &actual_result,
+                        )
+                        .await?
+                    {
+                        InternalCreditResult::Complete => {}
+                        InternalCreditResult::Held => {
+                            self.store
+                                .update_settlement(
+                                    &run,
+                                    instrument_id.as_str(),
+                                    held_settlement_update(),
+                                )
+                                .await?;
+                            held = true;
+                            settlement_blocked = true;
+                            continue;
                         }
-                    } else {
-                        (None, None)
-                    };
-                self.store
-                    .update_settlement(
-                        &run,
-                        instrument_id.as_str(),
-                        SettlementUpdate {
-                            operation_state: "complete",
-                            result_ref_hash: Some(&actual_result),
-                            credit_event_id,
-                            settlement_batch_id,
-                            payout_state: None,
-                            error_label: None,
-                        },
-                    )
-                    .await?;
+                    },
+                    None => {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                SettlementUpdate {
+                                    operation_state: "complete",
+                                    result_ref_hash: Some(&actual_result),
+                                    credit_event_id: None,
+                                    settlement_batch_id: None,
+                                    payout_state: None,
+                                    error_label: None,
+                                },
+                            )
+                            .await?;
+                    }
+                }
                 self.inject_crash(PipelineCrashPoint::AfterInstrumentOperation)?;
             }
             if settlement_blocked {
@@ -3492,46 +3547,78 @@ impl PipelineService {
         Ok(updated)
     }
 
+    /// The Trace Credit account a run's credit settles to: the submission's
+    /// authenticated principal reference.
+    async fn credit_account_ref(&self, run: &PipelineRunRecord) -> anyhow::Result<String> {
+        Ok(self
+            .backend
+            .get_trace_submission(&run.tenant_id, run.submission_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("submission is missing"))?
+            .auth_principal_ref)
+    }
+
+    /// Whether an unreleased hold names `account_ref` (ruling FR2, step 1:
+    /// read before any external effect).
+    async fn credit_account_is_held(
+        &self,
+        tenant_id: &str,
+        account_ref: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .backend
+            .list_trace_credit_holds(tenant_id)
+            .await?
+            .iter()
+            .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none()))
+    }
+
     /// Settles the Trace Credit leg into the internal credit ledger (port
-    /// 4937 to 5112), adapted for the #971 settlement shape and PR 2's
-    /// scope:
+    /// 4937 to 5112) in ONE tenant transaction (ruling FR2, step 4), after
+    /// the caller has checked the hold, fenced the lease, and received the
+    /// adapter's result (`result_ref_hash`, already equal to the selection's
+    /// result reference). The transaction:
+    ///
+    /// 1. locks the run row and confirms this attempt's lease is still the
+    ///    current one (`ensure_current_lease`, as the commit transactions do);
+    /// 2. takes the per-account advisory lock, so two runs for one account
+    ///    never select the same pending event into two batches;
+    /// 3. re-checks the hold under that lock -- a hold returns `Held` and
+    ///    rolls the transaction back with nothing written;
+    /// 4. inserts the ledger row idempotently (the event id is derived from
+    ///    the run and its Score outcome);
+    /// 5. if that event is already final, reuses the one finalized batch that
+    ///    carries it; otherwise composes the batch from the account's pending
+    ///    events, writes it finalized, sets its `instrument_id`, and marks
+    ///    those events final;
+    /// 6. completes the settlement row with the result, the event, and the
+    ///    batch.
+    ///
+    /// Everything commits together or nothing does, so a crash or a stale
+    /// lease anywhere in it leaves the leg exactly as it was before the
+    /// attempt, and the retry repeats the idempotent adapter call and this
+    /// transaction.
+    ///
+    /// Adapted for the #971 settlement shape and PR 2's scope:
     ///
     /// - Ruling A8: the microcredit amount comes from
     ///   `InstrumentAward::trace_credit_microcredits`, not the removed
     ///   `Microcredits::from_atomic_units` (private as of #971).
     /// - `external_ref` carries `pipeline_ledger_source_key` (a hash of the
-    ///   tenant and request idempotency key) rather than a raw run/outcome
-    ///   id string, per the repo's hash-only convention -- PR 2's schema
-    ///   (migrations V75 to V78) has no `ledger_source_key` column on
-    ///   `trace_credit_ledger` for a dedicated idempotency key; that column
-    ///   is out of this PR's scope.
+    ///   tenant and request idempotency key); PR 2's schema has no dedicated
+    ///   `ledger_source_key` column on `trace_credit_ledger`.
     /// - The batch never dispatches a NEAR payout in PR 2: `near_status` is
-    ///   always `Disabled` and `near_contract_id` always `None` (no
-    ///   `self.payout` config exists on this service).
-    ///
-    /// An active hold on the account (checked before any ledger write)
-    /// returns `Held` without touching the ledger at all -- the caller
-    /// records the row as `held` and leaves the leg pending.
+    ///   always `Disabled` and `near_contract_id` always `None`.
     async fn settle_internal_credit(
         &self,
         run: &PipelineRunRecord,
         settlement: &PipelineSettlementRecord,
         score_outcome_id: Uuid,
+        account_ref: &str,
+        result_ref_hash: &str,
     ) -> anyhow::Result<InternalCreditResult> {
-        let submission = self
-            .backend
-            .get_trace_submission(&run.tenant_id, run.submission_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("submission is missing"))?;
-        let account_ref = submission.auth_principal_ref;
-        let account_hash = credit_account_hash(&account_ref);
-        let holds = self.backend.list_trace_credit_holds(&run.tenant_id).await?;
-        if holds
-            .iter()
-            .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none())
-        {
-            return Ok(InternalCreditResult::Held);
-        }
+        let lease_token = required_lease_token(run)?;
+        let account_hash = credit_account_hash(account_ref);
         let event_id = pipeline_credit_event_id(&run.tenant_id, run.run_id, score_outcome_id);
         let amount = InstrumentAward::new(InstrumentId::trace_credit(), settlement.atomic_units)
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?
@@ -3540,6 +3627,21 @@ impl PipelineService {
         let external_ref = pipeline_ledger_source_key(&run.tenant_id, &run.request_idempotency_key);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+        let account_lock = format!("pipeline-credit-account:{}:{account_hash}", run.tenant_id);
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))",
+            &[&account_lock],
+        )
+        .await?;
+        if list_trace_credit_holds_on_tx(&tx, &run.tenant_id)
+            .await?
+            .iter()
+            .any(|hold| hold.credit_account_ref == account_ref && hold.released_at.is_none())
+        {
+            // Dropping the transaction rolls it back: nothing was written.
+            return Ok(InternalCreditResult::Held);
+        }
         tx.execute(
             "INSERT INTO trace_credit_ledger (
                 tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
@@ -3564,6 +3666,80 @@ impl PipelineService {
             ],
         )
         .await?;
+        self.inject_crash(PipelineCrashPoint::AfterCreditLedgerInsert)?;
+        let event_state: String = tx
+            .query_opt(
+                "SELECT settlement_state FROM trace_credit_ledger
+                  WHERE tenant_id = $1 AND credit_event_id = $2
+                    AND pipeline_run_id = $3 AND instrument_id = $4",
+                &[
+                    &run.tenant_id,
+                    &event_id,
+                    &run.run_id,
+                    &settlement.instrument_id,
+                ],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?
+            .get("settlement_state");
+        let batch_id = if event_state == "final" {
+            // The event already settled in an earlier batch: reuse that
+            // batch rather than composing a second one that carries it.
+            let carrying = tx
+                .query(
+                    "SELECT settlement_batch_id FROM trace_credit_settlement_batches
+                      WHERE tenant_id = $1 AND instrument_id = $2
+                        AND status = 'finalized'
+                        AND $3 = ANY(source_credit_event_ids)",
+                    &[&run.tenant_id, &settlement.instrument_id, &event_id],
+                )
+                .await?;
+            anyhow::ensure!(carrying.len() == 1, "settlement_operation_mismatch");
+            carrying[0].get::<_, Uuid>("settlement_batch_id")
+        } else {
+            self.finalize_pending_credit_batch(
+                &tx,
+                run,
+                &settlement.instrument_id,
+                account_ref,
+                &account_hash,
+                event_id,
+            )
+            .await?
+        };
+        update_settlement_on_tx(
+            &tx,
+            run,
+            lease_token,
+            &settlement.instrument_id,
+            SettlementUpdate {
+                operation_state: "complete",
+                result_ref_hash: Some(result_ref_hash),
+                credit_event_id: Some(event_id),
+                settlement_batch_id: Some(batch_id),
+                payout_state: None,
+                error_label: None,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(InternalCreditResult::Complete)
+    }
+
+    /// Composes the account's pending pipeline credit events for
+    /// `instrument_id` into one batch, writes it finalized, sets its
+    /// `instrument_id`, and marks those events final -- all inside the
+    /// caller's credit transaction, under the per-account advisory lock the
+    /// caller holds. `event_id` (the run's own event) must be among them.
+    async fn finalize_pending_credit_batch(
+        &self,
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        instrument_id: &str,
+        account_ref: &str,
+        account_hash: &str,
+        event_id: Uuid,
+    ) -> anyhow::Result<Uuid> {
         let pending_events = tx
             .query(
                 "SELECT credit_event_id, submission_id, points_delta
@@ -3574,10 +3750,9 @@ impl PipelineService {
                     AND credit_account_ref = $3
                     AND settlement_state = 'pending'
                   ORDER BY credit_event_id",
-                &[&run.tenant_id, &settlement.instrument_id, &account_ref],
+                &[&run.tenant_id, &instrument_id, &account_ref],
             )
             .await?;
-        tx.commit().await?;
         anyhow::ensure!(
             pending_events
                 .iter()
@@ -3603,87 +3778,71 @@ impl PipelineService {
                 .ok_or_else(|| anyhow::anyhow!("credit_amount_overflow"))
         })?;
         let batch_id = pipeline_settlement_batch_id(&run.tenant_id, &list_hash);
-        let existing = self
-            .backend
-            .list_trace_credit_settlement_batches(&run.tenant_id)
-            .await?
-            .into_iter()
-            .find(|batch| batch.settlement_batch_id == batch_id);
-        if existing
-            .as_ref()
-            .is_none_or(|batch| batch.status != TraceCreditSettlementBatchStatus::Finalized)
-        {
-            let line_item = TraceCreditAccountSettlementLineItem {
-                credit_account_ref: account_ref.clone(),
-                credit_account_hash: account_hash.clone(),
-                settled_credit_delta_micros: settled_micros,
-                source_credit_event_ids: event_ids.clone(),
-                source_submission_ids: submission_ids.clone(),
-                source_list_hash: list_hash.clone(),
-                near_status: TraceCreditSettlementNearStatus::Disabled,
-                near_outbox_id: None,
-                near_payout_hold_reason: None,
-            };
-            let preview = TraceCreditSettlementBatchWrite {
-                tenant_id: run.tenant_id.clone(),
-                settlement_batch_id: batch_id,
-                policy_version: PIPELINE_SETTLEMENT_POLICY_VERSION.to_string(),
-                status: TraceCreditSettlementBatchStatus::DryRun,
-                reason_hash: list_hash.clone(),
-                issuer_approval_evidence_hash: Some(issuer_approval_hash(&list_hash)),
-                source_credit_event_ids: event_ids.clone(),
-                source_submission_ids: submission_ids.clone(),
-                source_list_hash: list_hash.clone(),
-                settled_credit_points: Microcredits::from_raw(
-                    u64::try_from(settled_micros).unwrap_or(0),
-                )
-                .to_credit_decimal(),
-                settled_credit_micros: settled_micros,
-                line_items: vec![line_item.clone()],
-                near_contract_id: None,
-                ranking_model_version: None,
-                ranking_target_use: None,
-                ranking_calibration_run_id: None,
-                ranking_calibration_report_hash: None,
-                ranking_calibration_joined_evidence_hash: None,
-                ranking_credit_events_excluded_count: 0,
-                ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
-                actor_principal_ref: account_ref.clone(),
-            };
-            self.backend
-                .upsert_trace_credit_settlement_batch(preview.clone())
-                .await?;
-            let mut finalized = preview;
-            finalized.status = TraceCreditSettlementBatchStatus::Finalized;
-            self.backend
-                .upsert_trace_credit_settlement_batch(finalized)
-                .await?;
-            let mut client = self.backend.trace_pool().get().await?;
-            let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
-            tx.execute(
+        let line_item = TraceCreditAccountSettlementLineItem {
+            credit_account_ref: account_ref.to_string(),
+            credit_account_hash: account_hash.to_string(),
+            settled_credit_delta_micros: settled_micros,
+            source_credit_event_ids: event_ids.clone(),
+            source_submission_ids: submission_ids.clone(),
+            source_list_hash: list_hash.clone(),
+            near_status: TraceCreditSettlementNearStatus::Disabled,
+            near_outbox_id: None,
+            near_payout_hold_reason: None,
+        };
+        let batch = TraceCreditSettlementBatchWrite {
+            tenant_id: run.tenant_id.clone(),
+            settlement_batch_id: batch_id,
+            policy_version: PIPELINE_SETTLEMENT_POLICY_VERSION.to_string(),
+            status: TraceCreditSettlementBatchStatus::Finalized,
+            reason_hash: list_hash.clone(),
+            issuer_approval_evidence_hash: Some(issuer_approval_hash(&list_hash)),
+            source_credit_event_ids: event_ids.clone(),
+            source_submission_ids: submission_ids,
+            source_list_hash: list_hash,
+            settled_credit_points: Microcredits::from_raw(
+                u64::try_from(settled_micros).unwrap_or(0),
+            )
+            .to_credit_decimal(),
+            settled_credit_micros: settled_micros,
+            line_items: vec![line_item],
+            near_contract_id: None,
+            ranking_model_version: None,
+            ranking_target_use: None,
+            ranking_calibration_run_id: None,
+            ranking_calibration_report_hash: None,
+            ranking_calibration_joined_evidence_hash: None,
+            ranking_credit_events_excluded_count: 0,
+            ranking_credit_events_excluded_reason_counts: BTreeMap::new(),
+            actor_principal_ref: account_ref.to_string(),
+        };
+        insert_credit_settlement_batch_on_tx(tx, &batch).await?;
+        let tagged = tx
+            .execute(
                 "UPDATE trace_credit_settlement_batches
                     SET instrument_id = $3
                   WHERE tenant_id = $1 AND settlement_batch_id = $2
                     AND (instrument_id IS NULL OR instrument_id = $3)",
-                &[&run.tenant_id, &batch_id, &settlement.instrument_id],
+                &[&run.tenant_id, &batch_id, &instrument_id],
             )
             .await?;
-            tx.execute(
+        anyhow::ensure!(tagged == 1, "settlement_operation_mismatch");
+        let finalized = tx
+            .execute(
                 "UPDATE trace_credit_ledger
                     SET settlement_state = 'final'
                   WHERE tenant_id = $1 AND credit_event_id = ANY($2)
                     AND pipeline_run_id IS NOT NULL
                     AND instrument_id = $3
                     AND settlement_state = 'pending'",
-                &[&run.tenant_id, &event_ids, &settlement.instrument_id],
+                &[&run.tenant_id, &event_ids, &instrument_id],
             )
             .await?;
-            tx.commit().await?;
-        }
-        Ok(InternalCreditResult::Complete {
-            credit_event_id: event_id,
-            settlement_batch_id: batch_id,
-        })
+        anyhow::ensure!(
+            usize::try_from(finalized).ok() == Some(event_ids.len()),
+            "settlement_operation_mismatch"
+        );
+        self.inject_crash(PipelineCrashPoint::AfterCreditBatchFinalize)?;
+        Ok(batch_id)
     }
 }
 

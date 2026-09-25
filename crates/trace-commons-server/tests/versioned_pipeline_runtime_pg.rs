@@ -1022,6 +1022,100 @@ impl SettlementAdapter for MismatchingSettlementAdapter {
     }
 }
 
+/// What `InterruptingCreditAdapter` does to the database during its first
+/// `settle` call, after the delegated call returns.
+enum CreditInterruption {
+    /// Expires the calling run's lease: "the adapter call outlived the
+    /// lease" (FR2, Failure 1).
+    ExpireLease,
+    /// Places an unreleased hold on the account: a hold that lands between
+    /// the pre-dispatch hold check and the credit transaction's re-check.
+    PlaceHold(TraceCreditHoldWrite),
+}
+
+/// A Trace Credit adapter that delegates to a recording adapter (so a
+/// repeated operation is still one logical effect) and, on its first call
+/// only, applies one `CreditInterruption` in the database before it returns.
+/// `settle` is synchronous, so the database write runs through
+/// `block_in_place`; a test using it runs on a multi-thread runtime.
+struct InterruptingCreditAdapter {
+    inner: Arc<RecordingSettlementAdapter>,
+    backend: Arc<PgBackend>,
+    tenant_id: String,
+    interruption: CreditInterruption,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl SettlementAdapter for InterruptingCreditAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        self.inner.instrument_id()
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "interrupting_credit_test_only"
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
+        let result = self.inner.settle(request)?;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            let backend = self.backend.clone();
+            let tenant_id = self.tenant_id.clone();
+            let run_id = request.run_id;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    match &self.interruption {
+                        CreditInterruption::ExpireLease => {
+                            let mut client = backend.trace_pool_for_test().get().await.unwrap();
+                            let tx = tenant_tx(&mut client, &tenant_id).await;
+                            tx.execute(
+                                "UPDATE pipeline_runs
+                                    SET lease_expires_at = NOW() - INTERVAL '1 second'
+                                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                                &[&tenant_id, &run_id],
+                            )
+                            .await
+                            .unwrap();
+                            tx.commit().await.unwrap();
+                        }
+                        CreditInterruption::PlaceHold(hold) => {
+                            backend
+                                .upsert_trace_credit_hold(hold.clone())
+                                .await
+                                .unwrap();
+                        }
+                    }
+                })
+            });
+        }
+        Ok(result)
+    }
+}
+
+/// The hold the tests place on the receipt helper's fixed principal
+/// (`receipt`'s `actor_principal_ref`, which becomes the submission's
+/// `auth_principal_ref` and so the credit account), released or not.
+fn credit_hold(
+    tenant_id: &str,
+    hold_id: uuid::Uuid,
+    released_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> TraceCreditHoldWrite {
+    let account_ref = "principal_sha256:test".to_string();
+    TraceCreditHoldWrite {
+        tenant_id: tenant_id.to_string(),
+        hold_id,
+        credit_account_ref: account_ref.clone(),
+        credit_account_hash: credit_account_hash(&account_ref),
+        reason: TraceCreditHoldReason::PolicyMigration,
+        reason_hash: credit_account_hash("pipeline-hold"),
+        actor_principal_ref: account_ref,
+        released_at,
+    }
+}
+
 fn receipt<'a>(
     tenant: &'a str,
     key: &'a str,
@@ -1156,6 +1250,115 @@ async fn settlement_batch_status(
         .expect("query settlement batch status");
     tx.commit().await.expect("commit settlement_batch_status");
     row.map(|row| row.get::<_, String>("status"))
+}
+
+/// The `settlement_state` of one `trace_credit_ledger` event, or `None` if
+/// no row exists.
+async fn credit_event_state(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    credit_event_id: uuid::Uuid,
+) -> Option<String> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for credit_event_state");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT settlement_state FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND credit_event_id = $2",
+            &[&tenant_id, &credit_event_id],
+        )
+        .await
+        .expect("query credit event state");
+    tx.commit().await.expect("commit credit_event_state");
+    row.map(|row| row.get::<_, String>("settlement_state"))
+}
+
+/// Every finalized `trace_credit_settlement_batches` row whose source list
+/// carries `credit_event_id`, as `(settlement_batch_id, instrument_id)`.
+async fn finalized_batches_carrying(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    credit_event_id: uuid::Uuid,
+) -> Vec<(uuid::Uuid, Option<String>)> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for finalized_batches_carrying");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT settlement_batch_id, instrument_id
+               FROM trace_credit_settlement_batches
+              WHERE tenant_id = $1 AND status = 'finalized'
+                AND $2 = ANY(source_credit_event_ids)",
+            &[&tenant_id, &credit_event_id],
+        )
+        .await
+        .expect("query batches carrying the event");
+    tx.commit()
+        .await
+        .expect("commit finalized_batches_carrying");
+    rows.iter()
+        .map(|row| (row.get("settlement_batch_id"), row.get("instrument_id")))
+        .collect()
+}
+
+/// Ruling FR2's per-run credit invariant: the run's Trace Credit leg is
+/// complete, it wrote exactly one ledger row, that event is final, exactly
+/// one finalized batch carries it, the batch's `instrument_id` is set, and
+/// the settlement row points at that batch.
+async fn assert_credit_settled_once(
+    backend: &Arc<PgBackend>,
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+    context: &str,
+) {
+    assert_eq!(
+        count_credit_ledger_rows_for_run(backend, tenant_id, run_id).await,
+        1,
+        "exactly one credit ledger row for the run ({context})"
+    );
+    let credit_row = service
+        .store()
+        .list_settlements(tenant_id, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .unwrap_or_else(|| panic!("trace_credit row present ({context})"));
+    assert_eq!(credit_row.operation_state, "complete", "{context}");
+    let event_id = credit_row
+        .credit_event_id
+        .unwrap_or_else(|| panic!("the completed leg records its credit event ({context})"));
+    assert_eq!(
+        credit_event_state(backend, tenant_id, event_id)
+            .await
+            .as_deref(),
+        Some("final"),
+        "the run's credit event is final ({context})"
+    );
+    let batches = finalized_batches_carrying(backend, tenant_id, event_id).await;
+    assert_eq!(
+        batches.len(),
+        1,
+        "exactly one finalized batch carries the event ({context})"
+    );
+    assert_eq!(
+        batches[0].1.as_deref(),
+        Some(InstrumentId::trace_credit().as_str()),
+        "the batch's instrument_id is set ({context})"
+    );
+    assert_eq!(
+        credit_row.settlement_batch_id,
+        Some(batches[0].0),
+        "the settlement row points at the batch that carries its event ({context})"
+    );
 }
 
 /// Recursively counts regular files under `path`. Used to confirm a refused
@@ -2979,8 +3182,9 @@ async fn settled_credit_stays_when_withdrawal_follows_settlement() {
 
 /// A hold on the Trace Credit account (the same `TraceCorpusStore` API the
 /// port's `place_credit_hold` uses) keeps that leg pending while every other
-/// instrument still completes: the run retries under `credit_held`, and
-/// only once the hold is released does the Settle outcome commit.
+/// instrument still completes: the run retries under `credit_held`, the
+/// held leg's adapter is never called (FR2, I3), and only once the hold is
+/// released does the leg settle and the Settle outcome commit.
 #[tokio::test]
 async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complete() {
     let Some(backend) = runtime_backend(4).await else {
@@ -3050,8 +3254,8 @@ async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complet
     );
     assert_eq!(
         trace_credit.requests().len(),
-        1,
-        "the adapter rail was dispatched once even though the ledger stayed pending"
+        0,
+        "a held account never reaches its adapter (FR2: the hold is checked first)"
     );
     assert_eq!(
         count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
@@ -3104,9 +3308,11 @@ async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complet
         .expect("trace_credit row present");
     assert_eq!(credit_row.operation_state, "complete");
     assert_eq!(
-        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
-        1
+        trace_credit.requests().len(),
+        1,
+        "the adapter is dispatched once the hold is released"
     );
+    assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "after release").await;
 
     let outcomes = service
         .store()
@@ -3118,6 +3324,243 @@ async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complet
         .filter(|outcome| outcome.phase == Phase::Settle)
         .collect();
     assert_eq!(settle_outcomes.len(), 1, "exactly one Settle outcome");
+}
+
+/// FR2, Failure 1: the Trace Credit adapter settles, and the lease expires
+/// before the ledger work commits (a slow adapter call). The credit
+/// transaction re-checks the lease on the run row and rolls back, so nothing
+/// is half-written; the next claim repeats the idempotent adapter call and
+/// commits the ledger row, the finalized batch, and the settlement row
+/// together. Before the fix the ledger committed in its own transactions,
+/// the settlement row could not be written under the stale lease, and every
+/// retry then failed on the already-final event until the run was
+/// exhausted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credit_ledger_work_survives_a_lease_that_expires_during_the_adapter_call() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("settle-credit-lease-{}", uuid::Uuid::new_v4());
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let expiring = Arc::new(InterruptingCreditAdapter {
+        inner: trace_credit.clone(),
+        backend: backend.clone(),
+        tenant_id: tenant.clone(),
+        interruption: CreditInterruption::ExpireLease,
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            expiring as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    // The first Settle attempt loses its lease inside the adapter call; it
+    // may surface as an error (its own retry bookkeeping is fenced by the
+    // same lease) or as a retry, but it must not complete the run.
+    let _ = service.process_run(&tenant, run.run_id).await;
+    let after_first = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(after_first.state, PipelineRunState::Complete);
+
+    for attempt in 0..6 {
+        let current = service
+            .store()
+            .get_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if current.state == PipelineRunState::Complete {
+            break;
+        }
+        assert!(
+            attempt < 5 && current.state != PipelineRunState::Failed,
+            "the run must complete after the stale attempt (state {:?}, label {:?})",
+            current.state,
+            current.last_error_label
+        );
+        force_due(&backend, &tenant, run.run_id).await;
+        let _ = service.process_run(&tenant, run.run_id).await;
+    }
+
+    assert_credit_settled_once(
+        &backend,
+        &service,
+        &tenant,
+        run.run_id,
+        "after a lease expired during the adapter call",
+    )
+    .await;
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the repeated adapter call is one logical request"
+    );
+    assert_eq!(storage_rebate.requests().len(), 1);
+}
+
+/// FR2: a hold placed after the pre-dispatch hold check but before the
+/// credit transaction is caught by the transaction's re-check under the
+/// account lock. The transaction rolls back with nothing written, the leg
+/// waits as `held`, and once the hold is released the retry repeats the
+/// idempotent adapter call and settles the leg exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hold_placed_during_the_adapter_call_is_caught_by_the_credit_transaction() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("settle-credit-hold-race-{}", uuid::Uuid::new_v4());
+    let hold_id = uuid::Uuid::new_v4();
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let holding = Arc::new(InterruptingCreditAdapter {
+        inner: trace_credit.clone(),
+        backend: backend.clone(),
+        tenant_id: tenant.clone(),
+        interruption: CreditInterruption::PlaceHold(credit_hold(&tenant, hold_id, None)),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            holding as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let held = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle waits while the account is held");
+    assert_eq!(held.state, PipelineRunState::Retry);
+    assert_eq!(
+        held.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+    let credit_row = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row seeded");
+    assert_eq!(credit_row.operation_state, "held");
+    assert_eq!(credit_row.credit_event_id, None);
+    assert_eq!(credit_row.settlement_batch_id, None);
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "the credit transaction rolled back: no ledger row"
+    );
+
+    backend
+        .upsert_trace_credit_hold(credit_hold(&tenant, hold_id, Some(chrono::Utc::now())))
+        .await
+        .expect("release the credit hold");
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the retry settles the leg once the hold is released");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "after release").await;
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the adapter call repeated after the rollback is one logical request"
+    );
+}
+
+/// FR2: two runs for one credit account that settle at the same time never
+/// place one credit event in two finalized batches. The per-account advisory
+/// lock in the credit transaction serializes the pending-event selection and
+/// the final mark, so each event lands in exactly one batch. Repeated over
+/// several tenants to give the interleaving a chance to occur.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_runs_for_one_account_never_share_a_credit_event_across_batches() {
+    let Some(backend) = runtime_backend(8).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    for round in 0..4 {
+        let tenant = format!("settle-two-runs-{round}-{}", uuid::Uuid::new_v4());
+        // The receipt helper submits every run as the same principal, so
+        // both runs credit one account.
+        let (first, _) = run_to_settle_ready(&service, &tenant).await;
+        let (second, _) = run_to_settle_ready(&service, &tenant).await;
+        let (left, right) = tokio::join!(
+            service.process_run(&tenant, first.run_id),
+            service.process_run(&tenant, second.run_id)
+        );
+        left.expect("first Settle attempt");
+        right.expect("second Settle attempt");
+        for run_id in [first.run_id, second.run_id] {
+            for _ in 0..5 {
+                let current = service
+                    .store()
+                    .get_run(&tenant, run_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if current.state == PipelineRunState::Complete {
+                    break;
+                }
+                force_due(&backend, &tenant, run_id).await;
+                service.process_run(&tenant, run_id).await.unwrap();
+            }
+            assert_credit_settled_once(
+                &backend,
+                &service,
+                &tenant,
+                run_id,
+                &format!("round {round}"),
+            )
+            .await;
+        }
+    }
 }
 
 /// D4: the expected result comes from the persisted selection, not from
@@ -3586,6 +4029,8 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
         PipelineCrashPoint::AfterSettleSelection,
         PipelineCrashPoint::AfterIndexApply,
         PipelineCrashPoint::AfterInstrumentOperation,
+        PipelineCrashPoint::AfterCreditLedgerInsert,
+        PipelineCrashPoint::AfterCreditBatchFinalize,
         PipelineCrashPoint::AfterSettleCommit,
     ] {
         // Fresh tenant, artifact directory, and index per point (ruling:
@@ -3766,12 +4211,17 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
             "trace_credit must be dispatched exactly once across A and B at point {point:?}"
         );
 
-        // Exactly one trace_credit_ledger row for the run.
-        assert_eq!(
-            count_credit_ledger_rows_for_run(&backend, &tenant, run_id).await,
-            1,
-            "exactly one credit ledger row for the run at point {point:?}"
-        );
+        // Ruling FR2: exactly one trace_credit_ledger row for the run, its
+        // event final, exactly one finalized batch carrying it, and that
+        // batch's instrument_id set.
+        assert_credit_settled_once(
+            &backend,
+            &service_b,
+            &tenant,
+            run_id,
+            &format!("crash point {point:?}"),
+        )
+        .await;
 
         // The index holds each command chunk once. The double's map key is
         // (tenant, index_id, entry_id), and `entry_id` is derived

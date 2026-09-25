@@ -32,6 +32,17 @@ pub trait SettlementAdapter: Send + Sync {
         false
     }
     fn payout_rail(&self) -> &str;
+    /// Performs the instrument's external effect for one settlement
+    /// operation and returns its result reference.
+    ///
+    /// Idempotency contract: an adapter must return the same result for a
+    /// repeated `request.operation_ref_hash` and must not repeat its effect.
+    /// Recovery depends on this. The pipeline calls `settle` before it
+    /// records the leg durably, so a crash, a stale lease, or a rolled-back
+    /// ledger transaction after the call makes the next attempt call `settle`
+    /// again with the same request; that call must be answered from the
+    /// first one's outcome. A repeated `operation_ref_hash` with different
+    /// request content is an error, never a second effect.
     fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String>;
 }
 
