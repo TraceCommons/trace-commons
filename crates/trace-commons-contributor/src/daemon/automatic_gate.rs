@@ -11,25 +11,32 @@
 //!
 //! # Not enforced yet
 //!
-//! [`ENFORCED`] is `false`, and is switched on only when the conditions in the
-//! spec's "When enforcement is switched on" all hold: #1020's account
-//! admission check is enforced on every ingest replica, Z2 (#1005) is in
-//! place, and a held-session health condition reaches every shell. Until then
-//! the gate is evaluated and reported, and approvals go ahead exactly as
-//! before.
+//! [`ENFORCED`] is `false`, and is switched on only when the switch-on
+//! conditions in rev 8 of the spec hold: Z2 (#1005) is in place, and a
+//! held-session health condition reaches every shell. Until then the gate is
+//! evaluated and reported, and approvals go ahead exactly as before.
+//!
+//! Rev 8 is #1025 and has not merged; `main` still carries rev 7, in which R1
+//! gates. This module follows rev 8, and until #1025 lands the spec on `main`
+//! is behind the code here.
 //!
 //! # What it checks
 //!
-//! The trust model (rev 8 of the spec) decides what gates arming and what
-//! only decides the wording. Per contributor:
+//! The trust model (rev 8, #1025) decides what gates arming and what only
+//! decides the wording. Per contributor:
 //!
 //! - **R7** -- a data-use scope has been chosen.
 //! - **R3** -- the tenant is not one whose uploads need per-session admission
-//!   evidence (#706), which an armed folder never prepares. Kept until #1020's
-//!   account check is enforced on the server, and withdrawn then: sending
-//!   earlier would put sessions through the witness and classifier only for
-//!   ingest to refuse them. The client cannot see that switch, so removing
-//!   this check is a code change made when it happens, not a runtime test.
+//!   evidence (#706), which an armed folder never prepares. **A runtime check,
+//!   never removed in code.** It stops applying only while the configured
+//!   ingest says it admits by account instead ([`AccountAdmission`]), which
+//!   #1020 reports as the `authority` on `/v1/account/contribution-status`.
+//!   That switch is per ingest replica and off whenever its environment
+//!   variable is missing, so it can revert on any redeploy; a client that had
+//!   dropped R3 for good would then send every armed session through the
+//!   witness and classifier only for ingest to refuse it. Anything short of
+//!   an affirmative answer -- no answer, an older ingest, a different commons,
+//!   `legacy_evidence` -- keeps R3.
 //!
 //! **R1 is not a gate.** Full trust lets a folder with no verified model pass
 //! send after deterministic redaction. What R1 still decides is what the
@@ -46,10 +53,12 @@ use crate::config::ContributorConfig;
 /// docs for why this is off.
 ///
 /// Among the conditions for switching this on: a label-only health
-/// condition raised while `TickReport::gate_blocked` is non-zero, with copy
-/// in every shell. The counter and the log line exist today; without the
-/// health label, an enforced gate would hold armed work with nothing in the
-/// app to say so.
+/// condition, set and cleared only from full passes (where
+/// `TickReport::gate_blocked` is `Some`), with copy in every shell. An
+/// event-driven pass sees only changed paths, so it can neither raise nor
+/// clear it. The count and the log line exist today; without the health
+/// label, an enforced gate would hold armed work with nothing in the app to
+/// say so.
 pub const ENFORCED: bool = false;
 
 /// A requirement the spec names, by its number there.
@@ -97,8 +106,42 @@ fn needs_admission_evidence(tenant_id: &str) -> bool {
     trace_commons_protocol::admission::is_anchored_tenant(tenant_id)
 }
 
-/// Evaluate the gate for a contributor's current configuration.
+/// What the configured ingest last said about how it admits contributions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccountAdmission {
+    /// It admits by account (#1020), so no per-session evidence is needed.
+    Advertised,
+    /// No affirmative answer. The default, and the only safe one: R3 applies.
+    #[default]
+    NotAdvertised,
+}
+
+impl AccountAdmission {
+    /// From the `authority` label `/v1/account/contribution-status` returns
+    /// (#1020). `bounded` and `invited` are account admission;
+    /// `legacy_evidence`, and any label this build does not know, are not.
+    pub fn from_authority(authority: &str) -> Self {
+        match authority {
+            "bounded" | "invited" => Self::Advertised,
+            _ => Self::NotAdvertised,
+        }
+    }
+}
+
+/// Evaluate the gate for a contributor's current configuration, with no
+/// answer from ingest about account admission, so R3 applies to the anchored
+/// namespaces.
 pub fn evaluate(cfg: Option<&ContributorConfig>, enforced: bool) -> GateVerdict {
+    evaluate_with(cfg, enforced, AccountAdmission::NotAdvertised)
+}
+
+/// Evaluate the gate, with what the configured ingest last said about
+/// account admission.
+pub fn evaluate_with(
+    cfg: Option<&ContributorConfig>,
+    enforced: bool,
+    account_admission: AccountAdmission,
+) -> GateVerdict {
     let mut unmet = Vec::new();
     let Some(cfg) = cfg else {
         // Not enrolled: nothing uploads at all, and the uploader says so. The
@@ -110,7 +153,8 @@ pub fn evaluate(cfg: Option<&ContributorConfig>, enforced: bool) -> GateVerdict 
         return GateVerdict { unmet, enforced };
     };
 
-    if needs_admission_evidence(&cfg.tenant_id) {
+    if needs_admission_evidence(&cfg.tenant_id) && account_admission != AccountAdmission::Advertised
+    {
         unmet.push(Unmet {
             requirement: Requirement::R3Admission,
             reason: REASON_ADMISSION_PER_SESSION,
@@ -247,6 +291,34 @@ mod tests {
                 "{tenant}"
             );
         }
+    }
+
+    /// R3 is lifted only by an affirmative answer from ingest, and returns
+    /// the moment that answer does: a replica with #1020 switched off says
+    /// `legacy_evidence`, and an unknown label is not a yes.
+    #[test]
+    fn r3_follows_what_ingest_says_at_runtime() {
+        let nearai = format!("nearai-{}", "b".repeat(64));
+        let cfg = cfg(&nearai, &["debugging_evaluation"], false, None);
+        let with = |a| reasons(&evaluate_with(Some(&cfg), true, a));
+        assert!(with(AccountAdmission::NotAdvertised).contains(&REASON_ADMISSION_PER_SESSION));
+        assert!(with(AccountAdmission::Advertised).is_empty());
+        assert_eq!(
+            reasons(&evaluate(Some(&cfg), true)),
+            with(AccountAdmission::NotAdvertised)
+        );
+
+        for (label, expected) in [
+            ("bounded", AccountAdmission::Advertised),
+            ("invited", AccountAdmission::Advertised),
+            ("legacy_evidence", AccountAdmission::NotAdvertised),
+            ("", AccountAdmission::NotAdvertised),
+            ("Bounded", AccountAdmission::NotAdvertised),
+            ("something-newer", AccountAdmission::NotAdvertised),
+        ] {
+            assert_eq!(AccountAdmission::from_authority(label), expected, "{label}");
+        }
+        assert_eq!(AccountAdmission::default(), AccountAdmission::NotAdvertised);
     }
 
     #[test]
