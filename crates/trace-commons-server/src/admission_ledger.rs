@@ -97,6 +97,14 @@ pub struct AccountAdmissionStatus {
     pub ready: bool,
     pub retry_after_seconds: Option<i64>,
 }
+
+/// Immutable identity recorded by the pre-cutover admission ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyAdmissionRecord {
+    pub anchor_hash: String,
+    pub body_hash: String,
+    pub status: String,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionDecision {
     Reserved,
@@ -118,10 +126,10 @@ async fn account_policy_period(
         PolicyPeriod::Lifetime => Ok(("lifetime".into(), None)),
         PolicyPeriod::Fixed { seconds } => {
             let row = tx.query_one(
-                "SELECT floor(extract(epoch FROM clock_timestamp()) / $1)::bigint,
-                        ($1 - mod(floor(extract(epoch FROM clock_timestamp()))::bigint, $1))::bigint",
+                "SELECT floor(extract(epoch FROM clock_timestamp()) / ($1::bigint)::numeric)::bigint,
+                        ($1::bigint - mod(floor(extract(epoch FROM clock_timestamp()))::bigint, $1::bigint))::bigint",
                 &[seconds],
-            ).await.map_err(|_| database_refused())?;
+            ).await.map_err(DatabaseError::Postgres)?;
             let bucket: i64 = row.get(0);
             let delay: i64 = row.get(1);
             Ok((format!("fixed:{seconds}:{bucket}"), Some(delay)))
@@ -142,6 +150,25 @@ impl Drop for AdmissionProcessingGuard {
 }
 
 impl PgBackend {
+    pub async fn legacy_admission_record(
+        &self,
+        tenant: &str,
+        submission: Uuid,
+    ) -> Result<Option<LegacyAdmissionRecord>, DatabaseError> {
+        let mut client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row = tx.query_opt("SELECT anchor_hash,body_hash,status FROM trace_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&submission]).await.map_err(|_|database_refused())?;
+        tx.commit().await.map_err(|_| database_refused())?;
+        Ok(row.map(|row| LegacyAdmissionRecord {
+            anchor_hash: row.get(0),
+            body_hash: row.get(1),
+            status: row.get(2),
+        }))
+    }
     /// Advisory only. The submit transaction repeats every identity and budget
     /// check; this read never promises a processing lease.
     pub async fn account_admission_status(
@@ -245,21 +272,29 @@ impl PgBackend {
             .await
             .map_err(|_| database_refused())?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let live = tx.query_opt(
-            "SELECT 1 FROM trace_accounts a WHERE a.tenant_id=$1 AND a.account_id=$2
-             AND a.closed_at IS NULL AND EXISTS (
-               SELECT 1 FROM trace_near_provisioned_devices n
-               JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id
-               JOIN trace_account_principals p ON p.tenant_id=n.tenant_id
-                   AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref
-               JOIN trace_near_account_anchors h ON h.tenant_id=n.tenant_id AND h.account_id=n.account_id
-               WHERE n.tenant_id=a.tenant_id AND n.account_id=a.account_id
-                 AND n.principal_ref=$3 AND d.revoked_at IS NULL
-                 AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL
-             ) FOR UPDATE OF a",
-            &[&tenant, &account, &r.principal_ref],
-        ).await.map_err(|_| database_refused())?;
-        if live.is_none() {
+        let account_live = tx
+            .query_opt(
+                "SELECT 1 FROM trace_accounts WHERE tenant_id=$1 AND account_id=$2
+             AND closed_at IS NULL FOR UPDATE",
+                &[&tenant, &account],
+            )
+            .await
+            .map_err(|_| database_refused())?;
+        if account_live.is_none() {
+            return Ok(AdmissionDecision::Refused);
+        }
+        // A separate statement sees revocation committed while we waited for
+        // the account lock. Row locks serialize any later revoke/unlink with
+        // this reservation transaction.
+        let device_live: bool = tx
+            .query_one(
+                "SELECT trace_account_admission_live_device($1,$2,$3)",
+                &[&tenant, &account, &r.principal_ref],
+            )
+            .await
+            .map_err(|_| database_refused())?
+            .get(0);
+        if !device_live {
             return Ok(AdmissionDecision::Refused);
         }
 
@@ -295,8 +330,7 @@ impl PgBackend {
         }
         let active_grant: bool = tx
             .query_one(
-                "SELECT EXISTS(SELECT 1 FROM trace_account_invite_grants
-              WHERE tenant_id=$1 AND account_id=$2 AND revoked_at IS NULL)",
+                "SELECT trace_account_admission_active_grant($1,$2)",
                 &[&tenant, &account],
             )
             .await
@@ -402,8 +436,22 @@ impl PgBackend {
                 let expiry: DateTime<Utc> = prior.get(3);
                 let version: i64 = trust.get(0);
                 let authority: String = trust.get(1);
-                let grant: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM trace_account_invite_grants WHERE tenant_id=$1 AND account_id=$2 AND revoked_at IS NULL)", &[&tenant,&account]).await.map_err(|_|database_refused())?.get(0);
-                let live: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref WHERE n.tenant_id=$1 AND n.account_id=$2 AND n.principal_ref=$3 AND d.revoked_at IS NULL AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL)", &[&tenant,&account,&principal]).await.map_err(|_|database_refused())?.get(0);
+                let grant: bool = tx
+                    .query_one(
+                        "SELECT trace_account_admission_active_grant($1,$2)",
+                        &[&tenant, &account],
+                    )
+                    .await
+                    .map_err(|_| database_refused())?
+                    .get(0);
+                let live: bool = tx
+                    .query_one(
+                        "SELECT trace_account_admission_live_device($1,$2,$3)",
+                        &[&tenant, &account, &principal],
+                    )
+                    .await
+                    .map_err(|_| database_refused())?
+                    .get(0);
                 if closed.is_some()
                     || !live
                     || expiry <= Utc::now()

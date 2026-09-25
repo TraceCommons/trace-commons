@@ -496,6 +496,63 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         .await,
     )
     .await;
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"legacy-cutover-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["legacy-cutover-fixture"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let unauthenticated_status = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/contribution-status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !unauthenticated_status.status().is_success(),
+        "advisory status stays behind account authentication"
+    );
+    let legacy_retry = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            response.envelope_bytes.clone(),
+            headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        accepted, legacy_retry,
+        "completed legacy receipt is readable after cutover"
+    );
+    let mut altered_raw = response.envelope_bytes.clone();
+    altered_raw.push(b' ');
+    assert_eq!(
+        post(state.clone(), "/v1/traces", altered_raw, HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::CONFLICT,
+        "legacy UUID is bound to exact bytes across ledgers"
+    );
+    let account_rows: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        account_rows, 0,
+        "legacy retry and conflict never reserve account budget"
+    );
+    Arc::make_mut(&mut state).account_admission = None;
     let artifact: TraceContributionEnvelope =
         serde_json::from_slice(&response.envelope_bytes).unwrap();
     let receipt: serde_json::Value = serde_json::from_slice(&accepted).unwrap();
@@ -812,5 +869,162 @@ async fn the_anchor_lookup_is_what_binds_a_request_to_its_account() {
     assert!(
         admission::anchor(&state, &contexts[0]).await.is_err(),
         "revoking the provisioned device must withdraw the anchor"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn account_replacement_is_default_off_and_validates_offered_evidence() {
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
+    let body = serde_json::to_vec(&envelope).unwrap();
+    assert_eq!(
+        post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN,
+        "flag off retains the zero-evidence refusal"
+    );
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"account-http-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["account-http-fixture"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let mut malformed = HeaderMap::new();
+    malformed.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        HeaderValue::from_static("{"),
+    );
+    assert_eq!(
+        post(state.clone(), "/v1/traces", body.clone(), malformed)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN,
+        "offered malformed legacy evidence is still refused"
+    );
+    let accepted = post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new()).await;
+    assert_eq!(
+        accepted.status(),
+        StatusCode::OK,
+        "authenticated account can reserve without interactive evidence"
+    );
+    let mut changed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    changed["trace_id"] = serde_json::json!(Uuid::new_v4());
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&changed).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "same UUID with different exact bytes conflicts"
+    );
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"account-http-fixed","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":3600},"growth_rule":"none"}"#,
+            &["account-http-fixed"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let mut fixed_first = sample_envelope().await;
+    make_metadata_only_low_risk(&mut fixed_first);
+    fixed_first.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&fixed_first).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+    );
+    let mut fixed_second = sample_envelope().await;
+    make_metadata_only_low_risk(&mut fixed_second);
+    fixed_second.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
+    let fixed_refusal = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&fixed_second).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(fixed_refusal.status(), StatusCode::TOO_MANY_REQUESTS);
+    let fixed_body = axum::body::to_bytes(fixed_refusal.into_body(), 4096)
+        .await
+        .unwrap();
+    let fixed_error: serde_json::Value = serde_json::from_slice(&fixed_body).unwrap();
+    assert_eq!(fixed_error["error"], "account_limit_reached");
+    assert!(
+        fixed_error["retry_after_seconds"]
+            .as_i64()
+            .is_some_and(|seconds| (1..=3600).contains(&seconds))
+    );
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let used_before_invite: i64 = client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
+    client.execute("UPDATE trace_account_trust SET authority='invited',trust_version=trust_version+1 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
+    let invite_hash = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,2)", &[&tenant,&account_id,&invite_hash]).await.unwrap();
+    let mut invited = sample_envelope().await;
+    make_metadata_only_low_risk(&mut invited);
+    invited.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&invited).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "invited deterministic-only path needs no fabricated witness"
+    );
+    let total: i64 = client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
+    assert_eq!(
+        total, used_before_invite,
+        "invited submission bypasses cumulative debit"
     );
 }

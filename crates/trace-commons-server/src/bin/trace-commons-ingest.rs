@@ -7488,7 +7488,10 @@ fn community_routes() -> Router<Arc<AppState>> {
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reward_routes = rewards::account_routes(state.clone());
     Router::new()
-        .route("/v1/account/contribution-status", get(admission::account_status_handler))
+        .route(
+            "/v1/account/contribution-status",
+            get(admission::account_status_handler),
+        )
         .route(
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
@@ -13470,7 +13473,11 @@ async fn submit_trace_handler(
         )?;
         // Same-id quarantine remediation does not consume a new quota slot — the
         // prior quarantined row already counted.
-        if remediating_prior.is_none() && !admission.as_ref().is_some_and(admission::Attempt::is_invited) {
+        if remediating_prior.is_none()
+            && !admission
+                .as_ref()
+                .is_some_and(admission::Attempt::is_invited)
+        {
             enforce_submission_quota(state.as_ref(), &tenant)?;
         }
         apply_embedding_precheck(&mut envelope, &derived_precheck);
@@ -40779,7 +40786,7 @@ fn all_attempts_failed_outcome(
 /// The message is never logged: `spawn_driver_loop` hashes the error, and
 /// only the hash and the class reach the log line.
 fn worker_route_error(driver: &'static str, error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    let (status, Json(ApiError { error })) = error;
+    let (status, Json(ApiError { error, .. })) = error;
     DriverTickError::WorkerRouteRejected {
         driver,
         status,
@@ -69955,6 +69962,8 @@ type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<i64>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -69962,6 +69971,21 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         status,
         Json(ApiError {
             error: message.into(),
+            retry_after_seconds: None,
+        }),
+    )
+}
+
+fn api_error_with_retry(
+    status: StatusCode,
+    message: impl Into<String>,
+    retry_after_seconds: Option<i64>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: message.into(),
+            retry_after_seconds,
         }),
     )
 }

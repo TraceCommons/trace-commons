@@ -446,24 +446,32 @@ async fn reserve_account(
         resolve_contribution_account(db.as_ref(), tenant.tenant_id(), tenant.principal_ref())
             .await
             .map_err(|_| denied())?;
-    // Cutover must not charge an account reservation for an already completed
-    // legacy admission. The submit handler still checks receipt ownership.
+    let guard = db
+        .acquire_admission_processing_lock(tenant.tenant_id(), submission)
+        .await
+        .map_err(|_| denied())?
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
+    // The shared guard serializes both admission modes. Read *after* taking
+    // it: a legacy worker may have completed while this request waited.
     let legacy_anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
-    if db
-        .lookup_completed_submission_admission(
-            tenant.tenant_id(),
-            &legacy_anchor,
-            submission,
-            &hash_hex(body),
-        )
+    if let Some(legacy) = db
+        .legacy_admission_record(tenant.tenant_id(), submission)
         .await
         .map_err(|_| denied())?
     {
-        let guard = db
-            .acquire_admission_processing_lock(tenant.tenant_id(), submission)
-            .await
-            .map_err(|_| denied())?
-            .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
+        if legacy.anchor_hash != legacy_anchor || legacy.body_hash != hash_hex(body) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::IdentityConflict.label(),
+            ));
+        }
+        if legacy.status != "completed" {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::InProgress.label(),
+            ));
+        }
+        // The submit handler still checks receipt ownership.
         return Ok(Attempt {
             tenant_id: tenant.tenant_id().into(),
             submission_id: submission,
@@ -515,11 +523,6 @@ async fn reserve_account(
         )
         .map_err(|_| denied())?;
     }
-    let guard = db
-        .acquire_admission_processing_lock(tenant.tenant_id(), submission)
-        .await
-        .map_err(|_| denied())?
-        .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
     let reservation = AccountAdmissionReservation {
         account: account.clone(),
         principal_ref: tenant.principal_ref().into(),
@@ -555,9 +558,10 @@ async fn reserve_account(
             ));
         }
         AdmissionDecision::Exhausted => {
-            return Err(api_error(
+            return Err(api_error_with_retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 AdmissionRefusal::AccountLimitReached.label(),
+                status.retry_after_seconds,
             ));
         }
         AdmissionDecision::Refused => return Err(denied()),
@@ -669,6 +673,30 @@ pub(super) async fn challenge_handler(
 mod tests {
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
+
+    #[test]
+    fn account_limit_wire_contract_only_advertises_configured_reset() {
+        let (code, Json(fixed)) = api_error_with_retry(
+            StatusCode::TOO_MANY_REQUESTS,
+            AdmissionRefusal::AccountLimitReached.label(),
+            Some(7),
+        );
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+        let fixed = serde_json::to_value(fixed).unwrap();
+        assert_eq!(fixed["error"], "account_limit_reached");
+        assert_eq!(fixed["retry_after_seconds"], 7);
+        let (_, Json(lifetime)) = api_error_with_retry(
+            StatusCode::TOO_MANY_REQUESTS,
+            AdmissionRefusal::AccountLimitReached.label(),
+            None,
+        );
+        assert!(
+            serde_json::to_value(lifetime)
+                .unwrap()
+                .get("retry_after_seconds")
+                .is_none()
+        );
+    }
 
     /// The V59 trial window is closed, not narrowed: with no evidence headers
     /// there is no reachable path that admits a new submission.

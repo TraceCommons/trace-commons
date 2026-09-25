@@ -7,10 +7,37 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::PgBackend;
+use crate::account_trust::{TrustAccount, TrustFactOutcome, TrustFactSource};
 use crate::db::AccountInviteRedemption;
 use crate::error::DatabaseError;
 
 impl PgBackend {
+    /// The definer function verifies the server-owned accepted credit event or
+    /// gate decision and source ownership. Caller-supplied claims alone cannot
+    /// create a positive fact. No admission policy reads this table yet.
+    pub async fn record_account_trust_fact(
+        &self,
+        account: &TrustAccount,
+        source: TrustFactSource,
+    ) -> Result<Option<TrustFactOutcome>, DatabaseError> {
+        let tenant = account.tenant_id();
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let raw: Option<String> = tx
+            .query_one(
+                "SELECT trace_record_account_trust_fact($1,$2,$3,$4)",
+                &[
+                    &tenant,
+                    &account.account_id(),
+                    &source.kind(),
+                    &source.source_id(),
+                ],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(raw.as_deref().and_then(TrustFactOutcome::from_storage))
+    }
     pub(super) async fn redeem_account_invite_in_tx(
         &self,
         tenant: &str,

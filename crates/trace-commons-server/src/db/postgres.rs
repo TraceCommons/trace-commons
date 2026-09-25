@@ -210,6 +210,9 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_trust",
     "trace_account_invite_grants",
     "trace_account_trust_events",
+    "trace_account_admission_budget",
+    "trace_account_admission_submissions",
+    "trace_account_trust_facts",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",
@@ -1372,6 +1375,20 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn record_account_trust_fact(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        source: crate::account_trust::TrustFactSource,
+    ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
+        PgBackend::record_account_trust_fact(self, account, source).await
+    }
+    async fn legacy_admission_record(
+        &self,
+        tenant: &str,
+        submission: Uuid,
+    ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
+        PgBackend::legacy_admission_record(self, tenant, submission).await
+    }
     async fn reserve_account_admission(
         &self,
         request: &crate::admission_ledger::AccountAdmissionReservation,
@@ -1397,7 +1414,10 @@ impl Database for PgBackend {
         lease: Uuid,
         next: &str,
     ) -> Result<bool, DatabaseError> {
-        PgBackend::transition_account_admission(self, tenant, principal, account, submission, lease, next).await
+        PgBackend::transition_account_admission(
+            self, tenant, principal, account, submission, lease, next,
+        )
+        .await
     }
     async fn redeem_account_invite(
         &self,

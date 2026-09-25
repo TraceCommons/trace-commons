@@ -14,6 +14,49 @@ pub struct TrustAccount {
     account_id: Uuid,
 }
 
+/// A stable server-side source. Recording either fact never raises allowance;
+/// a later reviewed policy may evaluate the deduplicated history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustFactSource {
+    AcceptedSubmission(Uuid),
+    GateEvaluation(Uuid),
+}
+
+impl TrustFactSource {
+    pub fn source_id(self) -> Uuid {
+        match self {
+            Self::AcceptedSubmission(id) | Self::GateEvaluation(id) => id,
+        }
+    }
+
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::AcceptedSubmission(_) => "accepted_submission",
+            Self::GateEvaluation(_) => "gate_evaluation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustFactOutcome {
+    Accepted,
+    EvaluatedPassed,
+    EvaluatedFailed,
+    EvaluatedNotAccepted,
+}
+
+impl TrustFactOutcome {
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "evaluated_passed" => Some(Self::EvaluatedPassed),
+            "evaluated_failed" => Some(Self::EvaluatedFailed),
+            "evaluated_not_accepted" => Some(Self::EvaluatedNotAccepted),
+            _ => None,
+        }
+    }
+}
+
 impl TrustAccount {
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id

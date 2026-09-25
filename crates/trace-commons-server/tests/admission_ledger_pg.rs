@@ -3,7 +3,9 @@
 //! Explicit isolated PostgreSQL test: never falls back to DATABASE_URL or skips failure.
 use std::sync::Arc;
 use trace_commons_server::{
-    account_trust::{parse_bounded_policy, resolve_contribution_account},
+    account_trust::{
+        TrustFactOutcome, TrustFactSource, parse_bounded_policy, resolve_contribution_account,
+    },
     admission_ledger::{
         AccountAdmissionReservation, AdmissionDecision as D, AdmissionLimits, AdmissionReservation,
     },
@@ -47,7 +49,8 @@ async fn account_admission_atomicity_replay_and_revocation() {
     runtime_url
         .set_username("admission_account_runtime")
         .unwrap();
-    let runtime = Arc::new(PgBackend::new(&config(runtime_url.into())).await.unwrap());
+    let runtime_url: String = runtime_url.into();
+    let runtime = Arc::new(PgBackend::new(&config(runtime_url.clone())).await.unwrap());
     let anchor = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
     let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
     let account = Uuid::new_v4();
@@ -148,19 +151,44 @@ async fn account_admission_atomicity_replay_and_revocation() {
         D::Reserved,
         "invite bypasses exhausted cumulative allowance"
     );
-    admin.execute("UPDATE trace_account_invite_grants SET revoked_at=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap();
-    assert!(
-        !runtime
+    // Hold the grant row while processing attempts its liveness check. The
+    // runtime transaction must visibly block on this independent revoke row.
+    let mut revoke_client = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let revoke_tx = revoke_client.transaction().await.unwrap();
+    revoke_tx.query_one("SELECT 1 FROM trace_account_invite_grants WHERE tenant_id=$1 AND account_id=$2 FOR UPDATE", &[&tenant,&account]).await.unwrap();
+    let runtime_for_race = runtime.clone();
+    let tenant_for_race = tenant.clone();
+    let principal_for_race = principal.clone();
+    let invited_for_race = invited.clone();
+    let processing = tokio::spawn(async move {
+        runtime_for_race
             .transition_account_admission(
-                &tenant,
-                &principal,
+                &tenant_for_race,
+                &principal_for_race,
                 account,
-                invited.submission_id,
-                invited.lease_id,
-                "processing"
+                invited_for_race.submission_id,
+                invited_for_race.lease_id,
+                "processing",
             )
             .await
-            .unwrap(),
+            .unwrap()
+    });
+    let observed_block = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = admin.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE query LIKE 'SELECT trace_account_admission_active_grant%' AND cardinality(pg_blocking_pids(pid)) > 0)", &[]).await.unwrap().get(0);
+            if blocked { break true; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(observed_block);
+    revoke_tx.execute("UPDATE trace_account_invite_grants SET revoked_at=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap();
+    revoke_tx.commit().await.unwrap();
+    assert!(
+        !processing.await.unwrap(),
         "revoked grant cannot start processing"
     );
     let retry_policy = parse_bounded_policy(
@@ -248,6 +276,94 @@ async fn account_admission_atomicity_replay_and_revocation() {
     assert_eq!(
         runtime.reserve_account_admission(&conflict).await.unwrap(),
         D::Conflict
+    );
+    drop(runtime);
+    let restarted = PgBackend::new(&config(runtime_url)).await.unwrap();
+    assert_eq!(
+        restarted.reserve_account_admission(&retry).await.unwrap(),
+        D::Completed,
+        "process restart preserves terminal identity and charge"
+    );
+    let fixed_policy = parse_bounded_policy(
+        r#"{"version":"admission-test-fixed","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":2},"growth_rule":"none"}"#,
+        &["admission-test-fixed"],
+    ).unwrap();
+    let mut fixed = request(&principal);
+    fixed.policy = fixed_policy.clone();
+    assert_eq!(
+        restarted.reserve_account_admission(&fixed).await.unwrap(),
+        D::Reserved
+    );
+    let mut next = request(&other);
+    next.policy = fixed_policy.clone();
+    assert_eq!(
+        restarted.reserve_account_admission(&next).await.unwrap(),
+        D::Exhausted
+    );
+    let status = restarted
+        .account_admission_status(&trust_account, &principal, &fixed_policy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.ready);
+    let delay = status
+        .retry_after_seconds
+        .expect("fixed period has a next boundary");
+    assert!((1..=2).contains(&delay));
+    tokio::time::sleep(std::time::Duration::from_secs((delay + 1) as u64)).await;
+    assert_eq!(
+        restarted.reserve_account_admission(&next).await.unwrap(),
+        D::Reserved,
+        "explicit period boundary replenishes"
+    );
+
+    let source_submission = Uuid::new_v4();
+    let source_trace = Uuid::new_v4();
+    admin.execute("INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,redaction_pipeline_version,redaction_hash) VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5)", &[&tenant,&source_submission,&source_trace,&principal,&"a".repeat(64)]).await.unwrap();
+    assert_eq!(
+        restarted
+            .record_account_trust_fact(
+                &trust_account,
+                TrustFactSource::AcceptedSubmission(source_submission)
+            )
+            .await
+            .unwrap(),
+        None,
+        "status alone is not an accepted fact"
+    );
+    admin.execute("INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,credit_account_ref,event_type,points_delta,reason,actor_principal_ref,actor_role,settlement_state) VALUES($1,$2,$3,$4,'fixture','accepted','0','fixture',$5,'system','pending')", &[&tenant,&Uuid::new_v4(),&source_submission,&source_trace,&principal]).await.unwrap();
+    assert_eq!(
+        restarted
+            .record_account_trust_fact(
+                &trust_account,
+                TrustFactSource::AcceptedSubmission(source_submission)
+            )
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::Accepted)
+    );
+    assert_eq!(
+        restarted
+            .record_account_trust_fact(
+                &trust_account,
+                TrustFactSource::AcceptedSubmission(source_submission)
+            )
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::Accepted)
+    );
+    let fact_count: i64 = admin.query_one("SELECT count(*) FROM trace_account_trust_facts WHERE tenant_id=$1 AND account_id=$2 AND source_kind='accepted_submission'", &[&tenant,&account]).await.unwrap().get(0);
+    assert_eq!(fact_count, 1, "stable source cannot count twice");
+    let evaluation = Uuid::new_v4();
+    admin.execute("UPDATE trace_submissions SET status='quarantined' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&source_submission]).await.unwrap();
+    admin.execute("INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,gate_policy_version,gate_version_hash,perplexity_micros,tail_fraction_micros,perplexity_passed,novelty_score_micros,nearest_neighbor_hash,novelty_passed,embedding_evidence_hash,attestation_chain_hash) VALUES($1,$2,$3,'test-evaluator-v1',$4,1,1,TRUE,1,$4,TRUE,$4,$4)", &[&tenant,&evaluation,&source_submission,&"a".repeat(64)]).await.unwrap();
+    assert_eq!(
+        restarted
+            .record_account_trust_fact(&trust_account, TrustFactSource::GateEvaluation(evaluation))
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::EvaluatedNotAccepted),
+        "declined/quarantined work gets no positive outcome"
     );
 }
 

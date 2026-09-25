@@ -23,6 +23,12 @@ and work ceilings; it is not money, tokens, or NEAR credit. A fixed period has
 an advisory retry delay to its next boundary. A lifetime period has no reset
 time, so the API does not invent one. No quality-based growth is enabled.
 
+V77 stores deduplicated, typed source facts for accepted credit events and
+gate evaluations. The database verifies the source row, account ownership,
+and outcome before recording a fact. No current acceptance/evaluator worker
+calls this seam, and admission never reads it. It is historical storage for a
+later reviewed growth policy, not earned allowance in this release.
+
 Grant the ingest login `trace_account_admission_runtime` after applying V77.
 The role cannot mint or revoke invite codes and has no `BYPASSRLS` privilege.
 Only an active server-validated invite grant removes cumulative volume caps.
@@ -42,7 +48,10 @@ Before enabling, record read-only counts of legacy invite tenants, wallet
 accounts, NEAR AI accounts, ambiguous links, and unlinked devices. Those counts
 are **unknown** until measured on the target deployment. Verify control of
 both identities before migrating a legacy link; never infer a merge from a
-name or invite. Verify the client holds/retries safe refusals without disarming
+name or invite. The switch is global and has no supported per-tenant fallback.
+Enable it only after every affected legacy identity has verified linkage or a
+separate reviewed coexistence design is deployed. Verify the client
+holds/retries safe refusals without disarming
 folders, the Z4 withdrawal/source-session guard and Z5 capacity pacing are
 ready, and the R1–R7 witness and consent copy is approved. This code does not
 prove production admission, scoring, or settlement.
