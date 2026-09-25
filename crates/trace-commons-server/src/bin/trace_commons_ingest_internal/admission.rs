@@ -4,7 +4,7 @@
 use super::*;
 use trace_commons_protocol::admission::{
     AdmissionBinding, AdmissionEvidence, AdmissionRefusal, EVIDENCE_HEADER, SIGNATURE_HEADER,
-    hash_hex, is_hash,
+    hash_hex, is_anchored_tenant, is_hash,
 };
 use trace_commons_server::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
 use trace_commons_server::admission_ledger::{
@@ -42,14 +42,6 @@ fn denied() -> (StatusCode, Json<ApiError>) {
     api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
 }
 
-/// The tenant prefixes that carry a provisioned admission anchor.
-///
-/// Deliberately a list rather than a `starts_with("near")`: `nearai-` is not a
-/// sub-namespace of `near-`, and a prefix test that treated it as one would
-/// make the two identity systems substitutable at the only place that decides
-/// which of them a request is on.
-pub(super) const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
-
 /// This namespace is allocated only by verified NEAR provisioning. Both the
 /// tenant and the principal come from authentication, never envelope attribution.
 ///
@@ -75,10 +67,7 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
     //
     // A tenant in neither namespace is not refused, it is `None`: this is the
     // invite-free path, and an invited tenant simply does not use it.
-    if !ANCHOR_NAMESPACES
-        .iter()
-        .any(|prefix| tenant.tenant_id().strip_prefix(prefix).is_some_and(is_hash))
-    {
+    if !is_anchored_tenant(tenant.tenant_id()) {
         return Ok(None);
     }
     let db = state.db_mirror.as_ref().ok_or_else(denied)?;

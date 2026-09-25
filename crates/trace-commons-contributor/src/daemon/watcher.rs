@@ -83,6 +83,12 @@ pub struct TickReport {
     /// is how far today's behaviour is from what the gate will allow; see
     /// `automatic_gate`.
     pub gate_would_refuse: usize,
+    /// Sessions in armed folders that an enforced gate held waiting this
+    /// pass instead of approving. A level rather than an event: an entry the
+    /// gate holds is counted again on every pass that sees it, so this is
+    /// how much armed work is waiting on the gate now. Always zero while the
+    /// gate is unenforced. See `automatic_gate`.
+    pub gate_blocked: usize,
     /// The subset of `unloadable` the source declined by name over its own
     /// byte budget, rather than failed to read. See
     /// `source::SessionTooLarge` for why the two are counted apart.
@@ -492,7 +498,9 @@ fn visit_session(
         // but the load.
         // Through the automatic-contribution gate, like every other approval
         // made on the contributor's behalf. See `automatic_gate`.
-        if mode == ProjectMode::AutoUpload && state == QueueState::Pending && !ctx.gate.blocks() {
+        if mode == ProjectMode::AutoUpload && state == QueueState::Pending && ctx.gate.blocks() {
+            out.report.gate_blocked += 1;
+        } else if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
                 entry_id,
@@ -629,10 +637,13 @@ fn visit_session(
     // below that approve on the contributor's behalf -- a fresh entry created
     // `Approved`, and an already-queued one re-approved -- so gating it here
     // gates both. See `automatic_gate`.
-    let armed = mode == ProjectMode::AutoUpload
+    let would_arm = mode == ProjectMode::AutoUpload
         && !from_staging
-        && armed_settle_elapsed(obs.modified_at, ctx.now)
-        && !ctx.gate.blocks();
+        && armed_settle_elapsed(obs.modified_at, ctx.now);
+    let armed = would_arm && !ctx.gate.blocks();
+    // What the gate held back, counted so that enforcing it cannot stop an
+    // armed folder without saying so.
+    let gate_held = would_arm && ctx.gate.blocks();
 
     // Two questions off one transcript load. The mark is answered for every
     // contributor; the eligibility verdict is a derivation from it that stays
@@ -744,6 +755,9 @@ fn visit_session(
                     }
                 } else {
                     out.report.queued += 1;
+                    if gate_held {
+                        out.report.gate_blocked += 1;
+                    }
                 }
                 // A new entry passed the capacity check: there is
                 // space in the queue.
@@ -786,6 +800,12 @@ fn visit_session(
                     if ctx.gate.would_refuse() {
                         out.report.gate_would_refuse += 1;
                     }
+                } else if gate_held
+                    && queue
+                        .get(entry_id)
+                        .is_some_and(|e| e.state == QueueState::Pending)
+                {
+                    out.report.gate_blocked += 1;
                 }
                 // This path returns Ok without checking capacity, so
                 // it does not prove space is available. Do not
@@ -799,28 +819,34 @@ fn visit_session(
     }
 }
 
+/// Say what the gate refused, or would have refused, once per pass.
+///
+/// Only on a pass where it mattered, so a daemon with nothing armed logs
+/// nothing. The reasons are labels, never paths or content.
+fn report_gate(gate: &super::automatic_gate::GateVerdict, report: &TickReport) {
+    let reasons: Vec<&str> = gate.unmet.iter().map(|u| u.reason).collect();
+    if report.gate_blocked > 0 {
+        tracing::info!(
+            held = report.gate_blocked,
+            unmet = ?reasons,
+            "the automatic-contribution gate is holding sessions in armed folders for the contributor"
+        );
+    }
+    if report.gate_would_refuse > 0 {
+        tracing::info!(
+            approvals = report.gate_would_refuse,
+            unmet = ?reasons,
+            "approved on the contributor's behalf; the automatic-contribution gate would have refused these"
+        );
+    }
+}
+
 /// Everything a pass owes once it has visited its sessions: the relabel pass,
 /// the queue save and envelope sweep, the change publish, and the state save.
 ///
 /// The single implementation of the epilogue, and it runs once per pass, not
 /// once per session -- `queue.save` and `state.save` each rewrite a whole
 /// file, and the publish is a wake-up for every subscribed shell.
-/// Say what the unenforced gate would have refused, once per pass.
-///
-/// Only on a pass that made such an approval, so a daemon with nothing armed
-/// logs nothing. The reasons are labels, never paths or content.
-fn report_gate(gate: &super::automatic_gate::GateVerdict, report: &TickReport) {
-    if report.gate_would_refuse == 0 {
-        return;
-    }
-    let reasons: Vec<&str> = gate.unmet.iter().map(|u| u.reason).collect();
-    tracing::info!(
-        approvals = report.gate_would_refuse,
-        unmet = ?reasons,
-        "approved on the contributor's behalf; the automatic-contribution gate would have refused these"
-    );
-}
-
 fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
     let PassOutcome {
         report,
@@ -1521,6 +1547,7 @@ mod tests {
 
         assert_eq!(report.auto_ready, 1, "{report:?}");
         assert_eq!(report.gate_would_refuse, 1, "{report:?}");
+        assert_eq!(report.gate_blocked, 0, "unenforced, it holds nothing");
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Approved);
     }
@@ -1542,6 +1569,9 @@ mod tests {
 
         assert_eq!(first.auto_ready, 0, "{first:?}");
         assert_eq!(again.auto_ready, 0, "{again:?}");
+        // Not silently: each pass counts what the gate is holding.
+        assert_eq!(first.gate_blocked, 1, "{first:?}");
+        assert_eq!(again.gate_blocked, 1, "{again:?}");
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Pending, "waits for the contributor");
         assert!(!e.approved_unattended);

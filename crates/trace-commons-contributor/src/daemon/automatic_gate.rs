@@ -39,6 +39,12 @@ use crate::config::ContributorConfig;
 
 /// Whether an unmet requirement stops an unattended approval. See the module
 /// docs for why this is off.
+///
+/// Before this is switched on, besides K5 and something able to pass R1:
+/// a label-only health condition raised while `TickReport::gate_blocked` is
+/// non-zero, with copy in every shell. The counter and the log line exist
+/// today; without the health label, an enforced gate would hold armed work
+/// with nothing in the app to say so.
 pub const ENFORCED: bool = false;
 
 /// A requirement the spec names, by its number there.
@@ -81,16 +87,12 @@ pub const REASON_PIPELINE_UNVERIFIED: &str = "pipeline-not-verified-per-session"
 pub const REASON_ADMISSION_PER_SESSION: &str = "admission-evidence-is-per-session";
 pub const REASON_NO_SCOPE: &str = "no-data-use-scope-chosen";
 
-/// Whether this tenant's uploads need receipt-bound admission evidence.
-///
-/// The server's rule, `ANCHOR_NAMESPACES` in the ingest crate's
-/// `admission.rs`, is the pair `near-` (wallet provisioning) and `nearai-`
-/// (NEAR AI login), and a tenant in neither is on the invite-free path and
-/// never passes through admission. The `near-` half is
-/// [`crate::config::is_near_tenant_id`]; `nearai-` is tested by prefix, since
-/// the client holds no shape rule for it.
+/// Whether this tenant's uploads need receipt-bound admission evidence: the
+/// server's own rule, from the protocol crate, so the two cannot drift. A
+/// tenant outside it is on the invite-free path and never passes through
+/// admission.
 fn needs_admission_evidence(tenant_id: &str) -> bool {
-    crate::config::is_near_tenant_id(tenant_id) || tenant_id.starts_with("nearai-")
+    trace_commons_protocol::admission::is_anchored_tenant(tenant_id)
 }
 
 /// Evaluate the gate for a contributor's current configuration.
@@ -191,7 +193,8 @@ mod tests {
     #[test]
     fn admission_applies_to_the_near_namespaces_only() {
         let near = format!("near-{}", "a".repeat(64));
-        for tenant in [near.as_str(), "nearai-abc"] {
+        let nearai = format!("nearai-{}", "b".repeat(64));
+        for tenant in [near.as_str(), nearai.as_str()] {
             let v = evaluate(
                 Some(&cfg(tenant, &["debugging_evaluation"], true, None)),
                 true,
@@ -201,11 +204,18 @@ mod tests {
                 "{tenant}"
             );
         }
-        let invited = evaluate(
-            Some(&cfg("tenant-1", &["debugging_evaluation"], true, None)),
-            true,
-        );
-        assert!(!reasons(&invited).contains(&REASON_ADMISSION_PER_SESSION));
+        // Neither an invited tenant nor a namespace prefix without a hash
+        // after it: the server never admission-checks either.
+        for tenant in ["tenant-1", "nearai-abc", "near-abc"] {
+            let v = evaluate(
+                Some(&cfg(tenant, &["debugging_evaluation"], true, None)),
+                true,
+            );
+            assert!(
+                !reasons(&v).contains(&REASON_ADMISSION_PER_SESSION),
+                "{tenant}"
+            );
+        }
     }
 
     #[test]
