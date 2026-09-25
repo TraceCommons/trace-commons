@@ -29,6 +29,16 @@ pub enum InviteTenantMode {
     Derived,
 }
 
+/// Fixed invite grants must not claim a provisioned account tenant namespace.
+pub fn fixed_invite_tenant_uses_reserved_namespace(tenant_id: &str) -> bool {
+    tenant_id
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("near-"))
+        || tenant_id
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nearai-"))
+}
+
 #[derive(Debug, Clone)]
 pub struct InviteEntry {
     pub invite_subject_hash: String,
@@ -299,6 +309,13 @@ pub async fn import_file_invites(
                 "PilotAllowlistMalformed: invite entry missing tenant_id",
             ));
         };
+        if fixed_invite_tenant_uses_reserved_namespace(tenant_id) {
+            return Err(import_failure(
+                &summary,
+                entry_number,
+                "PilotAllowlistMalformed: fixed tenant namespace reserved",
+            ));
+        }
         let write = InviteGrantWrite {
             invite_subject_hash: subject_hash.to_string(),
             policy_label: policy_label.to_string(),
@@ -422,6 +439,31 @@ mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn fixed_invite_tenant_uses_reserved_namespace_for_any_suffix() {
+        for tenant_id in [
+            "near-",
+            "nearai-",
+            "near-abc",
+            "nearai-abc",
+            "NeAr-xyz",
+            "NEARAI-xyz",
+            "near-not-hex!",
+            "nearai-?",
+        ] {
+            assert!(
+                fixed_invite_tenant_uses_reserved_namespace(tenant_id),
+                "reserved tenant ID must be refused: {tenant_id}"
+            );
+        }
+        for tenant_id in ["nearby-1", "nearaiX-1", "tenant-zaki-pilot", ""] {
+            assert!(
+                !fixed_invite_tenant_uses_reserved_namespace(tenant_id),
+                "ordinary tenant ID must remain available: {tenant_id}"
+            );
+        }
+    }
 
     fn entry(hash: &str) -> InviteEntry {
         InviteEntry {

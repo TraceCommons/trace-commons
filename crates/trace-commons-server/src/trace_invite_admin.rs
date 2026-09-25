@@ -87,7 +87,8 @@ use serde_json::{Value, json};
 use crate::db::postgres::PgBackend;
 use crate::db::{InviteGrantInsertOutcome, InviteGrantWrite};
 use crate::trace_invite_registry::{
-    DbInviteRegistry, InviteEntry, InviteRegistry, InviteTenantMode, generate_invite_code,
+    DbInviteRegistry, InviteEntry, InviteRegistry, InviteTenantMode,
+    fixed_invite_tenant_uses_reserved_namespace, generate_invite_code,
 };
 use crate::trace_upload_claim_allowlist::hash_invite_code;
 
@@ -218,6 +219,17 @@ async fn create_invite_handler(
             );
         }
     };
+
+    if tenant_mode == InviteTenantMode::Fixed
+        && fixed_tenant_id
+            .as_deref()
+            .is_some_and(fixed_invite_tenant_uses_reserved_namespace)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "InviteFixedTenantReserved" })),
+        );
+    }
 
     if request.max_uses == 0 {
         return (
@@ -662,6 +674,71 @@ mod tests {
             registry.lookup(&hash).expect("lookup").is_some(),
             "a minted invite must be immediately redeemable"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_fixed_tenant_reserved_is_refused_before_any_write() {
+        let Some(state) = test_invite_admin_state().await else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let token = state.test_admin_token();
+        let backend = state.inner.backend.clone();
+        let app = invite_admin_router(state.inner);
+
+        for tenant_id in ["near-abc", "nearai-abc", "NeAr-Ai!", "NEARAI-"] {
+            let note_label = format!("reserved-z3-{}-{tenant_id}", std::process::id());
+            let body = serde_json::json!({
+                "tenant_mode": "fixed",
+                "fixed_tenant_id": tenant_id,
+                "note_label": note_label,
+            })
+            .to_string();
+            let response = app
+                .clone()
+                .oneshot(route_request(
+                    "POST",
+                    "/v1/admin/invites",
+                    Some(&body),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({ "error": "InviteFixedTenantReserved" })
+            );
+            assert!(
+                !backend
+                    .list_invite_grants()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.note_label.as_deref() == Some(note_label.as_str()))
+            );
+        }
+
+        for body in [
+            r#"{"tenant_mode":"fixed","fixed_tenant_id":"tenant-zaki-pilot"}"#,
+            r#"{"tenant_mode":"derived","tenant_template_id":"tmpl-1"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(route_request(
+                    "POST",
+                    "/v1/admin/invites",
+                    Some(body),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
     }
 
     #[tokio::test]
