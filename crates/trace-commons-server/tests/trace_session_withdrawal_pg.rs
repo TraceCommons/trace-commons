@@ -8,7 +8,10 @@ use tokio_postgres::NoTls;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::trace_corpus_storage::{
-    TraceCorpusStatus, TraceCorpusStore, TraceSourceSessionStatus, TraceSubmissionWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceDerivedRecordWrite, TraceDerivedStatus,
+    TraceExportManifestItemWrite, TraceObjectArtifactKind, TraceObjectRefWrite,
+    TraceSourceSessionStatus, TraceSubmissionWrite, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWorkerKind,
 };
 use uuid::Uuid;
 
@@ -610,4 +613,158 @@ async fn concurrent_approval_and_withdrawal_never_leave_accepted_content() {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn withdrawn_session_refuses_late_object_and_derived_writes() {
+    let Some(url) = database_url() else { return };
+    let client = migrated_client(&url).await;
+    let backend = PgBackend::new(&database_config(&url)).await.unwrap();
+    let tenant = format!("z4-{}", Uuid::new_v4());
+    let account = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    let digest = [0x39u8; 32];
+    client
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    backend
+        .claim_trace_source_session(&tenant, account, &digest, id)
+        .await
+        .unwrap();
+    backend
+        .upsert_trace_submission(submission(&tenant, id, TraceCorpusStatus::Quarantined))
+        .await
+        .unwrap();
+    backend
+        .withdraw_trace_source_session(&tenant, account, id, chrono::Utc::now())
+        .await
+        .unwrap();
+    let object = TraceObjectRefWrite {
+        object_ref_id: Uuid::new_v4(),
+        tenant_id: tenant.clone(),
+        submission_id: id,
+        artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: "file".into(),
+        object_key: "late-object".into(),
+        content_sha256: format!("sha256:{}", "0".repeat(64)),
+        encryption_key_ref: "test".into(),
+        size_bytes: 1,
+        compression: None,
+        created_by_job_id: None,
+    };
+    assert!(backend.append_trace_object_ref(object).await.is_err());
+    let derived = TraceDerivedRecordWrite {
+        derived_id: Uuid::new_v4(),
+        tenant_id: tenant.clone(),
+        submission_id: id,
+        trace_id: Uuid::new_v4(),
+        status: TraceDerivedStatus::Current,
+        worker_kind: TraceWorkerKind::DuplicatePrecheck,
+        worker_version: "z4-test".into(),
+        input_object_ref: None,
+        input_hash: "sha256:test".into(),
+        output_object_ref: None,
+        canonical_summary: Some("late content".into()),
+        canonical_summary_hash: Some("sha256:late".into()),
+        summary_model: "test".into(),
+        task_success: None,
+        privacy_risk: Some("low".into()),
+        event_count: Some(1),
+        tool_sequence: Vec::new(),
+        tool_categories: Vec::new(),
+        coverage_tags: Vec::new(),
+        duplicate_score: None,
+        novelty_score: None,
+        cluster_id: None,
+    };
+    assert!(backend.append_trace_derived_record(derived).await.is_err());
+    let vector_error = backend
+        .upsert_trace_vector_entry(TraceVectorEntryWrite {
+            tenant_id: tenant.clone(),
+            submission_id: id,
+            derived_id: Uuid::new_v4(),
+            vector_entry_id: Uuid::new_v4(),
+            vector_store: "z4-test".into(),
+            embedding_model: "z4-test".into(),
+            embedding_dimension: 1,
+            embedding_version: "z4-test".into(),
+            source_projection: TraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: "sha256:late".into(),
+            status: TraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: None,
+            duplicate_score: None,
+            novelty_score: None,
+            indexed_at: None,
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        vector_error
+            .to_string()
+            .contains("TraceSourceSessionWithdrawn")
+    );
+    let export_error = backend
+        .upsert_trace_export_manifest_item(TraceExportManifestItemWrite {
+            tenant_id: tenant.clone(),
+            export_manifest_id: Uuid::new_v4(),
+            submission_id: id,
+            trace_id: Uuid::new_v4(),
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: TraceCorpusStatus::Accepted,
+            source_hash_at_export: "sha256:late".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        export_error
+            .to_string()
+            .contains("TraceSourceSessionWithdrawn")
+    );
+    let legacy_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(submission(
+            &tenant,
+            legacy_id,
+            TraceCorpusStatus::Quarantined,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .append_trace_object_ref(TraceObjectRefWrite {
+                object_ref_id: Uuid::new_v4(),
+                tenant_id: tenant.clone(),
+                submission_id: legacy_id,
+                artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+                object_store: "file".into(),
+                object_key: "legacy-unmapped".into(),
+                content_sha256: format!("sha256:{}", "0".repeat(64)),
+                encryption_key_ref: "test".into(),
+                size_bytes: 1,
+                compression: None,
+                created_by_job_id: None,
+            })
+            .await
+            .is_ok()
+    );
+    client
+        .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .unwrap();
 }

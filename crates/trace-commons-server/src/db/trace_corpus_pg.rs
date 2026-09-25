@@ -2856,6 +2856,12 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&object_ref.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &object_ref.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &object_ref.tenant_id,
+            object_ref.submission_id,
+        )
+        .await?;
         let artifact_kind = enum_to_storage(object_ref.artifact_kind)?;
         tx.execute(
             "INSERT INTO trace_object_refs (
@@ -2956,6 +2962,12 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx =
             Self::begin_trace_tenant_transaction(&mut client, &derived_record.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &derived_record.tenant_id,
+            derived_record.submission_id,
+        )
+        .await?;
         if let Some(object_ref) = derived_record.input_object_ref.as_ref() {
             validate_tenant_scoped_trace_object_ref(
                 "derived input",
@@ -3104,6 +3116,12 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &vector_entry.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &vector_entry.tenant_id,
+            vector_entry.submission_id,
+        )
+        .await?;
         ensure_pg_derived_record_belongs_to_submission(
             &tx,
             &vector_entry.tenant_id,
@@ -4324,6 +4342,7 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&item.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        lock_active_source_session_for_submission(&tx, &item.tenant_id, item.submission_id).await?;
         if let Some(derived_id) = item.derived_id {
             ensure_pg_derived_record_belongs_to_submission(
                 &tx,

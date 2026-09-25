@@ -4420,16 +4420,15 @@ fn enforce_db_mirror_write_result(
     operation: &str,
     result: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let required = state.require_db_mirror_writes || state.account_admission.is_some();
     match result {
         Ok(()) => {
-            if state.require_db_mirror_writes && state.db_mirror.is_none() {
-                anyhow::bail!(
-                    "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for {operation}"
-                );
+            if required && state.db_mirror.is_none() {
+                anyhow::bail!("required Trace Commons DB mirror unavailable for {operation}");
             }
             Ok(())
         }
-        Err(error) if state.require_db_mirror_writes => Err(error.context(format!(
+        Err(error) if required => Err(error.context(format!(
             "required Trace Commons DB mirror write failed: {operation}"
         ))),
         Err(_) => Ok(()),
@@ -39006,7 +39005,7 @@ async fn apply_review_decision(
         privileged_policy.as_ref(),
         "review decision",
     )?;
-    if state.require_db_mirror_writes {
+    if state.require_db_mirror_writes || state.account_admission.is_some() {
         enforce_db_mirror_write_result(state, "review decision", Ok(())).map_err(internal_error)?;
     }
     let mut envelope = read_envelope_for_review_decision(
@@ -39081,7 +39080,7 @@ async fn apply_review_decision(
     let audit_event =
         TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason));
 
-    if state.require_db_mirror_writes {
+    if state.require_db_mirror_writes || state.account_admission.is_some() {
         let mirror_result = mirror_review_decision_to_db(
             state,
             tenant,
@@ -39116,7 +39115,7 @@ async fn apply_review_decision(
     }
     append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
 
-    if !state.require_db_mirror_writes {
+    if !state.require_db_mirror_writes && state.account_admission.is_none() {
         let mirror_result =
             mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
                 .await;
@@ -41670,62 +41669,95 @@ async fn process_one_pii_backstop(
     // held (`record.status == AwaitingPiiBackstop`). This is a no-op on the
     // status column (it already reads `awaiting_pii_backstop`) but refreshes the
     // redaction hash / counts / privacy risk / canonical summary pointers.
-    db.upsert_trace_submission(storage_submission_write_from_record(
-        &record,
-        &envelope,
-        envelope
-            .embedding_analysis
-            .as_ref()
-            .map(|analysis| analysis.canonical_summary_hash.clone()),
-    )?)
-    .await
-    .context("failed to mirror rescrubbed trace submission metadata")?;
-
-    // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
-    // release, so it is already active the instant the status becomes
-    // Accepted/Quarantined below.
-    let (object_ref, _) = trace_object_ref_write_from_record(
-        state,
-        "rescrubbed-envelope",
-        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
-        &record,
-        &envelope,
-    )?;
-    db.append_trace_object_ref(object_ref)
+    let mut staged_ref_target = None;
+    let release_result: anyhow::Result<()> = async {
+        db.upsert_trace_submission(storage_submission_write_from_record(
+            &record,
+            &envelope,
+            envelope
+                .embedding_analysis
+                .as_ref()
+                .map(|analysis| analysis.canonical_summary_hash.clone()),
+        )?)
         .await
-        .context("failed to mirror rescrubbed trace object ref")?;
+        .context("failed to mirror rescrubbed trace submission metadata")?;
 
-    // Step 3: now flip the on-disk record and release the DB hold. The file
-    // record's object_key was already repointed to the rescrubbed artifact
-    // above, so the file-record read path is safe regardless of ordering here;
-    // the DB release is the single authoritative status write to the target
-    // (the earlier upsert wrote the still-held status).
-    //
-    // The status flip and the invalidation of the pre-backstop
-    // `submitted_envelope` ref(s) happen ATOMICALLY via
-    // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
-    // commit without the other: envelope readers go through
-    // `get_latest_active_envelope_object_ref` (rescrubbed first, then
-    // submitted), and the object-primary read drill selects
-    // `SubmittedEnvelope` explicitly, so a status release with a still-active
-    // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
-    // on an ordinary transient DB failure with no re-enumeration path to heal
-    // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
-    // driver's own re-enumeration
-    // INNER JOINs an active `submitted_envelope` ref, so invalidating it
-    // without also releasing the status would strand the submission forever.
-    // Atomicity resolves both hazards: on any failure the transaction rolls
-    // back, the on-disk record write below is skipped, and the submission
-    // stays held and re-enumerable for the next tick to retry.
-    db.release_pii_backstop_hold(
-        &item.tenant_id,
-        item.submission_id,
-        storage_corpus_status(target_status),
-        PII_BACKSTOP_DRIVER_ACTOR_REF,
-        Some(PII_BACKSTOP_REDACTION_LABEL),
-    )
-    .await
-    .context("failed to atomically release PII backstop hold")?;
+        // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
+        // release, so it is already active the instant the status becomes
+        // Accepted/Quarantined below.
+        let (object_ref, _) = trace_object_ref_write_from_record(
+            state,
+            "rescrubbed-envelope",
+            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            &record,
+            &envelope,
+        )?;
+        staged_ref_target = Some((
+            object_ref.object_store.clone(),
+            object_ref.object_key.clone(),
+        ));
+        db.append_trace_object_ref(object_ref)
+            .await
+            .context("failed to mirror rescrubbed trace object ref")?;
+
+        // Step 3: now flip the on-disk record and release the DB hold. The file
+        // record's object_key was already repointed to the rescrubbed artifact
+        // above, so the file-record read path is safe regardless of ordering here;
+        // the DB release is the single authoritative status write to the target
+        // (the earlier upsert wrote the still-held status).
+        //
+        // The status flip and the invalidation of the pre-backstop
+        // `submitted_envelope` ref(s) happen ATOMICALLY via
+        // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
+        // commit without the other: envelope readers go through
+        // `get_latest_active_envelope_object_ref` (rescrubbed first, then
+        // submitted), and the object-primary read drill selects
+        // `SubmittedEnvelope` explicitly, so a status release with a still-active
+        // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
+        // on an ordinary transient DB failure with no re-enumeration path to heal
+        // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
+        // driver's own re-enumeration
+        // INNER JOINs an active `submitted_envelope` ref, so invalidating it
+        // without also releasing the status would strand the submission forever.
+        // Atomicity resolves both hazards: on any failure the transaction rolls
+        // back, the on-disk record write below is skipped, and the submission
+        // stays held and re-enumerable for the next tick to retry.
+        db.release_pii_backstop_hold(
+            &item.tenant_id,
+            item.submission_id,
+            storage_corpus_status(target_status),
+            PII_BACKSTOP_DRIVER_ACTOR_REF,
+            Some(PII_BACKSTOP_REDACTION_LABEL),
+        )
+        .await
+        .context("failed to atomically release PII backstop hold")?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = release_result {
+        // A withdrawal can win between the staged write and any one of the
+        // three DB calls. Retire the newly staged ref and bytes; retain the
+        // original held submission/ref so an ordinary transient DB failure
+        // remains re-enumerable on the next tick.
+        let ref_cleanup = if let Some((object_store, object_key)) = staged_ref_target {
+            db.mark_trace_object_ref_deleted(
+                &item.tenant_id,
+                item.submission_id,
+                &object_store,
+                &object_key,
+            )
+            .await
+            .map(|_| ())
+            .context("failed to retire rejected rescrubbed object ref")
+        } else {
+            Ok(())
+        };
+        let object_cleanup = delete_trace_objects_for_record(state, &record)
+            .context("failed to remove rejected rescrubbed object");
+        ref_cleanup?;
+        object_cleanup?;
+        return Err(error);
+    }
 
     record.status = target_status;
     write_submission_record(&state.root, &record)?;
