@@ -94561,6 +94561,11 @@ mod admission_pg_tests;
 #[path = "nearai_ceremony_pg_tests.rs"]
 mod nearai_ceremony_pg_tests;
 
+/// Full wallet v2 completion through the router, real signatures and PostgreSQL.
+/// CI selects this ignored module explicitly with a fresh database.
+#[path = "wallet_v2_pg_tests.rs"]
+mod wallet_v2_pg_tests;
+
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
 /// message templates are pinned here once rather than at each wrapper.
