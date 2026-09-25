@@ -175,8 +175,12 @@ CREATE TABLE pipeline_run_settlements (
     CONSTRAINT pipeline_run_settlements_attempt_limit CHECK (
         attempt_count <= max_attempts
     ),
+    -- NUMERIC(39,0) also holds values above u128::MAX, which AtomicUnits
+    -- refuses to load; a row above it could be stored and never settled.
+    CONSTRAINT pipeline_run_settlements_atomic_units_bound CHECK (
+        atomic_units <= 340282366920938463463374607431768211455
+    ),
     -- Trace Credit settles through the microcredit ledger's signed 64-bit
-    -- column; every other instrument is unbounded within the NUMERIC(39,0)
     -- column (decision: PR #971 amendments A2).
     CONSTRAINT pipeline_run_settlements_trace_credit_bound CHECK (
         instrument_id <> 'trace_credit' OR atomic_units <= 9223372036854775807

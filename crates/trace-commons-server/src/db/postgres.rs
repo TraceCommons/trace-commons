@@ -7610,6 +7610,8 @@ mod tests {
             "UNIQUE (tenant_id, operation_ref_hash)",
             "'forfeited'",
             "pipeline_run_settlements_result_shape",
+            "pipeline_run_settlements_atomic_units_bound",
+            "atomic_units <= 340282366920938463463374607431768211455",
             "settle_selection JSONB",
             "ALTER TABLE pipeline_run_settlements FORCE ROW LEVEL SECURITY;",
         ] {
