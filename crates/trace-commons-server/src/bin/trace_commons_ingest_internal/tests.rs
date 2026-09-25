@@ -10345,6 +10345,179 @@ async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
     );
 }
 
+/// A pipeline service whose PostgreSQL backend points at a loopback port
+/// nothing listens on: its readiness probe fails at once. `PgBackend::new`
+/// builds the pool lazily, so constructing it needs no database.
+async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
+    use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+    use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .unwrap();
+    let index = IsolatedPipelineIndex::new();
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend,
+            test_artifact_store(dir.path()),
+            package,
+            index.clone(),
+            index,
+            SettlementAdapterRegistry::new(Vec::new()).unwrap(),
+            PipelineCaps {
+                per_instrument_atomic_units: BTreeMap::new(),
+            },
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .build()
+        .unwrap(),
+    )
+}
+
+/// M12: a worker whose readiness probe fails reports
+/// `pipeline_worker_not_ready`, even when an earlier pass had reported
+/// ready.
+#[tokio::test]
+async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
+    use super::pipeline_runtime::{build_pipeline_app, run_pipeline_worker_pass};
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let service = pipeline_service_without_a_database().await;
+    Arc::make_mut(&mut state).pipeline_service = Some(service.clone());
+    state
+        .pipeline_worker_ready
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    run_pipeline_worker_pass(
+        async move { service.readiness().await },
+        Vec::<String>::new(),
+        |_tenant_id| async {},
+        &state.pipeline_worker_ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        !state
+            .pipeline_worker_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"status": "not_ready", "reason": "pipeline_worker_not_ready"})
+    );
+}
+
+/// I5: a panic while one tenant's batch runs ends only that batch. The pass
+/// goes on to the next tenant, the worker reports not ready for that pass,
+/// and a later pass without a panic reports ready again.
+#[tokio::test]
+async fn a_panicking_tenant_batch_marks_the_worker_not_ready_and_the_pass_continues() {
+    use super::pipeline_runtime::run_pipeline_worker_pass;
+
+    let ready = std::sync::atomic::AtomicBool::new(true);
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let drained = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let drain = |panicking: Option<&'static str>| {
+        let drained = drained.clone();
+        move |tenant_id: String| {
+            let drained = drained.clone();
+            async move {
+                if panicking == Some(tenant_id.as_str()) {
+                    panic!("test-only panic in a tenant batch");
+                }
+                drained.lock().unwrap().push(tenant_id);
+            }
+        }
+    };
+
+    run_pipeline_worker_pass(
+        async { Ok(()) },
+        vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        drain(Some("tenant-a")),
+        &ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        !ready.load(std::sync::atomic::Ordering::Relaxed),
+        "a pass with a panicking batch reports not ready"
+    );
+    assert_eq!(
+        *drained.lock().unwrap(),
+        vec!["tenant-b".to_string()],
+        "the pass continued past the panicking tenant"
+    );
+
+    run_pipeline_worker_pass(
+        async { Ok(()) },
+        vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        drain(None),
+        &ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        ready.load(std::sync::atomic::Ordering::Relaxed),
+        "a later clean pass reports ready again"
+    );
+}
+
 #[tokio::test]
 async fn source_stays_public_on_the_pipeline_app() {
     use super::pipeline_runtime::build_pipeline_app;

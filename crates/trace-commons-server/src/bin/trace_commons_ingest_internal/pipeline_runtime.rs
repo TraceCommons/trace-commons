@@ -156,19 +156,112 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 /// first.
 const PIPELINE_WORKER_POLL_INTERVAL: StdDuration = StdDuration::from_millis(200);
 
+/// One worker pass: probe readiness, then drain each rollout tenant's queue
+/// in turn with `drain`, checking `stop` between tenants.
+///
+/// Supervision (I5): the probe and every tenant's batch each run as their
+/// own tokio task, so a panic in a policy, an adapter, or a row decode ends
+/// only that task. The pass logs a fixed label (never the panic's own
+/// text), reports not ready, and goes on to the next tenant; the loop
+/// itself never ends on a panic.
+///
+/// `ready` goes false at once when the probe fails or a task does not
+/// finish, and true at the end of a pass whose probe succeeded and whose
+/// every task finished, unless `stop` has fired by then -- so a batch that
+/// panics on every pass keeps the worker not ready rather than flapping.
+pub(crate) async fn run_pipeline_worker_pass<Probe, Drain, DrainFuture>(
+    probe: Probe,
+    tenant_ids: impl IntoIterator<Item = String>,
+    drain: Drain,
+    ready: &std::sync::atomic::AtomicBool,
+    stop: &tokio::sync::watch::Receiver<bool>,
+) where
+    Probe: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    Drain: Fn(String) -> DrainFuture,
+    DrainFuture: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut pass_ready = match tokio::spawn(probe).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            ready.store(false, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                error_class = "PipelineWorkerReadinessProbeFailed",
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker readiness probe failed"
+            );
+            false
+        }
+        Err(join_error) => {
+            ready.store(false, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                error_class = pipeline_worker_task_failure_class(&join_error),
+                "pipeline worker readiness probe did not finish"
+            );
+            false
+        }
+    };
+    for tenant_id in tenant_ids {
+        let storage_ref = tenant_storage_ref(&tenant_id);
+        if let Err(join_error) = tokio::spawn(drain(tenant_id)).await {
+            pass_ready = false;
+            ready.store(false, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                error_class = pipeline_worker_task_failure_class(&join_error),
+                tenant_storage_ref = %storage_ref,
+                "pipeline worker tenant batch did not finish"
+            );
+        }
+        if *stop.borrow() {
+            break;
+        }
+    }
+    if pass_ready && !*stop.borrow() {
+        ready.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The label a supervised worker task that did not finish is logged under.
+/// A `JoinError`'s panic payload is never read or logged.
+fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'static str {
+    if join_error.is_panic() {
+        "PipelineWorkerTaskPanicked"
+    } else {
+        "PipelineWorkerTaskCancelled"
+    }
+}
+
+/// Drains one tenant's own queue with its own `process_one` (never a
+/// cross-tenant claim, D2), up to `PIPELINE_WORKER_MAX_RUNS_PER_TENANT` runs.
+/// `process_one` claims through `claim_next`, so an expired lease from a
+/// crashed run is claimable again without special handling here. A run
+/// failure is logged with a label and the tenant's `tenant_storage_ref` --
+/// never the tenant id or the error's own text -- and ends this tenant's
+/// batch for the pass.
+async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
+    for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
+        match service.process_one(&tenant_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "PipelineWorkerRunFailed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker run failed"
+                );
+                break;
+            }
+        }
+    }
+}
+
 /// Starts the owned pipeline worker loop. `None` when no pipeline runtime is
 /// injected -- there is nothing to drain, and the repository binary injects
 /// none.
 ///
-/// Each iteration: probe readiness and record it in `ready`; then, per D2,
-/// walk the `PipelineReceipts` rollout tenants in turn and drain each one's
-/// own queue with its own `process_one` (never a cross-tenant claim), up to
-/// `PIPELINE_WORKER_MAX_RUNS_PER_TENANT` runs before moving on -- `process_one`
-/// claims through `claim_next`, so an expired lease from a crashed run is
-/// claimable again without special handling here; then sleep
-/// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires. A readiness or run
-/// failure is logged with a label and, for a run, the tenant's
-/// `tenant_storage_ref` -- never the tenant id or the error's own text.
+/// Each iteration runs one `run_pipeline_worker_pass` over the
+/// `PipelineReceipts` rollout tenants, then sleeps
+/// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
 fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
     let gates = state.tenant_rollout_gates.clone();
@@ -177,38 +270,16 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let join = tokio::spawn(async move {
         while !*stop_rx.borrow() {
-            match service.readiness().await {
-                Ok(()) => worker_ready.store(true, std::sync::atomic::Ordering::Relaxed),
-                Err(error) => {
-                    worker_ready.store(false, std::sync::atomic::Ordering::Relaxed);
-                    tracing::warn!(
-                        error_class = "PipelineWorkerReadinessProbeFailed",
-                        error_hash = %safe_display_error_hash(&error),
-                        "pipeline worker readiness probe failed"
-                    );
-                }
-            }
-
-            for tenant_id in gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts) {
-                for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
-                    match service.process_one(&tenant_id).await {
-                        Ok(Some(_)) => {}
-                        Ok(None) => break,
-                        Err(error) => {
-                            tracing::warn!(
-                                error_class = "PipelineWorkerRunFailed",
-                                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-                                error_hash = %safe_display_error_hash(&error),
-                                "pipeline worker run failed"
-                            );
-                            break;
-                        }
-                    }
-                }
-                if *stop_rx.borrow() {
-                    break;
-                }
-            }
+            let probe_service = service.clone();
+            let drain_service = service.clone();
+            run_pipeline_worker_pass(
+                async move { probe_service.readiness().await },
+                gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts),
+                |tenant_id| drain_pipeline_tenant(drain_service.clone(), tenant_id),
+                &worker_ready,
+                &stop_rx,
+            )
+            .await;
 
             tokio::select! {
                 _ = tokio::time::sleep(PIPELINE_WORKER_POLL_INTERVAL) => {},
