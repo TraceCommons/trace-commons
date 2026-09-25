@@ -152,7 +152,7 @@ the server, not in a per-session step on the client.
 |---|---|---|
 | **R1** pipeline verified per session | **relaxed as a gate.** A folder without a witness may be armed and sends after deterministic redaction only. R1 still governs the **disclosure**: the model-scrub wording may be shown only where a certified full pipeline actually ran. | same as invitee: R1 governs the disclosure, not the arming. Volume is limited on the server instead |
 | **R2** pipeline specified, gate at the `AutoUpload` decision | unchanged | unchanged |
-| **R3** admission evidence | **applies until #1020's account check is enforced.** Once invites move onto the NEAR account an invitee is in `nearai-`, where #706 still applies; after #1020 is enforced, it does not apply | **becomes the trust-limited volume check** (see below) once #1020 is enforced; until then, #706 as today |
+| **R3** admission evidence | **a runtime check: applies unless the configured ingest says it admits by account (#1020).** Once invites move onto the NEAR account an invitee is in `nearai-`, where #706 applies whenever #1020 is off | **becomes the trust-limited volume check** (see below) where ingest admits by account; elsewhere, #706 as today |
 | **R4** provenance where claimed | unchanged: claim it only where #1005 supports it | unchanged, and it feeds account trust |
 | **R5** held for review | unchanged | unchanged |
 | **R6** void rule | unchanged; see R6 | unchanged |
@@ -192,11 +192,16 @@ is the corresponding server work. Consequences here:
 
 - R3's namespace test stops distinguishing invitees from everyone else, since
   everyone is `nearai-`. What distinguishes them is account trust, which the
-  client does not decide. The client-side gate's R3 check is withdrawn **once
-  #1020's check is enforced on the server, and not before**: withdrawn
-  earlier, an armed folder's sessions go to the witness and classifier and
-  are then refused at ingest, which is what R3 exists to prevent. It is on the
-  switch-on list below.
+  client does not decide. **The client-side gate's R3 check is never
+  withdrawn; it becomes a runtime check.** It applies unless the configured
+  ingest says it admits by account, which #1020 reports as the `authority`
+  on `/v1/account/contribution-status` (`bounded` or `invited`). That switch
+  is per replica and off whenever its variable is missing, so it can revert
+  on any redeploy, and it differs between commonses; a client that had
+  dropped R3 in a release would then send every armed session through the
+  witness and classifier only for ingest to refuse it. Only an affirmative
+  answer lifts R3. Anything else keeps it: no answer, an older ingest, or
+  `legacy_evidence`.
 - The logout rule below (a re-grant arms nothing already on disk) still
   stands for folder modes, which remain local.
 
@@ -223,25 +228,25 @@ checks change:
 
 - **R7** (scope chosen): kept.
 - **R1**: withdrawn as a gate. It moves to choosing the arming disclosure.
-- **R3**: withdrawn once #1020 is enforced, as above; the server then decides
-  volume. Kept until then.
+- **R3**: a runtime check, as above. Lifted only while ingest says it admits by
+  account, when the server decides volume instead.
 
 **When enforcement is switched on:** `automatic_gate::ENFORCED` ships `false`
 and is switched on only when all of these hold, so the dry run cannot become
 the permanent state by default:
 
-1. #1020's account admission check is enforced on the server, so withdrawing
-   the client's R3 check sends nothing that ingest will refuse. "Enforced"
-   means every ingest replica runs with the account switch on, attested by
-   the operator. It does not mean one `contribution-status` response saying
-   `bounded` or `invited`: the switch is per process, so during a rolling
-   deploy another replica may still require evidence;
-2. Z2 (#1005) is in place, so R4 is claimed only where it holds;
-3. the label-only would-refuse log is live (pending in #1012), together with
+1. Z2 (#1005) is in place, so R4 is claimed only where it holds;
+2. the label-only would-refuse log is live (pending in #1012), together with
    the count of sessions an enforced gate holds and a label-only health
-   condition that every shell shows, so enforcement cannot stop an armed
-   folder without saying so;
-4. the gate's checks are revised to the list above.
+   condition that every shell shows, set and cleared only from full polls, so
+   enforcement cannot stop an armed folder without saying so;
+3. the gate's checks are revised to the list above, with R3 as a runtime
+   check (pending in #1012).
+
+#1020 is not on this list. With R3 checked at runtime, enforcing the gate
+before #1020 holds `near-`/`nearai-` folders, counted and shown, rather than
+sending sessions ingest would refuse; where ingest admits by account, R3
+lifts on its own.
 
 R1 is not on this list, because rev 8 withdraws it as a gate. It still decides
 which disclosure an armed folder gets, and the model-scrub wording needs the
@@ -693,7 +698,7 @@ contributed, and no sentence covers that.
 Settled since rev 7 and removed from this list: where the earned-trust
 mechanism lives (the account, on the server), what stops spam on the invite
 path (server-side, keyed on the account), #706 under Flow 1 (the trust-limited
-volume check, once #1020 is enforced), the void rule's identity and
+volume check where ingest admits by account), the void rule's identity and
 measurement admission (R6; implementation pending in #1024), and the arming
 and quit copy (pending in #1011 and #1007; on `main` the quit copy still says
 "Nothing will be sent while nobody's approving").
