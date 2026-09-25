@@ -768,3 +768,138 @@ async fn withdrawn_session_refuses_late_object_and_derived_writes() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn failed_backstop_audit_rolls_back_release_and_fresh_ref_retry_stays_active() {
+    let Some(url) = database_url() else { return };
+    let client = migrated_client(&url).await;
+    let backend = PgBackend::new(&database_config(&url)).await.unwrap();
+    let tenant = format!("z4-{}", Uuid::new_v4());
+    let id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    backend
+        .upsert_trace_submission(submission(
+            &tenant,
+            id,
+            TraceCorpusStatus::AwaitingPiiBackstop,
+        ))
+        .await
+        .unwrap();
+    let submitted = TraceObjectRefWrite {
+        object_ref_id: Uuid::new_v4(),
+        tenant_id: tenant.clone(),
+        submission_id: id,
+        artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: "file".into(),
+        object_key: "submitted".into(),
+        content_sha256: format!("sha256:{}", "0".repeat(64)),
+        encryption_key_ref: "test".into(),
+        size_bytes: 1,
+        compression: None,
+        created_by_job_id: None,
+    };
+    backend
+        .append_trace_object_ref(submitted.clone())
+        .await
+        .unwrap();
+    let mut rescrubbed = submitted.clone();
+    rescrubbed.object_ref_id = Uuid::new_v4();
+    rescrubbed.artifact_kind = TraceObjectArtifactKind::RescrubbedEnvelope;
+    rescrubbed.object_key = "rescrubbed".into();
+    backend
+        .append_trace_object_ref(rescrubbed.clone())
+        .await
+        .unwrap();
+
+    client
+        .batch_execute(&format!(
+            "CREATE FUNCTION z4_fail_backstop_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.tenant_id = '{tenant}' THEN RAISE EXCEPTION 'z4 audit failure'; END IF;
+         RETURN NEW; END $$;
+         CREATE TRIGGER z4_fail_backstop_audit BEFORE INSERT ON trace_audit_events
+         FOR EACH ROW EXECUTE FUNCTION z4_fail_backstop_audit();"
+        ))
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .release_pii_backstop_hold(
+                &tenant,
+                id,
+                TraceCorpusStatus::Accepted,
+                "z4-test",
+                Some("backstop")
+            )
+            .await
+            .is_err()
+    );
+    client
+        .batch_execute(
+            "DROP TRIGGER z4_fail_backstop_audit ON trace_audit_events;
+         DROP FUNCTION z4_fail_backstop_audit();",
+        )
+        .await
+        .unwrap();
+    let held = backend
+        .get_trace_submission(&tenant, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.status, TraceCorpusStatus::AwaitingPiiBackstop);
+    let refs = backend.list_trace_object_refs(&tenant, id).await.unwrap();
+    assert!(
+        refs.iter()
+            .any(|r| r.object_ref_id == submitted.object_ref_id && r.invalidated_at.is_none())
+    );
+
+    backend
+        .mark_trace_object_ref_deleted(
+            &tenant,
+            id,
+            &rescrubbed.object_store,
+            &rescrubbed.object_key,
+        )
+        .await
+        .unwrap();
+    let retired_id = rescrubbed.object_ref_id;
+    rescrubbed.object_ref_id = Uuid::new_v4();
+    backend
+        .append_trace_object_ref(rescrubbed.clone())
+        .await
+        .unwrap();
+    backend
+        .release_pii_backstop_hold(
+            &tenant,
+            id,
+            TraceCorpusStatus::Accepted,
+            "z4-test",
+            Some("backstop"),
+        )
+        .await
+        .unwrap();
+    let refs = backend.list_trace_object_refs(&tenant, id).await.unwrap();
+    assert!(
+        refs.iter()
+            .any(|r| r.object_ref_id == retired_id && r.deleted_at.is_some())
+    );
+    assert!(
+        refs.iter()
+            .any(|r| r.object_ref_id == rescrubbed.object_ref_id
+                && r.deleted_at.is_none()
+                && r.invalidated_at.is_none())
+    );
+    assert!(
+        refs.iter()
+            .any(|r| r.object_ref_id == submitted.object_ref_id && r.invalidated_at.is_some())
+    );
+    client
+        .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .unwrap();
+}

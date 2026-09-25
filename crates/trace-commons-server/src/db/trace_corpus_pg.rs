@@ -1485,6 +1485,81 @@ async fn insert_near_credit_outbox_item_on_tx(
     Ok(())
 }
 
+async fn append_trace_audit_event_in_transaction(
+    tx: &Transaction<'_>,
+    audit_event: &TraceAuditEventWrite,
+) -> Result<(), DatabaseError> {
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        &[&audit_event.tenant_id],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    let latest_event_hash: Option<String> = tx
+        .query_opt(
+            "SELECT event_hash
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1
+                   AND event_hash IS NOT NULL
+                 ORDER BY audit_sequence DESC
+                 LIMIT 1",
+            &[&audit_event.tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .map(|row| row.get("event_hash"));
+    validate_trace_audit_append_chain(
+        &audit_event.tenant_id,
+        audit_event.audit_event_id,
+        latest_event_hash.as_deref(),
+        audit_event.previous_event_hash.as_deref(),
+        audit_event.event_hash.is_some(),
+    )?;
+    let next_audit_sequence: i64 = tx
+        .query_one(
+            "SELECT COALESCE(MAX(audit_sequence), 0) + 1
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1",
+            &[&audit_event.tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .get(0);
+    let action = enum_to_storage(audit_event.action.clone())?;
+    let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
+        DatabaseError::Serialization(format!("trace audit metadata encode failed: {e}"))
+    })?;
+    tx.execute(
+        "INSERT INTO trace_audit_events (
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
+                    metadata_json
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+        &[
+            &audit_event.tenant_id,
+            &next_audit_sequence,
+            &audit_event.audit_event_id,
+            &audit_event.actor_principal_ref,
+            &audit_event.actor_role,
+            &action,
+            &audit_event.reason,
+            &audit_event.request_id,
+            &audit_event.submission_id,
+            &audit_event.object_ref_id,
+            &audit_event.export_manifest_id,
+            &audit_event.decision_inputs_hash,
+            &audit_event.previous_event_hash,
+            &audit_event.event_hash,
+            &audit_event.canonical_event_json,
+            &metadata_json,
+        ],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    Ok(())
+}
+
 /// Lock the source-session row before any content-row status write. The mapping
 /// is immutable, so the lock serializes approval with account withdrawal even
 /// when a resumed version has a different submission ID.
@@ -2731,9 +2806,7 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
-
-        self.append_trace_audit_event(TraceAuditEventWrite {
+        let audit_event = TraceAuditEventWrite {
             audit_event_id: Uuid::new_v4(),
             tenant_id: tenant_id.to_string(),
             actor_principal_ref: actor_principal_ref.to_string(),
@@ -2753,8 +2826,9 @@ impl TraceCorpusStore for PgBackend {
                 resulting_status: status,
                 reason_code: reason.map(str::to_string),
             },
-        })
-        .await?;
+        };
+        append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
 
         Ok(invalidated)
     }
@@ -4711,74 +4785,7 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&audit_event.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-            &[&audit_event.tenant_id],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        let latest_event_hash: Option<String> = tx
-            .query_opt(
-                "SELECT event_hash
-                 FROM trace_audit_events
-                 WHERE tenant_id = $1
-                   AND event_hash IS NOT NULL
-                 ORDER BY audit_sequence DESC
-                 LIMIT 1",
-                &[&audit_event.tenant_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .map(|row| row.get("event_hash"));
-        validate_trace_audit_append_chain(
-            &audit_event.tenant_id,
-            audit_event.audit_event_id,
-            latest_event_hash.as_deref(),
-            audit_event.previous_event_hash.as_deref(),
-            audit_event.event_hash.is_some(),
-        )?;
-        let next_audit_sequence: i64 = tx
-            .query_one(
-                "SELECT COALESCE(MAX(audit_sequence), 0) + 1
-                 FROM trace_audit_events
-                 WHERE tenant_id = $1",
-                &[&audit_event.tenant_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .get(0);
-        let action = enum_to_storage(audit_event.action)?;
-        let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
-            DatabaseError::Serialization(format!("trace audit metadata encode failed: {e}"))
-        })?;
-        tx.execute(
-            "INSERT INTO trace_audit_events (
-                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
-                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
-                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
-                    metadata_json
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
-            &[
-                &audit_event.tenant_id,
-                &next_audit_sequence,
-                &audit_event.audit_event_id,
-                &audit_event.actor_principal_ref,
-                &audit_event.actor_role,
-                &action,
-                &audit_event.reason,
-                &audit_event.request_id,
-                &audit_event.submission_id,
-                &audit_event.object_ref_id,
-                &audit_event.export_manifest_id,
-                &audit_event.decision_inputs_hash,
-                &audit_event.previous_event_hash,
-                &audit_event.event_hash,
-                &audit_event.canonical_event_json,
-                &metadata_json,
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }

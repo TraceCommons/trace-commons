@@ -41685,13 +41685,16 @@ async fn process_one_pii_backstop(
         // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
         // release, so it is already active the instant the status becomes
         // Accepted/Quarantined below.
-        let (object_ref, _) = trace_object_ref_write_from_record(
+        let (mut object_ref, _) = trace_object_ref_write_from_record(
             state,
             "rescrubbed-envelope",
             StorageTraceObjectArtifactKind::RescrubbedEnvelope,
             &record,
             &envelope,
         )?;
+        // A failed release tombstones this attempt's ref. A retry must use a
+        // fresh ID rather than upserting into that tombstoned row.
+        object_ref.object_ref_id = Uuid::new_v4();
         staged_ref_target = Some((
             object_ref.object_store.clone(),
             object_ref.object_key.clone(),

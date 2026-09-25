@@ -85428,6 +85428,7 @@ struct PiiBackstopDriverTestDb {
     /// Object refs the driver appended on release (expected: a
     /// `RescrubbedEnvelope`).
     appended_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    appended_ref_ids: std::sync::RwLock<Vec<Uuid>>,
     /// Kinds the driver invalidated after release (expected: the pre-backstop
     /// `SubmittedEnvelope`).
     invalidated_kinds: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
@@ -85480,6 +85481,7 @@ impl PiiBackstopDriverTestDb {
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             statuses: std::sync::RwLock::new(std::collections::HashMap::new()),
             appended_refs: std::sync::RwLock::new(Vec::new()),
+            appended_ref_ids: std::sync::RwLock::new(Vec::new()),
             invalidated_kinds: std::sync::RwLock::new(Vec::new()),
             seeded_refs: std::sync::RwLock::new(Vec::new()),
             awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
@@ -86180,6 +86182,9 @@ async fn pii_backstop_process_one_atomic_release_stays_held_on_invalidation_fail
         Some(StorageTraceCorpusStatus::Accepted),
         "the retried release must succeed and clear the hold"
     );
+    let attempt_ids = db.appended_ref_ids.read().unwrap();
+    assert_eq!(attempt_ids.len(), 2);
+    assert_ne!(attempt_ids[0], attempt_ids[1], "retry needs a fresh ref ID");
 }
 
 // --- (b) process-one fail leaves the hold in place ----------------------
@@ -87165,6 +87170,10 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
         write: StorageTraceObjectRefWrite,
     ) -> Result<(), DatabaseError> {
         // Record the rescrubbed-envelope ref the backstop mirrors on release.
+        self.appended_ref_ids
+            .write()
+            .unwrap()
+            .push(write.object_ref_id);
         self.appended_refs.write().unwrap().push((
             write.tenant_id.clone(),
             write.submission_id,
