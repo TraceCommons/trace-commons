@@ -406,6 +406,14 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
+    /// A transient classifier retry stays approved, but cannot be claimed
+    /// before its persisted deadline. A missing deadline fails closed.
+    pub(crate) fn ready_for_upload(&self, now: DateTime<Utc>) -> bool {
+        self.state == QueueState::Approved
+            && (self.reason_label.as_deref() != Some(crate::submit::REASON_TRANSIENT_REDACTION)
+                || self.retry_after.is_some_and(|due| due <= now))
+    }
+
     /// Whether a witness certificate is held for the bytes this entry was
     /// pinned to.
     ///
@@ -796,6 +804,11 @@ impl Queue {
 
     pub fn set_state(&mut self, entry_id: Uuid, state: QueueState, reason_label: Option<String>) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            if e.reason_label.as_deref() == Some(crate::submit::REASON_TRANSIENT_REDACTION)
+                && !matches!(state, QueueState::Approved | QueueState::Uploading)
+            {
+                e.retry_after = None;
+            }
             e.state = state;
             e.reason_label = reason_label;
         }
@@ -850,6 +863,7 @@ impl Queue {
             {
                 e.state = QueueState::Refused;
                 e.reason_label = Some(REASON_PROJECT_IGNORED.to_string());
+                e.retry_after = None;
                 retracted += 1;
             }
         }
@@ -939,6 +953,7 @@ impl Queue {
         }
         e.state = QueueState::Approved;
         e.reason_label = None;
+        e.retry_after = None;
         // The latest approver wins. An entry can be auto-approved, revoked
         // back to `Pending` by a scope change or an Undo, and then approved
         // by hand; without this reset it would still be marked unattended
@@ -1071,11 +1086,11 @@ impl Queue {
     /// proceed from the snapshot and overwrite `Pending` with `Uploaded`.
     /// The contributor was told an upload was cancelled after it had been
     /// sent.
-    pub fn claim_for_upload(&mut self, entry_id: Uuid) -> bool {
+    pub fn claim_for_upload(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
-        if e.state != QueueState::Approved {
+        if !e.ready_for_upload(now) {
             return false;
         }
         e.state = QueueState::Uploading;
@@ -1111,6 +1126,7 @@ impl Queue {
         };
         e.state = QueueState::Pending;
         e.reason_label = Some(reason_label.to_string());
+        e.retry_after = None;
         e.approved_scopes = None;
         e.approved_verdict = None;
         e.approved_correction = None;
@@ -1432,6 +1448,7 @@ impl Queue {
         }
         e.state = QueueState::Pending;
         e.reason_label = None;
+        e.retry_after = None;
         e.approved_scopes = None;
         e.approved_verdict = None;
         e.approved_correction = None;
@@ -2059,6 +2076,39 @@ mod tests {
         assert_eq!(
             q.get(id).unwrap().retry_after,
             Some(at("2026-08-08T12:15:00Z"))
+        );
+    }
+
+    #[test]
+    fn scheduled_transient_approval_cannot_upload_early_and_can_be_cancelled() {
+        let mut q = Queue::new();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.state = QueueState::Approved;
+        e.reason_label = Some("privacy-filter-transient".into());
+        e.retry_after = Some(at("2026-08-08T12:01:00Z"));
+        e.approved_scopes = Some(vec!["debugging_evaluation".into()]);
+        e.approved_inputs = Some("sha256:approved-inputs".into());
+        e.previewed_envelope_digest = Some("sha256:approved-envelope".into());
+        let id = e.entry_id;
+        q.upsert(e, 500).unwrap();
+
+        assert!(q.pinned_entry_ids().contains(&id));
+        assert!(
+            !q.claim_for_upload(id, at("2026-08-08T12:00:59Z")),
+            "retry cannot bypass its deadline"
+        );
+        q.cancel(id).unwrap();
+
+        let cancelled = q.get(id).unwrap();
+        assert_eq!(cancelled.state, QueueState::Pending);
+        assert!(cancelled.approved_scopes.is_none());
+        assert!(cancelled.approved_inputs.is_none());
+        assert!(cancelled.previewed_envelope_digest.is_none());
+        assert!(!q.pinned_entry_ids().contains(&id));
+        q.set_state(id, QueueState::Failed, Some("claim-mint-failed".into()));
+        assert!(
+            !q.claim_for_upload(id, at("2026-08-08T13:00:00Z")),
+            "other Failed outcomes remain terminal"
         );
     }
 
