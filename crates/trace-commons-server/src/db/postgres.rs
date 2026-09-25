@@ -1375,7 +1375,8 @@ impl Database for PgBackend {
         account: Uuid,
         request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
         catalog: &crate::inference_connection::OperatorInferenceConnection,
-    ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError> {
+    ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
+    {
         PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
     }
 
@@ -1384,7 +1385,10 @@ impl Database for PgBackend {
         tenant: &str,
         account: Uuid,
         catalog: &[crate::inference_connection::OperatorInferenceConnection],
-    ) -> Result<Option<crate::db::postgres_inference_connection::InferenceConnectionStatus>, DatabaseError> {
+    ) -> Result<
+        Option<crate::db::postgres_inference_connection::InferenceConnectionStatus>,
+        DatabaseError,
+    > {
         PgBackend::current_inference_connection(self, tenant, account, catalog).await
     }
 
@@ -1393,7 +1397,8 @@ impl Database for PgBackend {
         tenant: &str,
         account: Uuid,
         connection_id: Uuid,
-    ) -> Result<crate::db::postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError> {
+    ) -> Result<crate::db::postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError>
+    {
         PgBackend::disconnect_inference_connection(self, tenant, account, connection_id).await
     }
 

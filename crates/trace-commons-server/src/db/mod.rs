@@ -201,7 +201,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
         _catalog: &crate::inference_connection::OperatorInferenceConnection,
     ) -> Result<postgres_inference_connection::InferenceSelectionOutcome, DatabaseError> {
-        Err(DatabaseError::Pool("inference_connection_unavailable".into()))
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
     }
 
     async fn current_inference_connection(
@@ -209,8 +211,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _tenant: &str,
         _account: uuid::Uuid,
         _catalog: &[crate::inference_connection::OperatorInferenceConnection],
-    ) -> Result<Option<postgres_inference_connection::InferenceConnectionStatus>, DatabaseError> {
-        Err(DatabaseError::Pool("inference_connection_unavailable".into()))
+    ) -> Result<Option<postgres_inference_connection::InferenceConnectionStatus>, DatabaseError>
+    {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
     }
 
     async fn disconnect_inference_connection(
@@ -219,7 +224,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _account: uuid::Uuid,
         _connection_id: uuid::Uuid,
     ) -> Result<postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError> {
-        Err(DatabaseError::Pool("inference_connection_unavailable".into()))
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
     }
 
     async fn redeem_account_invite(
