@@ -346,6 +346,30 @@ pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::re
     }
 }
 
+/// Opt-in K12 contract. It reports login readiness separately from connection
+/// selection and intentionally omits the legacy installable witness material.
+/// The old capabilities endpoint keeps its exact response for deployed clients.
+pub(super) async fn capabilities_v2(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    let wallet_ready = published_witness(&state).is_some() && published_issuer().is_some();
+    let login_ready = near_ai_login_ready(&state);
+    let network = account_near_config(&state).ok().map(|c| c.network.clone());
+    response(serde_json::json!({
+        "contract_version": "near-provision-capabilities-v2",
+        "ready": wallet_ready,
+        "near_ai_login_ready": login_ready,
+        "network": network,
+        "inference_connection_selection_required": true,
+        "inference_connection_offers_path": "/v1/account/inference-connection/offers",
+        "inference_connection_selection_path": "/v1/account/inference-connection",
+        "inference_connection_status_path": "/v1/account/inference-connection",
+        "inference_connection_disconnect_path_template": "/v1/account/inference-connection/{connection_id}",
+        "offers_available": !state.inference_connection_catalog.is_empty(),
+        "funding_available": false,
+    }))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StartRequest {

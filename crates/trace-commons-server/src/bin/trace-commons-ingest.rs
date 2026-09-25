@@ -3,6 +3,8 @@
 
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/inference_connection.rs"]
+mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -1531,6 +1533,8 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    inference_connection_catalog:
+        Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
     near_provisioning_admission_ready: bool,
     near_provisioning_public_origin: Option<String>,
@@ -4248,6 +4252,7 @@ impl AppState {
             account_native_requests,
             account_native_codes,
             account_near_config,
+            inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index: build_dedup_vector_index_from_env(),
@@ -7483,6 +7488,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
         )
+        .merge(inference_connection_routes::routes())
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
             "/v1/account/credit-summary",
@@ -7695,6 +7701,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
+        )
+        .route(
+            "/v1/account/near/provision/capabilities/v2",
+            get(near_provisioning::capabilities_v2),
         )
         .route(
             "/v1/account/near/provision/start",
@@ -15447,7 +15457,14 @@ async fn account_auth_middleware(
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
-            Err(err) => return err.into_response(),
+            Err(err) => {
+                let mut response = err.into_response();
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+                return response;
+            }
         };
 
     // A native token rotates exactly like a cookie session, but a native client
