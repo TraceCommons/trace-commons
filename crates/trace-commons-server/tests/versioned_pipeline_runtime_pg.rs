@@ -10,10 +10,10 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor, InstrumentId,
-    InstrumentKind, InstrumentSettlementOutcome, Phase, PhaseResult, ReasonCode, ReviewDecision,
-    ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision, SettleEvidence,
-    TRACE_CREDIT_DECIMALS,
+    AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
+    InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Phase, PhaseResult, ReasonCode,
+    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision,
+    SettleEvidence, TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{
     Embedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder, ReferencePerplexityScorer,
@@ -490,10 +490,10 @@ async fn outcomes_are_immutable_and_tenant_scoped() {
     };
     let output = ReviewOutput::rejected(result).unwrap();
     let stored = StoredPhaseResult::from_result(Phase::Review, output.result()).unwrap();
-    // Review commits through `commit_review`, not the generic `commit_phase`
-    // -- `commit_phase` no longer knows how to set the approved-content
-    // columns together with `approved_revision_id`, which is the whole
-    // point of decision D7 (see `pipeline_runs_approved_content_shape`).
+    // Review commits through `commit_review`, which sets the approved-content
+    // columns together with `approved_revision_id` (decision D7, see
+    // `pipeline_runs_approved_content_shape`); there is no generic phase
+    // commit.
     store
         .commit_review(&claimed, stored, None)
         .await
@@ -558,6 +558,35 @@ async fn outcomes_are_immutable_and_tenant_scoped() {
         .await
         .unwrap();
     assert!(other_outcomes.is_empty());
+
+    // M13: the isolation comes from forced RLS, not from the store's own
+    // tenant predicate. A raw SELECT with no tenant predicate at all, in a
+    // transaction scoped to the other tenant, sees no row for the outcome;
+    // the same statement scoped to the owning tenant sees it.
+    for (scope, expected) in [(&other_tenant, 0_i64), (&tenant, 1_i64)] {
+        let tx = client.transaction().await.expect("tx for raw select");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[scope],
+        )
+        .await
+        .expect("set tenant for raw select");
+        let visible: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM phase_outcomes WHERE outcome_id = $1",
+                &[&outcome_id],
+            )
+            .await
+            .expect("raw select without a tenant predicate")
+            .get(0);
+        tx.commit().await.expect("commit raw select");
+        assert_eq!(
+            visible,
+            expected,
+            "rows visible to a raw SELECT scoped to the {} tenant",
+            if expected == 0 { "other" } else { "owning" }
+        );
+    }
 }
 
 #[tokio::test]
@@ -1576,6 +1605,193 @@ async fn receipt_derives_retention_and_expiry_on_the_server() {
     assert_eq!(
         expires_at,
         Some(received_at + chrono::Duration::days(i64::from(max_age_days)))
+    );
+}
+
+/// Reads a submission's stored `status` in a tenant-scoped transaction.
+async fn submission_status(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) -> String {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let status: String = tx
+        .query_one(
+            "SELECT status FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    status
+}
+
+/// Admission Reject (a high-risk envelope): the receipt stores the
+/// submission as `rejected`, records the Reject decision, and completes the
+/// run at Admission -- there is no Review work to claim.
+#[tokio::test]
+async fn a_rejected_receipt_records_the_decision_and_creates_no_review_work() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("admission-reject-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("a rejected receipt still creates its run record")
+    };
+    assert_eq!(created.admission_decision, "reject");
+    assert_eq!(created.state, PipelineRunState::Complete);
+    assert_eq!(created.next_phase, None);
+    assert_eq!(
+        submission_status(&backend, &tenant, env.submission_id).await,
+        "rejected"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1, "only the Admission outcome");
+    assert_eq!(outcomes[0].phase, Phase::Admission);
+    let decision: AdmissionDecision = serde_json::from_value(outcomes[0].decision.clone()).unwrap();
+    match decision {
+        AdmissionDecision::Reject { reason } => {
+            assert_eq!(reason.as_str(), "privacy_risk_rejected");
+        }
+        other => panic!("expected an Admission Reject, got {other:?}"),
+    }
+
+    // No Review work: nothing is claimable, for this run or the tenant.
+    assert!(
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(service.process_one(&tenant).await.unwrap().is_none());
+}
+
+/// Admission Quarantine (a Medium-risk envelope): the receipt stores the
+/// submission as `quarantined` and records the Quarantine decision; Review
+/// cannot resolve it without a human assessment (PR 3), so each Review
+/// attempt is the uncharged `review_assessment_required` suspension, with
+/// the phase-age backoff -- never a charged retry and never a hot loop.
+#[tokio::test]
+async fn a_quarantined_receipt_waits_for_review_with_backoff() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("admission-quarantine-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "quarantine");
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    assert_eq!(
+        submission_status(&backend, &tenant, env.submission_id).await,
+        "quarantined"
+    );
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let decision: AdmissionDecision = serde_json::from_value(outcomes[0].decision.clone()).unwrap();
+    match decision {
+        AdmissionDecision::Quarantine { reason } => {
+            assert_eq!(reason.as_str(), "privacy_review_required");
+        }
+        other => panic!("expected an Admission Quarantine, got {other:?}"),
+    }
+
+    // The first Review attempt waits the one-second floor, uncharged.
+    let waited = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs and waits for a human assessment");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    assert_eq!(waited.next_phase, Some(Phase::Review));
+    assert_eq!(
+        waited.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(waited.attempt_count, 0);
+    let first_delay = waited.next_attempt_at - waited.updated_at;
+    assert!(first_delay >= chrono::Duration::seconds(1));
+    assert!(
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the run is not claimable again before its backoff elapses"
+    );
+
+    // A minute later the phase is older, so the next wait is longer; the
+    // run is still uncharged and has no Review outcome.
+    age_run(
+        &backend,
+        &tenant,
+        created.run_id,
+        chrono::Duration::seconds(60),
+    )
+    .await;
+    let waited_again = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs again once the backoff elapses");
+    assert_eq!(waited_again.state, PipelineRunState::Retry);
+    assert_eq!(waited_again.attempt_count, 0);
+    let second_delay = waited_again.next_attempt_at - waited_again.updated_at;
+    assert!(second_delay > first_delay);
+    assert!(second_delay <= chrono::Duration::hours(1));
+    assert!(
+        !service
+            .store()
+            .list_outcomes(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Review),
+        "no Review outcome while the quarantine is unresolved"
     );
 }
 

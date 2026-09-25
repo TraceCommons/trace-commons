@@ -185,7 +185,8 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
             caps,
         )
         .with_scorer(scorer)
-        .with_embedder(embedder);
+        .with_embedder(embedder)
+        .with_object_store_name(context.object_store_name);
         if let Some(crash_point) = self.crash_point {
             builder = builder.with_crash_point(crash_point);
         }
@@ -679,6 +680,37 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     assert_eq!(
         count_outcomes(&backend, "tenant-a", envelope.submission_id).await,
         4
+    );
+
+    // M11: the submitted envelope's and the approved content's object refs
+    // carry the configured store's name, as a legacy receipt's do.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, "tenant-a").await;
+    let stores: Vec<(String, String)> = tx
+        .query(
+            "SELECT artifact_kind, object_store FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY artifact_kind",
+            &[&"tenant-a", &envelope.submission_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        stores,
+        vec![
+            (
+                "review_snapshot".to_string(),
+                TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()
+            ),
+            (
+                "submitted_envelope".to_string(),
+                TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()
+            ),
+        ]
     );
 
     stop.send(()).expect("send shutdown to app 2");

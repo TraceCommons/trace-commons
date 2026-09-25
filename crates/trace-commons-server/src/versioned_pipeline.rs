@@ -71,6 +71,12 @@ pub const PIPELINE_CREDIT_HELD_LABEL: &str = "credit_held";
 pub const PIPELINE_CREDIT_CAP_LABEL: &str = "credit_cap_exceeded";
 pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
+pub const PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL: &str = "bundle_store_unavailable";
+/// The `trace_object_refs.object_store` label a service records when its
+/// builder is not told the configured store's name
+/// (`PipelineServiceBuilder::with_object_store_name`). Ingest's assembly
+/// refuses a service that still carries it (M11).
+pub const PIPELINE_DEFAULT_OBJECT_STORE_NAME: &str = "pipeline_local_encrypted";
 pub const INJECTED_PIPELINE_CRASH: &str = "injected_pipeline_crash";
 const DEFAULT_LEASE_SECONDS: i64 = 30;
 const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
@@ -717,90 +723,6 @@ impl PgPipelineStore {
         Ok(())
     }
 
-    /// Commits a phase outcome, advances `next_phase`, and clears the lease.
-    /// Review no longer commits through here -- see `commit_review`, which
-    /// stores the approved object reference and its derived-record
-    /// provenance in the same transaction as the outcome and the
-    /// transition, rather than setting `approved_revision_id` alone (that
-    /// alone violates the `pipeline_runs_approved_content_shape` CHECK).
-    pub async fn commit_phase(
-        &self,
-        run: &PipelineRunRecord,
-        outcome: StoredPhaseResult,
-        next_phase: Option<Phase>,
-        approved_revision_id: Option<Uuid>,
-    ) -> Result<PipelineRunRecord, DatabaseError> {
-        if run.next_phase != Some(outcome.phase) {
-            return Err(DatabaseError::Constraint(
-                "phase does not match run transition".to_string(),
-            ));
-        }
-        let lease_token = required_lease_token(run)?;
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        let current = tx
-            .query_opt(
-                "SELECT * FROM pipeline_runs
-                 WHERE tenant_id = $1 AND run_id = $2
-                 FOR UPDATE",
-                &[&run.tenant_id, &run.run_id],
-            )
-            .await?
-            .ok_or_else(|| DatabaseError::NotFound {
-                entity: "pipeline_run".to_string(),
-                id: run.run_id.to_string(),
-            })?;
-        let current = pipeline_run_from_row(&current)?;
-        if current.state != PipelineRunState::Leased
-            || current.next_phase != Some(outcome.phase)
-            || current.lease_token != Some(lease_token)
-            || current
-                .lease_expires_at
-                .is_none_or(|expires_at| expires_at <= Utc::now())
-        {
-            return Err(stale_lease_error());
-        }
-        insert_outcome(
-            &tx,
-            &run.tenant_id,
-            run.run_id,
-            run.trace_id,
-            &run.bundle_id,
-            Uuid::new_v4(),
-            outcome,
-        )
-        .await?;
-        let terminal = next_phase.is_none();
-        let state = if terminal {
-            PipelineRunState::Complete
-        } else {
-            PipelineRunState::Pending
-        };
-        let row = tx
-            .query_one(
-                "UPDATE pipeline_runs
-                 SET next_phase = $3, state = $4,
-                     approved_revision_id = COALESCE($5, approved_revision_id),
-                     lease_token = NULL, lease_expires_at = NULL,
-                     next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
-                 WHERE tenant_id = $1 AND run_id = $2
-                   AND lease_token = $6 AND lease_expires_at > NOW()
-                 RETURNING *",
-                &[
-                    &run.tenant_id,
-                    &run.run_id,
-                    &phase_as_db(next_phase),
-                    &state.as_db(),
-                    &approved_revision_id,
-                    &lease_token,
-                ],
-            )
-            .await?;
-        let updated = pipeline_run_from_row(&row)?;
-        tx.commit().await?;
-        Ok(updated)
-    }
-
     /// Commits the Review outcome together with its approved-content
     /// provenance and the phase transition, in one transaction (decision
     /// D7). On approval: the approved object ref, its `trace_derived_records`
@@ -1046,10 +968,11 @@ impl PgPipelineStore {
     /// (decision D4): `settle_selection`, its hash, the decided
     /// `index_membership`, and -- only for an include -- `index_write_state
     /// = 'pending'`, all in one transaction, and only the first time (the
-    /// `settle_selection IS NULL` guard). A later call for the same run,
-    /// after a crash and retry, finds the guard already tripped and updates
-    /// nothing; the caller checks `load_settle_selection` first and skips
-    /// this call entirely on a retry, so that path is never exercised here.
+    /// `settle_selection IS NULL` guard). A later call for the same run
+    /// finds the guard already tripped, matches no row, and returns the
+    /// stale-lease error; the caller checks `load_settle_selection` first
+    /// and skips this call entirely on a retry, so a retry never reaches
+    /// that error.
     pub async fn persist_settle_selection(
         &self,
         run: &PipelineRunRecord,
@@ -1706,15 +1629,30 @@ async fn load_bundle_from_transaction(
     Ok(Some(package))
 }
 
+/// The safe label for a store error while loading a run's bound bundle
+/// (M3). Only a stored package that fails its own validation -- the one
+/// error `load_bundle_from_transaction` raises as
+/// `bundle_package_invalid` -- is permanent; any other database error means
+/// the store could not answer, `bundle_store_unavailable`, which
+/// `process_claimed_run` treats as an uncharged suspension (ruling FR3).
+fn bound_bundle_load_error_label(error: &DatabaseError) -> &'static str {
+    match error {
+        DatabaseError::Serialization(label) if label == PIPELINE_BUNDLE_INVALID_LABEL => {
+            PIPELINE_BUNDLE_INVALID_LABEL
+        }
+        _ => PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL,
+    }
+}
+
 fn required_lease_token(run: &PipelineRunRecord) -> Result<Uuid, DatabaseError> {
     run.lease_token.ok_or_else(stale_lease_error)
 }
 
 /// Re-reads the run row `FOR UPDATE` and confirms the caller's lease is
-/// still the current one before it writes anything durable under it. Unlike
-/// `commit_phase`'s inline check, this does not re-validate `next_phase`:
-/// a phase transition always clears `lease_token`, so the token match alone
-/// already proves the lease has not moved on.
+/// still the current one before it writes anything durable under it. It
+/// does not re-validate `next_phase`: a phase transition always clears
+/// `lease_token`, so the token match alone already proves the lease has not
+/// moved on.
 async fn ensure_current_lease(
     tx: &Transaction<'_>,
     run: &PipelineRunRecord,
@@ -1982,6 +1920,7 @@ pub struct PipelineServiceBuilder {
     index_writer: Arc<dyn IdentifiedIndexWriter>,
     settlement_adapters: SettlementAdapterRegistry,
     caps: PipelineCaps,
+    object_store_name: String,
     crash_point: Option<PipelineCrashPoint>,
 }
 
@@ -2006,8 +1945,19 @@ impl PipelineServiceBuilder {
             index_writer,
             settlement_adapters,
             caps,
+            object_store_name: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
             crash_point: None,
         }
+    }
+
+    /// The name of the object store `artifact_store` writes to, recorded as
+    /// `trace_object_refs.object_store` on every object ref the pipeline
+    /// commits -- the same label the legacy receipt records from the
+    /// configured store (`ConfiguredTraceArtifactStore::object_store_name`),
+    /// which the legacy readers match before they read an object.
+    pub fn with_object_store_name(mut self, object_store_name: impl Into<String>) -> Self {
+        self.object_store_name = object_store_name.into();
+        self
     }
 
     pub fn with_scorer(mut self, scorer: Arc<dyn IdentifiedPerplexityScorer>) -> Self {
@@ -2047,6 +1997,7 @@ impl PipelineServiceBuilder {
             index_writer: self.index_writer,
             settlement_adapters: self.settlement_adapters,
             caps: self.caps,
+            object_store_name: self.object_store_name,
             crash_point: self.crash_point,
             crash_pending: AtomicBool::new(self.crash_point.is_some()),
             score_evaluations: AtomicUsize::new(0),
@@ -2070,6 +2021,7 @@ pub struct PipelineService {
     index_writer: Arc<dyn IdentifiedIndexWriter>,
     settlement_adapters: SettlementAdapterRegistry,
     caps: PipelineCaps,
+    object_store_name: String,
     crash_point: Option<PipelineCrashPoint>,
     crash_pending: AtomicBool,
     score_evaluations: AtomicUsize,
@@ -2079,6 +2031,11 @@ pub struct PipelineService {
 impl PipelineService {
     pub fn bundle_id(&self) -> &str {
         &self.default_package.bundle_id
+    }
+
+    /// The `trace_object_refs.object_store` label this service records.
+    pub fn object_store_name(&self) -> &str {
+        &self.object_store_name
     }
 
     /// How many times the Settle policy actually ran for this service. A
@@ -2260,13 +2217,13 @@ impl PipelineService {
             .store
             .load_bundle(&run.tenant_id, &run.bundle_id)
             .await
-            .map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL)?
+            .map_err(|error| bound_bundle_load_error_label(&error))?
             .ok_or(PIPELINE_BUNDLE_MISSING_LABEL)?;
         if !self
             .store
             .policy_is_runnable(&run.tenant_id, &run.bundle_id, phase)
             .await
-            .map_err(|_| PIPELINE_BUNDLE_INVALID_LABEL)?
+            .map_err(|error| bound_bundle_load_error_label(&error))?
         {
             return Err(PIPELINE_POLICY_NOT_RUNNABLE_LABEL);
         }
@@ -2581,7 +2538,7 @@ impl PipelineService {
             tenant_id: tenant_id.to_string(),
             submission_id: envelope.submission_id,
             artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
-            object_store: "pipeline_local_encrypted".to_string(),
+            object_store: self.object_store_name.clone(),
             object_key: artifact_receipt.object_key,
             content_sha256: format!("sha256:{}", artifact_receipt.ciphertext_sha256),
             encryption_key_ref: format!("tenant:{}", tenant_storage_ref.as_str()),
@@ -2790,13 +2747,15 @@ impl PipelineService {
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let bundle = match self.load_bound_bundle(&run).await {
             Ok(bundle) => bundle,
-            // D9 / FR3: a dependency the service does not hold, or a bundle
-            // whose operator-controlled runnable flag is off, is not this
-            // run's fault -- it waits in retry without the claim's attempt
-            // being charged, with `mark_transient_retry`'s backoff.
+            // D9 / FR3: a dependency the service does not hold, a bundle
+            // whose operator-controlled runnable flag is off, or a store that
+            // could not load the bound bundle (M3) is not this run's fault --
+            // it waits in retry without the claim's attempt being charged,
+            // with `mark_transient_retry`'s backoff.
             Err(label)
                 if label == PIPELINE_DEPENDENCY_MISSING_LABEL
-                    || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+                    || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL
+                    || label == PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL =>
             {
                 return Ok(Some(self.store.mark_transient_retry(&run, label).await?));
             }
@@ -2926,7 +2885,12 @@ impl PipelineService {
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         Some(ApprovedRevision {
                             revision_id: *registry_revision_id,
-                            object_ref: approved_object_ref(run, &receipt, content.bytes().len()),
+                            object_ref: approved_object_ref(
+                                run,
+                                &receipt,
+                                content.bytes().len(),
+                                &self.object_store_name,
+                            ),
                             content_hash: content.content_hash().to_string(),
                             source_content_hash,
                             worker_identity: content.worker_identity().to_string(),
@@ -2985,6 +2949,10 @@ impl PipelineService {
             .manifest
             .require_pinned(&result.decision.awards)
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        // M4: a Trace Credit award must fit the ledger's signed 64-bit
+        // microcredit column; refuse one that does not here, before any
+        // artifact is stored, rather than at the database CHECK.
+        ensure_trace_credit_awards_fit_the_ledger(&result.decision.awards)?;
         let lease_token = required_lease_token(run)?;
         let command_ref = match &command {
             None => None,
@@ -3892,6 +3860,28 @@ impl PipelineService {
     }
 }
 
+/// M4: every Trace Credit award in `awards` fits the credit ledger's
+/// signed 64-bit microcredit column (`microcredits_to_settled_i64`), else
+/// the safe label `score_outcome_invalid`. `InstrumentAward::new` and its
+/// serde form already refuse a Trace Credit amount above
+/// `MAX_TRACE_CREDIT_MICROCREDITS` (`i64::MAX`), so no Score output can
+/// carry one today; this check keeps the runner's refusal ahead of any
+/// artifact write should that contract bound ever move, and the
+/// `pipeline_run_settlements_trace_credit_bound` CHECK stays the backstop.
+fn ensure_trace_credit_awards_fit_the_ledger(awards: &InstrumentAwards) -> anyhow::Result<()> {
+    for award in awards
+        .iter()
+        .filter(|award| award.instrument_id() == &InstrumentId::trace_credit())
+    {
+        let microcredits = award
+            .trace_credit_microcredits()
+            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        microcredits_to_settled_i64(microcredits)
+            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+    }
+    Ok(())
+}
+
 /// Brief 3C's `ensure_operations_match_committed_awards`: the settlement
 /// rows Score seeded (decision D5) must still be exactly one per award,
 /// each with the instrument, units, and `pipeline_operation_ref` the award
@@ -3972,6 +3962,7 @@ fn approved_object_ref(
     run: &PipelineRunRecord,
     receipt: &EncryptedTraceArtifactReceipt,
     size_bytes: usize,
+    object_store: &str,
 ) -> TraceObjectRefWrite {
     TraceObjectRefWrite {
         object_ref_id: Uuid::new_v5(
@@ -3981,7 +3972,7 @@ fn approved_object_ref(
         tenant_id: run.tenant_id.clone(),
         submission_id: run.submission_id,
         artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
-        object_store: "pipeline_local_encrypted".to_string(),
+        object_store: object_store.to_string(),
         object_key: receipt.object_key.clone(),
         content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
         encryption_key_ref: format!(
@@ -3997,6 +3988,53 @@ fn approved_object_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M3: a stored package that fails its own validation is permanent
+    /// (`bundle_package_invalid`, the run fails); any other database error
+    /// while loading the bound bundle is the store being unavailable -- an
+    /// uncharged suspension, never `bundle_package_invalid`.
+    #[test]
+    fn a_database_error_loading_the_bound_bundle_is_not_an_invalid_package() {
+        assert_eq!(
+            bound_bundle_load_error_label(&DatabaseError::Serialization(
+                PIPELINE_BUNDLE_INVALID_LABEL.to_string()
+            )),
+            PIPELINE_BUNDLE_INVALID_LABEL
+        );
+        for error in [
+            DatabaseError::Pool("pool exhausted".to_string()),
+            DatabaseError::Query("statement timeout".to_string()),
+            DatabaseError::Serialization("row decode failed".to_string()),
+        ] {
+            assert_eq!(
+                bound_bundle_load_error_label(&error),
+                PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL
+            );
+        }
+    }
+
+    /// M4: a Trace Credit award up to the ledger's `i64::MAX` microcredits
+    /// passes the runner's check; one unit more cannot even be built as an
+    /// award, which is why the runner's refusal is a backstop.
+    #[test]
+    fn trace_credit_awards_are_bounded_by_the_ledger_before_storage() {
+        let at_limit = InstrumentAwards::new(vec![
+            InstrumentAward::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(i64::MAX as u128),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        assert!(ensure_trace_credit_awards_fit_the_ledger(&at_limit).is_ok());
+        assert!(
+            InstrumentAward::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(i64::MAX as u128 + 1),
+            )
+            .is_err()
+        );
+    }
 
     /// Expected value computed outside Rust: SHA-256("tenant-a"), first 16 bytes.
     #[test]

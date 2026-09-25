@@ -4,13 +4,18 @@
 use super::*;
 
 /// What a proprietary production pipeline assembly needs from ingest: the
-/// PostgreSQL backend the pipeline's own tables live on, and the artifact
-/// store envelopes and pipeline artifacts are written to. Both are the same
-/// connections `AppState::from_env_with_pipeline_runtime_assembler` already
-/// holds from its own DB-mirror and artifact-store configuration.
+/// PostgreSQL backend the pipeline's own tables live on, the artifact store
+/// envelopes and pipeline artifacts are written to, and that store's name.
+/// All three come from the connections and configuration
+/// `AppState::from_env_with_pipeline_runtime_assembler` already holds.
+/// An assembly passes `object_store_name` to
+/// `PipelineServiceBuilder::with_object_store_name`, so the pipeline's object
+/// refs carry the configured store's label as the legacy receipt's do;
+/// `assemble_ingest_pipeline_runtime` refuses a service that does not.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
+    pub object_store_name: String,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -49,13 +54,20 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     let backend = db_connections
         .map(|connections| connections.postgres.clone())
         .ok_or_else(|| anyhow::anyhow!("pipeline_runtime_database_unavailable"))?;
-    let artifact_store = artifact_store
-        .map(|configured| configured.store.clone())
+    let configured_store = artifact_store
         .ok_or_else(|| anyhow::anyhow!("pipeline_runtime_artifact_store_unavailable"))?;
+    let object_store_name = configured_store.object_store_name().to_string();
     let service = assembler.assemble(IngestPipelineRuntimeContext {
         backend,
-        artifact_store,
+        artifact_store: configured_store.store.clone(),
+        object_store_name: object_store_name.clone(),
     })?;
+    // M11: every object ref the pipeline commits names the store it was
+    // written to, exactly as a legacy receipt's does.
+    anyhow::ensure!(
+        service.object_store_name() == object_store_name,
+        "pipeline_runtime_object_store_mismatch"
+    );
     if production_required {
         anyhow::ensure!(
             pipeline_runtime_is_production_qualified(&service),

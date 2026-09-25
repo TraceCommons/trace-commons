@@ -10345,10 +10345,32 @@ async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
     );
 }
 
-/// A pipeline service whose PostgreSQL backend points at a loopback port
-/// nothing listens on: its readiness probe fails at once. `PgBackend::new`
-/// builds the pool lazily, so constructing it needs no database.
-async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
+/// A PostgreSQL backend that points at a loopback port nothing listens on.
+/// `PgBackend::new` builds the pool lazily, so constructing it needs no
+/// database; any query through it fails at once.
+async fn pg_backend_without_a_database() -> Arc<PgBackend> {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    )
+}
+
+/// A minimal pipeline service over `backend` and `artifact_store`, recording
+/// `object_store_name` when one is given (else the builder's default).
+fn minimal_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
     use trace_commons_server::versioned_pipeline_bundle::{
@@ -10357,20 +10379,6 @@ async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
     use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
     use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 
-    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let backend = Arc::new(
-        PgBackend::new(&DatabaseConfig::from_postgres_url(
-            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
-            1,
-        ))
-        .await
-        .unwrap(),
-    );
-    let dir = tempfile::tempdir().unwrap();
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(
@@ -10381,26 +10389,97 @@ async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
         },
         scorer.as_ref(),
         embedder.as_ref(),
-    )
-    .unwrap();
+    )?;
     let index = IsolatedPipelineIndex::new();
-    Arc::new(
-        PipelineServiceBuilder::new(
-            backend,
-            test_artifact_store(dir.path()),
-            package,
-            index.clone(),
-            index,
-            SettlementAdapterRegistry::new(Vec::new()).unwrap(),
-            PipelineCaps {
-                per_instrument_atomic_units: BTreeMap::new(),
-            },
-        )
-        .with_scorer(scorer)
-        .with_embedder(embedder)
-        .build()
-        .unwrap(),
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(Vec::new())?,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
     )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// M11: ingest's assembly hands the configured store's name to the
+/// assembler and refuses a service that records any other label on its
+/// object refs.
+#[tokio::test]
+async fn pipeline_assembly_requires_the_configured_object_store_name() {
+    struct NameAssembler {
+        pass_the_name: bool,
+    }
+    impl IngestPipelineRuntimeAssembler for NameAssembler {
+        fn assemble(
+            &self,
+            context: pipeline_runtime::IngestPipelineRuntimeContext,
+        ) -> anyhow::Result<Arc<PipelineService>> {
+            minimal_pipeline_service(
+                context.backend,
+                context.artifact_store,
+                self.pass_the_name.then_some(context.object_store_name),
+            )
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+
+    let refused = assemble_ingest_pipeline_runtime(
+        Some(&NameAssembler {
+            pass_the_name: false,
+        }),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+    )
+    .err()
+    .expect("a service that ignores the configured store name is refused");
+    assert_eq!(
+        refused.to_string(),
+        "pipeline_runtime_object_store_mismatch"
+    );
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&NameAssembler {
+            pass_the_name: true,
+        }),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        service.object_store_name(),
+        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+    );
+}
+
+/// A pipeline service whose PostgreSQL backend points at a loopback port
+/// nothing listens on: its readiness probe fails at once.
+async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
+    let dir = tempfile::tempdir().unwrap();
+    minimal_pipeline_service(
+        pg_backend_without_a_database().await,
+        test_artifact_store(dir.path()),
+        None,
+    )
+    .unwrap()
 }
 
 /// M12: a worker whose readiness probe fails reports

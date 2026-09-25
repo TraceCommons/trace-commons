@@ -24,9 +24,12 @@ ALTER TABLE pipeline_runs
         OR last_error_label ~ '^[a-z0-9_]{1,64}$'
     );
 
+-- The worker claims per tenant (`claim_next` filters `tenant_id = $1`), so
+-- the work index leads with the tenant.
 DROP INDEX idx_pipeline_runs_work;
 CREATE INDEX idx_pipeline_runs_work
     ON pipeline_runs (
+        tenant_id,
         state,
         next_attempt_at,
         lease_expires_at,
@@ -164,4 +167,3 @@ DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_receipt_artifact
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_receipt_artifacts
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
-

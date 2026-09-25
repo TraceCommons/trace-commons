@@ -35,6 +35,9 @@ injects a pipeline runtime. The repository binary injects none.
 - Tenants listed with a runtime: those tenants' receipts go to the pipeline.
 - Tenants listed without a runtime: ingest refuses to start with
   `pipeline_receipts_configured_without_runtime`.
+- Removing a tenant from the list also stops the worker for that tenant.
+  Its in-flight pipeline runs stay unprocessed until the tenant is listed
+  again.
 
 Activation replaces this list with qualified routing.
 
@@ -44,6 +47,10 @@ The pipeline counts only pipeline receipts against the hourly submission
 quota. It does not count legacy submission records. In the first hour after a
 tenant moves to the pipeline, that tenant can therefore receive up to one
 extra hourly quota. This is accepted behavior.
+
+The legacy quota and tombstone checks still run before ingest routes a
+receipt to the pipeline. A tenant with recent legacy submissions can
+therefore receive a legacy 429 for a pipeline receipt.
 
 ## Rehearse the switch
 
