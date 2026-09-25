@@ -291,6 +291,9 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "acknowledge_near_ai_notice",
     "approve",
+    "automatic_grant",
+    "grant_automatic",
+    "withdraw_automatic_grant",
     "certificate_detail",
     "cancel",
     "clear_public_profile",
@@ -2033,6 +2036,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
         "set_project_mode" => handle_set_project_mode(shared, req),
+        "grant_automatic" => handle_grant_automatic(shared, req),
+        "withdraw_automatic_grant" => handle_withdraw_automatic_grant(shared, req),
+        "automatic_grant" => Response::ok(req.id, automatic_grant_value(shared)),
         "dismiss" => {
             let id = try_response!(entry_id_param(req));
             // A dismissed entry is never previewed again, so drop any
@@ -2502,6 +2508,84 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
 // are supported, deliberately, rather than one replacing the other.
 //
 // `project_id` wins when both are sent.
+/// The Flow 1 grant as a client may see it: whether one is in force, when it
+/// was given, and whether what was on disk has been recorded yet (until it
+/// is, the grant arms nothing). No paths and no counts of them.
+fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
+    let policy = shared.policy.lock().expect("policy lock");
+    match &policy.automatic_grant {
+        Some(grant) => serde_json::json!({
+            "granted": true,
+            "granted_at": grant.granted_at,
+            "on_disk_recorded": grant.on_disk.is_some(),
+        }),
+        None => serde_json::json!({ "granted": false }),
+    }
+}
+
+// Give the Flow 1 grant: arm projects discovered from now on (K3), never
+// anything already on disk (K4). Refused without terms to grant under, like
+// arming one project, and recorded before it takes effect.
+fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    };
+    let now = Utc::now();
+    if audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: now,
+            action: "automatic-granted".to_string(),
+            project_label: None,
+            detail: None,
+        },
+    )
+    .is_err()
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.automatic_grant.clone();
+        policy.grant_automatic(now, terms);
+        if policy.save(&shared.store).is_err() {
+            policy.automatic_grant = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+    }
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, automatic_grant_value(shared))
+}
+
+// Withdraw the Flow 1 grant. Projects it armed keep their own entries.
+fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Response {
+    let withdrawn = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.automatic_grant.clone();
+        let withdrawn = policy.withdraw_automatic_grant();
+        if withdrawn && policy.save(&shared.store).is_err() {
+            policy.automatic_grant = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        withdrawn
+    };
+    if withdrawn {
+        // After the withdrawal, not before: a record that fails to write
+        // must not leave the grant in force.
+        let _ = audit::append(
+            &shared.store,
+            &AuditEntry {
+                at: Utc::now(),
+                action: "automatic-grant-withdrawn".to_string(),
+                project_label: None,
+                detail: None,
+            },
+        );
+        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    Response::ok(req.id, serde_json::json!({ "withdrawn": withdrawn }))
+}
+
 fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     let id_param = req.params.get("project_id").and_then(|v| v.as_str());
     let key_param = req.params.get("project_key").and_then(|v| v.as_str());
@@ -10836,7 +10920,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 42, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 45, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

@@ -15,7 +15,7 @@
 //! normalized trajectory files land there. Since the daemon cannot tell which
 //! project such a session belongs to, it cannot honour any opt-in for it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
@@ -133,6 +133,8 @@ pub const ARMING_DECLINE_COOLDOWN_DAYS: i64 = 30;
 pub struct GrantSweep {
     /// Projects returned to ask-first because their grant was widened.
     pub voided: Vec<VoidedGrant>,
+    /// Why the Flow 1 grant itself was voided, if it was.
+    pub automatic_grant_voided: Option<Vec<&'static str>>,
     /// Armed projects that had no recorded terms and now do.
     pub baselined: usize,
 }
@@ -140,7 +142,7 @@ pub struct GrantSweep {
 impl GrantSweep {
     /// Whether the policy changed and must be saved.
     pub fn changed(&self) -> bool {
-        !self.voided.is_empty() || self.baselined > 0
+        !self.voided.is_empty() || self.baselined > 0 || self.automatic_grant_voided.is_some()
     }
 }
 
@@ -179,6 +181,44 @@ pub struct ProjectPolicy {
     /// When the contributor last said "Not now" to arming a project.
     #[serde(default)]
     pub arming_declined_at: BTreeMap<String, DateTime<Utc>>,
+    /// The Flow 1 grant, if one is in force: arm projects discovered after
+    /// it. See [`AutomaticGrant`].
+    #[serde(default)]
+    pub automatic_grant: Option<AutomaticGrant>,
+}
+
+/// The Flow 1 grant: "contribute automatically from projects discovered from
+/// now on".
+///
+/// **It arms nothing already on disk** (the spec's logout rule). What was on
+/// disk is recorded by the first full watcher pass after the grant, as the
+/// set of session paths and the set of projects they belong to, and until
+/// then nothing is armed by it at all. A project with any session in that
+/// record keeps asking, and so does every session in it; only a project
+/// first seen afterwards, with no policy entry of its own, is armed.
+///
+/// That is what makes a re-grant after logout safe. Logout wipes this file,
+/// so a Never folder's decision and the grant's own record go with it; the
+/// re-grant records what is on disk again, and every folder that already
+/// had sessions -- the Never folder included -- asks rather than being
+/// counted as new.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomaticGrant {
+    pub granted_at: DateTime<Utc>,
+    /// The terms the grant was given under. A widening voids the grant
+    /// itself as well as the projects it armed (R6), or it would go on arming
+    /// new projects under terms nobody agreed to.
+    pub granted_under: super::grant_terms::GrantTerms,
+    /// `None` until the first full pass after the grant has recorded it.
+    #[serde(default)]
+    pub on_disk: Option<OnDiskAtGrant>,
+}
+
+/// What was on disk when an [`AutomaticGrant`] was given.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnDiskAtGrant {
+    pub sessions: BTreeSet<String>,
+    pub projects: BTreeSet<String>,
 }
 
 impl Default for ProjectPolicy {
@@ -194,7 +234,62 @@ impl ProjectPolicy {
             projects: BTreeMap::new(),
             contributed: BTreeMap::new(),
             arming_declined_at: BTreeMap::new(),
+            automatic_grant: None,
         }
+    }
+
+    /// Give the Flow 1 grant, replacing any earlier one. Arms nothing until
+    /// what is on disk has been recorded.
+    pub fn grant_automatic(&mut self, now: DateTime<Utc>, terms: super::grant_terms::GrantTerms) {
+        self.automatic_grant = Some(AutomaticGrant {
+            granted_at: now,
+            granted_under: terms,
+            on_disk: None,
+        });
+    }
+
+    /// Withdraw the Flow 1 grant. Projects it already armed keep their own
+    /// entries; withdrawing a project is `set_mode`. Returns whether one was
+    /// in force.
+    pub fn withdraw_automatic_grant(&mut self) -> bool {
+        self.automatic_grant.take().is_some()
+    }
+
+    /// Whether a grant is waiting for its record of what is on disk.
+    pub fn needs_on_disk_record(&self) -> bool {
+        self.automatic_grant
+            .as_ref()
+            .is_some_and(|g| g.on_disk.is_none())
+    }
+
+    /// Record what was on disk for the grant waiting on it. A no-op when no
+    /// grant is waiting, so a record cannot replace an earlier one.
+    pub fn record_on_disk(&mut self, on_disk: OnDiskAtGrant) -> bool {
+        match self.automatic_grant.as_mut() {
+            Some(grant) if grant.on_disk.is_none() => {
+                grant.on_disk = Some(on_disk);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the grant arms `project_key` on seeing the session at
+    /// `session_path`: a grant with its on-disk record, a real project with
+    /// no entry of its own, and neither the project nor the session on disk
+    /// when the grant was given.
+    pub fn arms_by_default(&self, project_key: &str, session_path: &str) -> bool {
+        let Some(on_disk) = self
+            .automatic_grant
+            .as_ref()
+            .and_then(|g| g.on_disk.as_ref())
+        else {
+            return false;
+        };
+        project_key != UNKNOWN_PROJECT_KEY
+            && !self.projects.contains_key(project_key)
+            && !on_disk.projects.contains(project_key)
+            && !on_disk.sessions.contains(session_path)
     }
 
     /// Count one successful upload against its project.
@@ -415,6 +510,13 @@ impl ProjectPolicy {
                         });
                     }
                 }
+            }
+        }
+        if let Some(grant) = &self.automatic_grant {
+            let reasons = current.widening_from(&grant.granted_under);
+            if !reasons.is_empty() {
+                self.automatic_grant = None;
+                sweep.automatic_grant_voided = Some(reasons);
             }
         }
         sweep
@@ -1063,6 +1165,88 @@ mod tests {
             disambiguated_label(UNKNOWN_PROJECT_KEY, None, &keys),
             UNKNOWN_PROJECT_KEY
         );
+    }
+
+    fn grant_terms_with(ingest_url: &str) -> super::super::grant_terms::GrantTerms {
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.ingest_url = ingest_url.to_string();
+        super::super::grant_terms::GrantTerms::current(&cfg, None, false, "none")
+    }
+
+    fn granted_with_disk(projects: &[&str], sessions: &[&str]) -> ProjectPolicy {
+        let mut p = ProjectPolicy::new();
+        p.grant_automatic(
+            t("2026-09-25T00:00:00Z"),
+            grant_terms_with("https://ingest.invalid"),
+        );
+        assert!(p.record_on_disk(OnDiskAtGrant {
+            projects: projects.iter().map(|s| s.to_string()).collect(),
+            sessions: sessions.iter().map(|s| s.to_string()).collect(),
+        }));
+        p
+    }
+
+    /// The grant arms only a real project, new since the grant, with no
+    /// entry of its own -- and never before the disk is recorded.
+    #[test]
+    fn the_grant_arms_only_a_project_new_since_it() {
+        let mut p = ProjectPolicy::new();
+        p.grant_automatic(
+            t("2026-09-25T00:00:00Z"),
+            grant_terms_with("https://ingest.invalid"),
+        );
+        assert!(
+            !p.arms_by_default("/w/new", "/s/new.jsonl"),
+            "not before the record"
+        );
+
+        let mut p = granted_with_disk(&["/w/old"], &["/s/live.jsonl"]);
+        assert!(p.arms_by_default("/w/new", "/s/new.jsonl"));
+        assert!(
+            !p.arms_by_default("/w/old", "/s/other.jsonl"),
+            "on disk at the grant"
+        );
+        assert!(
+            !p.arms_by_default("/w/moved", "/s/live.jsonl"),
+            "a session on disk at the grant, whatever project it reads as now"
+        );
+        assert!(!p.arms_by_default(UNKNOWN_PROJECT_KEY, "/s/u.jsonl"));
+        p.set_mode("/w/new", ProjectMode::Ignore, t("2026-09-25T01:00:00Z"))
+            .unwrap();
+        assert!(
+            !p.arms_by_default("/w/new", "/s/new2.jsonl"),
+            "its own entry wins"
+        );
+    }
+
+    /// What was on disk is recorded once per grant; a later pass cannot
+    /// replace it with a record that no longer contains what was there.
+    #[test]
+    fn the_on_disk_record_is_written_once_per_grant() {
+        let mut p = granted_with_disk(&["/w/old"], &[]);
+        assert!(!p.record_on_disk(OnDiskAtGrant::default()));
+        assert!(!p.arms_by_default("/w/old", "/s/x.jsonl"));
+        assert!(!ProjectPolicy::new().record_on_disk(OnDiskAtGrant::default()));
+    }
+
+    /// R6 reaches the grant itself: widened terms void it, so it cannot go
+    /// on arming new projects under terms nobody agreed to. Unchanged terms
+    /// keep it.
+    #[test]
+    fn widening_the_terms_voids_the_automatic_grant() {
+        let mut p = granted_with_disk(&[], &[]);
+        let same = p.sweep_grants(&grant_terms_with("https://ingest.invalid"));
+        assert!(same.automatic_grant_voided.is_none());
+        assert!(p.automatic_grant.is_some());
+
+        let moved = p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"));
+        assert_eq!(
+            moved.automatic_grant_voided,
+            Some(vec![super::super::grant_terms::VOID_DESTINATION])
+        );
+        assert!(moved.changed());
+        assert!(p.automatic_grant.is_none());
+        assert!(!p.arms_by_default("/w/new", "/s/new.jsonl"));
     }
 
     fn armed_policy() -> ProjectPolicy {

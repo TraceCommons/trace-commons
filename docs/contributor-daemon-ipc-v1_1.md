@@ -1541,11 +1541,52 @@ terms. Narrowing voids nothing. Unlike arming, the void is written **after**
 the mode change and a failed write does not undo it, because voiding is the
 safe direction.
 
+Four entries belong to the automatic grant (`grant_automatic`, below):
+`automatic-granted` and `automatic-grant-withdrawn` record it being given and
+withdrawn; `armed-by-default` records a project it armed, with that project's
+`project_label`; `automatic-grant-voided` records the grant itself voided by
+widened terms, with the same `detail` labels as `auto-upload-voided`.
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
 never free text, a path, or a token. See "Authorization" above for what this
 log is (and is not) for.
+
+### `grant_automatic`, `withdraw_automatic_grant`, `automatic_grant`
+
+The Flow 1 grant (the connect-and-forget design, K3 and K4): contribute
+automatically from projects discovered from now on.
+
+```json
+{ "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
+```
+
+`grant_automatic` takes no params and returns the grant as `automatic_grant`
+reports it. It is refused with `arming-terms-unavailable` (`ERR_UNAVAILABLE`)
+when there is no config to record terms from, and with `audit-write-failed`
+when its `automatic-granted` entry cannot be written, in which case nothing is
+granted. A second call replaces the first, and records what is on disk again.
+
+**It arms nothing already on disk.** The first full watcher pass after the
+grant records every session on disk and the project each belongs to, and
+`on_disk_recorded` turns true. Until then the grant arms nothing. After it, a
+session in a project that is not in that record, has no policy entry of its
+own, and is not the unknown-project bucket arms its project: an explicit
+`auto_upload` entry, the terms it is granted under, and an `armed-by-default`
+audit row written first. A project with any session on disk at the grant keeps
+asking, for its new sessions too.
+
+That is what makes a re-grant after logout safe. Logout wipes the policy,
+including a project set to `ignore`; a re-grant records the disk again, so that
+project asks rather than being armed as new.
+
+Widened terms void the grant itself as well as the projects it armed, with an
+`automatic-grant-voided` entry. `withdraw_automatic_grant` returns
+`{"withdrawn": bool}` and leaves the projects the grant armed as they are;
+each is withdrawn with `set_project_mode`. `automatic_grant` returns
+`{"granted": false}` when none is in force. None of the three returns a path
+or a count of them.
 
 ### `queue_outcome_counts`
 
