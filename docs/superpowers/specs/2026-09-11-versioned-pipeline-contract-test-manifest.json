@@ -68,6 +68,14 @@
       "test_ids": ["pipeline::package_validation_binds_manifest_and_all_artifacts", "pipeline::every_immutable_policy_input_changes_bundle_identity", "pipeline::instrument_identity_is_bounded_and_canonical", "pipeline::instrument_descriptors_have_one_spelling_per_kind", "pipeline::manifest_loading_pins_each_instrument_once", "pipeline::manifest_loading_repeats_the_bundle_identity_checks", "versioned_pipeline_qualification::package_signature_binds_canonical_package_and_trusted_key", "versioned_pipeline_pg::signed_package_qualification_gates_activation", "versioned_pipeline_pg::bound_bundle_survives_activation_and_rollback", "versioned_pipeline_pg::activation_after_resolution_does_not_rebind_the_receipt", "versioned_pipeline_pg::tenant_activation_is_explicit_and_gated", "versioned_pipeline_pg::rollback_containment_and_legacy_retirement"]
     },
     {
+      "contract_ids": ["BND-005"],
+      "boundary": "per-tenant instrument descriptor immutability",
+      "implementation_milestone": 2,
+      "evidence_status": "planned",
+      "test_ids": ["versioned_pipeline_runtime_pg::register_bundle_refuses_a_changed_descriptor_for_a_registered_instrument"],
+      "note": "The runtime delivery provides this test. One manifest cannot express the rule."
+    },
+    {
       "contract_ids": ["REV-001", "REV-002", "REV-003", "REV-004"],
       "boundary": "review source binding, revision commit, and assessment",
       "implementation_milestone": 4,

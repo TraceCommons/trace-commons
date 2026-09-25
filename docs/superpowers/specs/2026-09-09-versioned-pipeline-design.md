@@ -305,11 +305,25 @@ manifest that it passes, so the runner also checks Score's awards against the
 run's bound manifest with `BundleManifest::require_pinned` before the Score
 outcome commits. No settlement starts for an unpinned instrument.
 
-A descriptor never changes for an instrument identifier. A change of
-contract, network, kind, or `decimals` is a new instrument with a new
-identifier. An award that is already signed never gets a new meaning. The
-bundle registry enforces this rule: it refuses a package that pins a
-registered instrument identifier to a different descriptor.
+A descriptor never changes for an instrument identifier in a tenant. A change
+of contract, network, kind, or `decimals` is a new instrument with a new
+identifier. An award that is already signed never gets a new meaning.
+
+This rule is per tenant. The tenant's bundle registry refuses a package that
+pins an instrument identifier, already registered by that tenant, to a
+different descriptor. Registering an equal descriptor again is allowed. There
+is no cross-tenant instrument registry. Forced RLS isolates the tenants, and
+each tenant's awards resolve through the descriptors that the tenant
+registered. Two tenants can pin one instrument identifier to different
+descriptors.
+
+One manifest cannot express this rule, because the rule compares a package
+with the tenant's registered packages. The check reads server storage, so the
+runtime delivery enforces it: `PgPipelineStore::register_bundle` refuses the
+package with the safe label `bundle_instrument_conflict`. The PostgreSQL test
+`register_bundle_refuses_a_changed_descriptor_for_a_registered_instrument` in
+`crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs` covers
+it. Contract BND-005 states the rule.
 
 ## 4. Workflow
 

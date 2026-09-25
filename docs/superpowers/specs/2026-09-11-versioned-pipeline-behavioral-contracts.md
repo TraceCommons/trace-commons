@@ -443,8 +443,9 @@ stores no object.
   `decimals` MUST NOT exceed 38.
 - The `trace_credit` descriptor MUST pin a `nep141` token with 6 decimals, so
   one atomic unit is one microcredit.
-- An instrument identifier MUST keep one descriptor. A change of kind,
-  network, contract, or `decimals` MUST use a new instrument identifier.
+- An instrument identifier MUST keep one descriptor in a tenant (BND-005). A
+  change of kind, network, contract, or `decimals` MUST use a new instrument
+  identifier.
 - A manifest that repeats an instrument MUST fail to load.
 - Loading a manifest MUST apply every check that the bundle identifier
   applies. A manifest with a malformed descriptor MUST fail to load.
@@ -497,6 +498,25 @@ the resolved bundle.
 
 **Acceptance:** Run phase and bundle tests with small test implementations
 through the production traits.
+
+### BND-005: Instrument descriptor immutability
+
+- In a tenant, an instrument identifier MUST keep one descriptor.
+- The tenant's bundle registry MUST refuse a package that pins an instrument
+  identifier, already registered by that tenant, to a different descriptor.
+  The refusal MUST use the safe label `bundle_instrument_conflict`.
+- The registry MUST accept a package that pins a registered instrument
+  identifier to an equal descriptor.
+- The registry MUST serialize this check with a concurrent registration for
+  the same tenant.
+- The rule MUST be per tenant. There is no cross-tenant instrument registry.
+  One tenant's registrations MUST NOT constrain another tenant.
+
+**Acceptance:** Register a package for a tenant. Register a second package that
+pins the same instrument to an equal descriptor. It must be accepted. Register
+a third package that pins the same instrument to a different descriptor. It
+must be refused with `bundle_instrument_conflict`. The runtime delivery
+provides this PostgreSQL test.
 
 ## 8. Review contracts
 

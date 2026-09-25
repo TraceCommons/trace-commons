@@ -737,6 +737,7 @@ exempt later code from these requirements.
 | SUB-003, SUB-004 | Milestone 2: atomic receipt, exact replay, and conflicts. Milestone 4: quota behavior on replay. Milestone 8: qualify legacy retries. |
 | SUB-005, SUB-006, SUB-007 | Milestone 4: Admission decisions, limits across instances, and tombstones. Milestone 6: all lifecycle, submission, and export paths. |
 | BND-001, BND-002, BND-003, BND-004 | Phases 1 and 2: identity, traits, binding, and integrity. Milestone 7: production package retention and loading. Milestone 8: activation. |
+| BND-005 | Milestone 2: the tenant's bundle registry refuses a changed descriptor for a registered instrument. The runtime delivery provides the PostgreSQL test. |
 | REV-001, REV-002, REV-003, REV-004 | Phases 1, 2, and 4: source binding, atomic revisions, review leases and evidence, and transformations. |
 | SCR-001, SCR-002, SCR-003, SCR-004 | Phases 1, 3, and 5: fixed and real policies, read-only index evidence, checked units, and atomic event creation. |
 | SCR-005 | Deferred until the external valuation protocol is adopted. Refuse activation of any bundle that requires it until then. |
