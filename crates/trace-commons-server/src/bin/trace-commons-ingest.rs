@@ -15283,12 +15283,14 @@ async fn account_invite_redeem_handler(
             "cross-origin account mutation",
         ));
     }
-    // Bound the user-controlled code before hashing or issuing a database call.
-    if body.invite_code.len() > 128 || body.invite_code.is_empty() {
+    // Match the issuer: trim pasted whitespace, require exactly 16 uppercase
+    // ASCII letters/digits, and never case-fold a secret.
+    let invite_code = body.invite_code.trim();
+    if !trace_commons_server::trace_upload_claim_issuer::valid_onboard_invite_code(invite_code) {
         return Err(api_error(StatusCode::BAD_REQUEST, "invalid invite"));
     }
     let invite_hash =
-        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(&body.invite_code);
+        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(invite_code);
     let outcome = account_db(state.as_ref())?
         .redeem_account_invite(
             &ctx.tenant_id,
