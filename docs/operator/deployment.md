@@ -492,6 +492,21 @@ trace_public_runs` no longer needs it and may revoke it. The caller's tenant
 setting carries into the definer function, so the forced tenant policy still
 scopes the update to the caller's own tenant.
 
+### V75: account invite trust runtime grant
+
+V75 adds tenant-scoped account trust, invite grant, and event tables. Its
+`trace_account_invite_runtime` role has column-scoped access to the existing
+account, verified-anchor, and durable invite rows and access to the three new
+tables. The role is `NOLOGIN NOBYPASSRLS`; the ingest login must inherit it for
+`POST /v1/account/invites/redeem` to work under the restricted runtime role:
+
+```sql
+GRANT trace_account_invite_runtime TO <ingest runtime login>;
+```
+
+The invite remains issued by the separate registry role. This grant does not
+allow the ingest login to mint or revoke invites.
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

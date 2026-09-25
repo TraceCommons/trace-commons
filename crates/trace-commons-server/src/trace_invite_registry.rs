@@ -4,8 +4,11 @@
 //! In-process invite registry: cache, invalidation, and code generation.
 //!
 //! The cache is a latency optimization and never a correctness boundary.
-//! Expiry, revocation, and use-count are re-checked inside the redemption
-//! transaction, so a revoke racing a redemption is resolved by the database.
+//! Account invite redemption runs in the ingest process, so its committed use
+//! does not synchronously evict the issuer process's cache entry. The issuer's
+//! final database use-count update is authoritative even when that entry is
+//! still cached. New account redemption reads and locks the durable invite row
+//! directly, without consulting this cache.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
