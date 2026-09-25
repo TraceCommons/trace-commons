@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use secrecy::SecretString;
+use std::sync::Arc;
+use std::time::Duration;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{AccountInviteRedemption as Outcome, Database, postgres::PgBackend};
 use trace_commons_server::trace_upload_claim_allowlist::hash_invite_code;
@@ -95,7 +97,7 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
     runtime_url
         .set_username("tc_account_invite_runtime")
         .unwrap();
-    let runtime = PgBackend::new(&config(runtime_url.into())).await.unwrap();
+    let runtime = Arc::new(PgBackend::new(&config(runtime_url.into())).await.unwrap());
 
     let tenant_a = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
     let tenant_b = format!("nearai-{}", Uuid::new_v4().simple().to_string().repeat(2));
@@ -188,6 +190,106 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
             .unwrap(),
         Outcome::InvalidInvite
     );
+
+    // Hold the durable invite row across its expiration. Wait until PostgreSQL
+    // reports that the redeeming connection is blocked by this transaction,
+    // then cross the expiry and release it. This catches transaction-start
+    // `now()` checks that still see the pre-lock timestamp after waking.
+    let lock_wait = seed_invite(&admin, &format!("INVITE-{}", Uuid::new_v4()), 1).await;
+    let trust_before: i64 = admin
+        .query_one(
+            "SELECT trust_version FROM trace_account_trust
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant_a, &a],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    admin
+        .execute(
+            "UPDATE onboarding_invite_grants
+                SET expires_at = clock_timestamp() + interval '2 seconds'
+              WHERE invite_subject_hash = $1",
+            &[&lock_wait],
+        )
+        .await
+        .unwrap();
+    let mut blocker = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let lock_tx = blocker.transaction().await.unwrap();
+    let blocker_pid: i32 = lock_tx
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    lock_tx
+        .query_one(
+            "SELECT 1 FROM onboarding_invite_grants WHERE invite_subject_hash = $1 FOR UPDATE",
+            &[&lock_wait],
+        )
+        .await
+        .unwrap();
+    let runtime_for_wait = runtime.clone();
+    let wait_tenant = tenant_a.clone();
+    let wait_hash = lock_wait.clone();
+    let wait_key = Uuid::new_v4();
+    let wait_redeem = tokio::spawn(async move {
+        runtime_for_wait
+            .redeem_account_invite(&wait_tenant, a, &wait_hash, wait_key)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let blocked: bool = admin
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                   WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                    &[&blocker_pid],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("redemption must be waiting for the invite row lock");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    lock_tx.commit().await.unwrap();
+    assert_eq!(wait_redeem.await.unwrap().unwrap(), Outcome::InvalidInvite);
+    let uses: i32 = admin
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+            &[&lock_wait],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(uses, 0, "expired invite must not spend a use");
+    let trust_after: i64 = admin
+        .query_one(
+            "SELECT trust_version FROM trace_account_trust
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant_a, &a],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        trust_after, trust_before,
+        "expired invite must not raise trust"
+    );
+    for table in ["trace_account_invite_grants", "trace_account_trust_events"] {
+        let sql = format!("SELECT count(*) FROM {table} WHERE invite_subject_hash = $1");
+        let count: i64 = admin.query_one(&sql, &[&lock_wait]).await.unwrap().get(0);
+        assert_eq!(count, 0, "expired invite must not write {table}");
+    }
     admin
         .execute(
             "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
