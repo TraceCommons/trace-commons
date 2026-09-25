@@ -35,8 +35,21 @@ pub const QUIT_HOSTING_BODY: &str = concat!(
 );
 
 /// This process is attached to a watcher another process runs.
-pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running and will keep queuing \
-     sessions. Nothing will be sent while nobody's approving.";
+///
+/// The watcher that outlives this shell does not stop sending. It uploads
+/// anything already approved, and in a folder set to `auto_upload` it
+/// approves and uploads finished sessions itself -- including sessions that
+/// finish after the shell has quit. This used to end "Nothing will be sent
+/// while nobody's approving", which was false in both cases and steered a
+/// contributor towards quitting as though it stopped uploads.
+///
+/// Worded to be true whether or not any folder is armed, so no shell has to
+/// know the project policy to say it. "Unless it's paused" is there because
+/// pause is the one state in which the watcher does neither.
+pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running after you quit. \
+     Unless it's paused, it keeps sending sessions you've already approved, and any session \
+     from a folder set to contribute automatically, including ones that finish after you \
+     quit. Everything else waits for you.";
 
 /// This process has no watcher to stop.
 pub const QUIT_UNAVAILABLE_BODY: &str = "This app isn't connected to a watcher right now, so \
@@ -108,6 +121,35 @@ mod tests {
             );
         }
         assert!(QUIT_ATTACHED_BODY.contains("keeps running"));
+    }
+
+    /// The attached watcher keeps sending, so its quit prompt may not say
+    /// otherwise.
+    ///
+    /// It used to say "Nothing will be sent while nobody's approving", which
+    /// was false for any folder set to contribute automatically and for
+    /// anything already approved but not yet uploaded.
+    #[test]
+    fn the_attached_prompt_does_not_claim_nothing_is_sent() {
+        let body = quit_prompt(QuitRole::Attached).body;
+        for claim in [
+            "Nothing will be sent",
+            "Nothing is sent",
+            "nobody's approving",
+        ] {
+            assert!(
+                !body.contains(claim),
+                "the attached watcher keeps sending; the prompt must not say {claim:?}: {body}"
+            );
+        }
+        assert!(
+            body.contains("contribute automatically"),
+            "automatic folders keep uploading after quit and the prompt must say so: {body}"
+        );
+        assert!(
+            body.contains("already approved"),
+            "approved sessions still upload after quit and the prompt must say so: {body}"
+        );
     }
 
     #[test]
