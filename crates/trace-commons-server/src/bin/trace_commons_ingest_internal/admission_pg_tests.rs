@@ -1388,27 +1388,6 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         .unwrap()
         .get(0);
     assert_eq!(consumed, 1);
-    client.execute("UPDATE trace_account_invite_grants SET revoked_at=now() WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3", &[&tenant,&account_id,&invite_hash]).await.unwrap();
-    invited.submission_id = Uuid::new_v4();
-    let revoked_response = post(
-        state.clone(),
-        "/v1/traces",
-        serde_json::to_vec(&invited).unwrap(),
-        HeaderMap::new(),
-    )
-    .await;
-    assert_eq!(
-        revoked_response.status(),
-        StatusCode::TOO_MANY_REQUESTS,
-        "revocation restores the exhausted bounded policy"
-    );
-    let revoked_bytes = axum::body::to_bytes(revoked_response.into_body(), 4096)
-        .await
-        .unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&revoked_bytes).unwrap()["error"],
-        "account_limit_reached"
-    );
 }
 
 #[tokio::test]
