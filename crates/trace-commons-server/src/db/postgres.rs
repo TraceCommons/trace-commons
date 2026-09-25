@@ -1371,6 +1371,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_admission",
         include_str!("../../../../migrations/V77__account_admission.sql"),
     ),
+    (
+        78,
+        "trace_source_sessions",
+        include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -7106,6 +7111,7 @@ mod tests {
             include_str!("../../../../migrations/V75__account_trust.sql"),
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
             include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7131,6 +7137,7 @@ mod tests {
             include_str!("../../../../migrations/V75__account_trust.sql"),
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
             include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

@@ -45,14 +45,15 @@ use crate::trace_corpus_storage::{
     TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-    TraceRevocationPropagationTargetKind, TraceSubmissionKeysetCursor, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole,
-    TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite, TraceTenantPolicyRecord,
-    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
-    TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWithdrawalRecord, TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim,
-    TraceWitnessEvidenceCoverage, TraceWorkerKind,
+    TraceRevocationPropagationTargetKind, TraceSourceSessionStatus, TraceSourceSessionWithdrawal,
+    TraceSubmissionKeysetCursor, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+    TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
+    TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWithdrawalRecord,
+    TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim, TraceWitnessEvidenceCoverage,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -1484,8 +1485,220 @@ async fn insert_near_credit_outbox_item_on_tx(
     Ok(())
 }
 
+/// Lock the source-session row before any content-row status write. The mapping
+/// is immutable, so the lock serializes approval with account withdrawal even
+/// when a resumed version has a different submission ID.
+async fn lock_active_source_session_for_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<(), DatabaseError> {
+    let row = tx
+        .query_opt(
+            "SELECT s.withdrawn_at
+         FROM trace_submission_sessions m
+         JOIN trace_source_sessions s
+           ON s.tenant_id = m.tenant_id
+          AND s.account_id = m.account_id
+          AND s.session_digest = m.session_digest
+         WHERE m.tenant_id = $1 AND m.submission_id = $2
+         FOR UPDATE OF s",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    if row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()) {
+        return Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl TraceCorpusStore for PgBackend {
+    async fn claim_trace_source_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session_digest: &[u8; 32],
+        submission_id: Uuid,
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let digest = session_digest.as_slice();
+        tx.execute(
+            "INSERT INTO trace_source_sessions (tenant_id, account_id, session_digest)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            &[&tenant_id, &account_id, &digest],
+        )
+        .await?;
+        let row = tx
+            .query_one(
+                "SELECT withdrawn_at FROM trace_source_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             FOR UPDATE",
+                &[&tenant_id, &account_id, &digest],
+            )
+            .await?;
+        if row.get::<_, Option<DateTime<Utc>>>(0).is_some() {
+            return Ok(TraceSourceSessionStatus::Withdrawn);
+        }
+        tx.execute(
+            "INSERT INTO trace_submission_sessions
+                (tenant_id, submission_id, account_id, session_digest)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[&tenant_id, &submission_id, &account_id, &digest],
+        )
+        .await?;
+        let mapping = tx
+            .query_one(
+                "SELECT account_id, session_digest FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        let mapped_account: Uuid = mapping.get(0);
+        let mapped_digest: Vec<u8> = mapping.get(1);
+        if mapped_account != account_id || mapped_digest != digest {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
+        tx.commit().await?;
+        Ok(TraceSourceSessionStatus::Active)
+    }
+
+    async fn get_trace_source_session_status(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session_digest: &[u8; 32],
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let digest = session_digest.as_slice();
+        let row = tx
+            .query_opt(
+                "SELECT withdrawn_at FROM trace_source_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3",
+                &[&tenant_id, &account_id, &digest],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(
+            if row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()) {
+                TraceSourceSessionStatus::Withdrawn
+            } else {
+                TraceSourceSessionStatus::Active
+            },
+        )
+    }
+
+    async fn withdraw_trace_source_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        submission_id: Uuid,
+        withdrawn_at: DateTime<Utc>,
+    ) -> Result<Option<TraceSourceSessionWithdrawal>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let mapping = tx
+            .query_opt(
+                "SELECT session_digest FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
+                &[&tenant_id, &account_id, &submission_id],
+            )
+            .await?;
+        let Some(mapping) = mapping else {
+            return Ok(None);
+        };
+        let digest: Vec<u8> = mapping.get(0);
+        let row = tx
+            .query_one(
+                "UPDATE trace_source_sessions
+             SET withdrawn_at = COALESCE(withdrawn_at, $4)
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             RETURNING withdrawn_at",
+                &[&tenant_id, &account_id, &digest, &withdrawn_at],
+            )
+            .await?;
+        let first_withdrawn_at: DateTime<Utc> = row.get(0);
+        let mapped = tx
+            .query(
+                "SELECT submission_id FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             ORDER BY submission_id",
+                &[&tenant_id, &account_id, &digest],
+            )
+            .await?;
+        let mut affected_submission_ids = Vec::with_capacity(mapped.len());
+        for mapped_row in mapped {
+            let id: Uuid = mapped_row.get(0);
+            affected_submission_ids.push(id);
+            let content = tx
+                .query_opt(
+                    "SELECT status FROM trace_submissions
+                 WHERE tenant_id = $1 AND submission_id = $2 FOR UPDATE",
+                    &[&tenant_id, &id],
+                )
+                .await?;
+            let prior_status: String = content
+                .as_ref()
+                .map(|row| row.get(0))
+                .unwrap_or_else(|| "purged".into());
+            let exported: bool = tx
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM trace_export_manifest_items
+                  WHERE tenant_id = $1 AND submission_id = $2)",
+                    &[&tenant_id, &id],
+                )
+                .await?
+                .get(0);
+            let reach = if exported {
+                "commons_distributed"
+            } else if prior_status == "accepted" || content.is_none() {
+                "commons_not_distributed"
+            } else {
+                "not_distributed"
+            };
+            tx.execute(
+                "INSERT INTO trace_withdrawals
+                    (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+                &[&tenant_id, &id, &first_withdrawn_at, &prior_status, &reach],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE trace_submissions SET status = 'revoked',
+                    withdrawn_at = COALESCE(withdrawn_at, $3),
+                    revoked_at = COALESCE(revoked_at, $3),
+                    purged_at = COALESCE(purged_at, $3), updated_at = NOW()
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &id, &first_withdrawn_at],
+            )
+            .await?;
+        }
+        let row = tx
+            .query_one(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(Some(TraceSourceSessionWithdrawal {
+            withdrawn_at: first_withdrawn_at,
+            affected_submission_ids,
+            requested_tombstone: TraceWithdrawalRecord {
+                tenant_id: row.get(0),
+                submission_id: row.get(1),
+                withdrawn_at: row.get(2),
+                prior_status: row.get(3),
+                distribution_reach: row.get(4),
+            },
+        }))
+    }
+
     fn supports_token_bundles(&self) -> bool {
         true
     }
@@ -1626,6 +1839,12 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&submission.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &submission.tenant_id,
+            submission.submission_id,
+        )
+        .await?;
         let status = enum_to_storage(submission.status)?;
         let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|e| {
             DatabaseError::Serialization(format!("trace consent scopes encode failed: {e}"))
@@ -2342,6 +2561,7 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        lock_active_source_session_for_submission(&tx, tenant_id, submission_id).await?;
         let status_value = enum_to_storage(status)?;
         // Allowlisted label only -- never the caller's text. See
         // `safe_status_reason_label`.
@@ -2433,6 +2653,7 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<u64, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        lock_active_source_session_for_submission(&tx, tenant_id, submission_id).await?;
         let status_value = enum_to_storage(status)?;
         // Allowlisted label only -- never the caller's text. See
         // `safe_status_reason_label`.

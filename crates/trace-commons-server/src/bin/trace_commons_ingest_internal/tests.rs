@@ -3872,6 +3872,112 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
 // Trace withdrawal (`POST /v1/account/traces/{submission_id}/withdraw`)
 // ---------------------------------------------------------------------------
 
+#[tokio::test]
+async fn source_session_status_requires_account_auth_and_hides_other_accounts() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone()),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let source = SourceSessionIdentity {
+        adapter: "codex".into(),
+        native_id: Uuid::new_v4().to_string(),
+    };
+    let digest = session_digest(&canonical_source_session(&source).unwrap());
+    let body = serde_json::to_vec(&source).unwrap();
+    let route = "/v1/account/source-sessions/status";
+    let unauthenticated = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(route)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let headers_a = account_session_headers(&state, "token-a").await;
+    let headers_b = account_session_headers(&state, "token-a-2").await;
+    let account_a = account_ctx_ext(&state, &headers_a)
+        .await
+        .0
+        .account_id
+        .as_uuid();
+    let account_b = account_ctx_ext(&state, &headers_b)
+        .await
+        .0
+        .account_id
+        .as_uuid();
+    assert_ne!(account_a, account_b);
+    let id = Uuid::new_v4();
+    backend
+        .claim_trace_source_session("tenant-a", account_a, &digest, id)
+        .await
+        .unwrap();
+    backend
+        .withdraw_trace_source_session("tenant-a", account_a, id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut unsupported = axum::http::Request::builder()
+        .method("POST")
+        .uri(route)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"adapter":"trajectory","native_id":"fallback"}"#,
+        ))
+        .unwrap();
+    unsupported.headers_mut().extend(headers_a.clone());
+    let unsupported_response = app(state.clone()).oneshot(unsupported).await.unwrap();
+    assert_eq!(unsupported_response.status(), StatusCode::OK);
+    let unsupported_body = axum::body::to_bytes(unsupported_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unsupported_body).unwrap()["status"],
+        "unsupported"
+    );
+
+    for (headers, expected) in [(headers_a, "withdrawn"), (headers_b, "active")] {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(route)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        request.headers_mut().extend(headers);
+        let response = app(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["status"], expected);
+    }
+}
+
 /// Stage a stub trace object at the production object-key layout for
 /// `(tenant, status, submission)` so withdrawal has real bytes to delete.
 fn stage_trace_object_file(

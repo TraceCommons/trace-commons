@@ -1177,6 +1177,21 @@ scoped standing policy and cannot widen capture beyond it.
 
 ## Production hardening roadmap
 
+Account-admission submissions require `source_session: {adapter, native_id}`.
+The server validates this identity, stores only an account-scoped digest, and
+rejects a resumed version after any mapped version is withdrawn. Authenticated
+clients can check `POST /v1/account/source-sessions/status` before witness or
+upload; it returns `active`, `withdrawn`, or `unsupported`. The submit
+transaction is the final gate, since the status read can race withdrawal.
+
+This account-admission mode is default-off. Older submissions without a
+source-session mapping retain submission-ID withdrawal only. Existing V43
+tombstones do not contain a native source ID, and neither a content hash nor
+`conversation_id` can reliably reconstruct it. Previously stored local
+sessions must be held and re-confirmed before a client enables automatic
+contribution; parser-bound IDs and offline hold/re-grant behavior require
+client-side verification before rollout.
+
 The current implementation is a usable MVP for local development and controlled
 internal pilots. A production deployment needs the following before broad tenant
 rollout.

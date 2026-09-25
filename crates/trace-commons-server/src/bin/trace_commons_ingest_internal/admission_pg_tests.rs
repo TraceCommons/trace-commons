@@ -890,6 +890,96 @@ fn principal_for(token: &str) -> String {
     tokens.get(token).unwrap().principal_ref.clone()
 }
 
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn invalid_or_withdrawn_source_session_refuses_before_budget_and_staging() {
+    use trace_commons_server::trace_corpus_storage::{TraceCorpusStore, TraceSourceSessionStatus};
+
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"z4-source-refusal","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["z4-source-refusal"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let mut missing = sample_envelope().await;
+    make_metadata_only_low_risk(&mut missing);
+    missing.source_session = None;
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&missing).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    assert!(!submission_metadata_path(&state.root, &tenant, missing.submission_id).exists());
+
+    let native = trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+        adapter: "opencode".into(),
+        native_id: format!("ses_{}", Uuid::new_v4().simple()),
+    };
+    let digest = session_digest(&canonical_source_session(&native).unwrap());
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let original = Uuid::new_v4();
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, account_id, &digest, original)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    db.withdraw_trace_source_session(&tenant, account_id, original, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut resumed = sample_envelope().await;
+    make_metadata_only_low_risk(&mut resumed);
+    resumed.source_session = Some(native);
+    assert_ne!(resumed.submission_id, original);
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&resumed).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+    );
+    assert!(!submission_metadata_path(&state.root, &tenant, resumed.submission_id).exists());
+    let reserved: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        reserved, 0,
+        "source refusal must not reserve account budget"
+    );
+}
+
 /// #783. V58 made `tenant_id` a function of `anchor_hash` and `admission::anchor`
 /// asserted the two were equal. V61 deliberately destroyed that relationship --
 /// the tenant id is now random and the anchor a blind index -- which left the

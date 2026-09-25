@@ -51,11 +51,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
-    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
-    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
-    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
+    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
+    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -67,6 +68,7 @@ use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
     generate_login_code, generate_session_secret, hash_secret,
 };
+use trace_commons_server::account_trust::resolve_contribution_account;
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
@@ -77,6 +79,7 @@ use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
     VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
+use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -211,7 +214,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
-    TraceSubmissionKeysetCursor, TraceSubmissionRecord as StorageTraceSubmissionRecord,
+    TraceSourceSessionStatus as StorageTraceSourceSessionStatus, TraceSubmissionKeysetCursor,
+    TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
     TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
@@ -7498,6 +7502,10 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
+            "/v1/account/source-sessions/status",
+            post(account_source_session_status_handler),
+        )
+        .route(
             "/v1/account/credit-summary",
             get(account_credit_summary_handler),
         )
@@ -13323,6 +13331,53 @@ async fn submit_trace_handler(
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
+    // Validate and claim before reserving admission budget. A refused or
+    // withdrawn session must not strand a processing lease or consume quota.
+    // A valid-but-rejected request may retain an inert session mapping; it has
+    // no content row, and the mapping cannot authorize a later submission.
+    let source_claim = if state.account_admission.is_some() {
+        validate_envelope(&envelope)?;
+        let source = envelope
+            .source_session
+            .as_ref()
+            .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "source_session_invalid"))?;
+        let source = canonical_source_session(source)
+            .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "source_session_invalid"))?;
+        let db = state.db_mirror.as_ref().ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "source_session_unavailable",
+            )
+        })?;
+        let account = resolve_contribution_account(
+            db.as_ref(),
+            authenticated_tenant.tenant_id(),
+            authenticated_tenant.principal_ref(),
+        )
+        .await
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "account_trust_refused"))?;
+        let digest = session_digest(&source);
+        let status = db
+            .claim_trace_source_session(
+                authenticated_tenant.tenant_id(),
+                account.account_id(),
+                &digest,
+                envelope.submission_id,
+            )
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "source_session_unavailable",
+                )
+            })?;
+        if status == StorageTraceSourceSessionStatus::Withdrawn {
+            return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
+        }
+        Some((account.account_id(), digest))
+    } else {
+        None
+    };
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
@@ -13370,7 +13425,9 @@ async fn submit_trace_handler(
         )));
     }
     let result = async {
-        validate_envelope(&envelope)?;
+        if state.account_admission.is_none() {
+            validate_envelope(&envelope)?;
+        }
 
         // Idempotency: same submission_id always addresses the same record.
         // Owned quarantined rows are the exception — a re-POST supersedes the
@@ -13602,7 +13659,7 @@ async fn submit_trace_handler(
         } else {
             tenant.submitted_audit_event(&record)
         };
-        if state.require_db_mirror_writes {
+        if state.require_db_mirror_writes || state.account_admission.is_some() {
             let mirror_result = mirror_submission_to_db(
                 &state,
                 tenant.auth(),
@@ -13654,6 +13711,22 @@ async fn submit_trace_handler(
             }
             enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
                 .map_err(internal_error)?;
+        }
+
+        if let Some((account_id, digest)) = source_claim {
+            let db = state
+                .db_mirror
+                .as_ref()
+                .ok_or_else(|| internal_error("source_session_unavailable"))?;
+            let status = db
+                .get_trace_source_session_status(tenant.tenant_id(), account_id, &digest)
+                .await
+                .map_err(internal_error)?;
+            if status == StorageTraceSourceSessionStatus::Withdrawn {
+                cleanup_submission_file_side_writes(state.as_ref(), &record)
+                    .map_err(internal_error)?;
+                return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
+            }
         }
 
         // Best-effort cleanup of the pre-remediation artifact once the new
@@ -16655,6 +16728,46 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
 /// * Fail-closed: any deletion or eviction failure is a generic label-only
 ///   `500`. The withdrawal is not reported as complete while content or a
 ///   derived copy may survive.
+#[derive(Serialize)]
+struct AccountSourceSessionStatusResponse {
+    status: &'static str,
+}
+
+async fn account_source_session_status_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Json(source): Json<SourceSessionIdentity>,
+) -> ApiResult<impl IntoResponse> {
+    let source = match canonical_source_session(&source) {
+        Ok(source) => source,
+        Err(_) => {
+            return Ok((
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(AccountSourceSessionStatusResponse {
+                    status: "unsupported",
+                }),
+            ));
+        }
+    };
+    let status = account_db(state.as_ref())?
+        .get_trace_source_session_status(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &session_digest(&source),
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(AccountSourceSessionStatusResponse {
+            status: match status {
+                StorageTraceSourceSessionStatus::Active => "active",
+                StorageTraceSourceSessionStatus::Withdrawn => "withdrawn",
+            },
+        }),
+    ))
+}
+
 async fn account_trace_withdraw_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -16737,23 +16850,46 @@ async fn account_trace_withdraw_handler(
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
     // that it was withdrawn.
-    let tombstone = db
-        .record_trace_withdrawal(
+    let mapped = db
+        .withdraw_trace_source_session(
             &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
             submission_id,
             Utc::now(),
-            &prior_status,
-            &distribution_reach,
         )
         .await
         .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (tombstone, affected_ids) = if let Some(mapped) = mapped {
+        (mapped.requested_tombstone, mapped.affected_submission_ids)
+    } else {
+        let tombstone = db
+            .record_trace_withdrawal(
+                &ctx.tenant_id,
+                submission_id,
+                Utc::now(),
+                &prior_status,
+                &distribution_reach,
+            )
+            .await
+            .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+        (tombstone, vec![submission_id])
+    };
 
-    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+    // Retained mappings make this list stable across retries. Complete the
+    // external deletion for every content version before reporting success.
+    for affected_id in affected_ids {
+        evict_withdrawn_trace_from_derived_surfaces(
+            state.as_ref(),
+            &db,
+            &ctx.tenant_id,
+            affected_id,
+        )
         .await
         .map_err(|error| withdrawal_failed(&error))?;
-    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
+        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+    }
 
     // Hash-only audit. The reason is a fixed label; the actor is the synthetic
     // account-actor ref, never contributor identity.
