@@ -11,25 +11,30 @@
 //!
 //! # Not enforced yet
 //!
-//! [`ENFORCED`] is `false`. The first requirement, a verified redaction
-//! pipeline, cannot be met by anyone until the client checks the certified
-//! pipeline version (K6), which waits on the shared allowlist (Z1) and the v2
-//! witness certificate (#1005). Enforcing today would stop every armed folder
-//! uploading. So for now the gate is evaluated and reported, and approvals go
-//! ahead exactly as before; it is switched on together with moving
-//! already-armed folders back to ask-first (K5), so that nobody's folder
-//! stops silently.
+//! [`ENFORCED`] is `false`, and is switched on only when the conditions in the
+//! spec's "When enforcement is switched on" all hold: #1020's account
+//! admission check is enforced on every ingest replica, Z2 (#1005) is in
+//! place, and a held-session health condition reaches every shell. Until then
+//! the gate is evaluated and reported, and approvals go ahead exactly as
+//! before.
 //!
 //! # What it checks
 //!
-//! Only what the client can know before the send, per contributor:
+//! The trust model (rev 8 of the spec) decides what gates arming and what
+//! only decides the wording. Per contributor:
 //!
-//! - **R1** -- a prose pass is configured, and it is one that can be verified
-//!   per session. Configuration alone never satisfies R1; until K6 exists
-//!   nothing does, and the reason says which of the two is missing.
-//! - **R3** -- the tenant is not one whose uploads need per-session admission
-//!   evidence (#706), which automatic contribution removes the step for.
 //! - **R7** -- a data-use scope has been chosen.
+//! - **R3** -- the tenant is not one whose uploads need per-session admission
+//!   evidence (#706), which an armed folder never prepares. Kept until #1020's
+//!   account check is enforced on the server, and withdrawn then: sending
+//!   earlier would put sessions through the witness and classifier only for
+//!   ingest to refuse them. The client cannot see that switch, so removing
+//!   this check is a code change made when it happens, not a runtime test.
+//!
+//! **R1 is not a gate.** Full trust lets a folder with no verified model pass
+//! send after deterministic redaction. What R1 still decides is what the
+//! contributor is told: see [`disclosure`], which may claim a model scrubbed
+//! a session only where a certified full pipeline ran.
 //!
 //! R4 (provenance) is a property of what is claimed, R5 (the hold) is the
 //! queue's `held_for_review`, and R6 (the void rule) is a property of the
@@ -40,17 +45,16 @@ use crate::config::ContributorConfig;
 /// Whether an unmet requirement stops an unattended approval. See the module
 /// docs for why this is off.
 ///
-/// Before this is switched on, besides K5 and something able to pass R1:
-/// a label-only health condition raised while `TickReport::gate_blocked` is
-/// non-zero, with copy in every shell. The counter and the log line exist
-/// today; without the health label, an enforced gate would hold armed work
-/// with nothing in the app to say so.
+/// Among the conditions for switching this on: a label-only health
+/// condition raised while `TickReport::gate_blocked` is non-zero, with copy
+/// in every shell. The counter and the log line exist today; without the
+/// health label, an enforced gate would hold armed work with nothing in the
+/// app to say so.
 pub const ENFORCED: bool = false;
 
 /// A requirement the spec names, by its number there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Requirement {
-    R1Pipeline,
     R3Admission,
     R7Scope,
 }
@@ -82,8 +86,6 @@ impl GateVerdict {
     }
 }
 
-pub const REASON_NO_PROSE_PASS: &str = "no-prose-pass-configured";
-pub const REASON_PIPELINE_UNVERIFIED: &str = "pipeline-not-verified-per-session";
 pub const REASON_ADMISSION_PER_SESSION: &str = "admission-evidence-is-per-session";
 pub const REASON_NO_SCOPE: &str = "no-data-use-scope-chosen";
 
@@ -108,16 +110,6 @@ pub fn evaluate(cfg: Option<&ContributorConfig>, enforced: bool) -> GateVerdict 
         return GateVerdict { unmet, enforced };
     };
 
-    let prose_pass = cfg.witness.is_some() || cfg.pii_filter.is_some();
-    unmet.push(Unmet {
-        requirement: Requirement::R1Pipeline,
-        reason: if prose_pass {
-            REASON_PIPELINE_UNVERIFIED
-        } else {
-            REASON_NO_PROSE_PASS
-        },
-    });
-
     if needs_admission_evidence(&cfg.tenant_id) {
         unmet.push(Unmet {
             requirement: Requirement::R3Admission,
@@ -133,6 +125,29 @@ pub fn evaluate(cfg: Option<&ContributorConfig>, enforced: bool) -> GateVerdict 
     }
 
     GateVerdict { unmet, enforced }
+}
+
+/// What an armed folder may be told happens to its sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disclosure {
+    /// A certified full pipeline ran on every automatic session, so the
+    /// `AUTO_SCRUB_*` wording, which says a model removes what it
+    /// recognises, is true.
+    ModelScrubbed,
+    /// Only the fixed patterns can be relied on. The wording for this is not
+    /// yet written (the spec's Open list).
+    PatternsOnly,
+}
+
+/// R1, as the choice of disclosure: "trust relaxes what may be sent, never
+/// what may be said".
+///
+/// Always [`Disclosure::PatternsOnly`] for now. A configured witness or
+/// filter is not enough -- R1 needs the certified pipeline version checked
+/// per session against the published allowlist (K6), which waits on #1005.
+/// Configuration presence never earns the model-scrub wording.
+pub fn disclosure(_cfg: Option<&ContributorConfig>) -> Disclosure {
+    Disclosure::PatternsOnly
 }
 
 #[cfg(test)]
@@ -172,20 +187,36 @@ mod tests {
         v.unmet.iter().map(|u| u.reason).collect()
     }
 
-    /// Nobody passes today, which is the spec's own conclusion. Configuration
-    /// alone never satisfies R1.
+    /// R1 is not a gate: an invited contributor with a scope chosen passes
+    /// with or without a prose pass. What they are told is decided apart.
     #[test]
-    fn no_contributor_passes_until_the_pipeline_is_verified_per_session() {
-        let with_witness = evaluate(
-            Some(&cfg("tenant-1", &["debugging_evaluation"], true, None)),
-            true,
-        );
-        assert_eq!(reasons(&with_witness), [REASON_PIPELINE_UNVERIFIED]);
-        let bare = evaluate(
-            Some(&cfg("tenant-1", &["debugging_evaluation"], false, None)),
-            true,
-        );
-        assert_eq!(reasons(&bare), [REASON_NO_PROSE_PASS]);
+    fn an_invitee_with_a_scope_passes_whatever_their_prose_pass() {
+        for (witness, pii) in [(false, None), (true, None), (false, Some("near-ai"))] {
+            let v = evaluate(
+                Some(&cfg("tenant-1", &["debugging_evaluation"], witness, pii)),
+                true,
+            );
+            assert!(v.unmet.is_empty(), "{:?}", reasons(&v));
+            assert!(!v.blocks());
+        }
+    }
+
+    /// Configuration never earns the model-scrub wording; only a per-session
+    /// check of the certified pipeline would, and there is none yet.
+    #[test]
+    fn no_configuration_earns_the_model_scrub_disclosure() {
+        assert_eq!(disclosure(None), Disclosure::PatternsOnly);
+        for (witness, pii) in [(false, None), (true, None), (true, Some("near-ai"))] {
+            assert_eq!(
+                disclosure(Some(&cfg(
+                    "tenant-1",
+                    &["debugging_evaluation"],
+                    witness,
+                    pii
+                ))),
+                Disclosure::PatternsOnly
+            );
+        }
     }
 
     /// An invited tenant is outside admission; a wallet or NEAR AI-login
@@ -235,7 +266,8 @@ mod tests {
     }
 
     /// The shipped setting. A test, not only a constant, so that switching
-    /// it on is a change someone makes on purpose with K5 beside it.
+    /// it on is a change someone makes on purpose, with the spec's switch-on
+    /// conditions beside it.
     #[test]
     // A constant assertion on purpose: its only job is to make turning
     // enforcement on a change that fails a test, so it is made deliberately.
