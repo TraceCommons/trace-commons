@@ -10,7 +10,8 @@
 //!   manager, another shell) leaves that watcher running.
 //! - A shell with no watcher at all -- none started yet, or an attached one
 //!   whose connection dropped -- cannot claim either. It says only what is
-//!   true in both cases: quitting it stops nothing.
+//!   true in both cases: quitting it stops nothing, and it cannot tell
+//!   whether a watcher is running elsewhere.
 //!
 //! Getting it wrong is a lie about whether the machine is still watching,
 //! so the choice lives here with the sentences rather than in each shell.
@@ -37,7 +38,7 @@ pub const QUIT_HOSTING_BODY: &str = concat!(
 /// This process is attached to a watcher another process runs.
 ///
 /// The watcher that outlives this shell does not stop sending. It uploads
-/// anything already approved, and in a folder set to `auto_upload` it
+/// anything already approved, and in a project set to `auto_upload` it
 /// approves and uploads finished sessions itself -- including sessions that
 /// finish after the shell has quit. This used to end "Nothing will be sent
 /// while nobody's approving", which was false in both cases and steered a
@@ -48,12 +49,17 @@ pub const QUIT_HOSTING_BODY: &str = concat!(
 /// pause is the one state in which the watcher does neither.
 pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running after you quit. \
      Unless it's paused, it keeps sending sessions you've already approved, and any session \
-     from a folder set to contribute automatically, including ones that finish after you \
+     from a project set to contribute automatically, including ones that finish after you \
      quit. Everything else waits for you.";
 
 /// This process has no watcher to stop.
-pub const QUIT_UNAVAILABLE_BODY: &str = "This app isn't connected to a watcher right now, so \
-     quitting doesn't stop one. Anything already waiting stays waiting.";
+///
+/// It cannot say nothing moves. The dropped-connection case is this role
+/// too, and there the watcher a CLI or service manager runs is still going
+/// and still sending, so this used to end "Anything already waiting stays
+/// waiting", the claim `QUIT_ATTACHED_BODY` no longer makes.
+pub const QUIT_UNAVAILABLE_BODY: &str = "This app can't reach a watcher right now, so it can't \
+     tell whether one is still running. Quitting won't stop one that is.";
 
 pub const QUIT_CONFIRM: &str = "Quit";
 pub const QUIT_CANCEL: &str = "Cancel";
@@ -127,7 +133,7 @@ mod tests {
     /// otherwise.
     ///
     /// It used to say "Nothing will be sent while nobody's approving", which
-    /// was false for any folder set to contribute automatically and for
+    /// was false for any project set to contribute automatically and for
     /// anything already approved but not yet uploaded.
     #[test]
     fn the_attached_prompt_does_not_claim_nothing_is_sent() {
@@ -144,12 +150,26 @@ mod tests {
         }
         assert!(
             body.contains("contribute automatically"),
-            "automatic folders keep uploading after quit and the prompt must say so: {body}"
+            "automatic projects keep uploading after quit and the prompt must say so: {body}"
         );
         assert!(
             body.contains("already approved"),
             "approved sessions still upload after quit and the prompt must say so: {body}"
         );
+    }
+
+    /// With no watcher reachable, the prompt cannot know whether one is
+    /// still sending, so it may not say that nothing moves.
+    #[test]
+    fn the_unavailable_prompt_does_not_claim_nothing_moves() {
+        let body = quit_prompt(QuitRole::Unavailable).body;
+        for claim in ["stays waiting", "Nothing will be sent", "Nothing is sent"] {
+            assert!(
+                !body.contains(claim),
+                "a watcher may still be running; the prompt must not say {claim:?}: {body}"
+            );
+        }
+        assert!(body.contains("can't tell"), "{body}");
     }
 
     #[test]
