@@ -460,6 +460,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
             _ = ticker.tick() => {
+                let tick_started = std::time::Instant::now();
                 let now = Utc::now();
                 // Ahead of `watcher::tick` so the sources it builds via
                 // `source_roots_with_routing` see this pass's snapshot
@@ -488,7 +489,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
                 if !dry_run {
-                    if let Err(e) = drain_approved(shared, now).await {
+                    if let Err(e) = drain_approved(shared, now, tick_started).await {
                         // The one detail that is safe and load-bearing: a
                         // fail-closed precondition is a fixed label by
                         // construction (`SubmitPreconditionFailure`), and
@@ -525,7 +526,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
 /// One `SubmitContext` covers the whole pass, so the claim is minted once and
 /// the privacy-filter canary runs once, exactly as an interactive `submit`
 /// batch does.
-async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) -> Result<()> {
+async fn drain_approved(
+    shared: &Arc<ipc::DaemonShared>,
+    now: chrono::DateTime<Utc>,
+    tick_started: std::time::Instant,
+) -> Result<()> {
     // Pause used to be checked only inside `watcher::tick`, so a pause
     // stopped *discovery* and nothing else: everything already `Approved`
     // -- including everything an armed project had auto-approved before the
@@ -913,9 +918,15 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                         .get(entry.entry_id)
                         .map(|e| e.attempts.saturating_add(1))
                         .unwrap_or(1);
+                    // `now` was sampled at tick start. Classifier retries may
+                    // take longer than our backoff, so include monotonic time
+                    // spent in this pass before scheduling the next attempt.
+                    let observed_at = now
+                        + chrono::Duration::from_std(tick_started.elapsed())
+                            .expect("daemon pass elapsed time fits chrono duration");
                     q.record_attempt(
                         entry.entry_id,
-                        Some(now + transient_redaction_retry_delay(attempt)),
+                        Some(observed_at + transient_redaction_retry_delay(attempt)),
                     );
                     // Keep this approval live so its cancel, pin, consent,
                     // project-policy, and source guards still apply at retry.
@@ -1063,7 +1074,7 @@ pub async fn drain_approved_for_test(
     shared: &Arc<ipc::DaemonShared>,
     now: chrono::DateTime<Utc>,
 ) -> Result<()> {
-    drain_approved(shared, now).await
+    drain_approved(shared, now, std::time::Instant::now()).await
 }
 
 /// Find the adapter and session reference matching a queue entry's path.
@@ -1423,7 +1434,7 @@ mod tests {
     use super::*;
 
     use crate::daemon::test_support::at;
-    use std::sync::atomic::{AtomicU16, AtomicUsize};
+    use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize};
 
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
 
@@ -1432,6 +1443,7 @@ mod tests {
         shared: Arc<ipc::DaemonShared>,
         session_path: std::path::PathBuf,
         classifier_status: Arc<AtomicU16>,
+        classifier_delay_ms: Arc<AtomicU64>,
         uploads: Arc<AtomicUsize>,
     }
 
@@ -1449,17 +1461,24 @@ mod tests {
             cloud_credential_test_support::install(&store);
             let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
             let classifier_status = Arc::new(AtomicU16::new(0));
+            let classifier_delay_ms = Arc::new(AtomicU64::new(0));
             let uploads = Arc::new(AtomicUsize::new(0));
             let classifier = Self::spawn(Router::new().route(
                 "/privacy/classify",
                 post({
                     let classifier_status = classifier_status.clone();
+                    let classifier_delay_ms = classifier_delay_ms.clone();
                     move |Json(body): Json<serde_json::Value>| {
                         let classifier_status = classifier_status.clone();
+                        let classifier_delay_ms = classifier_delay_ms.clone();
                         async move {
                             let input = body["input"].as_str().unwrap_or_default();
                             let status = classifier_status.load(Ordering::SeqCst);
                             if input.contains("fix the parser please") && status != 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    classifier_delay_ms.load(Ordering::SeqCst),
+                                ))
+                                .await;
                                 return StatusCode::from_u16(status).unwrap().into_response();
                             }
                             let mut spans = Vec::new();
@@ -1585,6 +1604,7 @@ mod tests {
                 shared,
                 session_path,
                 classifier_status,
+                classifier_delay_ms,
                 uploads,
             }
         }
@@ -1869,9 +1889,9 @@ mod tests {
             Some("privacy-filter-transient")
         );
         assert_eq!(failed.attempts, 1);
-        assert_eq!(
-            failed.retry_after,
-            Some(TransientRetryHarness::now() + chrono::Duration::seconds(60))
+        assert!(
+            failed.retry_after.unwrap()
+                >= TransientRetryHarness::now() + chrono::Duration::seconds(60)
         );
         assert_eq!(
             h.shared.health.lock().unwrap().last_error_label.as_deref(),
@@ -1890,6 +1910,31 @@ mod tests {
         assert_eq!(h.entry().session_hash, original.session_hash);
         assert_eq!(std::fs::read(&h.session_path).unwrap(), original_bytes);
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_retry_delay_starts_after_slow_classifier_failure() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.classifier_delay_ms.store(250, Ordering::SeqCst);
+
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        assert_eq!(failed.state, queue::QueueState::Approved);
+        assert!(
+            failed.retry_after.unwrap()
+                >= TransientRetryHarness::now()
+                    + chrono::Duration::seconds(60)
+                    + chrono::Duration::milliseconds(200),
+            "slow classification must not consume the retry backoff"
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.classifier_status.store(0, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now() + chrono::Duration::seconds(60))
+            .await;
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
     }
 
     #[test]
