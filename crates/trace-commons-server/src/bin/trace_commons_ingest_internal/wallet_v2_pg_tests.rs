@@ -299,19 +299,24 @@ async fn row_counts(db: &PgBackend, tenant: &str) -> [i64; 6] {
     [0, 1, 2, 3, 4, 5].map(|index| row.get(index))
 }
 
-async fn global_provisioned_counts(db: &PgBackend) -> [i64; 3] {
+async fn global_provisioned_counts(db: &PgBackend) -> [i64; 8] {
     let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     let row = client
         .query_one(
             "SELECT \
              (SELECT count(*) FROM trace_near_account_anchors), \
+             (SELECT count(*) FROM trace_accounts), \
+             (SELECT count(*) FROM trace_near_identities), \
              (SELECT count(*) FROM device_keys), \
-             (SELECT count(*) FROM trace_sessions)",
+             (SELECT count(*) FROM trace_account_principals), \
+             (SELECT count(*) FROM trace_near_provisioned_devices), \
+             (SELECT count(*) FROM trace_sessions), \
+             (SELECT count(*) FROM trace_account_inference_connections)",
             &[],
         )
         .await
         .unwrap();
-    [0, 1, 2].map(|index| row.get(index))
+    [0, 1, 2, 3, 4, 5, 6, 7].map(|index| row.get(index))
 }
 
 async fn persisted_wallet_device_join(
@@ -466,12 +471,12 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
         let (status, refused) = finish(&state, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{variant}: {refused}");
         assert_eq!(rpc_calls.load(Ordering::SeqCst), 0, "{variant} reached RPC");
+        assert_eq!(
+            global_provisioned_counts(&db).await,
+            before,
+            "{variant} persisted account, identity, device, session or connection state"
+        );
     }
-    assert_eq!(
-        global_provisioned_counts(&db).await,
-        before,
-        "refused proofs must not persist an account, device or session"
-    );
 
     let started = start(&state, WALLET_ACCOUNT, &public_key, &challenge).await;
     let valid_body = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
