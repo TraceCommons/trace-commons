@@ -3283,6 +3283,14 @@ impl Database for PgBackend {
         self.near_anchor_for_principal(tenant, principal).await
     }
 
+    async fn get_near_provisioned_account(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        self.near_account_for_principal(tenant, principal).await
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         public_key: &str,

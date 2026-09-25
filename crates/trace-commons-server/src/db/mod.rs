@@ -251,6 +251,13 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<String>, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
+    async fn get_near_provisioned_account(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
