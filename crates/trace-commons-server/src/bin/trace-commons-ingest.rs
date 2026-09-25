@@ -13586,10 +13586,17 @@ async fn submit_trace_handler(
             tenant.submitted_audit_event(&record)
         };
         if state.require_db_mirror_writes {
-            let mirror_result =
-                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope,
-                    witness.as_ref().map(|verified| (verified, &headers, raw_body.as_ref())))
-                    .await;
+            let mirror_result = mirror_submission_to_db(
+                &state,
+                tenant.auth(),
+                &record,
+                &derived_record,
+                &envelope,
+                witness
+                    .as_ref()
+                    .map(|verified| (verified, &headers, raw_body.as_ref())),
+            )
+            .await;
             if let Err(error) = &mirror_result {
                 tracing::warn!(
                     error_hash = %safe_runtime_error_hash(error),
@@ -13610,10 +13617,17 @@ async fn submit_trace_handler(
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
             append_audit_event(&state.root, tenant.tenant_id(), audit_event)
                 .map_err(internal_error)?;
-            let mirror_result =
-                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope,
-                    witness.as_ref().map(|verified| (verified, &headers, raw_body.as_ref())))
-                    .await;
+            let mirror_result = mirror_submission_to_db(
+                &state,
+                tenant.auth(),
+                &record,
+                &derived_record,
+                &envelope,
+                witness
+                    .as_ref()
+                    .map(|verified| (verified, &headers, raw_body.as_ref())),
+            )
+            .await;
             if let Err(error) = &mirror_result {
                 tracing::warn!(
                     error_hash = %safe_runtime_error_hash(error),
@@ -58911,9 +58925,16 @@ async fn mirror_submission_to_db(
     envelope: &TraceContributionEnvelope,
     witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
 ) -> anyhow::Result<()> {
-    mirror_submission_to_db_with_options(state, tenant, record, derived_record, envelope, true,
-        witness_input)
-        .await
+    mirror_submission_to_db_with_options(
+        state,
+        tenant,
+        record,
+        derived_record,
+        envelope,
+        true,
+        witness_input,
+    )
+    .await
 }
 
 async fn mirror_submission_to_db_with_options(
@@ -58957,11 +58978,14 @@ async fn mirror_submission_to_db_with_options(
             )
         })
         .transpose()?;
-    db.upsert_trace_submission_with_witness(storage_submission_write_from_record(
-        record,
-        envelope,
-        Some(derived_record.canonical_summary_hash.clone()),
-    )?, witness_evidence)
+    db.upsert_trace_submission_with_witness(
+        storage_submission_write_from_record(
+            record,
+            envelope,
+            Some(derived_record.canonical_summary_hash.clone()),
+        )?,
+        witness_evidence,
+    )
     .await
     .context("failed to mirror trace submission metadata")?;
 
