@@ -2363,7 +2363,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state_with_options(
         temp.path().to_path_buf(),
-        Some(account_backend),
+        Some(account_backend.clone()),
         None,
         false,
         false,
@@ -2472,6 +2472,29 @@ async fn inference_connection_requires_explicit_account_session_selection() {
         idempotency_key: Uuid::new_v4(),
         expected_current_version: None,
     };
+    let mut unknown = request.clone();
+    unknown.offer_id = "never-published".into();
+    let unknown_response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&unknown).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_response.status(), StatusCode::BAD_REQUEST);
+    let unknown_body = to_bytes(unknown_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&unknown_body).contains("invalid inference selection"));
     let mut device_ctx = ctx.clone();
     device_ctx.auth_method = AccountAuthMethod::DeviceBearer;
     let direct_denial = inference_connection_routes::select_handler(
@@ -2578,6 +2601,36 @@ async fn inference_connection_requires_explicit_account_session_selection() {
         .unwrap()
         .parse()
         .unwrap();
+    let retired_state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(account_backend),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let retired_response = app(retired_state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired_response.status(), StatusCode::CONFLICT);
+    let retired_body = to_bytes(retired_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&retired_body).contains("connection_reselection_required"));
     let replay = app(state.clone())
         .oneshot(
             axum::http::Request::builder()

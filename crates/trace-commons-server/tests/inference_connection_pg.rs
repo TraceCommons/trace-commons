@@ -269,20 +269,37 @@ async fn selection_is_account_scoped_versioned_idempotent_and_rls_forced() {
     else {
         unreachable!()
     };
-    assert_eq!(current.state_version, 2);
+    assert_eq!(current.state_version, 3);
+    let events = admin
+        .query(
+            "SELECT event_type, state_version FROM trace_account_inference_connection_events
+             WHERE tenant_id = $1 AND account_id = $2 ORDER BY state_version",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    let ordered: Vec<(String, i64)> = events.iter().map(|row| (row.get(0), row.get(1))).collect();
     assert_eq!(
-        runtime
-            .disconnect_inference_connection(&tenant, account, current.connection_id)
-            .await
-            .unwrap(),
-        Disconnect::Revoked { state_version: 3 }
+        ordered,
+        vec![
+            ("inference_connection_selected".into(), 1),
+            ("inference_connection_revoked".into(), 2),
+            ("inference_connection_selected".into(), 3),
+        ]
     );
     assert_eq!(
         runtime
             .disconnect_inference_connection(&tenant, account, current.connection_id)
             .await
             .unwrap(),
-        Disconnect::Revoked { state_version: 3 }
+        Disconnect::Revoked { state_version: 4 }
+    );
+    assert_eq!(
+        runtime
+            .disconnect_inference_connection(&tenant, account, current.connection_id)
+            .await
+            .unwrap(),
+        Disconnect::Revoked { state_version: 4 }
     );
     assert_eq!(
         runtime
@@ -304,7 +321,26 @@ async fn selection_is_account_scoped_versioned_idempotent_and_rls_forced() {
     else {
         panic!("selection after disconnect failed")
     };
-    assert_eq!(resumed_selection.state_version, 4);
+    assert_eq!(resumed_selection.state_version, 5);
+    let events = admin
+        .query(
+            "SELECT event_type, state_version FROM trace_account_inference_connection_events
+             WHERE tenant_id = $1 AND account_id = $2 ORDER BY state_version",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    let ordered: Vec<(String, i64)> = events.iter().map(|row| (row.get(0), row.get(1))).collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ("inference_connection_selected".into(), 1),
+            ("inference_connection_revoked".into(), 2),
+            ("inference_connection_selected".into(), 3),
+            ("inference_connection_revoked".into(), 4),
+            ("inference_connection_selected".into(), 5),
+        ]
+    );
     drop(runtime);
     let restarted = PgBackend::new(&config(url.clone())).await.unwrap();
     let restored = restarted

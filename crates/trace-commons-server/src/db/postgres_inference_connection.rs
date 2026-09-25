@@ -157,16 +157,23 @@ impl PgBackend {
         if request.expected_current_version != current_version {
             return Ok(InferenceSelectionOutcome::VersionConflict);
         }
-        let next_version = tx.query_one(
+        // A replacement is two account transitions: revoke the old selection,
+        // then select the new one. Give each event its own monotonic version.
+        let transition_version: i64 = tx.query_one(
             "SELECT COALESCE(MAX(state_version), 0) + 1 FROM trace_account_inference_connections
              WHERE tenant_id = $1 AND account_id = $2",
             &[&tenant, &account]).await?.get::<_, i64>(0);
+        let next_version = if current.is_some() {
+            transition_version + 1
+        } else {
+            transition_version
+        };
         if let Some(current) = current {
             let old: Uuid = current.get(0);
             tx.execute(
-                "UPDATE trace_account_inference_connections SET revoked_at = now()
+                "UPDATE trace_account_inference_connections SET revoked_at = now(), state_version = $4
                  WHERE tenant_id = $1 AND account_id = $2 AND connection_id = $3",
-                &[&tenant, &account, &old],
+                &[&tenant, &account, &old, &transition_version],
             )
             .await?;
             tx.execute(

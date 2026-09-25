@@ -153,8 +153,26 @@ pub(super) async fn select_handler(
     let catalog = state
         .inference_connection_catalog
         .iter()
-        .find(|entry| entry.offer().offer_id == body.offer_id)
-        .ok_or_else(|| api_error(StatusCode::CONFLICT, "connection_reselection_required"))?;
+        .find(|entry| entry.offer().offer_id == body.offer_id);
+    let Some(catalog) = catalog else {
+        let current = account_db(state.as_ref())?
+            .current_inference_connection(
+                &ctx.tenant_id,
+                ctx.account_id.as_uuid(),
+                state.inference_connection_catalog.as_slice(),
+            )
+            .await
+            .map_err(internal_error)?;
+        return Err(
+            if current.as_ref().is_some_and(|selection| {
+                selection.offer_id == body.offer_id && selection.reselection_required
+            }) {
+                api_error(StatusCode::CONFLICT, "connection_reselection_required")
+            } else {
+                api_error(StatusCode::BAD_REQUEST, "invalid inference selection")
+            },
+        );
+    };
     let outcome = account_db(state.as_ref())?
         .select_inference_connection(&ctx.tenant_id, ctx.account_id.as_uuid(), &body, catalog)
         .await

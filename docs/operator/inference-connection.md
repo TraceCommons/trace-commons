@@ -22,14 +22,22 @@ At startup, `TRACE_COMMONS_INFERENCE_CONNECTION_CATALOG_JSON` accepts at most
 `inference_receipt_endpoint`. `disclosure_version` must be
 `inference-connection-disclosure-v1`. Identifiers are unique and the server
 refuses invalid URLs, pins, and duplicate IDs at startup. An unset value means
-there are no selectable offers. Replacing an entry changes its revision and
-requires contributor reselection.
+there are no selectable offers. The authenticated offer, current-selection,
+selection, and disconnect routes are mounted even when the catalog is empty;
+an empty catalog does not disable those routes. A selection for an unknown
+offer ID returns `400 invalid inference selection`, except when that ID names
+the account's retired current selection, which returns
+`409 connection_reselection_required`. Replacing an entry changes its revision
+and requires contributor reselection.
 
 Selection is an account record, not permission for a new device to install or
 send to the witness. Every device must ask for explicit installation. A
 selection also grants no folder, trace, raw-session, or standing contribution
 consent. A retired revision must surface `connection_reselection_required`;
 the current operator configuration must not silently replace what was selected.
+Replacement emits a revoke event for the old selection, then a select event
+for the new selection, each with a distinct increasing account state version.
+Explicit disconnect likewise advances the version for its revoke event.
 Disconnect stops new cooperating-client use after it is observed. It does not
 recall a transcript already disclosed or revoke an external provider credential.
 An offline device may continue to hold prior settings until it reconnects and
@@ -55,12 +63,16 @@ activation depends on K12/K8 migration, the settled account-trust eligibility
 policy, and Z1/Z2 provenance verification. Provider provisioning needs its own
 credential and revocation contract before any `connected` claim.
 
-Before enabling the selection routes in production, grant the ingest database
-login membership in `trace_inference_connection_runtime` and verify the grant
-using that non-superuser login. Migration V79 creates the role and restricts its
-column privileges; it does not assign the application login to the role.
-For example, an administrator grants `GRANT trace_inference_connection_runtime
-TO ingest_login;` with the deployment's actual login role in place of
-`ingest_login`. Connect as that login and require
-`SELECT pg_has_role(current_user, 'trace_inference_connection_runtime',
-'member');` to return `true` before enabling the routes.
+Migration V79 creates `trace_inference_connection_runtime` with limited table
+grants, but the current server uses its shared `trace_pool()` login for these
+operations. That login also runs migrations and owns the tables. The server
+does not switch to the runtime role or check membership before accepting
+selection requests, so granting it membership does not limit its owner
+privileges and is not an activation control. Treat the authenticated routes as
+available immediately after deployment. Restrict rollout through operator
+catalog configuration and client promotion until a separately authenticated
+runtime database pool is implemented and verified, if limited database
+privileges are required.
+
+The opt-in wallet v2 finish path is covered separately in
+[PR #1022](https://github.com/TraceCommons/trace-commons/pull/1022).
