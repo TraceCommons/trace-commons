@@ -18,6 +18,8 @@ fn bounded_policy_requires_explicit_reviewed_controls() {
     assert!(parse_bounded_policy(FIXTURE, &[]).is_err());
 
     for invalid in [
+        r#"{"version":"test-v1","processing_cost_bound":3,"bounded_allowance":12,"period":{"mode":"lifetime","seconds":86400},"growth_rule":"none"}"#,
+        r#"{"version":"test-v1","processing_cost_bound":3,"bounded_allowance":12,"period":{"mode":"lifetime","typo":true},"growth_rule":"none"}"#,
         r#"{"version":"test-v1","processing_cost_bound":0,"bounded_allowance":12,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
         r#"{"version":"test-v1","processing_cost_bound":3,"bounded_allowance":0,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
         r#"{"version":"test-v1","processing_cost_bound":13,"bounded_allowance":12,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,

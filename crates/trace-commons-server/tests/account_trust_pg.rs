@@ -84,7 +84,9 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
         eprintln!("SKIPPED: isolated account trust PostgreSQL fixture required");
         return;
     };
-    assert!(url.contains("127.0.0.1/trace_account_z3_invite_test"));
+    let parsed = reqwest::Url::parse(&url).expect("test database URL");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(parsed.path().starts_with("/admission_test_account_trust"));
     let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
     admin_db.run_migrations().await.unwrap();
     let admin = admin_db
@@ -152,8 +154,53 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
             .unwrap(),
         Outcome::IdempotencyConflict
     );
+    let second_key = Uuid::new_v4();
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &second, second_key)
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 1 }
+    );
+    let second_uses: i32 = admin
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+            &[&second],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        second_uses, 0,
+        "an invited account must leave other invites unspent"
+    );
+    // A fresh request reports current state, not the version on an old grant.
+    admin
+        .execute(
+            "UPDATE trace_account_trust SET trust_version = 7 WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant_a, &a],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &first, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 7 }
+    );
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &second, second_key)
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 1 },
+        "exact replay preserves the recorded result"
+    );
+    let d = Uuid::new_v4();
+    seed_account(&admin, &tenant_b, d, true).await;
     let (left, right) = tokio::join!(
-        runtime.redeem_account_invite(&tenant_a, a, &second, Uuid::new_v4()),
+        runtime.redeem_account_invite(&tenant_b, d, &second, Uuid::new_v4()),
         runtime.redeem_account_invite(&tenant_b, b, &second, Uuid::new_v4())
     );
     let outcomes = [left.unwrap(), right.unwrap()];
@@ -164,6 +211,62 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
             .filter(|o| matches!(o, Outcome::Invited { .. }))
             .count(),
         1
+    );
+
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &second, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::InvalidInvite,
+        "a different exhausted invite must still be invalid"
+    );
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &second, second_key)
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 1 },
+        "exact replay survives later consumption"
+    );
+
+    let fixed = seed_invite(&admin, &format!("INVITE-{}", Uuid::new_v4()), 1).await;
+    admin.execute("UPDATE onboarding_invite_grants SET tenant_mode='fixed', fixed_tenant_id=$2, tenant_template_id=NULL WHERE invite_subject_hash=$1",
+        &[&fixed, &tenant_b]).await.unwrap();
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &fixed, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::InvalidInvite,
+        "fixed invites cannot cross tenants, even for invited accounts"
+    );
+    let fixed_account = Uuid::new_v4();
+    seed_account(&admin, &tenant_b, fixed_account, true).await;
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_b, fixed_account, &fixed, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 1 }
+    );
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, a, &hash_invite_code("UNKNOWN"), Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::InvalidInvite
+    );
+    let audit_count: i64 = admin.query_one("SELECT count(*) FROM trace_account_audit WHERE tenant_id=$1 AND action='account_invite_redeemed'", &[&tenant_a]).await.unwrap().get(0);
+    assert_eq!(
+        audit_count, 1,
+        "no-spend requests and replays do not audit another elevation"
+    );
+    let audit = admin.query_one("SELECT actor_ref, safe_metadata FROM trace_account_audit WHERE tenant_id=$1 AND action='account_invite_redeemed'", &[&tenant_a]).await.unwrap();
+    assert!(audit.get::<_, String>(0).starts_with("sha256:"));
+    assert_eq!(
+        audit.get::<_, serde_json::Value>(1),
+        serde_json::json!({"invite_subject_hash": first, "trust_version": 1})
     );
 
     let revoked = seed_invite(&admin, &format!("INVITE-{}", Uuid::new_v4()), 1).await;
@@ -313,6 +416,12 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
     let acl = client.query_one("SELECT has_table_privilege(current_user, 'onboarding_invite_grants', 'INSERT'), (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user)", &[]).await.unwrap();
     assert!(!acl.get::<_, bool>(0), "runtime must not issue invites");
     assert!(!acl.get::<_, bool>(1), "runtime must obey RLS");
+    let lock_acl = client.query_one("SELECT has_column_privilege(current_user, 'trace_accounts', 'account_id', 'UPDATE'), has_column_privilege(current_user, 'trace_accounts', 'created_at', 'UPDATE')", &[]).await.unwrap();
+    assert!(
+        !lock_acl.get::<_, bool>(0),
+        "runtime must not mutate account identity"
+    );
+    assert!(lock_acl.get::<_, bool>(1), "runtime can lock account rows");
     for table in [
         "trace_account_trust",
         "trace_account_invite_grants",
