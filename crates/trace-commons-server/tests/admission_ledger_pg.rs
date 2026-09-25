@@ -51,6 +51,76 @@ async fn account_admission_atomicity_replay_and_revocation() {
         .unwrap();
     let runtime_url: String = runtime_url.into();
     let runtime = Arc::new(PgBackend::new(&config(runtime_url.clone())).await.unwrap());
+    assert!(runtime.account_admission_runtime_ready().await.unwrap());
+    assert!(
+        !admin_db.account_admission_runtime_ready().await.unwrap(),
+        "superuser is not an ingest login"
+    );
+    // A runtime without the role fails before any charge or submit can occur.
+    admin
+        .batch_execute("REVOKE trace_account_admission_runtime FROM admission_account_runtime")
+        .await
+        .unwrap();
+    assert!(!runtime.account_admission_runtime_ready().await.unwrap());
+    admin.batch_execute("GRANT trace_account_admission_runtime TO admission_account_runtime; ALTER ROLE admission_account_runtime BYPASSRLS").await.unwrap();
+    assert!(!runtime.account_admission_runtime_ready().await.unwrap());
+    admin
+        .batch_execute("ALTER ROLE admission_account_runtime NOBYPASSRLS")
+        .await
+        .unwrap();
+    let legacy_tenant = format!("legacy-{}", Uuid::new_v4());
+    let legacy_account = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&legacy_tenant, &legacy_account],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !runtime.account_admission_runtime_ready().await.unwrap(),
+        "unlinked legacy accounts block startup even without caller tenant context"
+    );
+    let minimal = runtime
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let visible: i64 = minimal
+        .query_one("SELECT count(*) FROM trace_accounts", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        visible, 0,
+        "readiness does not let runtime enumerate identities"
+    );
+    assert!(
+        !minimal
+            .query_one(
+                "SELECT pg_has_role(current_user,'trace_account_readiness_guard','MEMBER')",
+                &[]
+            )
+            .await
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    drop(minimal);
+    admin
+        .execute(
+            "UPDATE trace_accounts SET closed_at=clock_timestamp() WHERE tenant_id=$1",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    assert!(runtime.account_admission_runtime_ready().await.unwrap());
     let anchor = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
     let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
     let account = Uuid::new_v4();
@@ -85,7 +155,20 @@ async fn account_admission_atomicity_replay_and_revocation() {
         admin.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)", &[&tenant,&account,principal_ref]).await.unwrap();
         admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)", &[&tenant,principal_ref,&account,&device,&anchor]).await.unwrap();
     }
-    let trust_account = resolve_contribution_account(&admin_db, &tenant, &principal)
+    assert!(runtime.account_admission_runtime_ready().await.unwrap());
+    admin.execute("UPDATE trace_account_principals SET unlinked_at=clock_timestamp() WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&principal]).await.unwrap();
+    assert!(
+        !runtime.account_admission_runtime_ready().await.unwrap(),
+        "an active unlinked device blocks startup"
+    );
+    admin.execute("UPDATE trace_account_principals SET unlinked_at=NULL WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&principal]).await.unwrap();
+    admin.batch_execute("REVOKE EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT) FROM trace_account_admission_runtime").await.unwrap();
+    assert!(
+        !runtime.account_admission_runtime_ready().await.unwrap(),
+        "legacy transition grant is required at startup"
+    );
+    admin.batch_execute("GRANT EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT) TO trace_account_admission_runtime").await.unwrap();
+    let trust_account = resolve_contribution_account(runtime.as_ref(), &tenant, &principal)
         .await
         .unwrap();
     let policy = parse_bounded_policy(r#"{"version":"admission-test-v1","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["admission-test-v1"]).unwrap();
@@ -106,26 +189,40 @@ async fn account_admission_atomicity_replay_and_revocation() {
         runtime.reserve_account_admission(&second)
     );
     assert_eq!(
-        [a.unwrap(), b.unwrap()]
+        [a.unwrap().decision, b.unwrap().decision]
             .into_iter()
             .filter(|d| *d == D::Reserved)
             .count(),
         1,
         "two devices cannot overspend one account"
     );
-    let winner = if runtime.reserve_account_admission(&first).await.unwrap() == D::Busy {
+    let winner = if runtime
+        .reserve_account_admission(&first)
+        .await
+        .unwrap()
+        .decision
+        == D::Busy
+    {
         &first
     } else {
         &second
     };
     assert_eq!(
-        runtime.reserve_account_admission(winner).await.unwrap(),
+        runtime
+            .reserve_account_admission(winner)
+            .await
+            .unwrap()
+            .decision,
         D::Busy
     );
     let mut changed = winner.clone();
     changed.body_hash = "c".repeat(64);
     assert_eq!(
-        runtime.reserve_account_admission(&changed).await.unwrap(),
+        runtime
+            .reserve_account_admission(&changed)
+            .await
+            .unwrap()
+            .decision,
         D::Conflict
     );
     assert!(
@@ -145,7 +242,8 @@ async fn account_admission_atomicity_replay_and_revocation() {
         runtime
             .reserve_account_admission(&request(&other))
             .await
-            .unwrap(),
+            .unwrap()
+            .decision,
         D::Reserved,
         "pre-processing release refunds"
     );
@@ -155,10 +253,21 @@ async fn account_admission_atomicity_replay_and_revocation() {
     admin.execute("UPDATE trace_account_trust SET authority='invited',trust_version=2 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap();
     let invited = request(&principal);
     assert_eq!(
-        runtime.reserve_account_admission(&invited).await.unwrap(),
+        runtime
+            .reserve_account_admission(&invited)
+            .await
+            .unwrap()
+            .decision,
         D::Reserved,
         "invite bypasses exhausted cumulative allowance"
     );
+    let atomic = runtime
+        .reserve_account_admission(&request(&principal))
+        .await
+        .unwrap();
+    assert_eq!(atomic.decision, D::Reserved);
+    assert_eq!(atomic.authority, Some("invited"));
+    assert_eq!(atomic.retry_after_seconds, None);
     // Hold the grant row while processing attempts its liveness check. The
     // runtime transaction must visibly block on this independent revoke row.
     let mut revoke_client = admin_db
@@ -206,7 +315,11 @@ async fn account_admission_atomicity_replay_and_revocation() {
     let mut work = request(&principal);
     work.policy = retry_policy.clone();
     assert_eq!(
-        runtime.reserve_account_admission(&work).await.unwrap(),
+        runtime
+            .reserve_account_admission(&work)
+            .await
+            .unwrap()
+            .decision,
         D::Reserved
     );
     assert!(
@@ -240,7 +353,11 @@ async fn account_admission_atomicity_replay_and_revocation() {
     let mut retry = work.clone();
     retry.lease_id = Uuid::new_v4();
     assert_eq!(
-        runtime.reserve_account_admission(&retry).await.unwrap(),
+        runtime
+            .reserve_account_admission(&retry)
+            .await
+            .unwrap()
+            .decision,
         D::Reserved,
         "expired processing lease charges again"
     );
@@ -273,7 +390,11 @@ async fn account_admission_atomicity_replay_and_revocation() {
             .unwrap()
     );
     assert_eq!(
-        runtime.reserve_account_admission(&retry).await.unwrap(),
+        runtime
+            .reserve_account_admission(&retry)
+            .await
+            .unwrap()
+            .decision,
         D::Completed,
         "terminal retry costs zero"
     );
@@ -282,13 +403,39 @@ async fn account_admission_atomicity_replay_and_revocation() {
     let mut conflict = retry.clone();
     conflict.body_hash = "a".repeat(64);
     assert_eq!(
-        runtime.reserve_account_admission(&conflict).await.unwrap(),
+        runtime
+            .reserve_account_admission(&conflict)
+            .await
+            .unwrap()
+            .decision,
         D::Conflict
+    );
+    let mut tuned = request(&principal);
+    tuned.policy = parse_bounded_policy(r#"{"version":"admission-test-v3","processing_cost_bound":5,"bounded_allowance":30,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["admission-test-v3"]).unwrap();
+    let exhausted = runtime.reserve_account_admission(&tuned).await.unwrap();
+    assert_eq!(
+        exhausted.decision,
+        D::Exhausted,
+        "policy revision carries lifetime spend forward"
+    );
+    assert_eq!(exhausted.authority, Some("bounded"));
+    assert_eq!(exhausted.retry_after_seconds, None);
+    assert!(
+        !runtime
+            .account_admission_status(&trust_account, &principal, &tuned.policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .ready
     );
     drop(runtime);
     let restarted = PgBackend::new(&config(runtime_url)).await.unwrap();
     assert_eq!(
-        restarted.reserve_account_admission(&retry).await.unwrap(),
+        restarted
+            .reserve_account_admission(&retry)
+            .await
+            .unwrap()
+            .decision,
         D::Completed,
         "process restart preserves terminal identity and charge"
     );
@@ -299,13 +446,21 @@ async fn account_admission_atomicity_replay_and_revocation() {
     let mut fixed = request(&principal);
     fixed.policy = fixed_policy.clone();
     assert_eq!(
-        restarted.reserve_account_admission(&fixed).await.unwrap(),
+        restarted
+            .reserve_account_admission(&fixed)
+            .await
+            .unwrap()
+            .decision,
         D::Reserved
     );
     let mut next = request(&other);
     next.policy = fixed_policy.clone();
     assert_eq!(
-        restarted.reserve_account_admission(&next).await.unwrap(),
+        restarted
+            .reserve_account_admission(&next)
+            .await
+            .unwrap()
+            .decision,
         D::Exhausted
     );
     let status = restarted
@@ -320,7 +475,11 @@ async fn account_admission_atomicity_replay_and_revocation() {
     assert!((1..=2).contains(&delay));
     tokio::time::sleep(std::time::Duration::from_secs((delay + 1) as u64)).await;
     assert_eq!(
-        restarted.reserve_account_admission(&next).await.unwrap(),
+        restarted
+            .reserve_account_admission(&next)
+            .await
+            .unwrap()
+            .decision,
         D::Reserved,
         "explicit period boundary replenishes"
     );
@@ -447,6 +606,18 @@ async fn account_admission_atomicity_replay_and_revocation() {
         .unwrap()
         .get(0);
     assert_eq!(charged_once, 10);
+    assert!(
+        restarted
+            .transition_submission_admission(
+                &tenant,
+                legacy_submission,
+                first_legacy_lease,
+                "processing"
+            )
+            .await
+            .unwrap(),
+        "minimal account role can transition a resumed legacy lease"
+    );
     admin.execute("UPDATE trace_admission_submissions SET status='processing',ever_processed=TRUE,lease_expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&legacy_submission]).await.unwrap();
     assert_eq!(
         restarted

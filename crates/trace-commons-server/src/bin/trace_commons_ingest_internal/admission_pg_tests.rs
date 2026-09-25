@@ -111,6 +111,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
       GRANT USAGE ON SCHEMA public TO admission_ingest_runtime;
       GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO admission_ingest_runtime;
       GRANT trace_account_admission_runtime TO admission_ingest_runtime;
+      REVOKE ALL ON trace_accounts,trace_account_principals,trace_near_provisioned_devices,device_keys,trace_near_account_anchors,trace_account_trust,trace_account_invite_grants,trace_account_admission_budget,trace_account_admission_submissions FROM admission_ingest_runtime;
+
       REVOKE ALL ON trace_admission_receipts,trace_admission_global_budget FROM admission_ingest_runtime;
       GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO admission_ingest_runtime;
       GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),trace_transition_admission(TEXT,UUID,UUID,TEXT) TO admission_ingest_runtime;").await.unwrap();
@@ -408,7 +410,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     .with_admission_provider_trust(trust);
     let (response, evidence, signature) = witness
         .witness_admission_contribution(witness_service::WitnessContributionRequest {
-            raw_contribution: raw,
+            raw_contribution: raw.clone(),
             granted: witness_service::GrantedConsent {
                 scopes: vec![
                     ConsentScope::DebuggingEvaluation,
@@ -416,7 +418,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
                 ],
                 uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
             },
-            offered_receipt: Some(receipt),
+            offered_receipt: Some(receipt.clone()),
         })
         .await
         .unwrap();
@@ -505,6 +507,24 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         lease_seconds: 60,
         providers: None,
     });
+    client.batch_execute("REVOKE EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT) FROM admission_ingest_runtime").await.unwrap();
+    // Account role now supplies all identity/admission privileges, including V59 transition.
+    let unlinked_response = post(
+        {
+            let mut cutover = invited_state.clone();
+            Arc::make_mut(&mut cutover).account_admission = state.account_admission.clone();
+            cutover
+        },
+        "/v1/traces",
+        window_body.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(unlinked_response.status(), StatusCode::FORBIDDEN);
+    let unlinked_body = axum::body::to_bytes(unlinked_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&unlinked_body).contains("account_identity_unlinked"));
     let unauthenticated_status = app(state.clone())
         .oneshot(
             axum::http::Request::builder()
@@ -657,6 +677,157 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         account_rows, 0,
         "no legacy recovery creates account authority"
     );
+    // A freshly offered proof remains checked in account mode using its
+    // independent provider policy, with no legacy environment lookup.
+    raw.submission_id = Uuid::new_v4();
+    raw.trace_id = Uuid::new_v4();
+    let (fresh, fresh_evidence, fresh_signature) = witness
+        .witness_admission_contribution(witness_service::WitnessContributionRequest {
+            raw_contribution: raw,
+            granted: witness_service::GrantedConsent {
+                scopes: vec![
+                    ConsentScope::DebuggingEvaluation,
+                    ConsentScope::ModelTraining,
+                ],
+                uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
+            },
+            offered_receipt: Some(receipt),
+        })
+        .await
+        .unwrap();
+    let account_providers = state.admission.as_ref().unwrap().providers.clone();
+    Arc::make_mut(&mut state)
+        .account_admission
+        .as_mut()
+        .unwrap()
+        .providers = Some(account_providers);
+    let mut offered = HeaderMap::new();
+    offered.insert(
+        AUTHORIZATION,
+        HeaderValue::from_static("Bearer admission-fixture-token"),
+    );
+    offered.insert(
+        trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
+        serde_json::to_string(&witness_service::http::certificate_json(
+            &fresh.certificate,
+            fresh.residual_risk_verdict(),
+        ))
+        .unwrap()
+        .parse()
+        .unwrap(),
+    );
+    offered.insert(
+        trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
+        fresh.signature_hex.parse().unwrap(),
+    );
+    offered.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&fresh_evidence)
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    offered.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        fresh_signature.parse().unwrap(),
+    );
+    let authenticated = authenticate_ctx(&state, &offered).unwrap();
+    let fresh_envelope: TraceContributionEnvelope =
+        serde_json::from_slice(&fresh.envelope_bytes).unwrap();
+    let mut attempt = admission::reserve(
+        &state,
+        &authenticated,
+        &offered,
+        &fresh.envelope_bytes,
+        fresh_envelope.submission_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let resolved = trace_commons_server::account_trust::resolve_contribution_account(
+        db.as_ref(),
+        &tenant,
+        &principal,
+    )
+    .await
+    .unwrap();
+    // Revocation makes the advisory read fail, but the charged reservation
+    // already produced its Attempt and remains releasable without a new read.
+    client
+        .execute(
+            "UPDATE device_keys SET revoked_at=clock_timestamp() WHERE device_key_id=$1",
+            &[&device],
+        )
+        .await
+        .unwrap();
+    assert!(
+        db.account_admission_status(
+            &resolved,
+            &principal,
+            &state.account_admission.as_ref().unwrap().policy
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    attempt.finish(db.as_ref(), false).await.unwrap();
+    drop(attempt);
+    client
+        .execute(
+            "UPDATE device_keys SET revoked_at=NULL WHERE device_key_id=$1",
+            &[&device],
+        )
+        .await
+        .unwrap();
+    let charged: i64 = client
+        .query_one(
+            "SELECT cost_used FROM trace_account_admission_budget WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        charged, 0,
+        "pre-processing release refunds even after revocation"
+    );
+    offered.remove(trace_commons_protocol::admission::SIGNATURE_HEADER);
+    assert!(
+        admission::reserve(
+            &state,
+            &authenticated,
+            &offered,
+            &fresh.envelope_bytes,
+            fresh_envelope.submission_id
+        )
+        .await
+        .is_err(),
+        "offered partial proof is never ignored"
+    );
+    // Invites remove cumulative account debt, but retain the hourly pacing quota.
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    client.execute("INSERT INTO trace_account_trust(tenant_id,account_id,authority,trust_version) VALUES($1,$2,'invited',1) ON CONFLICT(tenant_id,account_id) DO UPDATE SET authority='invited',trust_version=1", &[&tenant,&account]).await.unwrap();
+    client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,1)", &[&tenant,&account,&invite_hash]).await.unwrap();
+    Arc::make_mut(&mut state)
+        .submission_quota
+        .max_per_tenant_per_hour = 1;
+    let mut quota_envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut quota_envelope);
+    let quota_response = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&quota_envelope).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(
+        quota_response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "invited accounts still enforce hourly quota"
+    );
+    Arc::make_mut(&mut state)
+        .submission_quota
+        .max_per_tenant_per_hour = 0;
     Arc::make_mut(&mut state).account_admission = None;
     let artifact: TraceContributionEnvelope =
         serde_json::from_slice(&response.envelope_bytes).unwrap();

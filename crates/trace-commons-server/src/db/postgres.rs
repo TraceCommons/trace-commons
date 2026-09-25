@@ -1412,7 +1412,7 @@ impl Database for PgBackend {
     async fn reserve_account_admission(
         &self,
         request: &crate::admission_ledger::AccountAdmissionReservation,
-    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+    ) -> Result<crate::admission_ledger::AccountAdmissionResult, DatabaseError> {
         PgBackend::reserve_account_admission(self, request).await
     }
 
@@ -1512,6 +1512,9 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::account_admission_runtime_ready(self).await
+    }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         self.check_admission_runtime().await
     }

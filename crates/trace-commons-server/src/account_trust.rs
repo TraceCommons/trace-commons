@@ -99,6 +99,8 @@ impl AccountTrustSnapshot {
 pub enum TrustRefusal {
     #[error("account_trust_refused")]
     Refused,
+    #[error("account_identity_unlinked")]
+    Unlinked,
     #[error("account_trust_unavailable")]
     Unavailable,
 }
@@ -116,7 +118,10 @@ pub async fn resolve_contribution_account(
             .strip_prefix(prefix)
             .is_some_and(trace_commons_protocol::admission::is_hash)
     });
-    if !in_near_namespace || principal_ref.is_empty() {
+    if !in_near_namespace {
+        return Err(TrustRefusal::Unlinked);
+    }
+    if principal_ref.is_empty() {
         return Err(TrustRefusal::Refused);
     }
     let account_id = db
