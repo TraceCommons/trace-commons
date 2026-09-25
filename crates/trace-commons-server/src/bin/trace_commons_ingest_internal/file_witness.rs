@@ -141,10 +141,10 @@ pub(super) fn for_submission(
     }))
 }
 
-fn current_object_digest(
+fn read_current_object(
     state: &AppState,
     record: &TraceCommonsSubmissionRecord,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, TraceContributionEnvelope)> {
     if let Some(receipt) = record.artifact_receipt.as_ref() {
         let store = state
             .artifact_store
@@ -159,12 +159,17 @@ fn current_object_digest(
             "witness_artifact_store_mismatch"
         );
         // get_json verifies the actual ciphertext, receipt binding and decryption.
-        let _: TraceContributionEnvelope = read_envelope_by_record(state, record)?;
-        Ok(receipt.ciphertext_sha256.clone())
+        let envelope = read_envelope_by_record(state, record)?;
+        Ok((receipt.ciphertext_sha256.clone(), envelope))
     } else {
-        Ok(hex::encode(Sha256::digest(std::fs::read(
-            state.root.join(&record.object_key),
-        )?)))
+        // Hash and parse one read, so content-revocation identity cannot come
+        // from a different object than the bytes that qualify the source proof.
+        let body = std::fs::read(state.root.join(&record.object_key))?;
+        let digest = hex::encode(Sha256::digest(&body));
+        let envelope = serde_json::from_slice(&body)?;
+        ensure_envelope_tenant_scope(&envelope, &record.tenant_id)?;
+        verify_envelope_tenant_drift(&envelope, &record.tenant_id)?;
+        Ok((digest, envelope))
     }
 }
 
@@ -242,17 +247,28 @@ pub(super) fn current_claim(
     claim.raw_body_sha256 = Some(evidence.raw_body_sha256.clone());
     claim.receipt_sha256 = evidence.receipt_sha256.clone();
     let tombstones = read_all_revocations(&state.root, tenant.tenant_id())?;
-    let derived = tenant.read_derived_record(&state.root, id)?;
+    let current_object = read_current_object(state, &record)
+        .ok()
+        .filter(|(digest, _)| {
+            evidence.object_key == record.object_key && digest == &evidence.artifact_sha256
+        });
+    // Derived metadata is a separate write and may be absent or stale after a
+    // crash. Only the verified current artifact can establish content identity.
+    let current_identity = current_object.as_ref().map(|(_, envelope)| {
+        (
+            sha256_prefixed(&canonical_summary_for_embedding(envelope)),
+            envelope.privacy.redaction_hash.as_str(),
+        )
+    });
     let revoked = tombstones.iter().any(|t| {
         t.submission_id == id
-            || t.canonical_summary_hash.as_ref().is_some_and(|hash| {
-                derived
-                    .as_ref()
-                    .is_some_and(|d| &d.canonical_summary_hash == hash)
-            })
-            || t.redaction_hash.as_ref().is_some_and(|hash| {
-                redaction_hash_for_record(state, &record).as_ref() == Some(hash)
-            })
+            || current_identity
+                .as_ref()
+                .is_some_and(|(canonical_hash, redaction_hash)| {
+                    t.canonical_summary_hash.as_ref() == Some(canonical_hash)
+                        || (!redaction_hash.is_empty()
+                            && t.redaction_hash.as_deref() == Some(*redaction_hash))
+                })
     });
     claim.coverage = if record.status != TraceCorpusStatus::Accepted
         || record.purged_at.is_some()
@@ -264,9 +280,7 @@ pub(super) fn current_claim(
         Coverage::LegacyV1
     } else if evidence.certificate_version != 2 || evidence.class == AttestationClass::Unattested {
         Coverage::ExplicitUnattested
-    } else if evidence.object_key != record.object_key
-        || current_object_digest(state, &record).ok().as_ref() != Some(&evidence.artifact_sha256)
-    {
+    } else if current_object.is_none() {
         Coverage::ArtifactMismatch
     } else {
         claim.class = evidence.class;

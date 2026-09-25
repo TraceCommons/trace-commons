@@ -599,7 +599,9 @@ parent-directory fsync is Unix-only.
 `file_witness::current_claim` is an internal, currently unused policy seam. It
 accepts authenticated tenant context and a submission ID, reads current durable
 status and revocation tombstones, and verifies the associated stored object's
-actual digest (including encrypted-store receipt verification). It returns no
+actual digest (including encrypted-store receipt verification). Content-based
+revocation uses canonical-summary and redaction identities derived from that
+same verified artifact, never separately written derived metadata. It returns no
 active attested class for inaccessible, absent, legacy, inactive, expired,
 revoked, missing-object or mismatched-object evidence. The raw proof is never in
 an exported envelope, public receipt, audit event or Debug output. Old metadata

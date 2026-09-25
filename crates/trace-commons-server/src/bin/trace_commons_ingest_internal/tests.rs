@@ -94247,7 +94247,7 @@ mod witness_receipt {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn file_witness_atomic_replace_failure_preserves_complete_metadata() {
+    async fn file_witness_temporary_file_creation_failure_preserves_complete_metadata() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let state = witnessed_state(temp.path().to_path_buf());
@@ -94444,6 +94444,70 @@ mod witness_receipt {
             file_claim(&state, envelope.submission_id).coverage,
             Coverage::ArtifactMismatch
         );
+    }
+
+    async fn assert_file_witness_current_content_revocation(stale_derived: bool) {
+        use trace_commons_protocol::witness_provenance::AttestationClass;
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::VerifiedV2
+        );
+        let mut derived = read_derived_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let original_content_hash = derived.canonical_summary_hash.clone();
+        if stale_derived {
+            derived.canonical_summary_hash = format!("sha256:{}", "f".repeat(64));
+            assert_ne!(derived.canonical_summary_hash, original_content_hash);
+            write_derived_record(temp.path(), &derived).unwrap();
+        } else {
+            std::fs::remove_file(derived_record_path(
+                temp.path(),
+                "tenant-a",
+                envelope.submission_id,
+            ))
+            .unwrap();
+        }
+        let revoked_other_id = Uuid::new_v4();
+        assert_ne!(revoked_other_id, envelope.submission_id);
+        write_revocation(
+            temp.path(),
+            &TraceCommonsRevocation {
+                tenant_id: "tenant-a".into(),
+                tenant_storage_ref: tenant_storage_ref("tenant-a"),
+                submission_id: revoked_other_id,
+                revoked_at: Utc::now(),
+                reason: "owner_self_revocation".into(),
+                redaction_hash: None,
+                canonical_summary_hash: Some(original_content_hash),
+            },
+        )
+        .unwrap();
+        let claim = file_claim(&state, envelope.submission_id);
+        assert_eq!(claim.coverage, Coverage::Inactive);
+        assert_eq!(claim.class, AttestationClass::Unattested);
+    }
+
+    #[tokio::test]
+    async fn file_witness_current_content_revocation_with_missing_derived_record() {
+        assert_file_witness_current_content_revocation(false).await;
+    }
+
+    #[tokio::test]
+    async fn file_witness_current_content_revocation_with_stale_derived_record() {
+        assert_file_witness_current_content_revocation(true).await;
     }
 
     #[tokio::test]
