@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route; do
+          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route walletv2; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -354,6 +354,10 @@ jobs:
           '
         env:
           TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
+      - name: wallet v2 signed completion against PostgreSQL
+        run: cargo test --bin trace-commons-ingest wallet_v2_pg_tests -- --ignored
+        env:
+          TRACE_COMMONS_WALLET_V2_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_walletv2
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.
@@ -368,7 +372,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route; do
+          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route walletv2; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"
