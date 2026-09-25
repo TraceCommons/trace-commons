@@ -2664,7 +2664,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         // Either way they stop being sent without the contributor deciding.
         let retracted = match mode {
             ProjectMode::Ignore => queue.retract_unattended_for_project(&key),
-            ProjectMode::NotifyOnly => queue.return_unattended_to_waiting_for_project(&key),
+            ProjectMode::NotifyOnly => {
+                queue.return_unattended_to_waiting_for_project(&key, Utc::now())
+            }
             ProjectMode::AutoUpload => 0,
         };
         let restored = if mode == ProjectMode::Ignore {

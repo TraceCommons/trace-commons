@@ -869,7 +869,11 @@ impl Queue {
     /// Without this, turning automatic off left every session it had already
     /// approved uploading, which the confirmation that turned it on promised
     /// it would not.
-    pub fn return_unattended_to_waiting_for_project(&mut self, project_key: &str) -> usize {
+    pub fn return_unattended_to_waiting_for_project(
+        &mut self,
+        project_key: &str,
+        now: DateTime<Utc>,
+    ) -> usize {
         let ids: Vec<Uuid> = self
             .entries
             .iter()
@@ -881,22 +885,39 @@ impl Queue {
             .map(|e| e.entry_id)
             .collect();
         for id in &ids {
-            self.return_to_waiting(*id);
+            self.return_to_waiting(*id, now);
         }
         ids.len()
     }
 
     /// Put one entry back to a fresh offer: `Pending`, every term of its old
-    /// approval cleared, and no reason label left naming a condition that no
-    /// longer holds.
-    pub fn return_to_waiting(&mut self, entry_id: Uuid) -> bool {
+    /// approval cleared, no reason label left naming a condition that no
+    /// longer holds, and dated `now`.
+    ///
+    /// Dated now because expiry counts from `discovered_at`. A session in an
+    /// armed project that stayed active for two weeks and was then approved
+    /// unattended would otherwise be expired on the next pass after the
+    /// project went to ask-first, instead of showing as waiting -- the
+    /// opposite of what the arming copy promises.
+    pub fn return_to_waiting(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> bool {
         if !self.revoke_approval(entry_id, "") {
             return false;
         }
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             e.reason_label = None;
+            e.discovered_at = now;
         }
         true
+    }
+
+    /// Whether `entry_id` is still an approval made on the contributor's
+    /// behalf. For a caller that chose it earlier and let the lock go: in
+    /// between, the contributor may have dismissed it or approved it
+    /// themselves, and neither decision may be undone.
+    pub fn is_unattended_approval(&self, entry_id: Uuid) -> bool {
+        self.entries.iter().any(|e| {
+            e.entry_id == entry_id && e.state == QueueState::Approved && e.approved_unattended
+        })
     }
 
     /// Drop every `project-ignored` refusal belonging to `project_key`,
@@ -2760,6 +2781,48 @@ mod tests {
         let e = e.expect("entry present");
         assert_eq!(e.state, QueueState::Refused);
         assert_eq!(e.reason_label.as_deref(), Some(REASON_PROJECT_IGNORED));
+    }
+
+    /// Reviewed on #1011: a returned session kept its original date, so one
+    /// that had been active in an armed project for two weeks was expired on
+    /// the next pass after the project went to ask-first.
+    #[test]
+    fn a_returned_session_is_dated_now_and_survives_the_next_expiry() {
+        let now = Utc::now();
+        let mut q = Queue::default();
+        let long_running = QueueEntry {
+            approved_unattended: true,
+            discovered_at: now - Duration::days(20),
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        q.push_for_test(long_running);
+
+        assert_eq!(
+            q.return_unattended_to_waiting_for_project("/w/alpha", now),
+            1
+        );
+        assert_eq!(q.expire(now, 14, false), 0);
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+    }
+
+    /// The check the upload pass makes under the lock before acting on a
+    /// choice it made earlier. A contributor's own approval, and a dismissal,
+    /// both make it false, so neither is undone.
+    #[test]
+    fn an_entry_stops_being_an_unattended_approval_once_the_contributor_acts() {
+        let mut q = Queue::default();
+        let e = entry_in("/w/alpha", QueueState::Pending);
+        let id = e.entry_id;
+        q.push_for_test(e);
+        assert!(q.approve_unattended(id, &[], None));
+        assert!(q.is_unattended_approval(id));
+
+        assert!(q.revoke_approval(id, ""));
+        assert!(q.approve(id, &[], None, None, None, None));
+        assert!(!q.is_unattended_approval(id), "their approval now");
+
+        q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
+        assert!(!q.is_unattended_approval(id), "dismissed");
     }
 
     #[test]

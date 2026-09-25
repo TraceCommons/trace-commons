@@ -605,18 +605,27 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     if !ignored_ids.is_empty() || !returned_ids.is_empty() {
         {
             let mut q = shared.queue.lock().expect("queue lock");
+            // Re-checked under the lock. These were chosen before it was
+            // taken, and meanwhile the contributor may have dismissed one or
+            // approved it themselves; acting on the stale choice would revive
+            // a dismissal or erase their approval.
             for id in &ignored_ids {
-                q.set_state(
-                    *id,
-                    queue::QueueState::Refused,
-                    Some(queue::REASON_PROJECT_IGNORED.to_string()),
-                );
+                if q.is_unattended_approval(*id) {
+                    q.set_state(
+                        *id,
+                        queue::QueueState::Refused,
+                        Some(queue::REASON_PROJECT_IGNORED.to_string()),
+                    );
+                }
             }
             for id in &returned_ids {
-                q.return_to_waiting(*id);
+                if q.is_unattended_approval(*id) {
+                    q.return_to_waiting(*id, now);
+                }
             }
-            if let Err(e) = q.save(&shared.store) {
-                tracing::warn!(error = %e, "could not persist project-ignored refusals");
+            if q.save(&shared.store).is_err() {
+                // A fixed label, not the error: its context can carry a path.
+                tracing::warn!("could not persist send-time refusals");
             }
             // Swept and published here rather than at the end of the pass.
             //
