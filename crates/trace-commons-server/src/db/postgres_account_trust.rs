@@ -76,14 +76,28 @@ impl PgBackend {
         let invite = tx
             .query_opt(
                 "SELECT consumed_uses, max_uses FROM onboarding_invite_grants
-                  WHERE invite_subject_hash = $1 AND revoked_at IS NULL
-                    AND (expires_at IS NULL OR expires_at > now()) FOR UPDATE",
+                  WHERE invite_subject_hash = $1 AND revoked_at IS NULL FOR UPDATE",
                 &[&invite_hash],
             )
             .await?;
         let Some(invite) = invite else {
             return Ok(AccountInviteRedemption::InvalidInvite);
         };
+        // `now()` is fixed at transaction start. The lock above may have
+        // blocked until after expiration, so evaluate wall-clock time in a
+        // separate statement only after the durable row is locked.
+        let live: bool = tx
+            .query_one(
+                "SELECT revoked_at IS NULL
+                        AND (expires_at IS NULL OR expires_at > clock_timestamp())
+                   FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+                &[&invite_hash],
+            )
+            .await?
+            .get(0);
+        if !live {
+            return Ok(AccountInviteRedemption::InvalidInvite);
+        }
         let existing = tx
             .query_opt(
                 "SELECT trust_version FROM trace_account_invite_grants
@@ -119,13 +133,22 @@ impl PgBackend {
                 &[&tenant, &account, &invite_hash, &next_version],
             )
             .await?;
-            tx.execute(
-                "UPDATE onboarding_invite_grants
+            let spent = tx
+                .query_opt(
+                    "UPDATE onboarding_invite_grants
                     SET consumed_uses = consumed_uses + 1, updated_at = now()
-                  WHERE invite_subject_hash = $1",
-                &[&invite_hash],
-            )
-            .await?;
+                  WHERE invite_subject_hash = $1 AND revoked_at IS NULL
+                    AND consumed_uses < max_uses
+                    AND (expires_at IS NULL OR expires_at > clock_timestamp())
+                  RETURNING consumed_uses",
+                    &[&invite_hash],
+                )
+                .await?;
+            if spent.is_none() {
+                // Returning before commit rolls back the preceding trust and
+                // grant inserts if the clock crossed expiry during this call.
+                return Ok(AccountInviteRedemption::InvalidInvite);
+            }
             next_version
         };
         tx.execute(
