@@ -1560,6 +1560,56 @@ async fn append_trace_audit_event_in_transaction(
     Ok(())
 }
 
+/// Claims and content creation take this lock before the session lock. It
+/// covers the absent-content case, where a row lock cannot serialize ownership.
+/// Withdrawal takes the session lock then content row locks and never this lock.
+async fn lock_source_submission_identity(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    submission: Uuid,
+) -> Result<(), DatabaseError> {
+    let key = format!(
+        "trace-source-submission.v1:{}:{}:{}",
+        tenant.len(),
+        tenant,
+        submission
+    );
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&key],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Historical content and either admission ledger are independent ownership
+/// evidence. Missing principal/anchor linkage is not authority to claim a row.
+async fn source_submission_owned_by_account(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    submission: Uuid,
+    account: Uuid,
+) -> Result<bool, DatabaseError> {
+    Ok(tx.query_one(
+        "SELECT NOT EXISTS (
+            SELECT 1 FROM trace_submissions s
+            WHERE s.tenant_id=$1 AND s.submission_id=$2 AND NOT EXISTS (
+                SELECT 1 FROM trace_account_principals p
+                WHERE p.tenant_id=s.tenant_id AND p.principal_ref=s.auth_principal_ref AND p.account_id=$3
+            )
+         ) AND NOT EXISTS (
+            SELECT 1 FROM trace_admission_submissions l
+            WHERE l.tenant_id=$1 AND l.submission_id=$2 AND NOT EXISTS (
+                SELECT 1 FROM trace_near_account_anchors a
+                WHERE a.tenant_id=l.tenant_id AND a.account_id=$3 AND a.anchor_hash='sha256:' || l.anchor_hash
+            )
+         ) AND NOT EXISTS (
+            SELECT 1 FROM trace_account_admission_submissions a
+            WHERE a.tenant_id=$1 AND a.submission_id=$2 AND a.account_id<>$3
+         )", &[&tenant,&submission,&account]
+    ).await?.get(0))
+}
+
 /// Lock the source-session row before any content-row status write. The mapping
 /// is immutable, so the lock serializes approval with account withdrawal even
 /// when a resumed version has a different submission ID.
@@ -1599,6 +1649,10 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<TraceSourceSessionStatus, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        lock_source_submission_identity(&tx, tenant_id, submission_id).await?;
+        if !source_submission_owned_by_account(&tx, tenant_id, submission_id, account_id).await? {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
         let digest = session_digest.as_slice();
         tx.execute(
             "INSERT INTO trace_source_sessions (tenant_id, account_id, session_digest)
@@ -1705,6 +1759,15 @@ impl TraceCorpusStore for PgBackend {
                 &[&tenant_id, &account_id, &digest],
             )
             .await?;
+        // Validate all siblings before any content mutation or returning IDs
+        // to the file/object cleanup caller. The session lock prevents new
+        // mappings and cooperating content writes while this snapshot is used.
+        for mapped_row in &mapped {
+            let id: Uuid = mapped_row.get(0);
+            if !source_submission_owned_by_account(&tx, tenant_id, id, account_id).await? {
+                return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+            }
+        }
         let mut affected_submission_ids = Vec::with_capacity(mapped.len());
         for mapped_row in mapped {
             let id: Uuid = mapped_row.get(0);
@@ -1914,12 +1977,31 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&submission.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
+        lock_source_submission_identity(&tx, &submission.tenant_id, submission.submission_id)
+            .await?;
         lock_active_source_session_for_submission(
             &tx,
             &submission.tenant_id,
             submission.submission_id,
         )
         .await?;
+        let foreign_mapping: bool = tx
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM trace_submission_sessions m
+             WHERE m.tenant_id=$1 AND m.submission_id=$2 AND NOT EXISTS (
+                SELECT 1 FROM trace_account_principals p WHERE p.tenant_id=m.tenant_id
+                AND p.account_id=m.account_id AND p.principal_ref=$3))",
+                &[
+                    &submission.tenant_id,
+                    &submission.submission_id,
+                    &submission.auth_principal_ref,
+                ],
+            )
+            .await?
+            .get(0);
+        if foreign_mapping {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
         let status = enum_to_storage(submission.status)?;
         let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|e| {
             DatabaseError::Serialization(format!("trace consent scopes encode failed: {e}"))

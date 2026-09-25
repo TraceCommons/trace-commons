@@ -107,7 +107,7 @@ async fn session_tables_have_forced_rls_and_mapping_outlives_content() {
         .unwrap();
     client
         .execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
             &[&tenant, &account],
         )
         .await
@@ -202,7 +202,7 @@ async fn all_accepted_status_writers_refuse_a_withdrawn_mapped_session() {
         .unwrap();
     client
         .execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
             &[&tenant, &account],
         )
         .await
@@ -286,7 +286,7 @@ async fn withdrawal_covers_resumed_ids_and_is_account_scoped_after_reconnect() {
     for id in [account, other_account] {
         client
             .execute(
-                "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+                "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
                 &[&tenant, &id],
             )
             .await
@@ -402,7 +402,7 @@ async fn withdrawal_covers_resumed_ids_and_is_account_scoped_after_reconnect() {
         .unwrap();
     client
         .execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
             &[&other_tenant, &account],
         )
         .await
@@ -447,7 +447,7 @@ async fn concurrent_claim_and_withdrawal_leave_no_usable_resumed_version() {
             .unwrap();
         client
             .execute(
-                "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+                "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
                 &[&tenant, &account],
             )
             .await
@@ -545,7 +545,7 @@ async fn concurrent_approval_and_withdrawal_never_leave_accepted_content() {
             .unwrap();
         client
             .execute(
-                "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+                "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
                 &[&tenant, &account],
             )
             .await
@@ -633,7 +633,7 @@ async fn withdrawn_session_refuses_late_object_and_derived_writes() {
         .unwrap();
     client
         .execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
             &[&tenant, &account],
         )
         .await
@@ -902,4 +902,156 @@ async fn failed_backstop_audit_rolls_back_release_and_fresh_ref_retry_stays_acti
         .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn foreign_legacy_claim_cannot_poison_bulk_withdrawal() {
+    let Some(url) = database_url() else { return };
+    let client = migrated_client(&url).await;
+    client.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='trace_z4_claim_runtime') THEN CREATE ROLE trace_z4_claim_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+        GRANT trace_account_admission_runtime TO trace_z4_claim_runtime;
+        GRANT SELECT,INSERT,UPDATE ON trace_tenants,trace_submissions,trace_source_sessions,trace_submission_sessions TO trace_z4_claim_runtime;
+        GRANT SELECT,INSERT ON trace_withdrawals TO trace_z4_claim_runtime;
+        GRANT SELECT ON trace_export_manifest_items TO trace_z4_claim_runtime;
+        GRANT SELECT,UPDATE ON trace_token_bundles TO trace_z4_claim_runtime;").await.unwrap();
+    let mut runtime_url = reqwest::Url::parse(&url).unwrap();
+    runtime_url.set_username("trace_z4_claim_runtime").unwrap();
+    let backend = PgBackend::new(&database_config(runtime_url.as_str()))
+        .await
+        .unwrap();
+    let tenant = format!("z4-{}", Uuid::new_v4());
+    let victim = Uuid::new_v4();
+    let attacker = Uuid::new_v4();
+    let original = Uuid::new_v4();
+    let sibling = Uuid::new_v4();
+    let digest = [0x58; 32];
+    client
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    for (account, principal) in [
+        (victim, "principal:victim"),
+        (attacker, "principal:attacker"),
+    ] {
+        client
+            .execute(
+                "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+                &[&tenant, &account],
+            )
+            .await
+            .unwrap();
+        client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)", &[&tenant,&account,&principal]).await.unwrap();
+    }
+    let legacy = Uuid::new_v4();
+    let anchor = "8".repeat(64);
+    client.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,'fixture','fixture')", &[&tenant,&format!("sha256:{anchor}"),&victim,&serde_json::json!({})]).await.unwrap();
+    client.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','released',$5,now(),10,FALSE,FALSE)", &[&tenant,&legacy,&anchor,&"9".repeat(64),&Uuid::new_v4()]).await.unwrap();
+    assert!(
+        backend
+            .claim_trace_source_session(&tenant, attacker, &digest, legacy)
+            .await
+            .is_err(),
+        "retained legacy authority protects even absent content"
+    );
+    assert_eq!(
+        backend
+            .claim_trace_source_session(&tenant, victim, &digest, legacy)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    let mut victim_write = submission(&tenant, original, TraceCorpusStatus::Accepted);
+    victim_write.auth_principal_ref = "principal:victim".into();
+    let before = backend.upsert_trace_submission(victim_write).await.unwrap();
+    let claim = backend
+        .claim_trace_source_session(&tenant, attacker, &digest, original)
+        .await;
+    assert!(
+        claim.is_err(),
+        "foreign legacy content must refuse before retaining a mapping"
+    );
+    let count: i64 = client.query_one("SELECT count(*) FROM trace_submission_sessions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&original]).await.unwrap().get(0);
+    assert_eq!(count, 0);
+    backend
+        .claim_trace_source_session(&tenant, attacker, &digest, sibling)
+        .await
+        .unwrap();
+    let mut sibling_write = submission(&tenant, sibling, TraceCorpusStatus::Accepted);
+    sibling_write.auth_principal_ref = "principal:attacker".into();
+    backend
+        .upsert_trace_submission(sibling_write)
+        .await
+        .unwrap();
+    // Concurrent first creation and a foreign claim may choose either winner,
+    // but must never leave accepted victim content mapped to the attacker.
+    for _ in 0..8 {
+        let id = Uuid::new_v4();
+        let race_digest = [0x62; 32];
+        let mut write = submission(&tenant, id, TraceCorpusStatus::Accepted);
+        write.auth_principal_ref = "principal:victim".into();
+        let (claim, content) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                backend.claim_trace_source_session(&tenant, attacker, &race_digest, id),
+                backend.upsert_trace_submission(write)
+            )
+        })
+        .await
+        .expect("claim/upsert must not deadlock");
+        assert!(
+            !(claim.is_ok() && content.is_ok()),
+            "ownership and mapping must agree"
+        );
+        assert!(
+            claim.is_ok() || content.is_ok(),
+            "one uncontended owner makes progress"
+        );
+    }
+    // Defense against mappings retained by older buggy writers: reject the
+    // entire withdrawal before returning any IDs that authorize object deletion.
+    client.execute("INSERT INTO trace_submission_sessions(tenant_id,submission_id,account_id,session_digest) VALUES($1,$2,$3,$4)", &[&tenant,&original,&attacker,&&digest[..]]).await.unwrap();
+    assert!(
+        backend
+            .withdraw_trace_source_session(&tenant, attacker, sibling, chrono::Utc::now())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        backend
+            .get_trace_submission(&tenant, original)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        backend
+            .get_trace_source_session_status(&tenant, attacker, &digest)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    client
+        .execute(
+            "DELETE FROM trace_submission_sessions WHERE tenant_id=$1 AND submission_id=$2",
+            &[&tenant, &original],
+        )
+        .await
+        .unwrap();
+    let withdrawal = backend
+        .withdraw_trace_source_session(&tenant, attacker, sibling, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(withdrawal.affected_submission_ids, vec![sibling]);
+    assert_eq!(
+        backend
+            .get_trace_submission(&tenant, original)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
 }

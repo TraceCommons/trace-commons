@@ -198,6 +198,7 @@ pub(super) struct Attempt {
     completed: bool,
     account: Option<(TrustAccount, String)>,
     invited: bool,
+    pub(super) source_claim: Option<(Uuid, [u8; 32])>,
 }
 impl Attempt {
     pub fn is_completed(&self) -> bool {
@@ -281,10 +282,11 @@ pub(super) async fn reserve(
     tenant: &TenantCtx,
     headers: &HeaderMap,
     body: &[u8],
-    submission: Uuid,
+    envelope: &TraceContributionEnvelope,
 ) -> ApiResult<Option<Attempt>> {
+    let submission = envelope.submission_id;
     if let Some(config) = state.account_admission.as_ref() {
-        return reserve_account(state, tenant, headers, body, submission, config)
+        return reserve_account(state, tenant, headers, body, envelope, config)
             .await
             .map(Some);
     }
@@ -340,6 +342,7 @@ pub(super) async fn reserve(
             completed: true,
             account: None,
             invited: false,
+            source_claim: None,
         }));
     }
     let verified = match plan {
@@ -429,6 +432,7 @@ pub(super) async fn reserve(
         completed,
         account: None,
         invited: false,
+        source_claim: None,
     }))
 }
 
@@ -437,9 +441,10 @@ async fn reserve_account(
     tenant: &TenantCtx,
     headers: &HeaderMap,
     body: &[u8],
-    submission: Uuid,
+    envelope: &TraceContributionEnvelope,
     config: &AccountAdmissionConfig,
 ) -> ApiResult<Attempt> {
+    let submission = envelope.submission_id;
     if !state.require_db_mirror_writes {
         return Err(denied());
     }
@@ -448,11 +453,30 @@ async fn reserve_account(
         resolve_contribution_account(db.as_ref(), tenant.tenant_id(), tenant.principal_ref())
             .await
             .map_err(|_| denied())?;
+    if let Some(existing) = tenant
+        .read_submission_record(&state.root, submission)
+        .map_err(internal_error)?
+    {
+        if !tenant.can_access_submission(&existing) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "admission_identity_conflict",
+            ));
+        }
+    }
     let guard = db
         .acquire_admission_processing_lock(tenant.tenant_id(), submission)
         .await
         .map_err(|_| denied())?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
+    if db
+        .get_trace_withdrawal(tenant.tenant_id(), submission)
+        .await
+        .map_err(|_| denied())?
+        .is_some()
+    {
+        return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
+    }
     // The shared guard serializes both admission modes. Read *after* taking
     // it: a legacy worker may have completed while this request waited.
     let legacy_anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
@@ -478,6 +502,7 @@ async fn reserve_account(
                 completed: true,
                 account: None,
                 invited: false,
+                source_claim: None,
             });
         }
         // A replay uses the original V59 authority. Offered evidence cannot
@@ -562,7 +587,37 @@ async fn reserve_account(
             completed,
             account: None,
             invited: false,
+            source_claim: None,
         });
+    }
+    // Only an exact existing V59 identity can omit source metadata. That
+    // branch above retains its original submission-level withdrawal guarantee.
+    let source = envelope
+        .source_session
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "source_session_invalid"))?;
+    let source = canonical_source_session(source)
+        .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "source_session_invalid"))?;
+    let digest = session_digest(&source);
+    let source_status = db
+        .claim_trace_source_session(
+            tenant.tenant_id(),
+            account.account_id(),
+            &digest,
+            submission,
+        )
+        .await
+        .map_err(|error| match error {
+            DatabaseError::Query(ref label) if label == "TraceSourceSessionConflict" => {
+                api_error(StatusCode::CONFLICT, "source_session_conflict")
+            }
+            _ => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "source_session_unavailable",
+            ),
+        })?;
+    if source_status == StorageTraceSourceSessionStatus::Withdrawn {
+        return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
     }
     let plan = evidence_plan(headers);
     if plan == EvidencePlan::Verify {
@@ -654,8 +709,9 @@ async fn reserve_account(
         _guard: guard,
         processing: false,
         completed,
-        account: Some((account, tenant.principal_ref().into())),
+        account: Some((account.clone(), tenant.principal_ref().into())),
         invited: status.authority == "invited",
+        source_claim: Some((account.account_id(), digest)),
     })
 }
 

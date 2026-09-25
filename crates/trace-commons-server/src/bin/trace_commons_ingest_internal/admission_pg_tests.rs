@@ -452,6 +452,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         trace_commons_protocol::admission::SIGNATURE_HEADER,
         signature.parse().unwrap(),
     );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&response.envelope_bytes)
+            .unwrap()
+            .get("source_session")
+            .is_none(),
+        "legacy bytes omit the new field entirely"
+    );
     // Each missing binding fails before any submission is admitted.
     for missing in [
         trace_commons_protocol::admission::EVIDENCE_HEADER,
@@ -559,6 +566,19 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     // marked its lease completed. The old charge stays; retrying with the
     // original signed headers acquires a new V59 lease, never account debt.
     client.execute("UPDATE trace_admission_submissions SET status='processing',lease_expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&admitted.submission_id]).await.unwrap();
+    let mut altered_expired = response.envelope_bytes.clone();
+    altered_expired.push(b' ');
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            altered_expired,
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
     let mut changed_signature = headers.clone();
     changed_signature.insert(
         trace_commons_protocol::admission::SIGNATURE_HEADER,
@@ -605,6 +625,10 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
 
     let mut released = sample_envelope().await;
     make_metadata_only_low_risk(&mut released);
+    assert!(
+        released.source_session.is_none(),
+        "historical bodies lack session metadata"
+    );
     let released_body = serde_json::to_vec(&released).unwrap();
     let released_hash = hash_hex(&released_body);
     client.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','reserved',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&released.submission_id,&anchor,&released_hash,&Uuid::new_v4()]).await.unwrap();
@@ -621,6 +645,19 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         "a live legacy lease remains busy after cutover"
     );
     client.execute("UPDATE trace_admission_submissions SET status='released' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&released.submission_id]).await.unwrap();
+    let mut altered_released = released_body.clone();
+    altered_released.push(b' ');
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            altered_released,
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(
         post(
             state.clone(),
@@ -807,10 +844,10 @@ async fn admission_pg_admin() -> Arc<PgBackend> {
         url: SecretString::from(url.clone()),
         pool_size: 4,
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: Some(SecretString::from(url)),
+        login_resolver_url: Some(SecretString::from(url.clone())),
         gate_driver_url: None,
         pii_backstop_driver_url: None,
-        invite_registry_url: None,
+        invite_registry_url: Some(SecretString::from(url)),
     })
     .await
     .unwrap();
@@ -1242,9 +1279,63 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         .unwrap()
         .get(0);
     let used_before_invite: i64 = client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
-    client.execute("UPDATE trace_account_trust SET authority='invited',trust_version=trust_version+1 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
-    let invite_hash = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
-    client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,2)", &[&tenant,&account_id,&invite_hash]).await.unwrap();
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    db.insert_invite_grant(trace_commons_server::db::InviteGrantWrite {
+        invite_subject_hash: invite_hash.clone(),
+        policy_label: "bounded-elevation".into(),
+        tenant_mode: trace_commons_server::trace_invite_registry::InviteTenantMode::Fixed,
+        fixed_tenant_id: Some(tenant.clone()),
+        tenant_template_id: None,
+        policy_version: "v1".into(),
+        allowed_consent_scopes: vec!["model_training".into()],
+        allowed_uses: vec!["research".into()],
+        max_uses: 1,
+        expires_at: None,
+        issuance_source: "operator".into(),
+        issued_by_label: None,
+        credential_binding_hash: None,
+        note_label: None,
+    })
+    .await
+    .unwrap();
+    let redemption_key = Uuid::new_v4();
+    let redemption = db
+        .redeem_account_invite(&tenant, account_id, &invite_hash, redemption_key)
+        .await
+        .unwrap();
+    assert!(matches!(
+        redemption,
+        trace_commons_server::db::AccountInviteRedemption::Invited { trust_version: 2 }
+    ));
+    assert_eq!(
+        db.redeem_account_invite(&tenant, account_id, &invite_hash, redemption_key)
+            .await
+            .unwrap(),
+        redemption
+    );
+    let authority: String = client
+        .query_one(
+            "SELECT authority FROM trace_account_trust WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        authority, "invited",
+        "real bounded-first redemption elevates authority"
+    );
+    let mut status_request = axum::http::Request::builder()
+        .uri("/v1/account/contribution-status")
+        .body(Body::empty())
+        .unwrap();
+    status_request
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    let status_bytes = require_ok(app(state.clone()).oneshot(status_request).await.unwrap()).await;
+    let status_json: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["authority"], "invited");
+    assert_eq!(status_json["ready"], true);
     let mut invited = sample_envelope().await;
     make_metadata_only_low_risk(&mut invited);
     assert_eq!(
@@ -1263,5 +1354,132 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     assert_eq!(
         total, used_before_invite,
         "invited submission bypasses cumulative debit"
+    );
+    let consumed: i32 = client
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash=$1",
+            &[&invite_hash],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(consumed, 1);
+    client.execute("UPDATE trace_account_invite_grants SET revoked_at=now() WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3", &[&tenant,&account_id,&invite_hash]).await.unwrap();
+    invited.submission_id = Uuid::new_v4();
+    let revoked_response = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&invited).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(
+        revoked_response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "revocation restores the exhausted bounded policy"
+    );
+    let revoked_bytes = axum::body::to_bytes(revoked_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&revoked_bytes).unwrap()["error"],
+        "account_limit_reached"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn rejected_foreign_session_claim_preserves_victim_bytes_after_sibling_withdrawal() {
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"ownership-fixture","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["ownership-fixture"],
+        ).unwrap(), lease_seconds: 60, providers: None,
+    });
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let victim_account = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &victim_account],
+        )
+        .await
+        .unwrap();
+    client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,'principal:victim')", &[&tenant,&victim_account]).await.unwrap();
+    let victim = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        "principal:victim",
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let victim_object =
+        stage_trace_object_file(&state, &tenant, TraceCorpusStatus::Quarantined, victim);
+    let victim_bytes = std::fs::read(&victim_object).unwrap();
+    let before = db
+        .get_trace_submission(&tenant, victim)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut own = sample_envelope().await;
+    make_metadata_only_low_risk(&mut own);
+    own.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("ownership-{}", Uuid::new_v4().simple()),
+        },
+    );
+    require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&own).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
+    )
+    .await;
+    let mut attack = own.clone();
+    attack.submission_id = victim;
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&attack).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let count: i64 = client.query_one("SELECT count(*) FROM trace_submission_sessions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&victim]).await.unwrap().get(0);
+    assert_eq!(count, 0, "rejected request leaves no victim mapping");
+    let mut withdraw = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/v1/account/traces/{}/withdraw", own.submission_id))
+        .body(Body::empty())
+        .unwrap();
+    withdraw
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    require_ok(app(state.clone()).oneshot(withdraw).await.unwrap()).await;
+    assert_eq!(std::fs::read(victim_object).unwrap(), victim_bytes);
+    assert_eq!(
+        db.get_trace_submission(&tenant, victim)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert!(
+        db.get_trace_withdrawal(&tenant, victim)
+            .await
+            .unwrap()
+            .is_none()
     );
 }

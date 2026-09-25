@@ -213,6 +213,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
+    "trace_source_sessions",
+    "trace_submission_sessions",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",

@@ -68,7 +68,6 @@ use trace_commons_server::account_session::{
     AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
     generate_login_code, generate_session_secret, hash_secret,
 };
-use trace_commons_server::account_trust::resolve_contribution_account;
 use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
@@ -13330,61 +13329,18 @@ async fn submit_trace_handler(
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
-    // Validate and claim before reserving admission budget. A refused or
-    // withdrawn session must not strand a processing lease or consume quota.
-    // A valid-but-rejected request may retain an inert session mapping; it has
-    // no content row, and the mapping cannot authorize a later submission.
-    let source_claim = if state.account_admission.is_some() {
+    if state.account_admission.is_some() {
         validate_envelope(&envelope)?;
-        let source = envelope
-            .source_session
-            .as_ref()
-            .ok_or_else(|| api_error(StatusCode::UNPROCESSABLE_ENTITY, "source_session_invalid"))?;
-        let source = canonical_source_session(source)
-            .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "source_session_invalid"))?;
-        let db = state.db_mirror.as_ref().ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "source_session_unavailable",
-            )
-        })?;
-        let account = resolve_contribution_account(
-            db.as_ref(),
-            authenticated_tenant.tenant_id(),
-            authenticated_tenant.principal_ref(),
-        )
-        .await
-        .map_err(|_| api_error(StatusCode::FORBIDDEN, "account_trust_refused"))?;
-        let digest = session_digest(&source);
-        let status = db
-            .claim_trace_source_session(
-                authenticated_tenant.tenant_id(),
-                account.account_id(),
-                &digest,
-                envelope.submission_id,
-            )
-            .await
-            .map_err(|_| {
-                api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "source_session_unavailable",
-                )
-            })?;
-        if status == StorageTraceSourceSessionStatus::Withdrawn {
-            return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
-        }
-        Some((account.account_id(), digest))
-    } else {
-        None
-    };
+    }
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
         &headers,
         &raw_body,
-        envelope.submission_id,
+        &envelope,
     )
     .await?;
+    let source_claim = admission.as_ref().and_then(|attempt| attempt.source_claim);
     let tenant = if admission.is_some() {
         authenticated_tenant
     } else {

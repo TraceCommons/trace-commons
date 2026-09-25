@@ -50,3 +50,8 @@ ALTER TABLE trace_submission_sessions FORCE ROW LEVEL SECURITY;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_submission_sessions
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
+
+-- Source ownership checks compare a retained V59 anchor to its account.
+-- This hash-only column is the sole additional account-runtime privilege.
+GRANT SELECT (anchor_hash) ON trace_near_account_anchors
+    TO trace_account_admission_runtime;
