@@ -46,6 +46,7 @@ pub mod trace_gate_service;
 pub mod trace_invite_admin;
 pub mod trace_invite_registry;
 pub mod trace_score_attestation;
+pub mod trace_session_identity;
 pub mod trace_upload_claim_allowlist;
 pub mod trace_upload_claim_issuer;
 pub mod trace_upload_claim_issuer_admin;

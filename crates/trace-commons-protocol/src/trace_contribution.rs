@@ -147,6 +147,24 @@ fn default_submission_status() -> String {
     "accepted".to_string()
 }
 
+/// Untrusted, adapter-native session identity. The server validates and scopes
+/// this to an authenticated account before using it as an equality key.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSessionIdentity {
+    pub adapter: String,
+    pub native_id: String,
+}
+
+impl std::fmt::Debug for SourceSessionIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceSessionIdentity")
+            .field("adapter", &"[untrusted]")
+            .field("native_id", &"[redacted]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
     pub schema_version: String,
@@ -173,6 +191,10 @@ pub struct TraceContributionEnvelope {
     /// never reach a gate, a scoring input, or a tenant-scoping decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Adapter-native equality key for account-scoped session withdrawal.
+    /// This is untrusted and never authorizes access by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<SourceSessionIdentity>,
     #[serde(default)]
     pub trace_card: TraceCard,
     #[serde(default)]
@@ -1612,6 +1634,8 @@ pub struct RawTraceContribution {
     /// redaction after the same privacy checks as other contributed metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<SourceSessionIdentity>,
 }
 
 /// The pre-redaction event an emitter builds.
@@ -1937,6 +1961,7 @@ impl RawTraceContribution {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
         }
     }
 
@@ -2189,6 +2214,7 @@ impl RawTraceContribution {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
         }
     }
 }
@@ -4870,6 +4896,7 @@ impl DeterministicTraceRedactor {
             embedding_analysis: trace.embedding_analysis,
             value: trace.value,
             conversation_id: trace.conversation_id,
+            source_session: trace.source_session,
             trace_card,
             value_card,
             hindsight: None,
@@ -5115,6 +5142,8 @@ pub const METADATA_KEY_COLLISION_REFUSAL: &str = "metadata-redaction-key-collisi
 /// are contributor identity, and identity does not leave the machine for a
 /// third-party classifier. They are opaque identifiers, not prose, so the
 /// deterministic pass is the whole of what they need.
+/// `source_session` is likewise an opaque adapter-native identity. A classifier
+/// rewrite would break the stable key needed to honor withdrawal.
 ///
 /// Consulted only where `redact_keys` is false, i.e. inside fixed-schema
 /// objects. A dynamic map keyed `timestamp` by an importer is still scanned.
@@ -5135,6 +5164,7 @@ const TYPED_METADATA_FIELDS: &[&str] = &[
     "nearest_trace_ids",
     "parent_event_id",
     "scopes",
+    "source_session",
     "submission_id",
     "task_success",
     "timestamp",
@@ -10245,6 +10275,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -10977,6 +11008,45 @@ mod tests {
         assert_eq!(parsed.conversation_id, None);
     }
 
+    #[test]
+    fn source_session_identity_round_trips_without_debug_disclosure() {
+        let identity = super::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_private-123".into(),
+        };
+        let encoded = serde_json::to_value(&identity).unwrap();
+        assert_eq!(encoded["native_id"], "ses_private-123");
+        let decoded: super::SourceSessionIdentity = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, identity);
+        assert!(!format!("{identity:?}").contains("ses_private-123"));
+    }
+
+    #[tokio::test]
+    async fn source_session_survives_raw_redaction_and_legacy_envelopes_parse() {
+        use super::TraceRedactor;
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.source_session = Some(super::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_stable-123".into(),
+        });
+        let mut legacy_raw = serde_json::to_value(&raw).unwrap();
+        legacy_raw.as_object_mut().unwrap().remove("source_session");
+        let parsed_raw: super::RawTraceContribution = serde_json::from_value(legacy_raw).unwrap();
+        assert!(parsed_raw.source_session.is_none());
+        let redacted = super::DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            redacted.source_session.as_ref().unwrap().native_id,
+            "ses_stable-123"
+        );
+        let mut legacy = serde_json::to_value(&redacted).unwrap();
+        legacy.as_object_mut().unwrap().remove("source_session");
+        let parsed: super::TraceContributionEnvelope = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.source_session.is_none());
+    }
+
     /// A guard, not a formality: an emitter-declared id that reached a gate
     /// would be a spoofable input to admission.
     #[test]
@@ -11043,6 +11113,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -11366,6 +11437,10 @@ mod tests {
 
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("a note the contributor typed".to_string());
+        raw.source_session = Some(SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_private-123".into(),
+        });
         raw.contributor.pseudonymous_contributor_id = Some("pseudonymous-contributor-0001".into());
         raw.contributor.tenant_scope_ref = Some("tenant-scope-0001".into());
         raw.contributor.credit_account_ref = Some("credit-account-0001".into());
@@ -11386,6 +11461,7 @@ mod tests {
             "pseudonymous-contributor-0001",
             "tenant-scope-0001",
             "credit-account-0001",
+            "ses_private-123",
         ] {
             assert!(
                 !seen.iter().any(|t| t == identity),
@@ -11500,6 +11576,10 @@ mod tests {
         // those are contributor-chosen, not schema.
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("note".into());
+        raw.source_session = Some(SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_abc".into(),
+        });
         raw.ironclaw.engine_version = Some("1".into());
         raw.ironclaw.model_name = Some("model".into());
         raw.ironclaw
@@ -11562,6 +11642,7 @@ mod tests {
         found.remove("DYNAMIC");
 
         let expected: std::collections::BTreeSet<String> = [
+            "adapter",
             "canonical_summary_hash",
             "channel",
             "cluster_id",
@@ -11596,6 +11677,7 @@ mod tests {
             "model_name",
             "nearest_cluster_id",
             "nearest_trace_ids",
+            "native_id",
             "novelty_score",
             // `TraceFailureMode::Other`'s payload key.
             "other",
@@ -11612,6 +11694,7 @@ mod tests {
             "revocation_handle",
             "routing_metadata_included",
             "scopes",
+            "source_session",
             "structured_payload",
             "submission_id",
             "submission_score",
@@ -13045,6 +13128,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -13245,6 +13329,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
