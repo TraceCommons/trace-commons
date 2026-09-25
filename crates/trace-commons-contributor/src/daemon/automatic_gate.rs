@@ -30,7 +30,8 @@
 //!   evidence (#706), which an armed folder never prepares. **A runtime check,
 //!   never removed in code.** It stops applying only while the configured
 //!   ingest says it admits by account instead ([`AccountAdmission`]), which
-//!   #1020 reports as the `authority` on `/v1/account/contribution-status`.
+//!   #1020 reports on `/v1/account/contribution-status` (see
+//!   [`AccountAdmission::from_status`]).
 //!   That switch is per ingest replica and off whenever its environment
 //!   variable is missing, so it can revert on any redeploy; a client that had
 //!   dropped R3 for good would then send every armed session through the
@@ -117,12 +118,21 @@ pub enum AccountAdmission {
 }
 
 impl AccountAdmission {
-    /// From the `authority` label `/v1/account/contribution-status` returns
-    /// (#1020). `bounded` and `invited` are account admission;
-    /// `legacy_evidence`, and any label this build does not know, are not.
-    pub fn from_authority(authority: &str) -> Self {
+    /// From what `/v1/account/contribution-status` returns (#1020): its
+    /// `authority` label and its `ready` flag.
+    ///
+    /// Account admission only when the authority is `bounded` or `invited`
+    /// **and** `ready` is true. A `bounded` account whose allowance is spent
+    /// answers `ready: false`, and every send it made would be refused, so it
+    /// keeps R3 like `legacy_evidence` and any label this build does not know.
+    ///
+    /// One answer comes from one ingest replica, so it is provisional: the
+    /// caller re-reads it on every full pass and drops back to
+    /// `NotAdvertised` on any admission refusal from ingest. Nothing here
+    /// persists a lift.
+    pub fn from_status(authority: &str, ready: bool) -> Self {
         match authority {
-            "bounded" | "invited" => Self::Advertised,
+            "bounded" | "invited" if ready => Self::Advertised,
             _ => Self::NotAdvertised,
         }
     }
@@ -308,15 +318,23 @@ mod tests {
             with(AccountAdmission::NotAdvertised)
         );
 
-        for (label, expected) in [
-            ("bounded", AccountAdmission::Advertised),
-            ("invited", AccountAdmission::Advertised),
-            ("legacy_evidence", AccountAdmission::NotAdvertised),
-            ("", AccountAdmission::NotAdvertised),
-            ("Bounded", AccountAdmission::NotAdvertised),
-            ("something-newer", AccountAdmission::NotAdvertised),
+        use AccountAdmission::{Advertised, NotAdvertised};
+        for (label, ready, expected) in [
+            ("bounded", true, Advertised),
+            ("invited", true, Advertised),
+            // An exhausted allowance: ingest would refuse every send.
+            ("bounded", false, NotAdvertised),
+            ("invited", false, NotAdvertised),
+            ("legacy_evidence", true, NotAdvertised),
+            ("", true, NotAdvertised),
+            ("Bounded", true, NotAdvertised),
+            ("something-newer", true, NotAdvertised),
         ] {
-            assert_eq!(AccountAdmission::from_authority(label), expected, "{label}");
+            assert_eq!(
+                AccountAdmission::from_status(label, ready),
+                expected,
+                "{label} ready={ready}"
+            );
         }
         assert_eq!(AccountAdmission::default(), AccountAdmission::NotAdvertised);
     }
