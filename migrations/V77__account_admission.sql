@@ -94,7 +94,7 @@ GRANT SELECT (tenant_id, account_id, revoked_at)
     ON trace_account_invite_grants TO trace_account_admission_runtime;
 GRANT SELECT, INSERT, UPDATE ON trace_account_admission_budget,
     trace_account_admission_submissions TO trace_account_admission_runtime;
-GRANT SELECT (tenant_id,submission_id,anchor_hash,body_hash,status)
+GRANT SELECT (tenant_id,submission_id,anchor_hash,body_hash,status,receipt_hash,challenge_hash)
     ON trace_admission_submissions TO trace_account_admission_runtime;
 
 -- PostgreSQL row locks require UPDATE privilege. Keep it out of the ingest

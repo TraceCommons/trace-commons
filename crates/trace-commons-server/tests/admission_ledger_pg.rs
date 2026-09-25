@@ -63,6 +63,14 @@ async fn account_admission_atomicity_replay_and_revocation() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        runtime
+            .legacy_admission_record(&tenant, Uuid::new_v4())
+            .await
+            .unwrap(),
+        None,
+        "minimal account runtime can inspect an absent legacy identity"
+    );
     admin
         .execute(
             "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
@@ -374,6 +382,16 @@ async fn account_admission_atomicity_replay_and_revocation() {
     admin.execute("INSERT INTO trace_admission_global_budget(singleton,cost_limit,cost_bound_used) VALUES(TRUE,100,0)", &[]).await.unwrap();
     admin.execute("INSERT INTO trace_admission_accounts(tenant_id,anchor_hash,attempt_limit,cost_limit) VALUES($1,$2,10,100)", &[&tenant,&legacy_anchor]).await.unwrap();
     admin.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','released',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&legacy_submission,&legacy_anchor,&legacy_body,&Uuid::new_v4()]).await.unwrap();
+    let stored_legacy = restarted
+        .legacy_admission_record(&tenant, legacy_submission)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_legacy.anchor_hash, legacy_anchor);
+    assert_eq!(stored_legacy.body_hash, legacy_body);
+    assert_eq!(stored_legacy.status, "released");
+    assert_eq!(stored_legacy.receipt_hash, None);
+    assert_eq!(stored_legacy.challenge_hash, None);
     let first_legacy_lease = Uuid::new_v4();
     assert_eq!(
         restarted
