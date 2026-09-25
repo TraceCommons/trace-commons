@@ -13,6 +13,7 @@ pub mod privacy;
 pub mod public_run;
 mod redaction;
 pub mod trace_contribution;
+pub mod witness_provenance;
 
 /// Response header carrying a rotated bearer for native account clients.
 pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";
