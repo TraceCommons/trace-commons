@@ -56,17 +56,20 @@ CREATE TABLE trace_account_trust_facts (
 );
 ALTER TABLE trace_account_trust_facts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_account_trust_facts FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_account_trust_facts;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_account_trust_facts
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
 ALTER TABLE trace_account_admission_budget ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_account_admission_budget FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_account_admission_budget;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_account_admission_budget
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 ALTER TABLE trace_account_admission_submissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_account_admission_submissions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_account_admission_submissions;
 CREATE POLICY trace_corpus_tenant_isolation ON trace_account_admission_submissions
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
