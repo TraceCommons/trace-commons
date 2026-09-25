@@ -804,13 +804,13 @@ async fn admission_pg_admin() -> Arc<PgBackend> {
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
     assert!(parsed.path().starts_with("/admission_test"));
     let admin = PgBackend::new(&DatabaseConfig {
-        url: SecretString::from(url),
+        url: SecretString::from(url.clone()),
         pool_size: 4,
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: None,
+        login_resolver_url: Some(SecretString::from(url.clone())),
         gate_driver_url: None,
         pii_backstop_driver_url: None,
-        invite_registry_url: None,
+        invite_registry_url: Some(SecretString::from(url)),
     })
     .await
     .unwrap();
@@ -1094,9 +1094,63 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         .unwrap()
         .get(0);
     let used_before_invite: i64 = client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
-    client.execute("UPDATE trace_account_trust SET authority='invited',trust_version=trust_version+1 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
-    let invite_hash = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
-    client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,2)", &[&tenant,&account_id,&invite_hash]).await.unwrap();
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    db.insert_invite_grant(trace_commons_server::db::InviteGrantWrite {
+        invite_subject_hash: invite_hash.clone(),
+        policy_label: "bounded-elevation".into(),
+        tenant_mode: trace_commons_server::trace_invite_registry::InviteTenantMode::Fixed,
+        fixed_tenant_id: Some(tenant.clone()),
+        tenant_template_id: None,
+        policy_version: "v1".into(),
+        allowed_consent_scopes: vec!["model_training".into()],
+        allowed_uses: vec!["research".into()],
+        max_uses: 1,
+        expires_at: None,
+        issuance_source: "operator".into(),
+        issued_by_label: None,
+        credential_binding_hash: None,
+        note_label: None,
+    })
+    .await
+    .unwrap();
+    let redemption_key = Uuid::new_v4();
+    let redemption = db
+        .redeem_account_invite(&tenant, account_id, &invite_hash, redemption_key)
+        .await
+        .unwrap();
+    assert!(matches!(
+        redemption,
+        trace_commons_server::db::AccountInviteRedemption::Invited { trust_version: 2 }
+    ));
+    assert_eq!(
+        db.redeem_account_invite(&tenant, account_id, &invite_hash, redemption_key)
+            .await
+            .unwrap(),
+        redemption
+    );
+    let authority: String = client
+        .query_one(
+            "SELECT authority FROM trace_account_trust WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        authority, "invited",
+        "real bounded-first redemption elevates authority"
+    );
+    let mut status_request = axum::http::Request::builder()
+        .uri("/v1/account/contribution-status")
+        .body(Body::empty())
+        .unwrap();
+    status_request
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    let status_bytes = require_ok(app(state.clone()).oneshot(status_request).await.unwrap()).await;
+    let status_json: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["authority"], "invited");
+    assert_eq!(status_json["ready"], true);
     let mut invited = sample_envelope().await;
     make_metadata_only_low_risk(&mut invited);
     assert_eq!(
@@ -1116,4 +1170,13 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         total, used_before_invite,
         "invited submission bypasses cumulative debit"
     );
+    let consumed: i32 = client
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash=$1",
+            &[&invite_hash],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(consumed, 1);
 }
