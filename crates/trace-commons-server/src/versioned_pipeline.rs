@@ -2947,12 +2947,12 @@ impl PipelineService {
         bundle
             .package
             .manifest
-            .require_pinned(&result.decision.awards)
+            .require_pinned(result.decision.awards())
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
         // M4: a Trace Credit award must fit the ledger's signed 64-bit
         // microcredit column; refuse one that does not here, before any
         // artifact is stored, rather than at the database CHECK.
-        ensure_trace_credit_awards_fit_the_ledger(&result.decision.awards)?;
+        ensure_trace_credit_awards_fit_the_ledger(result.decision.awards())?;
         let lease_token = required_lease_token(run)?;
         let command_ref = match &command {
             None => None,
@@ -2997,7 +2997,7 @@ impl PipelineService {
             .commit_score(
                 run,
                 StoredPhaseResult::from_result(Phase::Score, &result)?,
-                &result.decision.awards,
+                result.decision.awards(),
                 command_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
                 neighbor_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
                 &self.settlement_adapters.payout_rails(),
@@ -3055,8 +3055,8 @@ impl PipelineService {
         let score_evaluation = serde_json::from_value::<ScoreEvaluation>(score_outcome.evaluation)
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
         anyhow::ensure!(
-            score_decision.awards == score_evidence.fixed_awards
-                && score_decision.awards == score_evaluation.awards,
+            *score_decision.awards() == score_evidence.fixed_awards
+                && *score_decision.awards() == score_evaluation.awards,
             "score_outcome_invalid"
         );
 
@@ -3067,7 +3067,11 @@ impl PipelineService {
             .store
             .list_settlements(&run.tenant_id, run.run_id)
             .await?;
-        ensure_operations_match_committed_awards(run.run_id, &score_decision.awards, &settlements)?;
+        ensure_operations_match_committed_awards(
+            run.run_id,
+            score_decision.awards(),
+            &settlements,
+        )?;
 
         // Step 3: the submission-operability guard, read fresh.
         let mut guard = self.submission_guard(&run).await?;
@@ -3100,7 +3104,7 @@ impl PipelineService {
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
                 for operation in result.decision.settlement_operations() {
                     let award = score_decision
-                        .awards
+                        .awards()
                         .iter()
                         .find(|award| award.instrument_id() == operation.instrument_id())
                         .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?;

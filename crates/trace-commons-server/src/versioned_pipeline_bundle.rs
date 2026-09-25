@@ -388,7 +388,7 @@ struct FixedIndexSpec {
 }
 
 pub struct FixedScorePolicy {
-    awards: InstrumentAwards,
+    decision: ScoreDecision,
     index: Option<FixedIndexSpec>,
 }
 
@@ -403,7 +403,7 @@ fn settle_invalid<E>(_: E) -> PolicyError {
 #[async_trait]
 impl ScorePolicy for FixedScorePolicy {
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
-        let mut evidence = ScoreEvidence::fixed(self.awards.clone());
+        let mut evidence = ScoreEvidence::fixed(self.decision.awards().clone());
         let command = match &self.index {
             None => None,
             Some(spec) => {
@@ -454,20 +454,18 @@ impl ScorePolicy for FixedScorePolicy {
                 Some(command)
             }
         };
-        let rule_id = if self.awards.is_empty() {
+        let rule_id = if self.decision.awards().is_empty() {
             "minimal_fixed_zero_v1"
         } else {
             "minimal_fixed_positive_v1"
         };
         ScoreOutput::new(
             PhaseResult {
-                decision: ScoreDecision {
-                    awards: self.awards.clone(),
-                },
+                decision: self.decision.clone(),
                 evidence,
                 evaluation: ScoreEvaluation {
                     rule_id: rule_id.to_string(),
-                    awards: self.awards.clone(),
+                    awards: self.decision.awards().clone(),
                 },
             },
             command,
@@ -501,12 +499,12 @@ impl SettlePolicy for FixedSettlePolicy {
             ),
         };
         let operations =
-            settlement_operations(input.run_id, &input.score.awards).map_err(settle_invalid)?;
+            settlement_operations(input.run_id, input.score.awards()).map_err(settle_invalid)?;
         let decision =
             SettleDecision::new(membership, &input.score, operations).map_err(settle_invalid)?;
         let evidence = SettleEvidence::operations(
             input.index_command.is_some(),
-            u32::try_from(input.score.awards.iter().len()).map_err(settle_invalid)?,
+            u32::try_from(input.score.awards().iter().len()).map_err(settle_invalid)?,
         );
         Ok(PhaseResult {
             decision,
@@ -660,9 +658,7 @@ impl MinimalPolicyBundle {
                 })
                 .collect::<Result<Vec<_>, ContractError>>()?,
         )?;
-        package
-            .manifest
-            .require_pinned(&awards)
+        let decision = ScoreDecision::for_bundle(&package.manifest, awards)
             .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
 
         // The scorer is checked above to prove it matches the named
@@ -673,7 +669,7 @@ impl MinimalPolicyBundle {
             admission: Arc::new(MinimalAdmissionPolicy),
             review: Arc::new(MinimalReviewPolicy),
             score: Arc::new(FixedScorePolicy {
-                awards,
+                decision,
                 index: config.include_index.then(|| FixedIndexSpec {
                     embedder,
                     index_reader,
