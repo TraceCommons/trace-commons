@@ -698,8 +698,10 @@ impl BundleManifest {
     }
 
     /// Refuses an award set that names an instrument this bundle does not
-    /// pin. A runner applies this to Score's awards before it commits the
-    /// Score outcome, so no settlement starts for an unpinned instrument.
+    /// pin. `ScoreDecision::for_bundle` applies it, so no Score decision is
+    /// built with an unpinned award. A policy chooses the manifest that it
+    /// passes, so a runner also applies this with the run's bound manifest
+    /// before it commits the Score outcome.
     pub fn require_pinned(&self, awards: &InstrumentAwards) -> Result<(), ContractError> {
         if awards
             .iter()
@@ -969,9 +971,40 @@ pub enum ReviewDecision {
     Rejected { reason: ReasonCode },
 }
 
+/// Score's award set. It has no public field, so a policy builds it only
+/// through `for_bundle`, which refuses an award for an instrument that the
+/// bundle does not pin.
+///
+/// ```compile_fail
+/// use trace_commons_gate_api::pipeline::{InstrumentAwards, ScoreDecision};
+///
+/// let decision = ScoreDecision {
+///     awards: InstrumentAwards::default(),
+/// };
+/// ```
+///
+/// Loading a stored decision does not check pins, because a committed Score
+/// outcome is loaded without its manifest. Its awards were checked when it
+/// was built.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScoreDecision {
-    pub awards: InstrumentAwards,
+    awards: InstrumentAwards,
+}
+
+impl ScoreDecision {
+    /// Builds Score's decision under a bundle. Every award must name an
+    /// instrument that `manifest` pins.
+    pub fn for_bundle(
+        manifest: &BundleManifest,
+        awards: InstrumentAwards,
+    ) -> Result<Self, ContractError> {
+        manifest.require_pinned(&awards)?;
+        Ok(Self { awards })
+    }
+
+    pub fn awards(&self) -> &InstrumentAwards {
+        &self.awards
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3971,10 +4004,40 @@ mod tests {
             vec![award("storage_rebate", 7)],
             vec![award("trace_credit", 3), award("storage_rebate", 7)],
         ] {
+            let unpinned = InstrumentAwards::new(unpinned).unwrap();
             assert_eq!(
-                manifest.require_pinned(&InstrumentAwards::new(unpinned).unwrap()),
+                manifest.require_pinned(&unpinned),
+                Err(ContractError::UnpinnedInstrument)
+            );
+            // A Score decision is built only under a manifest, so an unpinned
+            // award never reaches Settle.
+            assert_eq!(
+                ScoreDecision::for_bundle(&manifest, unpinned),
                 Err(ContractError::UnpinnedInstrument)
             );
         }
+
+        let decision = ScoreDecision::for_bundle(&manifest, pinned.clone()).unwrap();
+        assert_eq!(decision.awards(), &pinned);
+        assert!(
+            ScoreDecision::for_bundle(&manifest, InstrumentAwards::default())
+                .unwrap()
+                .awards()
+                .is_empty()
+        );
+
+        // A committed decision loads without its manifest.
+        let stored = serde_json::to_value(&decision).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"awards": [
+                {"instrument_id": "bat", "atomic_units": "1000000000000000000"},
+                {"instrument_id": "trace_credit", "atomic_units": "3"},
+            ]})
+        );
+        assert_eq!(
+            serde_json::from_value::<ScoreDecision>(stored).unwrap(),
+            decision
+        );
     }
 }

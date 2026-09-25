@@ -96,7 +96,7 @@ enum ReviewDecision {
 }
 
 struct ScoreDecision {
-    awards: InstrumentAwards,
+    awards: InstrumentAwards, // built only by ScoreDecision::for_bundle
 }
 
 struct InstrumentAward {
@@ -295,9 +295,15 @@ applies, so a manifest with a malformed descriptor also fails to load. A
 reader that uses a loaded manifest's descriptors without its bundle identifier
 gets only valid descriptors.
 
-An award for an instrument that the bound bundle does not pin is refused. The
-runner checks Score's awards with `BundleManifest::require_pinned` before the
-Score outcome commits, so no settlement starts for an unpinned instrument.
+An award for an instrument that the bound bundle does not pin is refused.
+`ScoreDecision` has no public field. A Score policy builds it with
+`ScoreDecision::for_bundle(&manifest, awards)`, which refuses an award for an
+instrument that the manifest does not pin, and `SettleDecision::new` takes
+only a `ScoreDecision`. A stored decision loads without a manifest, because a
+committed Score outcome was checked when it was built. A policy chooses the
+manifest that it passes, so the runner also checks Score's awards against the
+run's bound manifest with `BundleManifest::require_pinned` before the Score
+outcome commits. No settlement starts for an unpinned instrument.
 
 A descriptor never changes for an instrument identifier. A change of
 contract, network, kind, or `decimals` is a new instrument with a new
@@ -570,16 +576,16 @@ Tests use small policy implementations through the production trait:
 
 ```rust
 struct FixedScorePolicy {
-    awards: InstrumentAwards,
+    // Built once, when the bundle loads, with
+    // `ScoreDecision::for_bundle(&manifest, awards)`.
+    decision: ScoreDecision,
 }
 
 #[async_trait]
 impl ScorePolicy for FixedScorePolicy {
     async fn execute(&self, _input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let result = PhaseResult {
-            decision: ScoreDecision {
-                awards: self.awards.clone(),
-            },
+            decision: self.decision.clone(),
             evidence: ScoreEvidence::Fixed,
             evaluation: ScoreEvaluation::FixedAmount,
         };

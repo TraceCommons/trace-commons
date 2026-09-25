@@ -599,6 +599,9 @@ and shadow comparison. No active index mutation can occur.
 - Each award MUST name an instrument that the bound bundle pins. The runner
   MUST refuse an award for an unpinned instrument before the Score outcome
   commits.
+- A Score decision MUST be built only through a constructor that takes the
+  bundle manifest and refuses an award for an unpinned instrument. A stored
+  Score decision MUST load without a manifest.
 - An empty collection MUST remain distinct from an incomplete Score phase.
 - Trace Credit MUST use the `trace_credit` instrument.
 - One Trace Credit MUST equal 1,000,000 microcredits.
@@ -609,6 +612,8 @@ and shadow comparison. No active index mutation can occur.
 deterministic ordering, duplicate identifiers, maximum values, overflow,
 negative source input, and excess-precision Trace Credit conversion. Load
 amounts above `u64::MAX`, and refuse a signed, zero-padded, or numeric amount.
+Build a Score decision with an award for an unpinned instrument. It must be
+refused.
 
 ### SCR-004: Score persistence and instrument operations
 
