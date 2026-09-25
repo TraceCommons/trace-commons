@@ -107,6 +107,62 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
     seed_account(&admin, &tenant_a, a, true).await;
     seed_account(&admin, &tenant_b, b, true).await;
     seed_account(&admin, &tenant_a, c, false).await;
+    // V77 broadens this V75 constraint when account admission is installed.
+    // Reproduce that later schema here to test redemption of a bounded account
+    // without pulling the account admission migration into this foundation PR.
+    admin
+        .batch_execute(
+            "ALTER TABLE trace_account_trust DROP CONSTRAINT trace_account_trust_authority_check;
+        ALTER TABLE trace_account_trust ADD CONSTRAINT trace_account_trust_authority_check
+        CHECK (authority IN ('bounded', 'invited'));",
+        )
+        .await
+        .unwrap();
+    let bounded = Uuid::new_v4();
+    seed_account(&admin, &tenant_a, bounded, true).await;
+    admin
+        .execute(
+            "INSERT INTO trace_account_trust(tenant_id,account_id,authority,trust_version)
+        VALUES($1,$2,'bounded',1)",
+            &[&tenant_a, &bounded],
+        )
+        .await
+        .unwrap();
+    let promotion_invite = seed_invite(&admin, &format!("INVITE-{}", Uuid::new_v4()), 1).await;
+    let promotion_key = Uuid::new_v4();
+    let promoted = runtime
+        .redeem_account_invite(&tenant_a, bounded, &promotion_invite, promotion_key)
+        .await
+        .unwrap();
+    assert_eq!(promoted, Outcome::Invited { trust_version: 2 });
+    let promoted_row = admin
+        .query_one(
+            "SELECT authority,trust_version FROM trace_account_trust
+        WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant_a, &bounded],
+        )
+        .await
+        .unwrap();
+    assert_eq!(promoted_row.get::<_, String>(0), "invited");
+    assert_eq!(promoted_row.get::<_, i64>(1), 2);
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, bounded, &promotion_invite, promotion_key)
+            .await
+            .unwrap(),
+        promoted,
+        "replay returns the same promotion"
+    );
+    let promotion_uses: i32 = admin
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants
+        WHERE invite_subject_hash=$1",
+            &[&promotion_invite],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(promotion_uses, 1, "replay must not consume a second use");
     let first = seed_invite(&admin, &format!("INVITE-{}", Uuid::new_v4()), 1).await;
     let same_key = Uuid::new_v4();
     let (left, right) = tokio::join!(
