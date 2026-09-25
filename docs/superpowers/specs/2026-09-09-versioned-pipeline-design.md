@@ -616,6 +616,7 @@ pipeline_runs
 pipeline_run_settlements
   tenant_id, run_id, instrument_id
   atomic_units NUMERIC(39,0) CHECK (atomic_units > 0)
+  CHECK (atomic_units <= 340282366920938463463374607431768211455)
   CHECK (instrument_id <> 'trace_credit'
          OR atomic_units <= 9223372036854775807)
   operation_ref_hash, result_ref_hash nullable
@@ -650,11 +651,14 @@ first; both count as complete for the Settle outcome.
 `atomic_units` is `NUMERIC(39,0)`. Its 39 digits hold every `u128` value.
 `BIGINT` is signed 64-bit and would refuse any token amount above `i64::MAX`.
 The positivity check matches the rule that only a positive award creates a
-row. A reader loads the value through `AtomicUnits`, which refuses a value
-above `u128::MAX`. The second check
-holds `trace_credit` rows to `i64::MAX` (9223372036854775807), the range of
-the `BIGINT` credit ledger. The database enforces the ledger bound, and not
-only the Rust contract.
+row. `NUMERIC(39,0)` also holds values up to 10^39 - 1, above `u128::MAX`. A
+reader loads the value through `AtomicUnits`, which refuses a value above
+`u128::MAX`, so the second check holds every row to `u128::MAX`
+(340282366920938463463374607431768211455). The database then refuses a value
+above `u128::MAX` when it is written. Without the check, the row would be
+stored and its settlement leg could not be read. The third check holds `trace_credit` rows to
+`i64::MAX` (9223372036854775807), the range of the `BIGINT` credit ledger. The
+database enforces both bounds, and not only the Rust contract.
 
 Existing credit events, holds, batches, and outbox rows stay the Trace Credit
 and payout records. A `trace_credit` settlement row links its credit event
