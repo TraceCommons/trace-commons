@@ -22,6 +22,7 @@ use trace_commons_gate_api::{
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
     RecordedTraceContributionOptions, ResidualPiiRisk, TraceContributionEnvelope, TraceRedactor,
+    retention_policy_for_trace,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, postgres::PgBackend};
@@ -1520,6 +1521,64 @@ async fn receipt_replay_and_conflict_are_exact() {
 /// `submission_id`. This test reproduces that shape: it seeds an unrelated
 /// prior submission, tombstones it by the redaction hash the new envelope
 /// carries, and submits the new envelope under a different submission id.
+/// I6: the receipt derives the submission's retention policy and expiry on
+/// the server, as the legacy path does (`retention_policy_for_trace` over
+/// the envelope's allowed uses and consent, and `received_at +
+/// max_age_days`), and never stores the retention policy the envelope
+/// itself asserts.
+#[tokio::test]
+async fn receipt_derives_retention_and_expiry_on_the_server() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("retention-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.trace_card.retention_policy = "client_asserted_keep_forever".to_string();
+    let expected = retention_policy_for_trace(&env);
+    assert_ne!(expected.name, env.trace_card.retention_policy);
+    let max_age_days = expected
+        .max_age_days
+        .expect("the fixture's allowed uses carry a bounded retention policy");
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(_) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT retention_policy_id, received_at, expires_at
+               FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let retention_policy_id: String = row.get("retention_policy_id");
+    let received_at: chrono::DateTime<chrono::Utc> = row.get("received_at");
+    let expires_at: Option<chrono::DateTime<chrono::Utc>> = row.get("expires_at");
+    assert_eq!(retention_policy_id, expected.name);
+    assert_eq!(
+        expires_at,
+        Some(received_at + chrono::Duration::days(i64::from(max_age_days)))
+    );
+}
+
 #[tokio::test]
 async fn tombstoned_content_is_refused_before_the_store() {
     let Some(backend) = runtime_backend(4).await else {

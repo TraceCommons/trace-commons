@@ -24,7 +24,7 @@ use trace_commons_gate_api::pipeline::{
     SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef,
 };
 use trace_commons_protocol::trace_contribution::{
-    ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope,
+    ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope, retention_policy_for_trace,
 };
 use uuid::Uuid;
 
@@ -2541,6 +2541,17 @@ impl PipelineService {
         let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
 
         // 10. Durable records (no pipeline_receipt_ownership insert -- PR 5).
+        // Retention is derived on the server, as the legacy receipt derives
+        // it (`retention_policy_for_trace` over the envelope's allowed uses
+        // and consent; expiry `received_at + max_age_days`), never taken from
+        // the envelope's own `trace_card.retention_policy`. `received_at` is
+        // the column default, this transaction's `NOW()`, read here so the
+        // expiry is anchored to the exact stored receipt time.
+        let retention_policy = retention_policy_for_trace(envelope);
+        let received_at: DateTime<Utc> = tx.query_one("SELECT NOW()", &[]).await?.get(0);
+        let expires_at = retention_policy
+            .max_age_days
+            .map(|days| received_at + Duration::days(i64::from(days)));
         let submission = TraceSubmissionWrite {
             tenant_id: tenant_id.to_string(),
             submission_id: envelope.submission_id,
@@ -2552,7 +2563,7 @@ impl PipelineService {
             consent_policy_version: envelope.consent.policy_version.clone(),
             consent_scopes: enum_strings(&envelope.consent.scopes)?,
             allowed_uses: enum_strings(&envelope.trace_card.allowed_uses)?,
-            retention_policy_id: envelope.trace_card.retention_policy.clone(),
+            retention_policy_id: retention_policy.name,
             status: TraceCorpusStatus::Received,
             privacy_risk: enum_string(&envelope.privacy.residual_pii_risk)?,
             residual_risk_basis: Some(safe_residual_risk_basis_labels(request.residual_risk_basis)),
@@ -2563,7 +2574,7 @@ impl PipelineService {
             submission_score: None,
             credit_points_pending: None,
             credit_points_final: None,
-            expires_at: None,
+            expires_at,
         };
         let object_ref = TraceObjectRefWrite {
             object_ref_id,
