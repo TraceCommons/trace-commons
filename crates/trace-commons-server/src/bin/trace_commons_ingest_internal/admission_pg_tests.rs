@@ -380,12 +380,6 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             ..Default::default()
         },
     );
-    raw.source_session = Some(
-        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
-            adapter: "opencode".into(),
-            native_id: format!("test-{}", Uuid::new_v4().simple()),
-        },
-    );
     const METADATA_SENTINEL: &str = "witness-sentinel@example.com";
     raw.conversation_id = Some(METADATA_SENTINEL.into());
     raw.ironclaw
@@ -611,12 +605,6 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
 
     let mut released = sample_envelope().await;
     make_metadata_only_low_risk(&mut released);
-    released.source_session = Some(
-        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
-            adapter: "opencode".into(),
-            native_id: format!("test-{}", Uuid::new_v4().simple()),
-        },
-    );
     let released_body = serde_json::to_vec(&released).unwrap();
     let released_hash = hash_hex(&released_body);
     client.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','reserved',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&released.submission_id,&anchor,&released_hash,&Uuid::new_v4()]).await.unwrap();
@@ -1007,12 +995,6 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
-    envelope.source_session = Some(
-        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
-            adapter: "opencode".into(),
-            native_id: format!("test-{}", Uuid::new_v4().simple()),
-        },
-    );
     let body = serde_json::to_vec(&envelope).unwrap();
     assert_eq!(
         post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new())
@@ -1071,12 +1053,6 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     });
     let mut fixed_first = sample_envelope().await;
     make_metadata_only_low_risk(&mut fixed_first);
-    fixed_first.source_session = Some(
-        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
-            adapter: "opencode".into(),
-            native_id: format!("test-{}", Uuid::new_v4().simple()),
-        },
-    );
     assert_eq!(
         post(
             state.clone(),
@@ -1090,12 +1066,6 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     );
     let mut fixed_second = sample_envelope().await;
     make_metadata_only_low_risk(&mut fixed_second);
-    fixed_second.source_session = Some(
-        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
-            adapter: "opencode".into(),
-            native_id: format!("test-{}", Uuid::new_v4().simple()),
-        },
-    );
     let fixed_refusal = post(
         state.clone(),
         "/v1/traces",
@@ -1129,12 +1099,6 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,2)", &[&tenant,&account_id,&invite_hash]).await.unwrap();
     let mut invited = sample_envelope().await;
     make_metadata_only_low_risk(&mut invited);
-    invited.source_session = Some(
-        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
-            adapter: "opencode".into(),
-            native_id: format!("test-{}", Uuid::new_v4().simple()),
-        },
-    );
     assert_eq!(
         post(
             state.clone(),
