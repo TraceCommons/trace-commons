@@ -81,6 +81,16 @@ pub const GATE_NOT_PINNED_HELP: &str = "This device isn't connected yet, so this
 /// No shell renders it yet; it crosses now so that every shell has it before
 /// the screen that uses it is built, rather than each shell writing its own.
 ///
+/// **Shown only where a model pass runs on every automatic session.** On the
+/// client the model pass is optional: it runs with `pii_filter = near-ai` or
+/// `TRACE_PRIVACY_FILTER_BACKEND` set, and on a default config only the fixed
+/// patterns run, which would make the second sentence untrue. The spec's R1
+/// makes the witness's certified full pipeline a precondition of automatic
+/// contribution, so a shell renders this only on the grant screen for a route
+/// where that holds, never as a description of what a default config does.
+/// Until R1 can be met (the gate in `daemon::automatic_gate`), no route
+/// qualifies and no shell shows it.
+///
 /// The model clause is conditional on purpose -- "when a model recognises
 /// it", not "by a model". [`AUTO_SCRUB_LIMIT`] says the model is not
 /// reliable, and an unconditional promise here would contradict it two lines
