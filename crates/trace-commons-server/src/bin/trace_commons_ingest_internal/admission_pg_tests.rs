@@ -681,7 +681,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     // independent provider policy, with no legacy environment lookup.
     raw.submission_id = Uuid::new_v4();
     raw.trace_id = Uuid::new_v4();
-    let (fresh, fresh_evidence, fresh_signature) = witness
+    let (fresh, mut fresh_evidence, _) = witness
         .witness_admission_contribution(witness_service::WitnessContributionRequest {
             raw_contribution: raw,
             granted: witness_service::GrantedConsent {
@@ -694,6 +694,10 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             offered_receipt: Some(receipt),
         })
         .await
+        .unwrap();
+    fresh_evidence.expires_at = Utc::now().timestamp() + 5;
+    let fresh_signature = signer
+        .sign_eip191(&fresh_evidence.signing_bytes().unwrap())
         .unwrap();
     let account_providers = state.admission.as_ref().unwrap().providers.clone();
     Arc::make_mut(&mut state)
@@ -734,6 +738,42 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     let authenticated = authenticate_ctx(&state, &offered).unwrap();
     let fresh_envelope: TraceContributionEnvelope =
         serde_json::from_slice(&fresh.envelope_bytes).unwrap();
+    let mut first_use_expired = fresh_evidence.clone();
+    first_use_expired.issued_at = Utc::now().timestamp() - 120;
+    first_use_expired.expires_at = Utc::now().timestamp() - 60;
+    let mut expired_headers = offered.clone();
+    expired_headers.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&first_use_expired)
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    expired_headers.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        signer
+            .sign_eip191(&first_use_expired.signing_bytes().unwrap())
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            expired_headers
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "first use still requires unexpired evidence"
+    );
+    let first_use_rows: i64 = client.query_one("SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id]).await.unwrap().get(0);
+    assert_eq!(
+        first_use_rows, 0,
+        "refused first use creates no account binding or charge"
+    );
     let mut attempt = admission::reserve(
         &state,
         &authenticated,
@@ -791,6 +831,159 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         charged, 0,
         "pre-processing release refunds even after revocation"
     );
+    // The exact signed evidence accepted above now expires. Released,
+    // completed, and crashed leases all retain account/body binding.
+    let wait = (fresh_evidence.expires_at - Utc::now().timestamp() + 1).max(0) as u64;
+    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    Arc::make_mut(&mut state).account_admission.as_mut().unwrap().policy = trace_commons_server::account_trust::parse_bounded_policy(
+        r#"{"version":"account-retry-wave2","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["account-retry-wave2"]).unwrap();
+    let account_receipt = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            offered.clone(),
+        )
+        .await,
+    )
+    .await;
+    let spent = || async {
+        client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1", &[&tenant]).await.unwrap().get::<_,i64>(0)
+    };
+    assert_eq!(spent().await, 10, "released recovery charges once");
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                fresh.envelope_bytes.clone(),
+                offered.clone()
+            )
+            .await
+        )
+        .await,
+        account_receipt,
+        "completed account retry accepts its original expired evidence"
+    );
+    assert_eq!(spent().await, 10, "completed retry has zero debit");
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                fresh.envelope_bytes.clone(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        account_receipt,
+        "headerless completed retry remains valid"
+    );
+    for (status, expected) in [("reserved", 20i64), ("processing", 30i64)] {
+        client.execute("UPDATE trace_account_admission_submissions SET status=$3,lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&status]).await.unwrap();
+        assert_eq!(
+            require_ok(
+                post(
+                    state.clone(),
+                    "/v1/traces",
+                    fresh.envelope_bytes.clone(),
+                    offered.clone()
+                )
+                .await
+            )
+            .await,
+            account_receipt,
+            "expired account lease recovers with authentic stale evidence"
+        );
+        assert_eq!(
+            spent().await,
+            expected,
+            "recovery retains old work charge and reserves once"
+        );
+    }
+    let mut altered = fresh.envelope_bytes.clone();
+    altered.push(b' ');
+    assert_eq!(
+        post(state.clone(), "/v1/traces", altered, offered.clone())
+            .await
+            .status(),
+        StatusCode::CONFLICT,
+        "stored UUID rejects different body bytes"
+    );
+    let foreign_account = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &foreign_account],
+        )
+        .await
+        .unwrap();
+    client.execute("UPDATE trace_account_admission_submissions SET account_id=$3 WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&foreign_account]).await.unwrap();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            offered.clone()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "foreign account binding cannot be resumed"
+    );
+    client.execute("UPDATE trace_account_admission_submissions SET account_id=$3 WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&account]).await.unwrap();
+    let mut invalid_signature = offered.clone();
+    invalid_signature.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        HeaderValue::from_static("invalid"),
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            invalid_signature
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "completed replay never ignores an invalid offered signature"
+    );
+    for wrong_anchor in [false, true] {
+        let mut mismatched = fresh_evidence.clone();
+        if wrong_anchor {
+            mismatched.account_anchor_sha256 = "f".repeat(64);
+        } else {
+            mismatched.artifact_sha256 = "e".repeat(64);
+        }
+        let mut mismatched_headers = offered.clone();
+        mismatched_headers.insert(
+            trace_commons_protocol::admission::EVIDENCE_HEADER,
+            serde_json::to_string(&mismatched).unwrap().parse().unwrap(),
+        );
+        mismatched_headers.insert(
+            trace_commons_protocol::admission::SIGNATURE_HEADER,
+            signer
+                .sign_eip191(&mismatched.signing_bytes().unwrap())
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            post(
+                state.clone(),
+                "/v1/traces",
+                fresh.envelope_bytes.clone(),
+                mismatched_headers
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN,
+            "signed proof must retain account and exact body binding"
+        );
+    }
+    assert_eq!(spent().await, 30, "conflicts and bad proofs never debit");
     offered.remove(trace_commons_protocol::admission::SIGNATURE_HEADER);
     assert!(
         admission::reserve(

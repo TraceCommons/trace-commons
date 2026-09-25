@@ -2487,7 +2487,7 @@ pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
 /// weight. See #810.
 ///
 /// **Keyed off [`AdmissionRefusal`] rather than off re-typed strings, and
-/// that is the point.** These six labels reach a queue entry's
+/// that is the point.** These seven labels reach a queue entry's
 /// `reason_label` in the server's wire spelling -- `admission_refused`, with
 /// an underscore -- while `daemon::health`'s constants for the same events
 /// are hyphenated. A table written against the wrong spelling would match

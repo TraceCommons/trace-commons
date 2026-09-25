@@ -1409,6 +1409,13 @@ impl Database for PgBackend {
         )
         .await
     }
+    async fn account_admission_record(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionRecord>, DatabaseError> {
+        PgBackend::account_admission_record(self, tenant, submission).await
+    }
     async fn reserve_account_admission(
         &self,
         request: &crate::admission_ledger::AccountAdmissionReservation,

@@ -520,6 +520,16 @@ credentials and adds two of its own. See
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` | R when enabled | (none) | Reviewed policy version allowed at startup. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule: none`. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS` | R when enabled | (none) | Positive processing lease, at most 86400 seconds. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_PROVIDER_SIGNERS` | See below | (none) | Comma-separated trusted provider-TEE signer keys. At least this or gateway signers must be configured. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_GATEWAY_SIGNERS` | See below | (none) | Comma-separated trusted gateway signer keys; optional when provider signers are configured. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_ACCEPTED_MODELS` | R with provider signers | (none) | Comma-separated accepted provider-TEE models. Not required for gateway-only evidence. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_MIN_REQUEST_BYTES` | R for independent evidence policy | (none) | Explicit positive minimum request-byte floor. |
+
+If any `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_*` variable is set, only that
+namespace is used: a partial policy fails closed, without borrowing legacy values.
+With none set, a complete legacy `TRACE_COMMONS_ADMISSION_*` evidence policy is
+required instead. Evidence verification is required whenever account admission
+is enabled; the legacy minimum-byte setting does not toggle it on or off.
 
 See [account trust](./account-trust.md) for the activation and response contract.
 

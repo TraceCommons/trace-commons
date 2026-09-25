@@ -119,8 +119,6 @@ GRANT SELECT (tenant_id, account_id, principal_ref, unlinked_at), UPDATE (unlink
     ON trace_account_principals TO trace_account_admission_guard;
 GRANT SELECT (tenant_id, account_id, revoked_at), UPDATE (revoked_at)
     ON trace_account_invite_grants TO trace_account_admission_guard;
-GRANT SELECT (tenant_id, account_id, principal_ref, unlinked_at)
-    ON trace_account_principals TO trace_account_admission_guard;
 GRANT SELECT (tenant_id, submission_id, auth_principal_ref, status)
     ON trace_submissions TO trace_account_admission_guard;
 GRANT SELECT (tenant_id, submission_id, event_type)

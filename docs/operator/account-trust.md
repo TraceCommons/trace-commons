@@ -115,13 +115,25 @@ transient capacity controls. Only cumulative account allowance is exempted.
 Lifetime allowance compares the requested cost with the sum of spending across
 all lifetime policy versions; changing the version, cost, or allowance cannot
 erase that history. Each version retains its original budget row, allowing an
-unprocessed reservation to refund its exact original debit. Fixed periods retain
-explicit boundaries; changing period mode/duration is a separate reviewed policy
-change, not an implicit lifetime reset. Lease liveness uses PostgreSQL time.
+unprocessed reservation to refund its exact original debit. Fixed periods also
+sum spending across versions sharing the same duration and bucket. A version bump
+inside that bucket does not refresh the allowance. Changing period mode/duration
+is a separate reviewed policy change, not an implicit lifetime reset. Lease liveness uses PostgreSQL time.
 
 Trust facts remain an unused storage seam; no production worker records them.
-The runtime can update only trust authority, version, and timestamp, to demote a revoked invitation,
-but an authority field alone cannot grant invited admission: reserve and
+The runtime can insert trust rows and can update only authority, version, and
+timestamp, including demotion after invite revocation. An inserted or updated
+authority field alone cannot grant invited admission: reserve and
 processing both require the independent live invite grant. Client copy for
 `account_limit_reached` is “Sent, and this account has reached its contribution
 allowance”; it is distinct from the legacy resetting-window message.
+
+An exact account-ledger retry is recognized under the processing guard before
+checking first-use evidence expiry. If evidence is offered on that retry, its
+signature, authenticated account anchor, and exact artifact hash must still
+match; partial or invalid signatures and foreign/altered bindings are refused.
+A completed retry returns the stored receipt with no debit. Released or expired
+leases re-reserve through the account ledger and its current live-identity and
+budget checks. This recovery exception does not make expired evidence valid for
+a submission UUID that has never been reserved. The shared allowance health
+condition makes no promise that a lifetime budget will reset.

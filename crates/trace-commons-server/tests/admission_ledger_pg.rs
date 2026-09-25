@@ -439,6 +439,73 @@ async fn account_admission_atomicity_replay_and_revocation() {
         D::Completed,
         "process restart preserves terminal identity and charge"
     );
+    // A stable-duration window is shared across versions. The older row
+    // remains distinct so a later release refunds its original cost exactly.
+    let stable_v1 = parse_bounded_policy(r#"{"version":"stable-v1","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":1000000000},"growth_rule":"none"}"#, &["stable-v1"]).unwrap();
+    let stable_v2 = parse_bounded_policy(r#"{"version":"stable-v2","processing_cost_bound":5,"bounded_allowance":10,"period":{"mode":"fixed","seconds":1000000000},"growth_rule":"none"}"#, &["stable-v2"]).unwrap();
+    let stable_v3 = parse_bounded_policy(r#"{"version":"stable-v3","processing_cost_bound":5,"bounded_allowance":15,"period":{"mode":"fixed","seconds":1000000000},"growth_rule":"none"}"#, &["stable-v3"]).unwrap();
+    let mut old_window = request(&principal);
+    old_window.policy = stable_v1;
+    assert_eq!(
+        restarted
+            .reserve_account_admission(&old_window)
+            .await
+            .unwrap()
+            .decision,
+        D::Reserved
+    );
+    let mut tuned_window = request(&other);
+    tuned_window.policy = stable_v2.clone();
+    assert_eq!(
+        restarted
+            .reserve_account_admission(&tuned_window)
+            .await
+            .unwrap()
+            .decision,
+        D::Exhausted,
+        "version bump cannot reset the same fixed window"
+    );
+    let tuned_status = restarted
+        .account_admission_status(&trust_account, &principal, &stable_v2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!tuned_status.ready);
+    assert!(tuned_status.retry_after_seconds.is_some());
+    tuned_window.policy = stable_v3;
+    assert_eq!(
+        restarted
+            .reserve_account_admission(&tuned_window)
+            .await
+            .unwrap()
+            .decision,
+        D::Reserved,
+        "explicitly larger allowance subtracts earlier window spend"
+    );
+    assert!(
+        restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                old_window.submission_id,
+                old_window.lease_id,
+                "released"
+            )
+            .await
+            .unwrap()
+    );
+    let budgets=admin.query("SELECT policy_version,cost_used FROM trace_account_admission_budget WHERE tenant_id=$1 AND policy_version IN ('stable-v1','stable-v3') ORDER BY policy_version", &[&tenant]).await.unwrap();
+    assert_eq!(
+        budgets[0].get::<_, i64>(1),
+        0,
+        "refund uses original ten-unit row"
+    );
+    assert_eq!(
+        budgets[1].get::<_, i64>(1),
+        5,
+        "newer five-unit row remains charged"
+    );
     let fixed_policy = parse_bounded_policy(
         r#"{"version":"admission-test-fixed","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":2},"growth_rule":"none"}"#,
         &["admission-test-fixed"],

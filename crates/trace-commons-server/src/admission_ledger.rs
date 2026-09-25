@@ -115,6 +115,14 @@ impl From<AdmissionDecision> for AccountAdmissionResult {
     }
 }
 
+/// Immutable binding established by the first account reservation. Reads of
+/// this row authorize only exact retries, never a different account or body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountAdmissionRecord {
+    pub account_id: Uuid,
+    pub body_hash: String,
+}
+
 /// Immutable identity recorded by the pre-cutover admission ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyAdmissionRecord {
@@ -156,6 +164,17 @@ async fn account_policy_period(
     }
 }
 
+/// Policy versions retain their own refund rows but share spending within the
+/// same lifetime or fixed-duration bucket. The first colon separates the version.
+async fn account_period_spend(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+    raw_period: &str,
+) -> Result<i64, DatabaseError> {
+    Ok(tx.query_one("SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND substring(period_id FROM position(':' IN period_id)+1)=$3", &[&tenant,&account,&raw_period]).await.map_err(|_|database_refused())?.get(0))
+}
+
 /// Owns an isolated database session for one in-flight submission. Dropping the
 /// guard removes its connection from the pool and closes it, including cancellation;
 /// a session advisory lock can never leak into a recycled pooled connection.
@@ -169,6 +188,27 @@ impl Drop for AdmissionProcessingGuard {
 }
 
 impl PgBackend {
+    /// Caller holds the processing guard while checking the binding and
+    /// verifying any offered proof. Atomic reserve still rechecks the row.
+    pub async fn account_admission_record(
+        &self,
+        tenant: &str,
+        submission: Uuid,
+    ) -> Result<Option<AccountAdmissionRecord>, DatabaseError> {
+        let mut client = self
+            .trace_pool()
+            .get()
+            .await
+            .map_err(|_| database_refused())?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let row=tx.query_opt("SELECT account_id,body_hash FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&submission]).await.map_err(|_|database_refused())?;
+        tx.commit().await.map_err(|_| database_refused())?;
+        Ok(row.map(|row| AccountAdmissionRecord {
+            account_id: row.get(0),
+            body_hash: row.get(1),
+        }))
+    }
+
     pub async fn legacy_admission_record(
         &self,
         tenant: &str,
@@ -281,22 +321,15 @@ impl PgBackend {
             account_policy_period(&tx, policy.period()).await?;
         let period_id = format!("{}:{raw_period_id}", policy.version());
         let budget = tx.query_opt("SELECT cost_used,cost_limit,cost_bound,policy_version FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3", &[&tenant,&account_id,&period_id]).await.map_err(|_|database_refused())?;
-        let used: i64 = if let Some(budget) = budget {
+        if let Some(budget) = budget {
             if budget.get::<_, i64>(1) != policy.bounded_allowance()
                 || budget.get::<_, i64>(2) != policy.processing_cost_bound()
                 || budget.get::<_, String>(3) != policy.version()
             {
                 return Ok(None);
             }
-            budget.get(0)
-        } else {
-            0
-        };
-        let used = if matches!(policy.period(), PolicyPeriod::Lifetime) {
-            tx.query_one("SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND period_id LIKE '%:lifetime'", &[&tenant,&account_id]).await.map_err(|_|database_refused())?.get::<_,i64>(0)
-        } else {
-            used
-        };
+        }
+        let used = account_period_spend(&tx, tenant, account_id, &raw_period_id).await?;
         let ready = if authority == "invited" {
             true
         } else {
@@ -443,11 +476,7 @@ impl PgBackend {
             {
                 return Ok(AdmissionDecision::Refused.into());
             }
-            let total_used = if matches!(r.policy.period(), PolicyPeriod::Lifetime) {
-                tx.query_one("SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND period_id LIKE '%:lifetime'", &[&tenant,&account]).await.map_err(|_|database_refused())?.get::<_,i64>(0)
-            } else {
-                used
-            };
+            let total_used = account_period_spend(&tx, tenant, account, &raw_period_id).await?;
             let next = total_used
                 .checked_add(r.policy.processing_cost_bound())
                 .ok_or_else(database_refused)?;

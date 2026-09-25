@@ -596,12 +596,29 @@ async fn reserve_account(
             account: None,
         });
     }
+    // Under the shared processing guard, only an existing exact binding may
+    // relax first-use evidence time limits. Reserve rechecks live identity,
+    // lease state and budget atomically after proof validation.
+    let body_hash = hash_hex(body);
+    let account_replay = if let Some(prior) = db
+        .account_admission_record(tenant.tenant_id(), submission)
+        .await
+        .map_err(|_| denied())?
+    {
+        if prior.account_id != account.account_id() || prior.body_hash != body_hash {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::IdentityConflict.label(),
+            ));
+        }
+        true
+    } else {
+        false
+    };
     let plan = evidence_plan(headers);
     if plan == EvidencePlan::Verify {
         // An offered legacy proof is always checked, even though account trust
         // is the new authority. A partial or malformed header cannot be ignored.
-        let providers = config.providers.as_ref().ok_or_else(denied)?;
-        let anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
         let read = |name: &str| -> ApiResult<&str> {
             let values = headers.get_all(name);
             if values.iter().count() != 1 {
@@ -620,28 +637,45 @@ async fn reserve_account(
         };
         let evidence: AdmissionEvidence =
             serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
-        let witness = verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
-        let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
-        if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
-            return Err(denied());
+        if account_replay {
+            let pin = state
+                .witness_capture_pin
+                .as_ref()
+                .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))
+                .ok_or_else(denied)?;
+            verify_stored_admission_signature(&evidence, read(SIGNATURE_HEADER)?, pin)
+                .map_err(|_| denied())?;
+            if evidence.account_anchor_sha256 != legacy_anchor
+                || evidence.artifact_sha256 != body_hash
+            {
+                return Err(denied());
+            }
+        } else {
+            let providers = config.providers.as_ref().ok_or_else(denied)?;
+            let witness =
+                verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
+            let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
+            if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
+                return Err(denied());
+            }
+            verify_admission_evidence(
+                &evidence,
+                read(SIGNATURE_HEADER)?,
+                &witness,
+                bypass.pin(),
+                providers,
+                &legacy_anchor,
+                Utc::now().timestamp(),
+            )
+            .map_err(|_| denied())?;
         }
-        verify_admission_evidence(
-            &evidence,
-            read(SIGNATURE_HEADER)?,
-            &witness,
-            bypass.pin(),
-            providers,
-            &anchor,
-            Utc::now().timestamp(),
-        )
-        .map_err(|_| denied())?;
     }
     let reservation = AccountAdmissionReservation {
         account: account.clone(),
         principal_ref: tenant.principal_ref().into(),
         expected_trust_version: None,
         submission_id: submission,
-        body_hash: hash_hex(body),
+        body_hash,
         lease_id: Uuid::new_v4(),
         policy: config.policy.clone(),
         lease_seconds: config.lease_seconds,
