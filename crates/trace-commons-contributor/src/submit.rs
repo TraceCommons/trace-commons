@@ -172,6 +172,55 @@ pub enum SubmitOutcome {
     Failed {
         reason_label: String,
     }, // network/auth after retries
+    /// The witness certified this session, and its verdict is one a person
+    /// has to see before it goes to the commons. Nothing was uploaded. Only
+    /// returned when the caller asked for it with
+    /// [`SubmitContext::hold_witnessed_unless_low_risk`]; the certified
+    /// response travels with it so the caller can keep it.
+    HeldForReview {
+        reason_label: String,
+        witnessed: Box<WitnessedEnvelope>,
+        attested_inference: Box<InferenceAttestationRecord>,
+    },
+}
+
+/// The label an unattended witnessed session is held under when its
+/// certificate's residual-risk verdict is not `low`.
+pub const REASON_WITNESS_RISK_REVIEW_REQUIRED: &str = "witness-risk-review-required";
+
+/// The R5 hold, decided: `Some` when the caller asked for it, this call ran
+/// the witness itself (`record` is set only then), and the verdict is not
+/// `low`.
+fn held_for_review(
+    hold: bool,
+    witnessed: Option<&WitnessedEnvelope>,
+    record: Option<InferenceAttestationRecord>,
+) -> Option<SubmitOutcome> {
+    let (response, record) = (witnessed?, record?);
+    if !hold || verdict_is_low(response) {
+        return None;
+    }
+    Some(SubmitOutcome::HeldForReview {
+        reason_label: REASON_WITNESS_RISK_REVIEW_REQUIRED.to_string(),
+        witnessed: Box::new(response.clone()),
+        attested_inference: Box::new(record),
+    })
+}
+
+/// Whether a certificate's verdict lets an unattended session go without a
+/// person. Only `low`: `medium` is quarantined unless an operator opted in
+/// and `high` always is, so sending either unattended trades a person's look
+/// for a server-side quarantine. A certificate with no readable verdict is
+/// not `low`.
+fn verdict_is_low(response: &WitnessedEnvelope) -> bool {
+    serde_json::from_str::<serde_json::Value>(&response.certificate_json)
+        .ok()
+        .and_then(|c| {
+            c.get("residual_risk_verdict")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "low")
+        })
+        .unwrap_or(false)
 }
 
 /// What the inference-receipt fetch produced for a shipped submission.
@@ -371,7 +420,8 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
             }),
             SubmitOutcome::SkippedParseFailure { .. }
             | SubmitOutcome::Refused { .. }
-            | SubmitOutcome::Failed { .. } => None,
+            | SubmitOutcome::Failed { .. }
+            | SubmitOutcome::HeldForReview { .. } => None,
         })
         .collect()
 }
@@ -428,6 +478,11 @@ pub struct SubmitContext<'a> {
     approved_envelope: Option<TraceContributionEnvelope>,
     approved_witness: Option<WitnessedEnvelope>,
     approved_token_bundle: Option<crate::token_bundle::TokenBundleReview>,
+    /// Set by the daemon for a session approved on the contributor's behalf:
+    /// a witnessed envelope whose verdict is not `low` is returned as
+    /// `HeldForReview` instead of uploaded. One-shot, like the approvals
+    /// above. See the spec's R5.
+    hold_unless_low_risk: bool,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -485,6 +540,7 @@ impl<'a> SubmitContext<'a> {
             approved_envelope: None,
             approved_witness: None,
             approved_token_bundle: None,
+            hold_unless_low_risk: false,
             last_receipt_shipped: ReceiptShipped::NoCall,
             #[cfg(test)]
             receipt_override: None,
@@ -550,6 +606,14 @@ impl<'a> SubmitContext<'a> {
         self.approved_witness = Some(response);
         self.invalidate_claim();
         Ok(())
+    }
+
+    /// Hold, rather than upload, the next witnessed session whose
+    /// certificate's verdict is not `low`. For sessions nobody reviewed:
+    /// the witness is the first point at which their risk is known, so this
+    /// hold stops the upload to the commons but not the send to the witness.
+    pub(crate) fn hold_witnessed_unless_low_risk(&mut self) {
+        self.hold_unless_low_risk = true;
     }
 
     pub(crate) fn use_approved_token_bundle(
@@ -1107,6 +1171,7 @@ impl<'a> SubmitContext<'a> {
         // behind would apply to whatever session came next.
         let approved_envelope = self.approved_envelope.take();
         let approved_witness = self.approved_witness.take();
+        let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1177,6 +1242,7 @@ impl<'a> SubmitContext<'a> {
         // risk while the contributor believed it carried a certificate.
         let witness_settings = self.cfg.witness.clone();
         let mut witnessed: Option<WitnessedEnvelope> = None;
+        let mut witnessed_record: Option<InferenceAttestationRecord> = None;
 
         let mut envelope = match approved_envelope {
             Some(approved) => {
@@ -1303,7 +1369,7 @@ impl<'a> SubmitContext<'a> {
                             // The record is dropped on this path: the CLI keeps
                             // no per-entry store to write it to. The daemon's
                             // review path is where it is kept.
-                            Ok((parsed, response, _attested_inference, shipped)) => {
+                            Ok((parsed, response, attested_inference, shipped)) => {
                                 // `parse_witnessed_envelope` inside
                                 // `witness_envelope` is what verified this
                                 // certificate against the bytes that came
@@ -1314,6 +1380,7 @@ impl<'a> SubmitContext<'a> {
                                 });
                                 self.last_receipt_shipped = shipped;
                                 witnessed = Some(response);
+                                witnessed_record = Some(attested_inference);
                                 parsed
                             }
                             Err(label) => {
@@ -1411,6 +1478,18 @@ impl<'a> SubmitContext<'a> {
         if envelope_size_ok(&envelope).is_err() {
             let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
             return Ok(refused_for_size(&transcript.session_hash, size));
+        }
+
+        // R5: the last check before anything reaches the commons, after every
+        // refusal above, so a session that would be refused is refused rather
+        // than held. `witnessed_record` is set only when this call ran the
+        // witness itself, never for a certificate a person already reviewed.
+        if let Some(held) = held_for_review(
+            hold_unless_low_risk,
+            witnessed.as_ref(),
+            witnessed_record.take(),
+        ) {
+            return Ok(held);
         }
 
         if let Some(bundle) = self.approved_token_bundle.take() {
@@ -5415,6 +5494,61 @@ mod tests {
         }
     }
 
+    fn witnessed_with_verdict(verdict: Option<&str>) -> WitnessedEnvelope {
+        let mut w = witnessed_over(UNCANONICAL_ENVELOPE);
+        let mut c: serde_json::Value = serde_json::from_str(&w.certificate_json).unwrap();
+        match verdict {
+            Some(v) => c["residual_risk_verdict"] = serde_json::json!(v),
+            None => {
+                c.as_object_mut().unwrap().remove("residual_risk_verdict");
+            }
+        }
+        w.certificate_json = c.to_string();
+        w
+    }
+
+    /// R5: an unattended session is held on any verdict but `low`, and a
+    /// certificate with no readable verdict counts as not `low`.
+    #[test]
+    fn only_a_low_verdict_lets_an_unattended_session_through() {
+        let record =
+            || InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD);
+        for (verdict, held) in [
+            (Some("low"), false),
+            (Some("medium"), true),
+            (Some("high"), true),
+            (Some("LOW"), true),
+            (None, true),
+        ] {
+            let w = witnessed_with_verdict(verdict);
+            let outcome = held_for_review(true, Some(&w), Some(record()));
+            assert_eq!(
+                matches!(
+                    &outcome,
+                    Some(SubmitOutcome::HeldForReview { reason_label, .. })
+                        if reason_label == REASON_WITNESS_RISK_REVIEW_REQUIRED
+                ),
+                held,
+                "{verdict:?}"
+            );
+        }
+        let mut garbled = witnessed_with_verdict(Some("low"));
+        garbled.certificate_json = "not json".into();
+        assert!(held_for_review(true, Some(&garbled), Some(record())).is_some());
+    }
+
+    /// Only when asked, and only for a certificate this call obtained: a
+    /// person's review (no record) and a CLI run (not asked) are never held.
+    #[test]
+    fn the_hold_applies_only_when_asked_and_only_to_a_fresh_certificate() {
+        let record =
+            || InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD);
+        let medium = witnessed_with_verdict(Some("medium"));
+        assert!(held_for_review(false, Some(&medium), Some(record())).is_none());
+        assert!(held_for_review(true, Some(&medium), None).is_none());
+        assert!(held_for_review(true, None, Some(record())).is_none());
+    }
+
     /// Envelope bytes whose compact re-serialisation is a DIFFERENT string, so
     /// a `call_json` on this path would be caught rather than passing because
     /// the fixture was already canonical.
@@ -5693,6 +5827,10 @@ pub fn outcomes_to_json(
                     "session_ref": session_ref,
                     "size_bytes": size_bytes,
                     "limit_bytes": limit_bytes,
+                }),
+                SubmitOutcome::HeldForReview { reason_label, .. } => serde_json::json!({
+                    "outcome": "held",
+                    "reason": reason_label,
                 }),
                 SubmitOutcome::Failed { reason_label } => serde_json::json!({
                     "outcome": "failed",

@@ -77,6 +77,15 @@ pub enum UploadDecision {
     /// is not the one the contributor was shown. Nothing was sent; the
     /// entry goes back in front of the contributor under `reason_label`.
     ApprovalStale { reason_label: String },
+    /// Approved on the contributor's behalf, certified by the witness, and
+    /// held for a person because the certificate's verdict is not `low`.
+    /// Nothing reached the commons. The certified review is already saved
+    /// under the entry; `pin` is its digest.
+    HeldForReview {
+        reason_label: String,
+        pin: String,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+    },
     /// Network or auth failure.
     Failed { reason_label: String },
     /// A daily volume cap is in force.
@@ -203,6 +212,41 @@ pub fn budget_snapshot(
     }
 }
 
+/// Save the certified review of a held session, so opening it shows the
+/// witness's bytes rather than running the witness again (the spec's R5).
+///
+/// If it cannot be saved the entry is still held, only without the pin:
+/// nothing is sent either way, and a person opening it re-runs the witness,
+/// which is where this was before R5.
+fn hold_for_review(
+    store: &ConfigStore,
+    entry_id: Uuid,
+    session_hash: &str,
+    inputs: &str,
+    reason_label: String,
+    witnessed: crate::witness::transport::WitnessedEnvelope,
+    attested_inference: crate::witness::inference_record::InferenceAttestationRecord,
+) -> UploadDecision {
+    let artifact = super::approved_envelope::WitnessReviewArtifact::new(
+        witnessed,
+        session_hash.to_string(),
+        inputs.to_string(),
+        None,
+        None,
+        Some(attested_inference.clone()),
+    );
+    match artifact.digest() {
+        Ok(pin) if super::approved_envelope::save_witnessed(store, entry_id, &artifact).is_ok() => {
+            UploadDecision::HeldForReview {
+                reason_label,
+                pin,
+                attested_inference: Some(attested_inference),
+            }
+        }
+        _ => UploadDecision::ApprovalStale { reason_label },
+    }
+}
+
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
 /// fixed label rather than pipeline internals.
 fn decision_for(outcome: SubmitOutcome, receipt: crate::submit::ReceiptShipped) -> UploadDecision {
@@ -227,6 +271,11 @@ fn decision_for(outcome: SubmitOutcome, receipt: crate::submit::ReceiptShipped) 
         }
         SubmitOutcome::Refused { reason_label, .. } => UploadDecision::Refused { reason_label },
         SubmitOutcome::Failed { reason_label } => UploadDecision::Failed { reason_label },
+        // Turned into a decision by `Uploader::hold_for_review`, which has
+        // the entry the certified review is saved under; never reaches here.
+        SubmitOutcome::HeldForReview { reason_label, .. } => {
+            UploadDecision::ApprovalStale { reason_label }
+        }
     }
 }
 
@@ -497,6 +546,12 @@ impl Uploader<'_, '_> {
                 Ok(approved) => self.ctx.use_approved_envelope(approved),
                 Err(reason_label) => return Ok(UploadDecision::ApprovalStale { reason_label }),
             }
+            // Nobody has looked at this session. If the witness is what
+            // builds it, its verdict is the first point at which the risk is
+            // known, and one that is not `low` stops here for a person.
+            if entry.approved_unattended {
+                self.ctx.hold_witnessed_unless_low_risk();
+            }
         }
 
         // `submit_one` returns `Err` only for a fail-closed precondition
@@ -523,7 +578,22 @@ impl Uploader<'_, '_> {
                 return Err(e);
             }
         };
-        let decision = decision_for(outcome, self.ctx.last_receipt_shipped());
+        let decision = match outcome {
+            SubmitOutcome::HeldForReview {
+                reason_label,
+                witnessed,
+                attested_inference,
+            } => hold_for_review(
+                self.store,
+                entry.entry_id,
+                &entry.session_hash,
+                &inputs_now,
+                reason_label,
+                *witnessed,
+                *attested_inference,
+            ),
+            outcome => decision_for(outcome, self.ctx.last_receipt_shipped()),
+        };
 
         match &decision {
             UploadDecision::Uploaded { .. } => {
@@ -544,6 +614,51 @@ impl Uploader<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R5: a held session keeps the certified review it was held with, so a
+    /// person opening it sees the witness's bytes without a second witness
+    /// run. The pin in the decision names exactly what was saved.
+    #[test]
+    fn a_held_session_keeps_the_certified_review_it_was_held_with() {
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let id = Uuid::new_v4();
+        let witnessed = crate::witness::transport::WitnessedEnvelope {
+            admission: None,
+            envelope_bytes: b"{}".to_vec(),
+            certificate_json: r#"{"residual_risk_verdict":"medium"}"#.into(),
+            signature_hex: format!("0x{}", "ab".repeat(65)),
+        };
+        let record = crate::witness::inference_record::InferenceAttestationRecord::uncertified(
+            crate::witness::inference_record::REASON_BODIES_WITHHELD,
+        );
+        let decision = hold_for_review(
+            &store,
+            id,
+            "sha256:aa",
+            "fp",
+            crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED.into(),
+            witnessed.clone(),
+            record.clone(),
+        );
+        let UploadDecision::HeldForReview {
+            reason_label,
+            pin,
+            attested_inference,
+        } = decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(
+            reason_label,
+            crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED
+        );
+        assert_eq!(attested_inference, Some(record));
+        let saved = super::super::approved_envelope::load_witnessed(&store, id)
+            .unwrap()
+            .expect("the certified review is saved");
+        assert_eq!(saved.digest().unwrap(), pin);
+        assert_eq!(saved.response().envelope_bytes, witnessed.envelope_bytes);
+    }
     use crate::config::tests_support::temp_store;
     use crate::daemon::queue::{QueueEntry, QueueState, entry_id_for};
     use crate::source::claude_code::ClaudeCodeSource;

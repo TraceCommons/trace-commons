@@ -545,7 +545,10 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 /// Deliberately narrow. A reason belongs here only if re-approving without a
 /// person cannot succeed. `scopes-changed` does not: re-applying the standing
 /// opt-in under the new scopes is exactly what arming means.
-pub const REASONS_NEEDING_A_PERSON: &[&str] = &[REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED];
+pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
+    REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
+    crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
@@ -1168,6 +1171,24 @@ impl Queue {
     /// Revoke an approval and put the entry back in front of the
     /// contributor, because the terms it was approved under no longer hold.
     /// Returns whether anything changed.
+    /// Revoke an unattended approval and pin the certified review the
+    /// witness has just produced for it, so a person opening the entry sees
+    /// those bytes instead of running the witness again (the spec's R5).
+    /// `reason_label` should be one of [`REASONS_NEEDING_A_PERSON`]: the pin
+    /// is kept, and nothing re-approves the entry without someone.
+    pub fn hold_with_witness_pin(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: &str,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+    ) -> bool {
+        if !self.revoke_approval(entry_id, reason_label) {
+            return false;
+        }
+        self.record_previewed_envelope(entry_id, pin, attested_inference)
+    }
+
     pub fn revoke_approval(&mut self, entry_id: Uuid, reason_label: &str) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
@@ -1591,6 +1612,36 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R5, the queue half: an unattended approval held after the witness
+    /// goes back to waiting with its certified review pinned, and nothing
+    /// re-approves it on the contributor's behalf.
+    #[test]
+    fn a_witness_hold_keeps_its_pin_and_waits_for_a_person() {
+        let mut q = Queue::default();
+        let e = QueueEntry {
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        q.push_for_test(e);
+        let pin = format!("{WITNESS_PIN_PREFIX}{}", "ab".repeat(32));
+
+        assert!(q.hold_with_witness_pin(
+            id,
+            crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+            &pin,
+            None
+        ));
+        let e = q.get(id).unwrap().clone();
+        assert_eq!(e.state, QueueState::Pending);
+        assert!(!e.approved_unattended);
+        assert_eq!(e.previewed_envelope_digest.as_deref(), Some(pin.as_str()));
+        assert!(e.holds_witness_certificate());
+        assert!(e.held_for_review());
+        assert!(!q.approve_unattended(id, &[], None), "not on their behalf");
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+    }
     use crate::config::tests_support::temp_store;
 
     use crate::daemon::test_support::at;
