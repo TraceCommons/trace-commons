@@ -279,8 +279,9 @@ scale. The descriptor gives:
 - `kind`: `nep141` for a NEAR token, `erc20` for an EVM token, or
   `credit_account` for an off-chain credit account that is not a token.
   Inference credits can use `credit_account`.
-- `network` and `contract`: a NEAR network and account id, an EIP-155 chain id
-  and lowercase `0x` contract address, or a ledger label and account label.
+- `network` and `contract`: a NEAR network (`mainnet` or `testnet`) and
+  account id, an EIP-155 chain id in canonical decimal and a lowercase `0x`
+  contract address, or a ledger label and account label.
 - `decimals`: the scale of the atomic units, at most 38.
 
 Each kind accepts one spelling of its network and contract, so equal

@@ -437,9 +437,10 @@ stores no object.
 - The manifest MUST pin one instrument descriptor for each instrument that
   the bundle can award. A descriptor has a `kind` (`nep141`, `erc20`, or
   `credit_account`), a network, a contract, and `decimals`.
-- Each descriptor MUST have one spelling: a NEAR account id for `nep141`, a
-  decimal EIP-155 chain id and a lowercase `0x` address for `erc20`, and safe
-  labels for `credit_account`. `decimals` MUST NOT exceed 38.
+- Each descriptor MUST have one spelling: `mainnet` or `testnet` and a NEAR
+  account id for `nep141`, a canonical decimal EIP-155 chain id and a
+  lowercase `0x` address for `erc20`, and safe labels for `credit_account`.
+  `decimals` MUST NOT exceed 38.
 - The `trace_credit` descriptor MUST pin a `nep141` token with 6 decimals, so
   one atomic unit is one microcredit.
 - An instrument identifier MUST keep one descriptor. A change of kind,

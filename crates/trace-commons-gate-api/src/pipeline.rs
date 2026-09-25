@@ -61,6 +61,10 @@ fn is_near_account_id(value: &str) -> bool {
             .any(|pair| separator(&pair[0]) && separator(&pair[1]))
 }
 
+/// The NEAR networks that a `nep141` descriptor can name. A fixed set gives
+/// each network one spelling, so one token cannot be pinned under two labels.
+const NEAR_NETWORKS: [&str; 2] = ["mainnet", "testnet"];
+
 /// An EIP-155 chain id in canonical decimal: nonzero, with no leading zero.
 fn is_evm_chain_id(value: &str) -> bool {
     !value.starts_with('0')
@@ -551,8 +555,9 @@ impl InstrumentKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstrumentDescriptor {
     pub kind: InstrumentKind,
-    /// `nep141`: the NEAR network, such as `mainnet`. `erc20`: the EIP-155
-    /// chain id in decimal, such as `1`. `credit_account`: the ledger label.
+    /// `nep141`: the NEAR network, `mainnet` or `testnet`. `erc20`: the
+    /// EIP-155 chain id in decimal, such as `1`. `credit_account`: the ledger
+    /// label.
     pub network: String,
     /// `nep141`: the token's NEAR account id. `erc20`: the lowercase
     /// `0x`-prefixed contract address. `credit_account`: the account label.
@@ -568,7 +573,7 @@ impl InstrumentDescriptor {
     pub fn validate(&self) -> Result<(), ContractError> {
         let located = match self.kind {
             InstrumentKind::Nep141 => {
-                is_safe_identifier(&self.network) && is_near_account_id(&self.contract)
+                NEAR_NETWORKS.contains(&self.network.as_str()) && is_near_account_id(&self.contract)
             }
             InstrumentKind::Erc20 => {
                 is_evm_chain_id(&self.network) && is_evm_address(&self.contract)
@@ -3650,7 +3655,7 @@ mod tests {
         // A pinned descriptor is part of the bundle identity.
         let bat = InstrumentId::new("bat").unwrap();
         let changes: [fn(&mut InstrumentDescriptor); 4] = [
-            |descriptor| descriptor.kind = InstrumentKind::Nep141,
+            |descriptor| descriptor.kind = InstrumentKind::CreditAccount,
             |descriptor| descriptor.network = "10".to_string(),
             |descriptor| descriptor.contract = format!("0x{}", "1".repeat(40)),
             |descriptor| descriptor.decimals = 8,
@@ -3715,7 +3720,16 @@ mod tests {
             contract: "inference_credit".to_string(),
             decimals: 0,
         };
-        for valid in [trace_credit_descriptor(), bat_descriptor(), credit_account] {
+        let testnet = InstrumentDescriptor {
+            network: "testnet".to_string(),
+            ..trace_credit_descriptor()
+        };
+        for valid in [
+            trace_credit_descriptor(),
+            testnet,
+            bat_descriptor(),
+            credit_account,
+        ] {
             assert_eq!(valid.validate(), Ok(()), "{valid:?}");
         }
         let implicit = InstrumentDescriptor {
@@ -3729,7 +3743,7 @@ mod tests {
             change(&mut descriptor);
             descriptor.validate()
         };
-        let near: [fn(&mut InstrumentDescriptor); 8] = [
+        let near: [fn(&mut InstrumentDescriptor); 12] = [
             |d| d.contract = "a".to_string(),
             |d| d.contract = "a".repeat(65),
             |d| d.contract = "-credit.near".to_string(),
@@ -3738,6 +3752,10 @@ mod tests {
             |d| d.contract = "Credit.near".to_string(),
             |d| d.contract = "credit near".to_string(),
             |d| d.network = "Mainnet".to_string(),
+            |d| d.network = "near-mainnet".to_string(),
+            |d| d.network = "..".to_string(),
+            |d| d.network = String::new(),
+            |d| d.network = "1".to_string(),
         ];
         for change in near {
             assert_eq!(
@@ -3745,8 +3763,12 @@ mod tests {
                 Err(ContractError::InvalidInstrumentDescriptor)
             );
         }
-        let evm: [fn(&mut InstrumentDescriptor); 7] = [
+        let evm: [fn(&mut InstrumentDescriptor); 11] = [
             |d| d.network = "0".to_string(),
+            |d| d.network = String::new(),
+            |d| d.network = "+1".to_string(),
+            |d| d.network = "1 ".to_string(),
+            |d| d.network = "mainnet".to_string(),
             |d| d.network = "01".to_string(),
             |d| d.network = "eip155:1".to_string(),
             |d| d.network = "18446744073709551616".to_string(),
