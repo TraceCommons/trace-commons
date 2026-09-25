@@ -29,7 +29,7 @@ pub enum ConnectionConfigError {
 
 /// Constructed from operator configuration only. Client selection carries IDs
 /// and digests, never a replacement URL or pin.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OperatorInferenceConnection {
     offer_id: String,
     provider_id: String,
@@ -37,6 +37,26 @@ pub struct OperatorInferenceConnection {
     inference_receipt_endpoint: Option<String>,
     config_digest: String,
     revision: String,
+}
+
+impl std::fmt::Debug for OperatorInferenceConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OperatorInferenceConnection")
+            .field("offer_id", &self.offer_id)
+            .field("provider_id", &self.provider_id)
+            .field("witness", &self.witness)
+            .field(
+                "inference_receipt_endpoint",
+                &self
+                    .inference_receipt_endpoint
+                    .as_ref()
+                    .map(|_| "[redacted]"),
+            )
+            .field("config_digest", &self.config_digest)
+            .field("revision", &self.revision)
+            .finish()
+    }
 }
 
 impl OperatorInferenceConnection {
@@ -85,30 +105,18 @@ impl OperatorInferenceConnection {
             return Err(ConnectionConfigError::ReceiptUrl);
         }
 
-        let mut config = Vec::new();
-        config.extend_from_slice(b"trace-commons/inference-connection-config/v1\0");
-        frame(&mut config, provider_id.as_bytes());
-        frame(&mut config, disclosure_version.as_bytes());
-        frame(&mut config, witness.url.as_bytes());
-        frame(&mut config, witness.signing_address.as_bytes());
-        config.extend_from_slice(&(witness.expected_measurements.len() as u32).to_be_bytes());
-        for measurement in &witness.expected_measurements {
-            frame(&mut config, measurement.as_bytes());
-        }
-        match &inference_receipt_endpoint {
-            Some(endpoint) => {
-                config.push(1);
-                frame(&mut config, endpoint.as_bytes());
-            }
-            None => config.push(0),
-        }
-        let config_digest = digest(&config);
-        let mut descriptor = b"trace-commons/inference-connection-offer/v1\0".to_vec();
-        frame(&mut descriptor, offer_id.as_bytes());
-        frame(&mut descriptor, provider_id.as_bytes());
-        frame(&mut descriptor, disclosure_version.as_bytes());
-        frame(&mut descriptor, config_digest.as_bytes());
-        let revision = digest(&descriptor);
+        let config_digest = digest(&encode_config(
+            &provider_id,
+            disclosure_version,
+            &witness,
+            inference_receipt_endpoint.as_deref(),
+        ));
+        let revision = digest(&encode_revision(
+            &offer_id,
+            &provider_id,
+            disclosure_version,
+            &config_digest,
+        ));
         Ok(Self {
             offer_id,
             provider_id,
@@ -147,6 +155,46 @@ impl OperatorInferenceConnection {
             inference_receipt_endpoint: self.inference_receipt_endpoint.clone(),
         }
     }
+}
+
+fn encode_config(
+    provider_id: &str,
+    disclosure_version: &str,
+    witness: &ConnectionWitnessConfig,
+    inference_receipt_endpoint: Option<&str>,
+) -> Vec<u8> {
+    let mut config = Vec::new();
+    config.extend_from_slice(b"trace-commons/inference-connection-config/v1\0");
+    frame(&mut config, provider_id.as_bytes());
+    frame(&mut config, disclosure_version.as_bytes());
+    frame(&mut config, witness.url.as_bytes());
+    frame(&mut config, witness.signing_address.as_bytes());
+    config.extend_from_slice(&(witness.expected_measurements.len() as u32).to_be_bytes());
+    for measurement in &witness.expected_measurements {
+        frame(&mut config, measurement.as_bytes());
+    }
+    match inference_receipt_endpoint {
+        Some(endpoint) => {
+            config.push(1);
+            frame(&mut config, endpoint.as_bytes());
+        }
+        None => config.push(0),
+    }
+    config
+}
+
+fn encode_revision(
+    offer_id: &str,
+    provider_id: &str,
+    disclosure_version: &str,
+    config_digest: &str,
+) -> Vec<u8> {
+    let mut descriptor = b"trace-commons/inference-connection-offer/v1\0".to_vec();
+    frame(&mut descriptor, offer_id.as_bytes());
+    frame(&mut descriptor, provider_id.as_bytes());
+    frame(&mut descriptor, disclosure_version.as_bytes());
+    frame(&mut descriptor, config_digest.as_bytes());
+    descriptor
 }
 
 fn valid_https_url(raw: &str) -> bool {
@@ -383,5 +431,71 @@ mod tests {
         assert!(offer.matches_selection(&request));
         request.config_digest = format!("sha256:{}", "0".repeat(64));
         assert!(!offer.matches_selection(&request));
+    }
+
+    #[test]
+    fn disclosure_version_changes_config_digest_and_revision_encoding() {
+        let current = digest(&encode_config(
+            "near-ai",
+            DISCLOSURE_VERSION,
+            &witness(),
+            None,
+        ));
+        let future = digest(&encode_config(
+            "near-ai",
+            "future-disclosure-v2",
+            &witness(),
+            None,
+        ));
+        assert_ne!(current, future);
+        let current_revision = digest(&encode_revision(
+            "offer",
+            "near-ai",
+            DISCLOSURE_VERSION,
+            &current,
+        ));
+        let future_revision = digest(&encode_revision(
+            "offer",
+            "near-ai",
+            "future-disclosure-v2",
+            &future,
+        ));
+        assert_ne!(current_revision, future_revision);
+        assert!(matches!(
+            OperatorInferenceConnection::new(
+                "offer".into(),
+                "near-ai".into(),
+                "future-disclosure-v2",
+                witness(),
+                None
+            ),
+            Err(ConnectionConfigError::Disclosure)
+        ));
+    }
+
+    #[test]
+    fn operator_debug_hides_witness_and_receipt_values() {
+        let mut sensitive = witness();
+        sensitive.url = "https://private-witness.example/secret-path".into();
+        sensitive.signing_address = format!("0x{}", "ab".repeat(20));
+        sensitive.expected_measurements = vec![format!("mrtd={}", "cd".repeat(48))];
+        let configured = OperatorInferenceConnection::new(
+            "offer".into(),
+            "near-ai".into(),
+            DISCLOSURE_VERSION,
+            sensitive.clone(),
+            Some("https://private-receipt.example/secret-path".into()),
+        )
+        .unwrap();
+        let output = format!("{configured:?}");
+        for secret in [
+            sensitive.url.as_str(),
+            sensitive.signing_address.as_str(),
+            sensitive.expected_measurements[0].as_str(),
+            "private-receipt",
+        ] {
+            assert!(!output.contains(secret), "Debug leaked {secret}");
+        }
+        assert!(output.contains("[redacted]"));
     }
 }

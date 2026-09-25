@@ -30,7 +30,7 @@ pub struct SelectInferenceConnection {
     pub expected_current_version: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionWitnessConfig {
     pub url: String,
@@ -38,7 +38,18 @@ pub struct ConnectionWitnessConfig {
     pub expected_measurements: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for ConnectionWitnessConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectionWitnessConfig")
+            .field("url", &"[redacted]")
+            .field("signing_address", &"[redacted]")
+            .field("expected_measurements", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectedInferenceConnection {
     pub connection_id: Uuid,
@@ -48,6 +59,27 @@ pub struct SelectedInferenceConnection {
     pub disclosure_version: String,
     pub witness: ConnectionWitnessConfig,
     pub inference_receipt_endpoint: Option<String>,
+}
+
+impl std::fmt::Debug for SelectedInferenceConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectedInferenceConnection")
+            .field("connection_id", &"[redacted]")
+            .field("state_version", &self.state_version)
+            .field("revision", &"[redacted]")
+            .field("config_digest", &"[redacted]")
+            .field("disclosure_version", &"[redacted]")
+            .field("witness", &self.witness)
+            .field(
+                "inference_receipt_endpoint",
+                &self
+                    .inference_receipt_endpoint
+                    .as_ref()
+                    .map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 /// Bounded, syntax-only request validation. Authorization and catalog matching
@@ -171,5 +203,35 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn selected_and_witness_debug_hide_connection_details() {
+        let witness = ConnectionWitnessConfig {
+            url: "https://private-witness.example/secret-path".into(),
+            signing_address: "0xprivate-signing-address".into(),
+            expected_measurements: vec!["private-measurement-pin".into()],
+        };
+        let selected = SelectedInferenceConnection {
+            connection_id: Uuid::new_v4(),
+            state_version: 1,
+            revision: "sha256:revision".into(),
+            config_digest: "sha256:configuration".into(),
+            disclosure_version: DISCLOSURE_VERSION.into(),
+            witness: witness.clone(),
+            inference_receipt_endpoint: Some("https://private-receipt.example/secret-path".into()),
+        };
+        let output = format!("{witness:?} {selected:?}");
+        for secret in [
+            "private-witness",
+            "secret-path",
+            "private-signing-address",
+            "private-measurement-pin",
+            "private-receipt",
+            &selected.connection_id.to_string(),
+        ] {
+            assert!(!output.contains(secret), "Debug leaked {secret}");
+        }
+        assert!(output.contains("[redacted]"));
     }
 }
