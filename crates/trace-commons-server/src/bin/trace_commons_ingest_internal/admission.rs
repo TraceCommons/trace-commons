@@ -6,15 +6,63 @@ use trace_commons_protocol::admission::{
     AdmissionBinding, AdmissionEvidence, AdmissionRefusal, EVIDENCE_HEADER, SIGNATURE_HEADER,
     hash_hex, is_hash,
 };
+use trace_commons_server::account_trust::{
+    BoundedPolicy, TrustAccount, parse_bounded_policy, resolve_contribution_account,
+};
 use trace_commons_server::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
 use trace_commons_server::admission_ledger::{
-    AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard, AdmissionReservation,
+    AccountAdmissionReservation, AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard,
+    AdmissionReservation,
 };
 
 #[derive(Clone)]
 pub(super) struct AdmissionConfig {
     pub limits: AdmissionLimits,
     pub providers: AdmissionProviderTrust,
+}
+
+#[derive(Clone)]
+pub(super) struct AccountAdmissionConfig {
+    pub policy: BoundedPolicy,
+    pub lease_seconds: i64,
+    pub providers: Option<AdmissionProviderTrust>,
+}
+
+pub(super) fn account_config_from_env(
+    durable_db: bool,
+) -> anyhow::Result<Option<AccountAdmissionConfig>> {
+    match std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("false") | Ok("0") => return Ok(None),
+        Ok("true") | Ok("1") => {}
+        _ => anyhow::bail!("account_admission_activation_invalid"),
+    }
+    if !durable_db {
+        anyhow::bail!("account_admission_requires_durable_database");
+    }
+    let raw = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON")
+        .map_err(|_| anyhow::anyhow!("account_admission_policy_missing"))?;
+    let version = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION")
+        .map_err(|_| anyhow::anyhow!("account_admission_policy_version_missing"))?;
+    let policy = parse_bounded_policy(&raw, &[&version])
+        .map_err(|_| anyhow::anyhow!("account_admission_policy_invalid"))?;
+    let lease_seconds = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| (1..=86400).contains(v))
+        .ok_or_else(|| anyhow::anyhow!("account_admission_lease_invalid"))?;
+    let providers = if std::env::var_os("TRACE_COMMONS_ADMISSION_MIN_REQUEST_BYTES").is_some() {
+        Some(
+            AdmissionProviderTrust::from_env("TRACE_COMMONS_ADMISSION")
+                .map_err(|_| anyhow::anyhow!("admission_provider_policy_invalid"))?,
+        )
+    } else {
+        None
+    };
+    Ok(Some(AccountAdmissionConfig {
+        policy,
+        lease_seconds,
+        providers,
+    }))
 }
 
 pub(super) fn config_from_env(
@@ -146,26 +194,41 @@ pub(super) struct Attempt {
     _guard: AdmissionProcessingGuard,
     processing: bool,
     completed: bool,
+    account: Option<(TrustAccount, String)>,
+    invited: bool,
 }
 impl Attempt {
     pub fn is_completed(&self) -> bool {
         self.completed
+    }
+    pub fn is_invited(&self) -> bool {
+        self.invited
     }
 
     pub async fn processing(&mut self, db: &dyn Database) -> ApiResult<()> {
         if self.processing || self.completed {
             return Ok(());
         }
-        if !db
-            .transition_submission_admission(
+        let transitioned = if let Some((account, principal)) = &self.account {
+            db.transition_account_admission(
+                &self.tenant_id,
+                principal,
+                account.account_id(),
+                self.submission_id,
+                self.lease_id,
+                "processing",
+            )
+            .await
+        } else {
+            db.transition_submission_admission(
                 &self.tenant_id,
                 self.submission_id,
                 self.lease_id,
                 "processing",
             )
             .await
-            .map_err(|_| denied())?
-        {
+        };
+        if !transitioned.map_err(|_| denied())? {
             return Err(denied());
         }
         self.processing = true;
@@ -185,16 +248,26 @@ impl Attempt {
         } else {
             return Ok(());
         };
-        if !db
-            .transition_submission_admission(
+        let transitioned = if let Some((account, principal)) = &self.account {
+            db.transition_account_admission(
+                &self.tenant_id,
+                principal,
+                account.account_id(),
+                self.submission_id,
+                self.lease_id,
+                next,
+            )
+            .await
+        } else {
+            db.transition_submission_admission(
                 &self.tenant_id,
                 self.submission_id,
                 self.lease_id,
                 next,
             )
             .await
-            .map_err(|_| denied())?
-        {
+        };
+        if !transitioned.map_err(|_| denied())? {
             return Err(denied());
         }
         Ok(())
@@ -208,6 +281,11 @@ pub(super) async fn reserve(
     body: &[u8],
     submission: Uuid,
 ) -> ApiResult<Option<Attempt>> {
+    if let Some(config) = state.account_admission.as_ref() {
+        return reserve_account(state, tenant, headers, body, submission, config)
+            .await
+            .map(Some);
+    }
     let Some(anchor) = anchor(state, tenant).await? else {
         return Ok(None);
     };
@@ -258,6 +336,8 @@ pub(super) async fn reserve(
             _guard: guard,
             processing: false,
             completed: true,
+            account: None,
+            invited: false,
         }));
     }
     let verified = match plan {
@@ -345,7 +425,193 @@ pub(super) async fn reserve(
         _guard: guard,
         processing: false,
         completed,
+        account: None,
+        invited: false,
     }))
+}
+
+async fn reserve_account(
+    state: &AppState,
+    tenant: &TenantCtx,
+    headers: &HeaderMap,
+    body: &[u8],
+    submission: Uuid,
+    config: &AccountAdmissionConfig,
+) -> ApiResult<Attempt> {
+    if !state.require_db_mirror_writes {
+        return Err(denied());
+    }
+    let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let account =
+        resolve_contribution_account(db.as_ref(), tenant.tenant_id(), tenant.principal_ref())
+            .await
+            .map_err(|_| denied())?;
+    // Cutover must not charge an account reservation for an already completed
+    // legacy admission. The submit handler still checks receipt ownership.
+    let legacy_anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
+    if db
+        .lookup_completed_submission_admission(
+            tenant.tenant_id(),
+            &legacy_anchor,
+            submission,
+            &hash_hex(body),
+        )
+        .await
+        .map_err(|_| denied())?
+    {
+        let guard = db
+            .acquire_admission_processing_lock(tenant.tenant_id(), submission)
+            .await
+            .map_err(|_| denied())?
+            .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
+        return Ok(Attempt {
+            tenant_id: tenant.tenant_id().into(),
+            submission_id: submission,
+            lease_id: Uuid::new_v4(),
+            _guard: guard,
+            processing: false,
+            completed: true,
+            account: None,
+            invited: false,
+        });
+    }
+    let plan = evidence_plan(headers);
+    if plan == EvidencePlan::Verify {
+        // An offered legacy proof is always checked, even though account trust
+        // is the new authority. A partial or malformed header cannot be ignored.
+        let providers = config.providers.as_ref().ok_or_else(denied)?;
+        let anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
+        let read = |name: &str| -> ApiResult<&str> {
+            let values = headers.get_all(name);
+            if values.iter().count() != 1 {
+                return Err(denied());
+            }
+            let value = values
+                .iter()
+                .next()
+                .ok_or_else(denied)?
+                .to_str()
+                .map_err(|_| denied())?;
+            if value.len() > 8192 {
+                return Err(denied());
+            }
+            Ok(value)
+        };
+        let evidence: AdmissionEvidence =
+            serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
+        let witness = verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
+        let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
+        if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
+            return Err(denied());
+        }
+        verify_admission_evidence(
+            &evidence,
+            read(SIGNATURE_HEADER)?,
+            &witness,
+            bypass.pin(),
+            providers,
+            &anchor,
+            Utc::now().timestamp(),
+        )
+        .map_err(|_| denied())?;
+    }
+    let guard = db
+        .acquire_admission_processing_lock(tenant.tenant_id(), submission)
+        .await
+        .map_err(|_| denied())?
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
+    let reservation = AccountAdmissionReservation {
+        account: account.clone(),
+        principal_ref: tenant.principal_ref().into(),
+        expected_trust_version: None,
+        submission_id: submission,
+        body_hash: hash_hex(body),
+        lease_id: Uuid::new_v4(),
+        policy: config.policy.clone(),
+        lease_seconds: config.lease_seconds,
+    };
+    let decision = db
+        .reserve_account_admission(&reservation)
+        .await
+        .map_err(|_| denied())?;
+    let status = db
+        .account_admission_status(&account, tenant.principal_ref(), &config.policy)
+        .await
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let completed = match decision {
+        AdmissionDecision::Reserved => false,
+        AdmissionDecision::Completed => true,
+        AdmissionDecision::Busy => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::InProgress.label(),
+            ));
+        }
+        AdmissionDecision::Conflict => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::IdentityConflict.label(),
+            ));
+        }
+        AdmissionDecision::Exhausted => {
+            return Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                AdmissionRefusal::AccountLimitReached.label(),
+            ));
+        }
+        AdmissionDecision::Refused => return Err(denied()),
+    };
+    Ok(Attempt {
+        tenant_id: tenant.tenant_id().into(),
+        submission_id: submission,
+        lease_id: reservation.lease_id,
+        _guard: guard,
+        processing: false,
+        completed,
+        account: Some((account, tenant.principal_ref().into())),
+        invited: status.authority == "invited",
+    })
+}
+
+pub(super) async fn account_status_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+) -> ApiResult<axum::response::Response> {
+    let mut response = if let Some(config) = state.account_admission.as_ref() {
+        let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+        let mut resolved = None;
+        for principal in ctx.principal_set.to_vec() {
+            if let Ok(account) =
+                resolve_contribution_account(db.as_ref(), &ctx.tenant_id, &principal).await
+            {
+                if account.account_id() == ctx.account_id.as_uuid() {
+                    resolved = Some((account, principal));
+                    break;
+                }
+            }
+        }
+        let (account, principal) = resolved.ok_or_else(denied)?;
+        let status = db
+            .account_admission_status(&account, &principal, &config.policy)
+            .await
+            .map_err(|_| denied())?
+            .ok_or_else(denied)?;
+        Json(serde_json::json!({
+            "authority":status.authority,
+            "policy_version":status.policy_version,
+            "ready":status.ready,
+            "refusal_label":if status.ready { None } else { Some(AdmissionRefusal::AccountLimitReached.label()) },
+            "retry_after_seconds":status.retry_after_seconds,
+        })).into_response()
+    } else {
+        Json(serde_json::json!({"authority":"legacy_evidence","policy_version":null,"ready":false,"refusal_label":null,"retry_after_seconds":null})).into_response()
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 pub(super) async fn challenge_handler(

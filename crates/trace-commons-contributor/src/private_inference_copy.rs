@@ -2504,7 +2504,9 @@ pub fn outcome_refusal_line(label: &str) -> Option<&'static str> {
     use trace_commons_protocol::admission::AdmissionRefusal;
     Some(match AdmissionRefusal::from_label(label)? {
         AdmissionRefusal::Refused => OUTCOME_ADMISSION_REFUSED,
-        AdmissionRefusal::LimitReached => OUTCOME_ADMISSION_LIMIT_REACHED,
+        AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached => {
+            OUTCOME_ADMISSION_LIMIT_REACHED
+        }
         AdmissionRefusal::InProgress => OUTCOME_ADMISSION_IN_PROGRESS,
         AdmissionRefusal::IdentityConflict => OUTCOME_ADMISSION_IDENTITY_CONFLICT,
         AdmissionRefusal::EvidenceRefused => OUTCOME_ADMISSION_EVIDENCE_REFUSED,

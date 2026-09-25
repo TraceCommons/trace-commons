@@ -1,12 +1,255 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Explicit isolated PostgreSQL test: never falls back to DATABASE_URL or skips failure.
+use std::sync::Arc;
 use trace_commons_server::{
-    admission_ledger::{AdmissionDecision as D, AdmissionLimits, AdmissionReservation},
+    account_trust::{parse_bounded_policy, resolve_contribution_account},
+    admission_ledger::{
+        AccountAdmissionReservation, AdmissionDecision as D, AdmissionLimits, AdmissionReservation,
+    },
     config::{DatabaseConfig, SslMode},
     db::{Database, postgres::PgBackend},
 };
 use uuid::Uuid;
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL"]
+async fn account_admission_atomicity_replay_and_revocation() {
+    let url = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL")
+        .expect("explicit isolated account admission database URL required");
+    let parsed = url.parse::<tokio_postgres::Config>().unwrap();
+    assert!(
+        matches!(parsed.get_hosts().first(), Some(tokio_postgres::config::Host::Tcp(host)) if host == "127.0.0.1" || host == "localhost")
+    );
+    assert!(
+        parsed
+            .get_dbname()
+            .is_some_and(|name| name.starts_with("admission_test"))
+    );
+    let config = |url: String| DatabaseConfig {
+        url: url.into(),
+        pool_size: 8,
+        ssl_mode: SslMode::Prefer,
+        login_resolver_url: None,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    };
+    let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
+    admin_db.run_migrations().await.unwrap();
+    let admin = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    admin.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='admission_account_runtime') THEN CREATE ROLE admission_account_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT trace_account_admission_runtime TO admission_account_runtime;").await.unwrap();
+    let mut runtime_url = reqwest::Url::parse(&url).unwrap();
+    runtime_url
+        .set_username("admission_account_runtime")
+        .unwrap();
+    let runtime = Arc::new(PgBackend::new(&config(runtime_url.into())).await.unwrap());
+    let anchor = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let account = Uuid::new_v4();
+    let principal = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let other = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    admin.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,$4,'fixture-pepper','fixture-key')", &[&tenant,&account,&anchor,&serde_json::json!({"fixture":true})]).await.unwrap();
+    for (index, principal_ref) in [&principal, &other].into_iter().enumerate() {
+        let device = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+        admin.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near')", &[&device,&tenant,&format!("fixture-key-{index}")]).await.unwrap();
+        admin.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)", &[&tenant,&account,principal_ref]).await.unwrap();
+        admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)", &[&tenant,principal_ref,&account,&device,&anchor]).await.unwrap();
+    }
+    let trust_account = resolve_contribution_account(&admin_db, &tenant, &principal)
+        .await
+        .unwrap();
+    let policy = parse_bounded_policy(r#"{"version":"admission-test-v1","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["admission-test-v1"]).unwrap();
+    let request = |principal_ref: &str| AccountAdmissionReservation {
+        account: trust_account.clone(),
+        principal_ref: principal_ref.into(),
+        expected_trust_version: None,
+        submission_id: Uuid::new_v4(),
+        body_hash: "b".repeat(64),
+        lease_id: Uuid::new_v4(),
+        policy: policy.clone(),
+        lease_seconds: 60,
+    };
+    let first = request(&principal);
+    let second = request(&other);
+    let (a, b) = tokio::join!(
+        runtime.reserve_account_admission(&first),
+        runtime.reserve_account_admission(&second)
+    );
+    assert_eq!(
+        [a.unwrap(), b.unwrap()]
+            .into_iter()
+            .filter(|d| *d == D::Reserved)
+            .count(),
+        1,
+        "two devices cannot overspend one account"
+    );
+    let winner = if runtime.reserve_account_admission(&first).await.unwrap() == D::Busy {
+        &first
+    } else {
+        &second
+    };
+    assert_eq!(
+        runtime.reserve_account_admission(winner).await.unwrap(),
+        D::Busy
+    );
+    let mut changed = winner.clone();
+    changed.body_hash = "c".repeat(64);
+    assert_eq!(
+        runtime.reserve_account_admission(&changed).await.unwrap(),
+        D::Conflict
+    );
+    assert!(
+        runtime
+            .transition_account_admission(
+                &tenant,
+                &winner.principal_ref,
+                account,
+                winner.submission_id,
+                winner.lease_id,
+                "released"
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        runtime
+            .reserve_account_admission(&request(&other))
+            .await
+            .unwrap(),
+        D::Reserved,
+        "pre-processing release refunds"
+    );
+
+    let invite = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    admin.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,2)", &[&tenant,&account,&invite]).await.unwrap();
+    admin.execute("UPDATE trace_account_trust SET authority='invited',trust_version=2 WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap();
+    let invited = request(&principal);
+    assert_eq!(
+        runtime.reserve_account_admission(&invited).await.unwrap(),
+        D::Reserved,
+        "invite bypasses exhausted cumulative allowance"
+    );
+    admin.execute("UPDATE trace_account_invite_grants SET revoked_at=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account]).await.unwrap();
+    assert!(
+        !runtime
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                invited.submission_id,
+                invited.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap(),
+        "revoked grant cannot start processing"
+    );
+    let retry_policy = parse_bounded_policy(
+        r#"{"version":"admission-test-v2","processing_cost_bound":10,"bounded_allowance":30,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+        &["admission-test-v2"],
+    ).unwrap();
+    let mut work = request(&principal);
+    work.policy = retry_policy.clone();
+    assert_eq!(
+        runtime.reserve_account_admission(&work).await.unwrap(),
+        D::Reserved
+    );
+    assert!(
+        runtime
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                work.submission_id,
+                work.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !runtime
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                work.submission_id,
+                work.lease_id,
+                "released"
+            )
+            .await
+            .unwrap(),
+        "processing work never refunds"
+    );
+    admin.execute("UPDATE trace_account_admission_submissions SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&work.submission_id]).await.unwrap();
+    let mut retry = work.clone();
+    retry.lease_id = Uuid::new_v4();
+    assert_eq!(
+        runtime.reserve_account_admission(&retry).await.unwrap(),
+        D::Reserved,
+        "expired processing lease charges again"
+    );
+    let used: i64 = admin.query_one("SELECT cost_used FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND policy_version=$3", &[&tenant,&account,&retry_policy.version()]).await.unwrap().get(0);
+    assert_eq!(used, 20);
+    assert!(
+        runtime
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                retry.submission_id,
+                retry.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        runtime
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                retry.submission_id,
+                retry.lease_id,
+                "completed"
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        runtime.reserve_account_admission(&retry).await.unwrap(),
+        D::Completed,
+        "terminal retry costs zero"
+    );
+    let unchanged: i64 = admin.query_one("SELECT cost_used FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND policy_version=$3", &[&tenant,&account,&retry_policy.version()]).await.unwrap().get(0);
+    assert_eq!(unchanged, 20);
+    let mut conflict = retry.clone();
+    conflict.body_hash = "a".repeat(64);
+    assert_eq!(
+        runtime.reserve_account_admission(&conflict).await.unwrap(),
+        D::Conflict
+    );
+}
 
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ADMISSION_PG_TEST_URL"]

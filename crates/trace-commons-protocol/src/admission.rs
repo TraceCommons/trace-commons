@@ -30,6 +30,8 @@ pub enum AdmissionRefusal {
     Refused,
     /// The account's admission budget for this window is spent.
     LimitReached,
+    /// Explicit account-authority allowance is exhausted.
+    AccountLimitReached,
     /// Another attempt at the same submission holds the lease.
     InProgress,
     /// This submission id is already bound to different bytes or a different
@@ -42,9 +44,10 @@ pub enum AdmissionRefusal {
 
 impl AdmissionRefusal {
     /// Every refusal, for tests and exhaustive mappings.
-    pub const ALL: [AdmissionRefusal; 5] = [
+    pub const ALL: [AdmissionRefusal; 6] = [
         AdmissionRefusal::Refused,
         AdmissionRefusal::LimitReached,
+        AdmissionRefusal::AccountLimitReached,
         AdmissionRefusal::InProgress,
         AdmissionRefusal::IdentityConflict,
         AdmissionRefusal::EvidenceRefused,
@@ -55,6 +58,7 @@ impl AdmissionRefusal {
         match self {
             AdmissionRefusal::Refused => "admission_refused",
             AdmissionRefusal::LimitReached => "admission_limit_reached",
+            AdmissionRefusal::AccountLimitReached => "account_limit_reached",
             AdmissionRefusal::InProgress => "admission_in_progress",
             AdmissionRefusal::IdentityConflict => "admission_identity_conflict",
             AdmissionRefusal::EvidenceRefused => "admission_evidence_refused",
@@ -65,7 +69,7 @@ impl AdmissionRefusal {
     pub const fn status(self) -> u16 {
         match self {
             AdmissionRefusal::Refused | AdmissionRefusal::EvidenceRefused => 403,
-            AdmissionRefusal::LimitReached => 429,
+            AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached => 429,
             AdmissionRefusal::InProgress | AdmissionRefusal::IdentityConflict => 409,
         }
     }
@@ -439,6 +443,7 @@ mod tests {
             [
                 ("admission_refused", 403),
                 ("admission_limit_reached", 429),
+                ("account_limit_reached", 429),
                 ("admission_in_progress", 409),
                 ("admission_identity_conflict", 409),
                 ("admission_evidence_refused", 403),

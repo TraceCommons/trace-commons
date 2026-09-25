@@ -56,8 +56,10 @@ the link.
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
+| Operating explicit contributor inference connection selection | [`./inference-connection.md`](./inference-connection.md) |
 | Taking attested inference from dormant to enforced | [`./attested-inference.md`](./attested-inference.md) |
 | Switching on invite-free (uninvited, receipt-backed) contribution | [`./invite-free-admission.md`](./invite-free-admission.md) |
+| Preparing authenticated account contribution admission | [`./account-trust.md`](./account-trust.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |

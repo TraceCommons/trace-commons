@@ -1705,6 +1705,7 @@ struct AppState {
     witness_bypass: Option<WitnessBypassConfig>,
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
+    account_admission: Option<admission::AccountAdmissionConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3901,6 +3902,9 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let account_admission = admission::account_config_from_env(
+            db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
+        )?;
         if admission.is_some()
             && !db_mirror
                 .as_ref()
@@ -4211,8 +4215,9 @@ impl AppState {
             pii_backstop_driver,
             witness_bypass,
             witness_capture_pin,
-            near_provisioning_admission_ready: admission.is_some(),
+            near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
+            account_admission,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -7483,6 +7488,7 @@ fn community_routes() -> Router<Arc<AppState>> {
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reward_routes = rewards::account_routes(state.clone());
     Router::new()
+        .route("/v1/account/contribution-status", get(admission::account_status_handler))
         .route(
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
@@ -13464,7 +13470,7 @@ async fn submit_trace_handler(
         )?;
         // Same-id quarantine remediation does not consume a new quota slot — the
         // prior quarantined row already counted.
-        if remediating_prior.is_none() {
+        if remediating_prior.is_none() && !admission.as_ref().is_some_and(admission::Attempt::is_invited) {
             enforce_submission_quota(state.as_ref(), &tenant)?;
         }
         apply_embedding_precheck(&mut envelope, &derived_precheck);

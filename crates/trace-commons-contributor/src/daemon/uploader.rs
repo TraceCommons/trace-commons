@@ -245,7 +245,9 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
             // A refusal the commons sent on purpose, before the catch-all
             // that reads everything else as an outage.
             other => match AdmissionRefusal::from_label(other) {
-                Some(AdmissionRefusal::LimitReached) => Some(LABEL_ADMISSION_LIMIT_REACHED),
+                Some(AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached) => {
+                    Some(LABEL_ADMISSION_LIMIT_REACHED)
+                }
                 // A lease another attempt holds, which the next retry
                 // resolves. Nothing for a contributor to be told about.
                 Some(AdmissionRefusal::InProgress) => None,

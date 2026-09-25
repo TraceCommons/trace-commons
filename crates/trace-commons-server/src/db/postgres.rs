@@ -1363,10 +1363,42 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_witness_certificate_evidence",
         include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
     ),
+    (
+        77,
+        "account_admission",
+        include_str!("../../../../migrations/V77__account_admission.sql"),
+    ),
 ];
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn reserve_account_admission(
+        &self,
+        request: &crate::admission_ledger::AccountAdmissionReservation,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        PgBackend::reserve_account_admission(self, request).await
+    }
+
+    async fn account_admission_status(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        principal: &str,
+        policy: &crate::account_trust::BoundedPolicy,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionStatus>, DatabaseError> {
+        PgBackend::account_admission_status(self, account, principal, policy).await
+    }
+
+    async fn transition_account_admission(
+        &self,
+        tenant: &str,
+        principal: &str,
+        account: Uuid,
+        submission: Uuid,
+        lease: Uuid,
+        next: &str,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::transition_account_admission(self, tenant, principal, account, submission, lease, next).await
+    }
     async fn redeem_account_invite(
         &self,
         tenant: &str,
@@ -7033,6 +7065,7 @@ mod tests {
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
             include_str!("../../../../migrations/V75__account_trust.sql"),
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+            include_str!("../../../../migrations/V77__account_admission.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7057,6 +7090,7 @@ mod tests {
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
             include_str!("../../../../migrations/V75__account_trust.sql"),
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+            include_str!("../../../../migrations/V77__account_admission.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

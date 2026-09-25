@@ -320,6 +320,31 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
+    async fn reserve_account_admission(
+        &self,
+        _request: &crate::admission_ledger::AccountAdmissionReservation,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        Err(DatabaseError::Pool("account_admission_database_unavailable".into()))
+    }
+    async fn account_admission_status(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _principal: &str,
+        _policy: &crate::account_trust::BoundedPolicy,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionStatus>, DatabaseError> {
+        Err(DatabaseError::Pool("account_admission_database_unavailable".into()))
+    }
+    async fn transition_account_admission(
+        &self,
+        _tenant: &str,
+        _principal: &str,
+        _account: uuid::Uuid,
+        _submission: uuid::Uuid,
+        _lease: uuid::Uuid,
+        _next: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("account_admission_database_unavailable".into()))
+    }
     async fn transition_submission_admission(
         &self,
         _tenant: &str,

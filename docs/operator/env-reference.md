@@ -512,6 +512,17 @@ credentials and adds two of its own. See
 | `TRACE_COMMONS_NEAR_AI_PCCS_URL` | optional | `https://api.trustedservices.intel.com` | Where Intel DCAP collateral is fetched from. Defaults to Intel's own PCS rather than a caching mirror: the collateral is what a quote is verified against. |
 | `TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS` | optional | `60` | Shared with the gate scorer; bounds each of the drill's four calls. |
 
+## Account contribution admission (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED` | optional | `false` | Explicit replacement switch. Off retains legacy evidence behavior. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` | R when enabled | (none) | Reviewed policy version allowed at startup. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule: none`. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS` | R when enabled | (none) | Positive processing lease, at most 86400 seconds. |
+
+See [account trust](./account-trust.md) for the activation and response contract.
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.
