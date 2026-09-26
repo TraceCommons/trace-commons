@@ -35,7 +35,6 @@ pub struct TraceWitnessCertificateEvidenceWrite {
     pub(crate) inference_class: AttestationClass,
     pub(crate) bound_model: Option<String>,
     pub(crate) receipt_signer: Option<String>,
-    pub(crate) receipt_sha256: Option<String>,
     pub(crate) issued_at: DateTime<Utc>,
 }
 
@@ -74,16 +73,20 @@ impl TraceWitnessCertificateEvidenceWrite {
             .expect("matched verified headers have signature")
             .as_bytes()
             .to_vec();
-        let (inference_class, bound_model, receipt_signer, receipt_sha256) =
-            match verified.inference_provenance() {
-                InferenceProvenance::Unattested => (AttestationClass::Unattested, None, None, None),
-                InferenceProvenance::Attested(call) => (
-                    call.class(),
-                    call.model().map(str::to_string),
-                    Some(call.receipt_signer().to_string()),
-                    Some(call.receipt_sha256().to_string()),
-                ),
-            };
+        // A v1 certificate carries no provenance claim (`None`); it is stored
+        // as unattested and `certificate_version = 1` keeps it distinguishable
+        // from a signed v2 unattested statement.
+        let (inference_class, bound_model, receipt_signer) = match verified.inference_provenance()
+        {
+            None | Some(InferenceProvenance::Unattested) => {
+                (AttestationClass::Unattested, None, None)
+            }
+            Some(InferenceProvenance::Attested(call)) => (
+                call.class(),
+                call.model().map(str::to_string),
+                Some(call.receipt_signer().to_string()),
+            ),
+        };
         Ok(Self {
             tenant_id: tenant_id.to_string(),
             submission_id,
@@ -95,7 +98,6 @@ impl TraceWitnessCertificateEvidenceWrite {
             inference_class,
             bound_model,
             receipt_signer,
-            receipt_sha256,
             issued_at,
         })
     }
@@ -125,7 +127,6 @@ pub struct TraceWitnessEvidenceClaim {
     pub class: AttestationClass,
     pub coverage: TraceWitnessEvidenceCoverage,
     pub raw_body_sha256: Option<String>,
-    pub receipt_sha256: Option<String>,
 }
 
 fn default_trace_ranking_min_label_source_count() -> u32 {

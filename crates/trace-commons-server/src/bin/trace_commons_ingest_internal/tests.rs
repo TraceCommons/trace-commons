@@ -93332,11 +93332,8 @@ mod witness_receipt {
         let provenance = InferenceProvenance::Attested(
             FinalCallAttestation::new(
                 AttestationClass::ProviderTeeFinalCall,
-                "a".repeat(64),
                 Some("model".into()),
                 "b".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64),
             )
             .unwrap(),
         );

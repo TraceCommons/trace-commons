@@ -367,7 +367,6 @@ fn witness_claim_from_row(
         class: AttestationClass::Unattested,
         coverage: TraceWitnessEvidenceCoverage::Missing,
         raw_body_sha256: None,
-        receipt_sha256: None,
     };
     let Some(row) = row else {
         return missing();
@@ -376,12 +375,10 @@ fn witness_claim_from_row(
         return missing();
     };
     let raw_body_sha256: Option<String> = row.get(6);
-    let receipt_sha256: Option<String> = row.get(8);
     let conservative = |coverage| TraceWitnessEvidenceClaim {
         class: AttestationClass::Unattested,
         coverage,
         raw_body_sha256: raw_body_sha256.clone(),
-        receipt_sha256: receipt_sha256.clone(),
     };
     if version == 1 {
         return conservative(TraceWitnessEvidenceCoverage::LegacyV1);
@@ -411,7 +408,6 @@ fn witness_claim_from_row(
         class,
         coverage: TraceWitnessEvidenceCoverage::VerifiedV2,
         raw_body_sha256,
-        receipt_sha256,
     }
 }
 
@@ -1739,8 +1735,8 @@ impl TraceCorpusStore for PgBackend {
                 "INSERT INTO trace_witness_certificate_evidence (
                     tenant_id, submission_id, certificate_json, signature_header,
                     raw_body_sha256, artifact_sha256, certificate_version, inference_class,
-                    bound_model, receipt_signer, receipt_sha256, issued_at
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                    bound_model, receipt_signer, issued_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                  ON CONFLICT (tenant_id, submission_id) DO NOTHING",
                 &[
                     &evidence.tenant_id,
@@ -1753,7 +1749,6 @@ impl TraceCorpusStore for PgBackend {
                     &class,
                     &evidence.bound_model,
                     &evidence.receipt_signer,
-                    &evidence.receipt_sha256,
                     &evidence.issued_at,
                 ],
             )
@@ -1763,7 +1758,7 @@ impl TraceCorpusStore for PgBackend {
                 .query_one(
                     "SELECT certificate_json, signature_header, raw_body_sha256, artifact_sha256,
                         certificate_version, inference_class, bound_model, receipt_signer,
-                        receipt_sha256, issued_at
+                        issued_at
                  FROM trace_witness_certificate_evidence
                  WHERE tenant_id = $1 AND submission_id = $2
                  FOR UPDATE",
@@ -1778,8 +1773,7 @@ impl TraceCorpusStore for PgBackend {
                 && existing.get::<_, String>(5) == class
                 && existing.get::<_, Option<String>>(6) == evidence.bound_model
                 && existing.get::<_, Option<String>>(7) == evidence.receipt_signer
-                && existing.get::<_, Option<String>>(8) == evidence.receipt_sha256
-                && existing.get::<_, DateTime<Utc>>(9) == evidence.issued_at;
+                && existing.get::<_, DateTime<Utc>>(8) == evidence.issued_at;
             if !same_signed_source {
                 return Err(DatabaseError::Query("WitnessEvidenceConflict".into()));
             }
@@ -1814,7 +1808,7 @@ impl TraceCorpusStore for PgBackend {
             .query_opt(
                 "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
                     e.certificate_version, e.inference_class, e.raw_body_sha256,
-                    e.artifact_sha256, e.receipt_sha256
+                    e.artifact_sha256
              FROM trace_submissions s
              LEFT JOIN trace_witness_certificate_evidence e
                ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
@@ -1838,7 +1832,7 @@ impl TraceCorpusStore for PgBackend {
             .query_opt(
                 "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
                     e.certificate_version, e.inference_class, e.raw_body_sha256,
-                    e.artifact_sha256, e.receipt_sha256,
+                    e.artifact_sha256,
                     current_object.content_sha256 AS current_object_sha256
              FROM trace_submissions s
              LEFT JOIN trace_witness_certificate_evidence e
@@ -1857,7 +1851,7 @@ impl TraceCorpusStore for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         let selected_digest = row
             .as_ref()
-            .and_then(|r| r.get::<_, Option<String>>(9))
+            .and_then(|r| r.get::<_, Option<String>>(8))
             .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_string));
         let claim = witness_claim_from_row(row, selected_digest.as_deref());
         tx.commit().await.map_err(DatabaseError::Postgres)?;

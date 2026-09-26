@@ -95,11 +95,8 @@ fn signed_evidence_at(
         InferenceProvenance::Attested(
             FinalCallAttestation::new(
                 class,
-                "a".repeat(64),
                 Some("model".into()),
                 "b".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64),
             )
             .unwrap(),
         )
@@ -541,8 +538,8 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
             "INSERT INTO trace_witness_certificate_evidence (
             tenant_id, submission_id, certificate_json, signature_header, raw_body_sha256,
             artifact_sha256, certificate_version, inference_class, receipt_signer,
-            receipt_sha256, issued_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,2,'provider_tee_final_call',$7,$8,NOW())",
+            issued_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,2,'provider_tee_final_call',$7,NOW())",
             &[
                 &tenant_a,
                 &insert_target,
@@ -551,7 +548,6 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
                 &hex::encode(Sha256::digest(BODY)),
                 &artifact,
                 &"b".repeat(64),
-                &"c".repeat(64),
             ],
         )
         .await;

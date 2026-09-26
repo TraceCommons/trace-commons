@@ -1016,6 +1016,58 @@ async fn a_mid_import_failure_reports_the_partial_summary() {
 }
 
 #[tokio::test]
+async fn import_refuses_reserved_fixed_tenant_after_partial_progress() {
+    let Some(config) = registry_test_config() else {
+        eprintln!("skipping: no test database configured");
+        return;
+    };
+    let backend = PgBackend::new(&config).await.expect("backend");
+    backend.run_migrations().await.expect("migrations");
+
+    for reserved in ["near-", "nearai-", "NeAr-?!", "NEARAI-abc"] {
+        let policy_label = unique_label("reserved-import");
+        let hash_1 = unique_hash();
+        let hash_2 = unique_hash();
+        let hash_3 = unique_hash();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.json");
+        let file = serde_json::json!({
+            "version": 1,
+            "generated_at": "2026-05-17T18:00:00Z",
+            "policy_label": policy_label,
+            "entries": [
+                {"subject_hash": hash_1, "tenant_id": "nearby-1", "max_uses": 3},
+                {"subject_hash": hash_2, "tenant_id": reserved, "max_uses": 3},
+                {"subject_hash": hash_3, "tenant_id": "tenant-zaki-pilot", "max_uses": 3}
+            ]
+        });
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).expect("write file");
+
+        let err = import_file_invites(&backend, &path, &policy_label)
+            .await
+            .expect_err("reserved fixed tenant must stop the import");
+        let message = err.to_string();
+        assert!(message.contains("imported=1"), "message: {message}");
+        assert!(message.contains("entry 2"), "message: {message}");
+        assert!(
+            message.contains("PilotAllowlistMalformed: fixed tenant namespace reserved"),
+            "message: {message}"
+        );
+        assert!(!message.contains(reserved), "tenant ID leaked: {message}");
+        assert!(!message.contains(&hash_2), "subject hash leaked: {message}");
+
+        let all = backend.list_invite_grants().await.expect("list");
+        let imported: Vec<_> = all
+            .iter()
+            .filter(|entry| entry.policy_label == policy_label)
+            .collect();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].invite_subject_hash, hash_1);
+        assert_eq!(imported[0].fixed_tenant_id.as_deref(), Some("nearby-1"));
+    }
+}
+
+#[tokio::test]
 async fn an_expired_invite_cannot_be_redeemed() {
     let Some(config) = registry_test_config() else {
         eprintln!("skipping: no test database configured");

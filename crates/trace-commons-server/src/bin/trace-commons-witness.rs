@@ -130,6 +130,14 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
     version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION"))
 )]
 struct Args {
+    /// Certificate profile; enable v2 only after ingest and supported clients upgrade.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION",
+        default_value = "v1"
+    )]
+    certificate_version: trace_commons_server::witness_service::WitnessCertificateIssuance,
+
     /// Address to bind. Bind to the guest's own interface; the witness is
     /// reached through whatever terminates TLS in front of it.
     #[arg(
@@ -174,6 +182,12 @@ struct Args {
         default_value_t = DEFAULT_MAX_CONCURRENT_REQUESTS
     )]
     max_concurrent_requests: usize,
+
+    /// Slots left available to ordinary calls when background calls fill
+    /// their cooperative budget. Defaults to one, or zero for a one-slot
+    /// witness. This does not increase the global concurrency limit.
+    #[arg(long, env = "TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS")]
+    reserved_interactive_slots: Option<usize>,
 
     /// How long one `POST /v1/witness` request may take before it is
     /// abandoned and its slot released. See [`DEFAULT_REQUEST_TIMEOUT_SECS`].
@@ -305,6 +319,20 @@ struct Args {
     gateway_receipt_key_pins: Option<String>,
 }
 
+fn resolved_reserved_interactive_slots(
+    max_concurrent_requests: usize,
+    configured: Option<usize>,
+) -> Result<usize, &'static str> {
+    if max_concurrent_requests == 0 {
+        return Err("witness concurrency limit must be positive");
+    }
+    let reserved = configured.unwrap_or(usize::from(max_concurrent_requests > 1));
+    if reserved >= max_concurrent_requests {
+        return Err("reserved interactive slots must be below the concurrency limit");
+    }
+    Ok(reserved)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -331,6 +359,11 @@ async fn main() -> Result<()> {
     if args.max_concurrent_requests == 0 {
         bail!("TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS must be greater than zero");
     }
+    let reserved_interactive_slots = resolved_reserved_interactive_slots(
+        args.max_concurrent_requests,
+        args.reserved_interactive_slots,
+    )
+    .map_err(anyhow::Error::msg)?;
     if args.request_timeout_secs == 0 {
         bail!("TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS must be greater than zero");
     }
@@ -546,6 +579,7 @@ async fn main() -> Result<()> {
         enclave as Arc<dyn Enclave>,
         args.max_request_bytes,
     )
+    .with_certificate_issuance(args.certificate_version)
     .requiring_attested_inference(inference_policy)
     .with_contribution_redactor(contribution_redactor);
     if std::env::var_os("TRACE_COMMONS_WITNESS_ADMISSION_PROVIDER_SIGNERS").is_some() {
@@ -557,15 +591,92 @@ async fn main() -> Result<()> {
     }
     let service = Arc::new(service);
 
+    let load = WitnessLoadBound::with_reservation(
+        args.max_concurrent_requests,
+        reserved_interactive_slots,
+        Duration::from_secs(args.request_timeout_secs),
+    )
+    .map_err(anyhow::Error::msg)?;
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
-    let load = WitnessLoadBound::new(
-        args.max_concurrent_requests,
-        Duration::from_secs(args.request_timeout_secs),
-    );
     axum::serve(listener, witness_router(service, load))
         .await
         .context("the witness listener stopped")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod certificate_issuance_tests {
+    use super::*;
+    use trace_commons_server::witness_service::WitnessCertificateIssuance;
+
+    #[test]
+    fn certificate_version_configuration_is_closed_and_defaults_v1() {
+        // Explicit CLI values override any developer environment configuration.
+        for (value, expected) in [
+            ("v1", WitnessCertificateIssuance::V1),
+            ("v2", WitnessCertificateIssuance::V2),
+        ] {
+            assert_eq!(
+                Args::try_parse_from([
+                    "witness",
+                    "--redaction",
+                    DETERMINISTIC_ONLY,
+                    "--certificate-version",
+                    value
+                ])
+                .unwrap()
+                .certificate_version,
+                expected
+            );
+        }
+        assert_eq!(
+            WitnessCertificateIssuance::default(),
+            WitnessCertificateIssuance::V1
+        );
+        for invalid in ["", "2", "V2", "v3", "v2 "] {
+            assert!(
+                Args::try_parse_from([
+                    "witness",
+                    "--redaction",
+                    DETERMINISTIC_ONLY,
+                    "--certificate-version",
+                    invalid
+                ])
+                .is_err()
+            );
+        }
+        use clap::CommandFactory;
+        let command = Args::command();
+        let argument = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "certificate_version")
+            .unwrap();
+        assert_eq!(
+            argument.get_default_values(),
+            &[std::ffi::OsString::from("v1")]
+        );
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new(
+                "TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION"
+            ))
+        );
+    }
+}
+
+#[cfg(test)]
+mod reserved_interactive_tests {
+    use super::resolved_reserved_interactive_slots;
+
+    #[test]
+    fn default_and_explicit_reservations_respect_global_limit() {
+        assert_eq!(resolved_reserved_interactive_slots(4, None), Ok(1));
+        assert_eq!(resolved_reserved_interactive_slots(4, Some(0)), Ok(0));
+        assert_eq!(resolved_reserved_interactive_slots(1, None), Ok(0));
+        assert!(resolved_reserved_interactive_slots(1, Some(1)).is_err());
+        assert!(resolved_reserved_interactive_slots(4, Some(4)).is_err());
+        assert!(resolved_reserved_interactive_slots(0, None).is_err());
+    }
 }

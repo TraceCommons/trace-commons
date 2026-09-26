@@ -13,6 +13,7 @@ pub mod privacy;
 pub mod public_run;
 mod redaction;
 pub mod trace_contribution;
+pub mod witness_pacing;
 pub mod witness_provenance;
 
 /// Response header carrying a rotated bearer for native account clients.
