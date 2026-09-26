@@ -12,13 +12,11 @@
 //! # Not enforced yet
 //!
 //! [`ENFORCED`] is `false`, and is switched on only when the switch-on
-//! conditions in rev 8 of the spec hold: Z2 (#1005) is in place, and a
-//! held-session health condition reaches every shell. Until then the gate is
-//! evaluated and reported, and approvals go ahead exactly as before.
-//!
-//! Rev 8 is #1025 and has not merged; `main` still carries rev 7, in which R1
-//! gates. This module follows rev 8, and until #1025 lands the spec on `main`
-//! is behind the code here.
+//! conditions in rev 8 of the spec ("When enforcement is switched on") hold:
+//! among them, Z2 (#1005) is in place, a held-session health condition
+//! reaches every shell, and the client reads the contribution-status answer
+//! that feeds R3. Until then the gate is evaluated and reported, and
+//! approvals go ahead exactly as before.
 //!
 //! # What it checks
 //!
