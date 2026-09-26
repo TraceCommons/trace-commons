@@ -474,13 +474,15 @@ next poll under the new inputs. So a changed witness — URL, pins, or
 **Required:** a void rule whose identity includes `signing_address`, and which
 holds re-approval until re-consent rather than letting the next poll resume.
 
-**Specified in review; implementation pending in #1024.** The identity is structured terms,
+**Implemented in #1024 (`daemon/grant_terms.rs`).** The identity is structured terms,
 not `input_fingerprint`, which hashes the crate version and would void every
 grant on every release: the destination (ingest and issuer endpoints, audience,
 host allowlist), the identity (tenant, instance, subject, device), the consent
-scopes, the privacy filter and its classifier host and model, the receipt
-endpoint, the witness URL, `signing_address` and measurements, and attested
-bodies. The NEAR AI API key stays out.
+scopes, the privacy filter and its classifier host and model (including the
+filter `TRACE_PRIVACY_FILTER_BACKEND` attaches, by its host and model or
+sidecar command, hashed), the receipt endpoint, the witness URL,
+`signing_address` and measurements, and attested bodies. The NEAR AI API key
+stays out.
 
 A grant is voided -- the project returns to ask-first and the void is audited
 -- when **the parties who see content grow or change, or the content that
@@ -492,7 +494,7 @@ attested bodies off, a receipt endpoint removed and a measurement retired do
 not void: each is one fewer party or less content. Measurements are part of
 the witness term, so "a change of witness" here is deliberately narrower than
 "any change to that term": a retirement alone never voids. This matches
-#1024 (pending), which compares `witness_url` and `witness_signing_address`
+#1024, which compares `witness_url` and `witness_signing_address`
 for equality and voids on measurements only when the new set is not a subset
 of the granted one.
 

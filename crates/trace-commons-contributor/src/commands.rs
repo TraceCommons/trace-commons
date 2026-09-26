@@ -4056,6 +4056,8 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
+        // Arming records the terms in force, so it needs a config.
+        store.save_config(&unenrolled_preview_config()).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false).unwrap();
         let key = std::fs::canonicalize(project.path())
