@@ -77,6 +77,24 @@ pub struct TickReport {
     /// Sessions that reached `TraceSource::load` and could not be read, for
     /// any reason. Every one of these used to be a bare `continue`.
     pub unloadable: usize,
+    /// Unattended approvals made this pass that the automatic-contribution
+    /// gate would have refused, had it been enforced. Counted within
+    /// `auto_ready`, not apart from it. While the gate ships unenforced this
+    /// is how far today's behaviour is from what the gate will allow; see
+    /// `automatic_gate`.
+    pub gate_would_refuse: usize,
+    /// Sessions in armed folders that an enforced gate is holding waiting
+    /// instead of approving. A level rather than an event: an entry the gate
+    /// holds is counted again on every pass that sees it, so this is how
+    /// much armed work is waiting on the gate now.
+    ///
+    /// `None` on a scoped pass. That pass visits only the sessions some
+    /// paths resolved to, so its count says nothing about the rest of the
+    /// corpus; reporting it as a level would drop to zero on every unrelated
+    /// file change while work is still held. Only a full pass measures it,
+    /// the same rule `finish_pass` applies to retracting health conditions.
+    /// `Some(0)` while the gate is unenforced. See `automatic_gate`.
+    pub gate_blocked: Option<usize>,
     /// The subset of `unloadable` the source declined by name over its own
     /// byte budget, rather than failed to read. See
     /// `source::SessionTooLarge` for why the two are counted apart.
@@ -186,7 +204,9 @@ fn tick_over(
         }
     }
 
-    finish_pass(shared, out, true)
+    let report = finish_pass(shared, out, true)?;
+    report_gate(shared, &ctx.gate, &report);
+    Ok(report)
 }
 
 /// Record what is on disk for the Flow 1 grant `grant`, per source: each
@@ -406,7 +426,27 @@ fn tick_over_paths(
         }
     }
 
-    finish_pass(shared, out, false)
+    let report = finish_pass(shared, out, false)?;
+    report_gate(shared, &ctx.gate, &report);
+    Ok(report)
+}
+
+// Lets a test exercise the enforced gate while it ships unenforced.
+//
+// Thread-local rather than a shared flag because tests run in parallel and a
+// global would leak between them; each `#[tokio::test]` runs on its own
+// current-thread runtime. Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static ENFORCE_GATE_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn gate_enforced() -> bool {
+    #[cfg(test)]
+    if ENFORCE_GATE_FOR_TEST.with(std::cell::Cell::get) {
+        return true;
+    }
+    super::automatic_gate::ENFORCED
 }
 
 /// Void every standing grant the terms in force no longer cover.
@@ -487,6 +527,10 @@ struct PassContext {
     /// invited contributor, whose entries carry no eligibility at all -- see
     /// `QueueEntry::eligibility`.
     admission_evidence: bool,
+    /// Whether an unattended approval may happen this pass. Evaluated once,
+    /// with the config, because every requirement it checks today is about
+    /// the contributor rather than a particular session.
+    gate: super::automatic_gate::GateVerdict,
     /// The grant terms in force, from the same config and settings this pass
     /// reads. `None` without a config. See `sweep_grants`.
     grant_terms: Option<super::grant_terms::GrantTerms>,
@@ -547,12 +591,14 @@ impl PassContext {
             .as_ref()
             .and_then(|c| c.witness.as_ref())
             .is_some_and(|w| w.admission_evidence);
+        let gate = super::automatic_gate::evaluate(cfg.as_ref(), gate_enforced());
         Self {
             now,
             max_queue_entries,
             consent_scopes,
             approval_inputs,
             admission_evidence,
+            gate,
             grant_terms,
             source_identities,
         }
@@ -571,6 +617,10 @@ struct PassOutcome {
     /// condition it is testing rather than as a count.
     too_large: bool,
     unsupported_export_version: bool,
+    /// Sessions the gate held this pass. Kept out of `report` until the
+    /// epilogue knows whether the pass was exhaustive; see
+    /// `TickReport::gate_blocked`.
+    gate_blocked: usize,
 }
 
 /// Everything one session costs: observe, evaluate, ask the queue, and load
@@ -713,10 +763,16 @@ fn visit_session(
         // it can never resurrect a dismissed, expired or uploaded
         // entry. Preserved here so skipping the load costs nothing
         // but the load.
-        if mode == ProjectMode::AutoUpload
+        // Through the automatic-contribution gate, like every other approval
+        // made on the contributor's behalf. See `automatic_gate`. A session
+        // the grant holds back would not be approved either way, so it is
+        // not counted as one the gate holds.
+        let would_approve = mode == ProjectMode::AutoUpload
             && state == QueueState::Pending
-            && !held_back_from_the_grant(shared, &project_key, &obs.path)
-        {
+            && !held_back_from_the_grant(shared, &project_key, &obs.path);
+        if would_approve && ctx.gate.blocks() {
+            out.gate_blocked += 1;
+        } else if would_approve {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
                 entry_id,
@@ -725,6 +781,9 @@ fn visit_session(
             ) {
                 out.changed = true;
                 out.report.auto_ready += 1;
+                if ctx.gate.would_refuse() {
+                    out.report.gate_would_refuse += 1;
+                }
             }
         }
         return;
@@ -851,10 +910,18 @@ fn visit_session(
     // window has elapsed (site above), and a session that grows in the
     // meantime supersedes this entry -- free, where the same growth after an
     // upload would cost one of three re-uploads and a duplicate penalty.
-    let armed = mode == ProjectMode::AutoUpload
+    // Through the automatic-contribution gate. `armed` decides both paths
+    // below that approve on the contributor's behalf -- a fresh entry created
+    // `Approved`, and an already-queued one re-approved -- so gating it here
+    // gates both. See `automatic_gate`.
+    let would_arm = mode == ProjectMode::AutoUpload
         && !from_staging
         && armed_settle_elapsed(obs.modified_at, ctx.now)
         && !held_back_from_the_grant(shared, &project_key, &obs.path);
+    let armed = would_arm && !ctx.gate.blocks();
+    // What the gate held back, counted so that enforcing it cannot stop an
+    // armed folder without saying so.
+    let gate_held = would_arm && ctx.gate.blocks();
 
     // Two questions off one transcript load. The mark is answered for every
     // contributor; the eligibility verdict is a derivation from it that stays
@@ -961,8 +1028,14 @@ fn visit_session(
                 out.changed = true;
                 if armed {
                     out.report.auto_ready += 1;
+                    if ctx.gate.would_refuse() {
+                        out.report.gate_would_refuse += 1;
+                    }
                 } else {
                     out.report.queued += 1;
+                    if gate_held {
+                        out.gate_blocked += 1;
+                    }
                 }
                 // A new entry passed the capacity check: there is
                 // space in the queue.
@@ -1002,6 +1075,15 @@ fn visit_session(
                 {
                     out.changed = true;
                     out.report.auto_ready += 1;
+                    if ctx.gate.would_refuse() {
+                        out.report.gate_would_refuse += 1;
+                    }
+                } else if gate_held
+                    && queue
+                        .get(entry_id)
+                        .is_some_and(|e| e.state == QueueState::Pending)
+                {
+                    out.gate_blocked += 1;
                 }
                 // This path returns Ok without checking capacity, so
                 // it does not prove space is available. Do not
@@ -1015,6 +1097,70 @@ fn visit_session(
     }
 }
 
+/// Say what the gate refused, or would have refused.
+///
+/// Only when it mattered, so a daemon with nothing armed logs nothing. What
+/// the gate holds is a level, so it is logged when a full pass finds it
+/// changed -- the count or the unmet reasons -- rather than on every poll:
+/// one session held for a day would otherwise log the same line every poll
+/// interval, and a count-only comparison would leave the last line showing
+/// stale reasons. The reasons are labels, never paths or content.
+fn report_gate(
+    shared: &DaemonShared,
+    gate: &super::automatic_gate::GateVerdict,
+    report: &TickReport,
+) -> Option<HeldLog> {
+    let reasons: Vec<&'static str> = gate.unmet.iter().map(|u| u.reason).collect();
+    let mut logged = None;
+    if let Some(held) = report.gate_blocked {
+        // What the last "held" line said: the count and the reasons, so a
+        // change of reasons at the same count is logged too. Nothing held has
+        // no reasons worth comparing.
+        let now = (
+            held,
+            if held > 0 {
+                reasons.clone()
+            } else {
+                Vec::new()
+            },
+        );
+        let before = std::mem::replace(
+            &mut *shared
+                .gate_held_logged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            now.clone(),
+        );
+        if now != before && held > 0 {
+            tracing::info!(
+                held,
+                unmet = ?reasons,
+                "the automatic-contribution gate is holding sessions in armed folders for the contributor"
+            );
+            logged = Some(HeldLog::Holding);
+        } else if now != before {
+            tracing::info!("the automatic-contribution gate is no longer holding any sessions");
+            logged = Some(HeldLog::Released);
+        }
+    }
+    if report.gate_would_refuse > 0 {
+        tracing::info!(
+            approvals = report.gate_would_refuse,
+            unmet = ?reasons,
+            "approved on the contributor's behalf; the automatic-contribution gate would have refused these"
+        );
+    }
+    logged
+}
+
+/// Which "held" line `report_gate` wrote, if any. Returned so the log-on-change
+/// rule can be tested without capturing log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldLog {
+    Holding,
+    Released,
+}
+
 /// Everything a pass owes once it has visited its sessions: the relabel pass,
 /// the queue save and envelope sweep, the change publish, and the state save.
 ///
@@ -1023,11 +1169,13 @@ fn visit_session(
 /// file, and the publish is a wake-up for every subscribed shell.
 fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
     let PassOutcome {
-        report,
+        mut report,
         mut changed,
         too_large,
         unsupported_export_version,
+        gate_blocked,
     } = out;
+    report.gate_blocked = exhaustive.then_some(gate_blocked);
 
     // Retract the unreadable-session flag only from a pass that asked every
     // source what it has and found nothing it could not read. A scoped pass
@@ -1718,6 +1866,128 @@ mod tests {
         );
     }
 
+    /// Report-only, which is how the gate ships: the approval goes ahead as
+    /// before, and is counted as one the gate would have refused.
+    #[tokio::test]
+    async fn the_unenforced_gate_approves_as_before_and_counts_what_it_would_refuse() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        assert_eq!(report.gate_would_refuse, 1, "{report:?}");
+        assert_eq!(report.gate_blocked, Some(0), "unenforced, it holds nothing");
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Approved);
+    }
+
+    /// Enforced, every route to an unattended approval stops: a fresh
+    /// settled session is created waiting, not approved, and stays waiting
+    /// when it is seen again. Nobody passes the gate today, so this is what
+    /// switching it on without K5 would do to every armed folder.
+    #[tokio::test]
+    async fn the_enforced_gate_stops_every_approval_on_the_contributors_behalf() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let first = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let again = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(first.auto_ready, 0, "{first:?}");
+        assert_eq!(again.auto_ready, 0, "{again:?}");
+        // Not silently: each pass counts what the gate is holding.
+        assert_eq!(first.gate_blocked, Some(1), "{first:?}");
+        assert_eq!(again.gate_blocked, Some(1), "{again:?}");
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Pending, "waits for the contributor");
+        assert!(!e.approved_unattended);
+    }
+
+    /// What the gate holds is a level only a full pass can measure. A scoped
+    /// pass over an unrelated session must not report the held work as
+    /// gone, or a health condition read from it would clear on every file
+    /// change while the session is still waiting.
+    #[tokio::test]
+    async fn only_a_full_pass_reports_what_the_gate_is_holding() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let full = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let unrelated = f.write_session("other", "22222222-2222-2222-2222-222222222222", 0);
+        let (l, d) = (loads(), loads());
+        let scoped = f.settle_paths(
+            Utc::now() + chrono::Duration::hours(31),
+            &l,
+            &d,
+            std::slice::from_ref(&unrelated),
+        );
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(full.gate_blocked, Some(1), "{full:?}");
+        assert_eq!(scoped.gate_blocked, None, "{scoped:?}");
+    }
+
+    /// The "holding" line is written when what the gate holds changes: the
+    /// count, or the reasons it holds for. The same pair on the next poll
+    /// logs nothing; a new reason at the same count logs again, so the last
+    /// line never shows stale reasons. A scoped pass measures nothing and
+    /// logs nothing.
+    #[tokio::test]
+    async fn the_held_line_is_logged_when_the_count_or_the_reasons_change() {
+        use super::super::automatic_gate::{
+            GateVerdict, REASON_ACCOUNT_ALLOWANCE_SPENT, REASON_ADMISSION_PER_SESSION,
+            REASON_NO_SCOPE, Requirement, Unmet,
+        };
+        let f = WatcherFixture::new();
+        let verdict = |unmet: &[(Requirement, &'static str)]| GateVerdict {
+            unmet: unmet
+                .iter()
+                .map(|&(requirement, reason)| Unmet {
+                    requirement,
+                    reason,
+                })
+                .collect(),
+            enforced: true,
+        };
+        let held = |n| TickReport {
+            gate_blocked: n,
+            ..TickReport::default()
+        };
+        let r3 = verdict(&[(Requirement::R3Admission, REASON_ADMISSION_PER_SESSION)]);
+        let r3_spent = verdict(&[(Requirement::R3Admission, REASON_ACCOUNT_ALLOWANCE_SPENT)]);
+        let r7 = verdict(&[(Requirement::R7Scope, REASON_NO_SCOPE)]);
+
+        let log = |g: &GateVerdict, r: &TickReport| report_gate(&f.shared, g, r);
+        assert_eq!(log(&r3, &held(Some(2))), Some(HeldLog::Holding));
+        assert_eq!(log(&r3, &held(Some(2))), None, "unchanged: not every poll");
+        assert_eq!(
+            log(&r3, &held(None)),
+            None,
+            "a scoped pass measures nothing"
+        );
+        assert_eq!(
+            log(&r3_spent, &held(Some(2))),
+            Some(HeldLog::Holding),
+            "same count, new reason"
+        );
+        assert_eq!(
+            log(&r7, &held(Some(2))),
+            Some(HeldLog::Holding),
+            "same count, R3 lifted and R7 unmet"
+        );
+        assert_eq!(log(&r7, &held(Some(3))), Some(HeldLog::Holding));
+        assert_eq!(log(&r7, &held(Some(0))), Some(HeldLog::Released));
+        // Nothing held: a change of reasons alone is not news, since the
+        // unenforced gate reports would-refuse approvals on their own line.
+        assert_eq!(log(&r3, &held(Some(0))), None);
+        assert_eq!(log(&r3, &held(Some(1))), Some(HeldLog::Holding));
+    }
+
     fn grant_test_cfg(scopes: &[&str]) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
@@ -1935,6 +2205,38 @@ mod tests {
             .collect();
         assert_eq!(armed.len(), 1);
         assert_eq!(armed[0].project_label.as_deref(), Some("new"));
+    }
+
+    /// A project the grant arms by default is still an unattended approval,
+    /// so it goes through the gate: enforced, the new project is armed (the
+    /// grant is the contributor's), but its session waits and is counted as
+    /// held. The project on disk at the grant asks, and is not counted.
+    #[tokio::test]
+    async fn the_enforced_gate_holds_a_session_in_a_project_the_grant_armed() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.shared.store.save_config(&grant_test_cfg(&[])).unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        f.write_session("old", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        let third = f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+        assert_eq!(second.auto_ready, 0, "{second:?}");
+        assert_eq!(second.gate_blocked, Some(1), "{second:?}");
+        assert_eq!(third.gate_blocked, Some(1), "{third:?}");
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            queue
+                .all()
+                .iter()
+                .all(|e| e.state == QueueState::Pending && !e.approved_unattended),
+            "nothing approved on the contributor's behalf"
+        );
     }
 
     /// K4: a re-grant after logout arms nothing already on disk. Logout
