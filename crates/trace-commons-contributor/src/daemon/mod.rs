@@ -26,6 +26,7 @@ pub mod approved_envelope;
 pub mod attached;
 pub mod attestation_mark;
 pub mod audit;
+pub mod automatic_gate;
 pub mod client;
 pub(crate) mod cloud_credential_lifecycle;
 #[cfg(test)]
@@ -37,6 +38,7 @@ pub mod contribution_eligibility;
 pub(crate) mod credential_store;
 pub mod eligibility;
 pub mod enroll;
+pub mod grant_terms;
 pub mod harness;
 pub mod health;
 pub mod history;
