@@ -74,6 +74,7 @@ pub struct AccountSession {
     pub account_id: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct LoadedAccountSession {
     pub session: AccountSession,
     pub snapshot: crate::daemon::commons_credentials::Snapshot,
@@ -114,10 +115,17 @@ pub(crate) fn try_load_session_with_snapshot(
     let Ok(session) = serde_json::from_slice::<AccountSession>(&raw) else {
         return Ok(None);
     };
-    if session.expires_at <= Utc::now() + EXPIRY_SKEW {
+    if !session_is_usable(&session) {
         return Ok(None);
     }
     Ok(Some(LoadedAccountSession { session, snapshot }))
+}
+
+/// Whether a session is still worth presenting: not expired, and not about
+/// to be. The same test [`try_load_session_with_snapshot`] applies on load,
+/// for a caller that holds a loaded session across time.
+pub(crate) fn session_is_usable(session: &AccountSession) -> bool {
+    session.expires_at > Utc::now() + EXPIRY_SKEW
 }
 
 pub(crate) fn store_rotated_token(

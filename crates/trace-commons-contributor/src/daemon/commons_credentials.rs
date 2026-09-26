@@ -132,7 +132,13 @@ fn native(_store: &ConfigStore) -> Result<CredentialStore<Arc<dyn SecretBackend>
 
 /// Capture before a browser/network operation. Both sign-out and wipe advance
 /// this durable generation, so even an absent -> absent change invalidates it.
-#[derive(Clone)]
+///
+/// Equality is the whole of that: two snapshots taken either side of a
+/// sign-out, a wipe, a configuration change or a token rotation differ, so a
+/// caller holding a credential it loaded under one can tell from a fresh
+/// snapshot, which reads only local files, whether the credential still
+/// stands.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     generation: Option<Vec<u8>>,
     config: Option<Vec<u8>>,

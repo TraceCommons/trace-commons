@@ -15,8 +15,8 @@
 //! conditions in rev 8 of the spec ("When enforcement is switched on") hold:
 //! among them, Z2 (#1005) is in place, a held-session health condition
 //! reaches every shell. The contribution-status answer that feeds R3 is now
-//! read (`daemon::account_admission`). Until then the gate is evaluated and reported, and
-//! approvals go ahead exactly as before.
+//! read (`daemon::account_admission`). Until then the gate is evaluated and
+//! reported, and approvals go ahead exactly as before.
 //!
 //! # What it checks
 //!
@@ -32,7 +32,7 @@
 //!   `/v1/account/contribution-status` (see [`AccountAdmission::from_status`]).
 //!   The daemon reads that answer before every full pass and hands it to
 //!   [`evaluate_with`]; see `daemon::account_admission` for how a yes is kept
-//!   provisional (per ingest and account, cancelled by any admission
+//!   provisional (per ingest and account, cancelled by a rule-3 admission
 //!   refusal, held while an allowance is spent, never persisted).
 //!   Account admission is per ingest replica and off whenever its environment
 //!   variable is missing, so it can revert on any redeploy; a client that had
@@ -146,8 +146,8 @@ impl AccountAdmission {
     ///
     /// One answer comes from one ingest replica, so it is provisional: the
     /// caller re-reads it on every full pass and drops back to
-    /// `NotAdvertised` on any admission refusal from ingest. Nothing here
-    /// persists a lift.
+    /// `NotAdvertised` on a rule-3 admission refusal from ingest. Nothing
+    /// here persists a lift.
     pub fn from_status(authority: &str, ready: bool) -> Self {
         match authority {
             "bounded" | "invited" if ready => Self::Advertised,

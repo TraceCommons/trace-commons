@@ -16,7 +16,7 @@
 //!
 //! The session comes from `crate::account_auth`: the human completes the
 //! ordinary browser login flow, and the browser hands this machine a
-//! short-lived bearer token on a loopback redirect. [`account_session_token`]
+//! short-lived bearer token on a loopback redirect. [`account_session`]
 //! reads that token, and treats an absent, unparseable, or expired one as
 //! absent -- so both handlers below fail closed with
 //! [`ERR_ACCOUNT_SESSION_REQUIRED`] rather than making a call that would 401.
@@ -34,14 +34,43 @@ use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Respons
 /// having to guess from a generic `unavailable`.
 pub const ERR_ACCOUNT_SESSION_REQUIRED: &str = "account-session-required";
 
-/// The account-session token this daemon presents to the withdrawal endpoint.
+/// The account session this daemon presents to the withdrawal endpoint,
+/// with the credential snapshot a rotation is stored against.
 ///
 /// `None` whenever the token is missing, unreadable, or expired (or about to
 /// be): the caller must then report [`ERR_ACCOUNT_SESSION_REQUIRED`] rather
 /// than fall back to the device key, which is deliberately not accepted for
 /// withdrawal.
-fn account_session_token(shared: &DaemonShared) -> anyhow::Result<Option<String>> {
-    super::run_blocking(|| crate::account_auth::try_load_token(&shared.store))
+fn account_session(
+    shared: &DaemonShared,
+) -> anyhow::Result<Option<crate::account_auth::LoadedAccountSession>> {
+    super::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(&shared.store))
+}
+
+/// Keep the rotated session the server handed back, if it rotated one, and
+/// present it from here on. The old token lasts only the server's short
+/// grace after a rotation, so dropping this signs the contributor out.
+///
+/// `false` when a rotation came back and could not be stored.
+fn keep_rotated_token(
+    shared: &DaemonShared,
+    session: &mut crate::account_auth::LoadedAccountSession,
+    rotated_token: Option<String>,
+) -> bool {
+    let Some(rotated_token) = rotated_token else {
+        return true;
+    };
+    let stored =
+        super::public_run::persist_rotated_token(shared, session, Some(rotated_token.clone()))
+            .is_ok();
+    // Reloaded rather than patched, so a second rotation in the same batch is
+    // stored against the snapshot the first one left.
+    match super::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(&shared.store))
+    {
+        Ok(Some(reloaded)) if stored => *session = reloaded,
+        _ => session.session.access_token = rotated_token,
+    }
+    stored
 }
 
 fn parse_submission_id(params: &serde_json::Value) -> Result<Uuid, &'static str> {
@@ -78,8 +107,8 @@ pub(super) async fn handle_withdraw(shared: &DaemonShared, req: &Request) -> Res
         Ok(id) => id,
         Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
     };
-    let token = match account_session_token(shared) {
-        Ok(Some(token)) => token,
+    let mut session = match account_session(shared) {
+        Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => {
             return Response::err(
@@ -92,28 +121,31 @@ pub(super) async fn handle_withdraw(shared: &DaemonShared, req: &Request) -> Res
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
     };
-    match crate::withdraw::call_withdraw(
+    let call = crate::withdraw::call_withdraw(
         &cfg.ingest_url,
         cfg.allowed_hosts.as_deref(),
-        &token,
+        &session.session.access_token,
         submission_id,
     )
-    .await
-    {
+    .await;
+    // Whatever the result: the server rotates on a refusal too.
+    let credential_persisted = keep_rotated_token(shared, &mut session, call.rotated_token);
+    match call.result {
         Ok(outcome) => {
             if let Ok(mut records) = HistoryCache::load(&shared.store) {
                 if history::mark_withdrawn(&mut records, submission_id, Utc::now()) {
                     let _ = HistoryCache::save(&shared.store, &records);
                 }
             }
-            Response::ok(
-                req.id,
-                serde_json::json!({
-                    "withdrawn": true,
-                    "distribution_reach": reach_label(outcome.distribution_reach),
-                    "token_deletion_note":outcome.token_deletion_state.map(|s| s.note()),
-                }),
-            )
+            let mut value = serde_json::json!({
+                "withdrawn": true,
+                "distribution_reach": reach_label(outcome.distribution_reach),
+                "token_deletion_note":outcome.token_deletion_state.map(|s| s.note()),
+            });
+            if !credential_persisted {
+                super::public_run::attach_credential_warning(&mut value);
+            }
+            Response::ok(req.id, value)
         }
         Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "withdraw-failed"),
     }
@@ -135,8 +167,8 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "status-invalid"),
         None => return Response::err(req.id, ERR_BAD_PARAMS, "status-required"),
     };
-    let token = match account_session_token(shared) {
-        Ok(Some(token)) => token,
+    let mut session = match account_session(shared) {
+        Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => {
             return Response::err(
@@ -161,16 +193,19 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
 
     let mut withdrawn = 0u32;
     let mut failed = 0u32;
+    let mut credential_persisted = true;
     let now = Utc::now();
     for id in targets {
-        match crate::withdraw::call_withdraw(
+        let call = crate::withdraw::call_withdraw(
             &cfg.ingest_url,
             cfg.allowed_hosts.as_deref(),
-            &token,
+            &session.session.access_token,
             id,
         )
-        .await
-        {
+        .await;
+        // Before the next call, which must present the rotated token.
+        credential_persisted &= keep_rotated_token(shared, &mut session, call.rotated_token);
+        match call.result {
             Ok(_) => {
                 if history::mark_withdrawn(&mut records, id, now) {
                     withdrawn += 1;
@@ -182,10 +217,11 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
     if withdrawn > 0 {
         let _ = HistoryCache::save(&shared.store, &records);
     }
-    Response::ok(
-        req.id,
-        serde_json::json!({ "withdrawn": withdrawn, "failed": failed }),
-    )
+    let mut value = serde_json::json!({ "withdrawn": withdrawn, "failed": failed });
+    if !credential_persisted {
+        super::public_run::attach_credential_warning(&mut value);
+    }
+    Response::ok(req.id, value)
 }
 
 #[cfg(test)]
@@ -290,7 +326,7 @@ mod tests {
         // withdrawal reports `account-session-required` rather than reaching
         // for the device key.
         let s = shared();
-        assert_eq!(account_session_token(&s).unwrap(), None);
+        assert!(account_session(&s).unwrap().is_none());
     }
 
     #[test]
@@ -312,7 +348,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            account_session_token(&s).unwrap().as_deref(),
+            account_session(&s)
+                .unwrap()
+                .map(|loaded| loaded.session.access_token)
+                .as_deref(),
             Some("tcn1_dGVuYW50.secret")
         );
     }
@@ -345,5 +384,155 @@ mod tests {
         let err = r.error.unwrap();
         assert_eq!(err.code, ERR_UNAVAILABLE);
         assert_eq!(err.message, ERR_ACCOUNT_SESSION_REQUIRED);
+    }
+
+    /// A withdrawal route, serving a rotated session on the first call only
+    /// and recording the bearer each call presented.
+    async fn rotating_ingest(
+        status: axum::http::StatusCode,
+        rotated: String,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{Json, Router, response::IntoResponse, routing::post};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let router = Router::new().route(
+            "/v1/account/traces/{submission_id}/withdraw",
+            post({
+                let seen = seen.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let seen = seen.clone();
+                    let rotated = rotated.clone();
+                    async move {
+                        let auth = headers["authorization"].to_str().unwrap().to_string();
+                        let first = seen.lock().unwrap().is_empty();
+                        seen.lock().unwrap().push(auth);
+                        let body = if status.is_success() {
+                            serde_json::json!({ "distribution_reach": "not_distributed" })
+                        } else {
+                            serde_json::json!({ "error": "SubmissionNotFound" })
+                        };
+                        let mut resp = (status, Json(body)).into_response();
+                        if first {
+                            resp.headers_mut().insert(
+                                trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+                                rotated.parse().unwrap(),
+                            );
+                        }
+                        resp
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// Signed in against `base`, with `records` quarantined in the history
+    /// cache.
+    fn signed_in(base: &str, records: &[Uuid]) -> DaemonShared {
+        let s = shared();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.ingest_url = base.to_string();
+        s.store.save_config(&cfg).unwrap();
+        let session = crate::account_auth::AccountSession {
+            access_token: "tcn1_dGVuYW50.original".to_string(),
+            expires_at: Utc::now() + chrono::TimeDelta::hours(6),
+            account_id: "acct".to_string(),
+        };
+        s.store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&session).unwrap(),
+            )
+            .unwrap();
+        let records: Vec<history::HistoryRecord> = records
+            .iter()
+            .map(|id| history::HistoryRecord {
+                submission_id: *id,
+                submitted_at: Utc::now(),
+                project_id: String::new(),
+                project_label: "proj".into(),
+                source: "claude".into(),
+                session_hash: "sha256:test".into(),
+                status: STATUS_QUARANTINED.into(),
+                consent_scopes: Vec::new(),
+                credit_points_pending: 0.0,
+                credit_points_final: None,
+                explanations: Vec::new(),
+                last_refreshed_at: None,
+                withdrawn_at: None,
+            })
+            .collect();
+        HistoryCache::save(&s.store, &records).unwrap();
+        s
+    }
+
+    fn stored_token(s: &DaemonShared) -> Option<String> {
+        crate::account_auth::try_load_token(&s.store).unwrap()
+    }
+
+    /// The account route rotates an old session and hands the new token back.
+    /// Dropping it signs the contributor out once the old one's grace ends.
+    #[tokio::test]
+    async fn withdraw_keeps_a_rotated_account_session() {
+        let rotated = "tcn1_dGVuYW50.rotated".to_string();
+        let (base, _) = rotating_ingest(axum::http::StatusCode::OK, rotated.clone()).await;
+        let s = signed_in(&base, &[]);
+        let r = handle_withdraw(
+            &s,
+            &req(
+                "withdraw",
+                serde_json::json!({"submission_id": Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none());
+        assert_eq!(stored_token(&s), Some(rotated));
+    }
+
+    /// The middleware rotates before the handler answers, so a refusal can
+    /// carry a rotation too.
+    #[tokio::test]
+    async fn withdraw_keeps_a_rotated_account_session_on_a_refusal() {
+        let rotated = "tcn1_dGVuYW50.rotated".to_string();
+        let (base, _) = rotating_ingest(axum::http::StatusCode::NOT_FOUND, rotated.clone()).await;
+        let s = signed_in(&base, &[]);
+        let r = handle_withdraw(
+            &s,
+            &req(
+                "withdraw",
+                serde_json::json!({"submission_id": Uuid::new_v4().to_string()}),
+            ),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "withdraw-failed");
+        assert_eq!(stored_token(&s), Some(rotated));
+    }
+
+    /// In a batch, the calls after a rotation present the rotated token, and
+    /// it is the one left stored.
+    #[tokio::test]
+    async fn withdraw_bulk_presents_and_keeps_a_rotated_account_session() {
+        let rotated = "tcn1_dGVuYW50.rotated".to_string();
+        let (base, seen) = rotating_ingest(axum::http::StatusCode::OK, rotated.clone()).await;
+        let s = signed_in(&base, &[Uuid::new_v4(), Uuid::new_v4()]);
+        let r = handle_withdraw_bulk(
+            &s,
+            &req(
+                "withdraw_bulk",
+                serde_json::json!({"status": "quarantined"}),
+            ),
+        )
+        .await;
+        assert_eq!(r.result.unwrap()["withdrawn"], 2);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [
+                "Bearer tcn1_dGVuYW50.original".to_string(),
+                format!("Bearer {rotated}")
+            ]
+        );
+        assert_eq!(stored_token(&s), Some(rotated));
     }
 }
