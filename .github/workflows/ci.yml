@@ -410,6 +410,107 @@ jobs:
       # runs exactly when a save is about to happen.
       - uses: ./.github/actions/trim-cargo-cache
 
+  ingest-bin-postgres:
+    name: trace-commons-ingest tests, whole bin, against PostgreSQL (advisory)
+    # ADVISORY. Not a required status check, and deliberately left out of
+    # branch protection: it becomes required once it is green on `main`.
+    # Until then a red run here blocks nothing, so read it.
+    #
+    # The `trace-commons-ingest` bin carries well over a thousand unit tests,
+    # and every PostgreSQL-backed one self-skips without
+    # TRACE_COMMONS_PG_TEST_DATABASE_URL. `postgres-suites` above sets that
+    # variable only for a handful of named slices, so most of them had never
+    # run against PostgreSQL in CI. Run locally, the whole bin had 25 of them
+    # failing deterministically -- stale fixtures, one real defect shared by
+    # five, and one more found while repairing the rest. This job runs all
+    # of them.
+    #
+    # Not run in the merge queue: it is not required, so a queued batch would
+    # only spend a runner on a result nobody waits for.
+    if: ${{ github.event_name != 'merge_group' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: postgres
+          # Same reason as `postgres-suites`: fixtures create password-less
+          # login roles and connect as them, and the login-resolver URL below
+          # names one. Trust auth is safe on a throwaway loopback server.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-ingest-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      # One database, named `admission_test_*` on the literal host 127.0.0.1,
+      # because fixtures assert both before running destructive cleanup.
+      #
+      # The login-resolver role is provisioned the way
+      # docs/operator/login-resolver-role.md recommends: the privilege-bearing
+      # base role exactly as V30 creates it (NOLOGIN NOBYPASSRLS -- V30 creates
+      # it only if absent, so creating it first changes nothing), plus a
+      # separate LOGIN role that is a member of it. Without the resolver URL,
+      # about 74 account, passkey and login tests fail with
+      # `redeem succeeds: left 400 right 303`, because the redeem path fails
+      # closed when its resolver pool cannot connect.
+      - name: Create the database and the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace admission_test_ingest_bin
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      # Single-threaded: the tests share the `tenant-a` fixture tenant and
+      # clean it up at start and end, so in parallel they delete each other's
+      # rows. Every other job that runs these tests runs them without a
+      # database, where they return before touching anything.
+      - name: trace-commons-ingest, every test, one thread
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+          '
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin
+      # The same guard as `postgres-suites`: a pass count is not evidence that
+      # anything reached the database. A renamed variable or a new early
+      # return leaves xact_commit where createdb left it. A full run commits
+      # tens of thousands of transactions; the floor is far below that and far
+      # above what a skipping run could produce.
+      - name: Refuse a run that executed nothing
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_ingest_bin';")
+          echo "admission_test_ingest_bin committed ${n:-0} transactions"
+          if [ "${n:-0}" -lt 1000 ]; then
+            echo "::error::admission_test_ingest_bin shows no real activity; the PostgreSQL tests skipped instead of running"
+            exit 1
+          fi
+      - uses: ./.github/actions/trim-cargo-cache
+
   mark-assets-drift:
     name: mark assets match the generator
     runs-on: ubuntu-latest

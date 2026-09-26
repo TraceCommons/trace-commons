@@ -452,8 +452,11 @@ Branch protection on `main` requires:
   | `cargo check (local-gpu-models, non-CUDA)` | `database suites against a real PostgreSQL` |
   | `cargo check (permissive crates, standalone)` | `builds at the declared MSRV floor` |
 
-  `.github/workflows/ci.yml` holds more jobs than this (sixteen as of
-  2026-09-22); the others run on every PR but do not block the merge. The
+  `.github/workflows/ci.yml` holds more jobs than this (seventeen as of
+  2026-09-26); the others run on every PR but do not block the merge. One
+  of them, `trace-commons-ingest tests, whole bin, against PostgreSQL
+  (advisory)`, is meant to join the required set once it is green on
+  `main`. The
   client shells -- the macOS app, the Windows app, installer, named-pipe ACL
   and update conformance, and the Linux GTK shell -- live in
   `.github/workflows/clients.yml` since 2026-09-22. They run on every push to

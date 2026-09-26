@@ -13,6 +13,9 @@ All drills:
 - Return HTTP 200 with `ready: true` on pass, and a label-only
   `blocking_gaps` list naming what is missing otherwise. There is no
   `success` field on any drill response.
+- Accept an optional free-text `purpose`, and return it only as
+  `purpose_hash` (`sha256:` of the trimmed text, or of the drill's default
+  label when none is given). The text itself never appears in a response.
 - Are idempotent — re-running has no side effects beyond a fresh audit
   row.
 
