@@ -2542,108 +2542,33 @@ impl TraceCorpusStore for PgBackend {
         actor_principal_ref: &str,
         reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        if lock_source_session_for_submission(&tx, tenant_id, submission_id).await? {
-            // A withdrawn session already revoked this row. Retention and
-            // legacy revocation still mirror terminal statuses from file
-            // records that never saw the account withdrawal; those are
-            // idempotent no-ops here, so one withdrawn sibling cannot abort a
-            // maintenance run. Every consumer-visible status stays refused.
-            return match status {
-                TraceCorpusStatus::Revoked
-                | TraceCorpusStatus::Expired
-                | TraceCorpusStatus::Purged
-                | TraceCorpusStatus::Rejected => {
-                    tx.commit().await.map_err(DatabaseError::Postgres)?;
-                    Ok(())
-                }
-                TraceCorpusStatus::Received
-                | TraceCorpusStatus::Accepted
-                | TraceCorpusStatus::Quarantined
-                | TraceCorpusStatus::AwaitingPiiBackstop => {
-                    Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()))
-                }
-            };
-        }
-        let status_value = enum_to_storage(status)?;
-        // Allowlisted label only -- never the caller's text. See
-        // `safe_status_reason_label`.
-        let reason_label = reason.map(crate::trace_corpus_storage::safe_status_reason_label);
-        let updated = tx
-            .execute(
-                "UPDATE trace_submissions
-                 SET status = $3,
-                     updated_at = NOW(),
-                     reviewed_at = CASE
-                         WHEN $3 IN ('accepted', 'quarantined', 'rejected') THEN NOW()
-                         ELSE reviewed_at
-                     END,
-                     review_assigned_to_principal_ref = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_assigned_to_principal_ref
-                     END,
-                     review_assigned_at = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_assigned_at
-                     END,
-                     review_lease_expires_at = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_lease_expires_at
-                     END,
-                     review_due_at = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_due_at
-                     END,
-                     revoked_at = CASE WHEN $3 = 'revoked' THEN NOW() ELSE revoked_at END,
-                     purged_at = CASE WHEN $3 = 'purged' THEN NOW() ELSE purged_at END,
-                     credit_points_pending = CASE
-                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
-                         ELSE credit_points_pending
-                     END,
-                     credit_points_final = CASE
-                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
-                         ELSE credit_points_final
-                     END,
-                     last_status_reason = $4
-                 WHERE tenant_id = $1 AND submission_id = $2",
-                &[&tenant_id, &submission_id, &status_value, &reason_label],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        if updated == 0 {
-            return Err(DatabaseError::NotFound {
-                entity: "trace_submission".to_string(),
-                id: submission_id.to_string(),
-            });
-        }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        self.update_trace_submission_status_inner(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+            true,
+        )
+        .await
+    }
 
-        self.append_trace_audit_event(TraceAuditEventWrite {
-            audit_event_id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            actor_principal_ref: actor_principal_ref.to_string(),
-            actor_role: "system".to_string(),
-            action: audit_action_for_status(status),
-            reason: reason.map(str::to_string),
-            request_id: None,
-            submission_id: Some(submission_id),
-            object_ref_id: None,
-            export_manifest_id: None,
-            decision_inputs_hash: None,
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: TraceAuditSafeMetadata::ReviewDecision {
-                decision: status_value,
-                resulting_status: status,
-                reason_code: reason.map(str::to_string),
-            },
-        })
+    async fn update_trace_submission_status_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.update_trace_submission_status_inner(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+            false,
+        )
         .await
     }
 
@@ -7450,6 +7375,127 @@ impl PgBackend {
         }
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)
+    }
+}
+
+impl PgBackend {
+    /// `update_trace_submission_status`, with the store's own audit row
+    /// appended only when `append_audit` is set.
+    async fn update_trace_submission_status_inner(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+        append_audit: bool,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        if lock_source_session_for_submission(&tx, tenant_id, submission_id).await? {
+            // A withdrawn session already revoked this row. Retention and
+            // legacy revocation still mirror terminal statuses from file
+            // records that never saw the account withdrawal; those are
+            // idempotent no-ops here, so one withdrawn sibling cannot abort a
+            // maintenance run. Every consumer-visible status stays refused.
+            return match status {
+                TraceCorpusStatus::Revoked
+                | TraceCorpusStatus::Expired
+                | TraceCorpusStatus::Purged
+                | TraceCorpusStatus::Rejected => {
+                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    Ok(())
+                }
+                TraceCorpusStatus::Received
+                | TraceCorpusStatus::Accepted
+                | TraceCorpusStatus::Quarantined
+                | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()))
+                }
+            };
+        }
+        let status_value = enum_to_storage(status)?;
+        // Allowlisted label only -- never the caller's text. See
+        // `safe_status_reason_label`.
+        let reason_label = reason.map(crate::trace_corpus_storage::safe_status_reason_label);
+        let updated = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET status = $3,
+                     updated_at = NOW(),
+                     reviewed_at = CASE
+                         WHEN $3 IN ('accepted', 'quarantined', 'rejected') THEN NOW()
+                         ELSE reviewed_at
+                     END,
+                     review_assigned_to_principal_ref = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_to_principal_ref
+                     END,
+                     review_assigned_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_at
+                     END,
+                     review_lease_expires_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_lease_expires_at
+                     END,
+                     review_due_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_due_at
+                     END,
+                     revoked_at = CASE WHEN $3 = 'revoked' THEN NOW() ELSE revoked_at END,
+                     purged_at = CASE WHEN $3 = 'purged' THEN NOW() ELSE purged_at END,
+                     credit_points_pending = CASE
+                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
+                         ELSE credit_points_pending
+                     END,
+                     credit_points_final = CASE
+                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
+                         ELSE credit_points_final
+                     END,
+                     last_status_reason = $4
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id, &status_value, &reason_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "trace_submission".to_string(),
+                id: submission_id.to_string(),
+            });
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        if !append_audit {
+            return Ok(());
+        }
+
+        self.append_trace_audit_event(TraceAuditEventWrite {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            actor_principal_ref: actor_principal_ref.to_string(),
+            actor_role: "system".to_string(),
+            action: audit_action_for_status(status),
+            reason: reason.map(str::to_string),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: TraceAuditSafeMetadata::ReviewDecision {
+                decision: status_value,
+                resulting_status: status,
+                reason_code: reason.map(str::to_string),
+            },
+        })
+        .await
     }
 }
 
