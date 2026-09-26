@@ -1466,6 +1466,18 @@ final class AppModel: ObservableObject {
     /// Refreshes settings and status afterward so `nearAIConfigured` /
     /// `health` reflect the daemon's own post-acknowledgment state rather
     /// than an assumption made here.
+    /// Records that one void notice was shown, then re-reads status so the
+    /// daemon's own list, not an assumption made here, decides what stays.
+    func acknowledgeGrantVoid(id: UInt64) {
+        perform(
+            "acknowledge_grant_voids",
+            work: { try $0.acknowledgeGrantVoids(ids: [id]) }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
     func acknowledgeNearAINotice() {
         perform(
             "acknowledge_near_ai_notice",

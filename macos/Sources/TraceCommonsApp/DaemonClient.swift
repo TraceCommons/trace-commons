@@ -576,6 +576,14 @@ final class DaemonClient {
         _ = try rawResult("acknowledge_near_ai_notice")
     }
 
+    /// Records that the void notices with these ids were shown -- see "Void
+    /// notices" in the contract. Only the ids actually drawn: there is no
+    /// "all", so a void raised after the shell drew is never cleared unseen.
+    /// Re-arms nothing.
+    func acknowledgeGrantVoids(ids: [UInt64]) throws {
+        _ = try rawResult("acknowledge_grant_voids", params: ["ids": ids])
+    }
+
     /// Replaces the enrolled device's consent scopes. Local config write
     /// only -- no network I/O -- and requires an existing enrollment
     /// (`unavailable` / `not-logged-in` otherwise, per the contract). Used

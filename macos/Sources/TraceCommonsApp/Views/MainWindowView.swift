@@ -90,6 +90,11 @@ struct MainWindowView: View {
         // hit the limit.
         VStack(spacing: 0) {
             if model.isAttachedDaemon { AttachedDaemonNotice() }
+            // Above the shell for the same reason: a void changes what the
+            // contributor agreed to, and they are told wherever they are.
+            GrantVoidNotices(voids: model.status.grantVoids) { id in
+                model.acknowledgeGrantVoid(id: id)
+            }
             shell
         }
     }
@@ -740,6 +745,89 @@ struct AttachedDaemonNotice: View {
             NativeFlowNotice(message: copy.attachedDetail, glyph: "", tone: "neutral")
                 .accessibilityLabel(Text(copy.attachedTitle))
         }
+    }
+}
+
+/// Every grant the daemon voided that no shell has shown yet (R6 of the
+/// connect-and-forget design). The words come from `consent_copy` across the
+/// ABI; this view only lays them out.
+struct GrantVoidNotices: View {
+    let voids: [GrantVoidWire]
+    let onAcknowledge: (UInt64) -> Void
+
+    var body: some View {
+        if !voids.isEmpty {
+            VStack(spacing: TC.Space.s) {
+                ForEach(voids, id: \.id) { void in
+                    // The ABI words every element, including one it cannot
+                    // place, so nil here is a caught panic or a payload this
+                    // build cannot decode. Nothing is drawn then, as with
+                    // `AttachedDaemonNotice`: a card with no words is worse
+                    // than none, and no sentence is written in this shell.
+                    if let notice = TCConsentCopy.voidNoticeJSON(forVoid: void.json)
+                        .flatMap(GrantVoidNotice.decode(fromJSON:))
+                    {
+                        GrantVoidNoticeCard(
+                            notice: notice,
+                            onAcknowledge: { onAcknowledge(void.id) }
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+struct GrantVoidNoticeCard: View {
+    let notice: GrantVoidNotice
+    let onAcknowledge: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(notice.title)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                Text(notice.body)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(notice.reasonsHeading)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                    .padding(.top, TC.Space.xxs)
+                ForEach(notice.reasons, id: \.self) { reason in
+                    HStack(alignment: .firstTextBaseline, spacing: TC.Space.xxs) {
+                        Text(verbatim: "\u{2022}")
+                        Text(reason)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                }
+                Text(notice.rearm)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, TC.Space.xxs)
+            }
+            Spacer(minLength: TC.Space.m)
+            // Acknowledging records that the notice was shown, and re-arms
+            // nothing.
+            Button(notice.acknowledge, action: onAcknowledge)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(notice.title))
     }
 }
 

@@ -15,6 +15,29 @@ final class DaemonFieldDecodingTests: XCTestCase {
         return try decoder.decode(type, from: Data(json.utf8))
     }
 
+    // MARK: - Void notices
+
+    /// `grant_voids` is R6's void notice. A daemon that predates it has
+    /// nothing to report, which is the only safe reading of silence; a
+    /// daemon that has it hands each element through with its id.
+    func testStatusDecodesGrantVoids() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null},
+         "grant_voids":[{"id":4,"kind":"project","project_id":"p","project_label":"api",
+                         "reasons":["witness-changed"],"voided_at":"2026-09-26T12:00:00Z"}]}
+        """)
+        XCTAssertEqual(status.grantVoids.map(\.id), [4])
+    }
+
+    func testStatusFromAnOlderDaemonHasNoGrantVoids() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertEqual(status.grantVoids, [])
+    }
+
     func testQueueEntryDecodesProjectAndSessionPaths() throws {
         let entry = try decode(QueueEntry.self, """
         {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",

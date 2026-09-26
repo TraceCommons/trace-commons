@@ -262,6 +262,9 @@ struct DaemonStatus: Decodable, Equatable {
     /// What the daemon is seeing from the declared local proxy, in three
     /// states. Not part of `health`: none of the three is a fault.
     let routing: RoutingStatus
+    /// Grants the daemon voided that no shell has shown yet (R6). A daemon
+    /// that predates the field has voided nothing it can report.
+    let grantVoids: [GrantVoidWire]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -274,6 +277,7 @@ struct DaemonStatus: Decodable, Equatable {
         case health
         case dailyBudget = "daily_budget"
         case routing
+        case grantVoids = "grant_voids"
     }
 
     init(
@@ -286,7 +290,8 @@ struct DaemonStatus: Decodable, Equatable {
         nextDigestAt: Date?,
         health: DaemonHealth,
         dailyBudget: DailyBudget = .unknown,
-        routing: RoutingStatus = .notDeclared
+        routing: RoutingStatus = .notDeclared,
+        grantVoids: [GrantVoidWire] = []
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -298,6 +303,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.health = health
         self.dailyBudget = dailyBudget
         self.routing = routing
+        self.grantVoids = grantVoids
     }
 
     init(from decoder: Decoder) throws {
@@ -315,6 +321,7 @@ struct DaemonStatus: Decodable, Equatable {
         // A daemon that predates this field has declared no proxy, which is
         // exactly what the fallback says.
         routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
+        grantVoids = try c.decodeIfPresent([GrantVoidWire].self, forKey: .grantVoids) ?? []
     }
 
     static let unknown = DaemonStatus(
