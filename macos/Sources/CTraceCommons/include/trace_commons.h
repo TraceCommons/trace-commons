@@ -1466,12 +1466,16 @@ char*       tc_source_check_line(const char* tool, const char* source_mode);
 /* Every fixed sentence on the consent surface, as an owned JSON object; free
  * it with tc_string_free. NULL only on a caught panic.
  *
- * Keys: gate_statement, ready_help, not_pinned_help.
+ * Keys: gate_statement, ready_help, not_pinned_help, auto_scrub_scope,
+ * auto_scrub_limit, auto_no_review. The auto_* three are for the automatic
+ * grant screen and are shown together, only where the certified full
+ * pipeline runs on every automatic session (see consent_copy.rs).
  *
- * ONE CALL, NOT ONE PER SENTENCE. Three sentences is not three exports: a
- * per-sentence export would let a shell take two of them and hand-write the
- * third, and one of the three is the claim about what leaves this machine that
- * a contributor reads immediately above an irreversible button.
+ * ONE CALL, NOT ONE PER SENTENCE. Six sentences is not six exports: a
+ * per-sentence export would let a shell take some of them and hand-write the
+ * rest, and gate_statement and the auto_* three are claims about what leaves
+ * this machine that a contributor reads immediately above an irreversible
+ * button.
  *
  * Refuse the WHOLE payload if any field is empty rather than rendering a blank
  * label. A missing sentence here is a missing claim.
