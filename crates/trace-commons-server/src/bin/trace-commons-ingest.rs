@@ -7479,6 +7479,10 @@ fn community_routes() -> Router<Arc<AppState>> {
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reward_routes = rewards::account_routes(state.clone());
     Router::new()
+        .route(
+            "/v1/account/invites/redeem",
+            post(account_invite_redeem_handler),
+        )
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
             "/v1/account/credit-summary",
@@ -15245,6 +15249,83 @@ fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
             "account registry DB is not configured",
         )
     })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountInviteRedeemRequest {
+    invite_code: String,
+    idempotency_key: uuid::Uuid,
+}
+
+#[derive(Serialize)]
+struct AccountInviteRedeemResponse {
+    authority: &'static str,
+    trust_version: i64,
+}
+
+/// Elevate the authenticated account in place. Neither a tenant nor an
+/// account identifier is accepted from the request body.
+async fn account_invite_redeem_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    headers: HeaderMap,
+    Json(body): Json<AccountInviteRedeemRequest>,
+) -> ApiResult<(HeaderMap, Json<AccountInviteRedeemResponse>)> {
+    if matches!(ctx.auth_method, AccountAuthMethod::DeviceBearer) {
+        return Err(api_error(StatusCode::FORBIDDEN, "account session required"));
+    }
+    if matches!(ctx.auth_method, AccountAuthMethod::SessionCookie)
+        && !confirm_is_same_origin(&headers)
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "cross-origin account mutation",
+        ));
+    }
+    // Match the issuer: trim pasted whitespace, require exactly 16 uppercase
+    // ASCII letters/digits, and never case-fold a secret.
+    let invite_code = body.invite_code.trim();
+    if !trace_commons_server::trace_upload_claim_issuer::valid_onboard_invite_code(invite_code) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "invalid invite"));
+    }
+    let invite_hash =
+        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(invite_code);
+    let outcome = account_db(state.as_ref())?
+        .redeem_account_invite(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &invite_hash,
+            body.idempotency_key,
+        )
+        .await
+        .map_err(internal_error)?;
+    let trust_version = match outcome {
+        trace_commons_server::db::AccountInviteRedemption::Invited { trust_version } => {
+            trust_version
+        }
+        trace_commons_server::db::AccountInviteRedemption::InvalidInvite => {
+            return Err(api_error(StatusCode::BAD_REQUEST, "invalid invite"));
+        }
+        trace_commons_server::db::AccountInviteRedemption::AccountIneligible => {
+            return Err(api_error(StatusCode::FORBIDDEN, "account is not eligible"));
+        }
+        trace_commons_server::db::AccountInviteRedemption::IdempotencyConflict => {
+            return Err(api_error(StatusCode::CONFLICT, "idempotency key reused"));
+        }
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Ok((
+        response_headers,
+        Json(AccountInviteRedeemResponse {
+            authority: "invited",
+            trust_version,
+        }),
+    ))
 }
 
 /// Resolve the configured WebAuthn relying party for the passkey ceremonies.
