@@ -4735,37 +4735,24 @@ impl Database for PgBackend {
         // Source-session withdrawal is account-scoped. Carry B's sessions onto
         // A so a withdrawal made by either identity reaches every mapped
         // version, and a session B already withdrew stays withdrawn for
-        // resumed uploads under A. When both accounts hold the same session,
-        // withdrawal wins. The mappings then follow; V78's immutability
-        // trigger admits exactly this re-key because the proposal above is
-        // consumed in this transaction. B's session rows are left in place,
-        // unreferenced, on the closed account.
-        let source_sessions_moved = tx
-            .execute(
-                "INSERT INTO trace_source_sessions
-                    (tenant_id, account_id, session_digest, created_at, withdrawn_at)
-                 SELECT tenant_id, $1, session_digest, created_at, withdrawn_at
-                   FROM trace_source_sessions
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND account_id = $2
-                 ON CONFLICT (tenant_id, account_id, session_digest) DO UPDATE
-                   SET withdrawn_at = COALESCE(
-                       trace_source_sessions.withdrawn_at,
-                       EXCLUDED.withdrawn_at
-                   )",
-                &[&surviving_account_id, &absorbed_account_id],
+        // resumed uploads under A (withdrawal wins on overlap); the mappings
+        // follow. This runs through V78's SECURITY DEFINER function, so the
+        // merge-executing login needs no privilege on the session tables. The
+        // function accepts only a proposal consumed by this transaction, like
+        // the reward hook above, so the consume must stay outside a SAVEPOINT.
+        let source_sessions_moved: i64 = tx
+            .query_one(
+                "SELECT public.trace_source_sessions_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
             )
             .await
-            .map_err(DatabaseError::Postgres)? as i64;
-        tx.execute(
-            "UPDATE trace_submission_sessions
-                SET account_id = $1
-              WHERE tenant_id = trace_current_tenant_id()
-                AND account_id = $2",
-            &[&surviving_account_id, &absorbed_account_id],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
 
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.

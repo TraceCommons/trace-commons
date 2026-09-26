@@ -1156,7 +1156,7 @@ async fn terminal_status_writes_on_a_withdrawn_session_are_idempotent_no_ops() {
 #[tokio::test]
 async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor() {
     let Some(url) = database_url() else { return };
-    let client = migrated_client(&url).await;
+    let mut client = migrated_client(&url).await;
     let backend = PgBackend::new(&database_config(&url)).await.unwrap();
     let tenant = format!("z4-merge-{}", Uuid::new_v4());
     let survivor = backend
@@ -1241,11 +1241,65 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
         .await
         .unwrap()
         .unwrap();
-    backend
+    // Execute as a login holding only the privileges a merge had before
+    // source sessions existed (the set reward_participant_pg grants), and
+    // nothing on the session tables: the carry-over runs through V78's
+    // definer function, not the caller's rights.
+    client
+        .batch_execute(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_z4_merge_runtime') THEN CREATE ROLE trace_z4_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+             GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_z4_merge_runtime;
+             GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
+                 trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_z4_merge_runtime;
+             GRANT INSERT ON trace_account_audit TO trace_z4_merge_runtime;
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_z4_merge_runtime;",
+        )
+        .await
+        .unwrap();
+    let session_rights: bool = client
+        .query_one(
+            "SELECT has_table_privilege('trace_z4_merge_runtime', 'trace_source_sessions', 'SELECT')
+                 OR has_table_privilege('trace_z4_merge_runtime', 'trace_submission_sessions', 'SELECT')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !session_rights,
+        "the merge login holds no session-table rights"
+    );
+    let mut merge_url = reqwest::Url::parse(&url).unwrap();
+    merge_url.set_username("trace_z4_merge_runtime").unwrap();
+    let merge_runtime = PgBackend::new(&database_config(merge_url.as_str()))
+        .await
+        .unwrap();
+    merge_runtime
         .execute_merge(&tenant, survivor, staged.proposal_id)
         .await
         .unwrap()
         .unwrap();
+    // The definer function refuses outside the transaction that consumed the
+    // proposal, so it cannot be called to move sessions on its own.
+    let direct = client.transaction().await.unwrap();
+    direct
+        .execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    let replay = direct
+        .query_one(
+            "SELECT public.trace_source_sessions_merge($1, $2, $3, $4)",
+            &[&tenant, &survivor, &absorbed, &staged.proposal_id],
+        )
+        .await;
+    assert!(
+        replay.is_err(),
+        "a proposal consumed by an earlier transaction authorizes nothing"
+    );
+    direct.rollback().await.unwrap();
 
     // Withdrawing one version as the survivor withdraws every version the
     // absorbed account submitted from that session.
