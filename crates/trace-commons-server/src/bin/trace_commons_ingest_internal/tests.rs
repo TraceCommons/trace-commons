@@ -93603,11 +93603,8 @@ mod witness_receipt {
         let provenance = InferenceProvenance::Attested(
             FinalCallAttestation::new(
                 AttestationClass::ProviderTeeFinalCall,
-                "a".repeat(64),
                 Some("model".into()),
                 "b".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64),
             )
             .unwrap(),
         );
@@ -93958,6 +93955,136 @@ mod witness_receipt {
         );
         assert_eq!(row.get::<_, Vec<u8>>(1), certificate.as_bytes());
         assert_eq!(row.get::<_, Vec<u8>>(2), signature.as_bytes());
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    }
+
+    /// Quarantine remediation (#214) replaces a quarantined submission's body
+    /// under the same id. Evidence for the prior body must be replaced by the
+    /// new body's evidence, or removed when the re-POST is unwitnessed, so the
+    /// remediation succeeds and later retries of the remediated body are not
+    /// judged against the pre-remediation body.
+    #[tokio::test]
+    async fn real_router_remediating_a_witnessed_quarantined_submission_replaces_evidence() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone() as Arc<dyn Database>),
+            Some(test_artifact_store(temp.path())),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.require_db_mirror_writes = true;
+        state_mut.witness_capture_pin = Some(
+            trace_commons_server::redaction_witness::verification::WitnessPin::new(
+                &signing_address(),
+                [MEASUREMENT.to_string()],
+            )
+            .unwrap(),
+        );
+        state_mut.witness_bypass = None;
+        state_mut.accept_medium_risk_submissions = false;
+        state_mut.pii_backstop_driver = None;
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let evidence_row = |submission_id: Uuid| {
+            let client = &client;
+            async move {
+                client
+                    .query_opt(
+                        "SELECT certificate_json, raw_body_sha256
+                         FROM trace_witness_certificate_evidence
+                         WHERE tenant_id='tenant-a' AND submission_id=$1",
+                        &[&submission_id],
+                    )
+                    .await
+                    .unwrap()
+                    .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, String>(1)))
+            }
+        };
+
+        for remediation_is_witnessed in [true, false] {
+            let mut first = sample_envelope().await;
+            make_metadata_only_low_risk(&mut first);
+            first.consent.message_text_included = true;
+            first.consent.tool_payloads_included = true;
+            first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+            let first_body = serde_json::to_vec(&first).unwrap();
+            let (first_certificate, first_signature) = certificate_v2_over(&first_body);
+            let response = post_through_the_real_router(
+                state.clone(),
+                first_body,
+                Some((&first_certificate, &first_signature)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                stored_status(temp.path(), first.submission_id),
+                TraceCorpusStatus::Quarantined,
+                "the fixture must land quarantined to exercise remediation"
+            );
+            assert_eq!(
+                evidence_row(first.submission_id).await.map(|row| row.0),
+                Some(first_certificate.as_bytes().to_vec()),
+            );
+
+            let mut corrected = first.clone();
+            make_metadata_only_low_risk(&mut corrected);
+            corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+            let corrected_body = serde_json::to_vec(&corrected).unwrap();
+            let (corrected_certificate, corrected_signature) = certificate_v2_over(&corrected_body);
+            let witness = remediation_is_witnessed
+                .then_some((corrected_certificate.as_str(), corrected_signature.as_str()));
+            let remediated =
+                post_through_the_real_router(state.clone(), corrected_body.clone(), witness).await;
+            assert_eq!(
+                remediated.status(),
+                StatusCode::OK,
+                "remediation of a witnessed quarantined submission must succeed \
+                 (witnessed re-POST: {remediation_is_witnessed})"
+            );
+            assert_eq!(
+                stored_status(temp.path(), first.submission_id),
+                TraceCorpusStatus::Accepted,
+            );
+            let expected = remediation_is_witnessed.then(|| {
+                (
+                    corrected_certificate.as_bytes().to_vec(),
+                    hex::encode(sha2::Sha256::digest(&corrected_body)),
+                )
+            });
+            assert_eq!(
+                evidence_row(first.submission_id).await,
+                expected,
+                "evidence describes the remediated body, or is gone"
+            );
+
+            let retry =
+                post_through_the_real_router(state.clone(), corrected_body.clone(), None).await;
+            assert_eq!(
+                retry.status(),
+                StatusCode::OK,
+                "an idempotent retry of the remediated body is not a witness conflict"
+            );
+            if remediation_is_witnessed {
+                let exact = post_through_the_real_router(
+                    state.clone(),
+                    corrected_body,
+                    Some((&corrected_certificate, &corrected_signature)),
+                )
+                .await;
+                assert_eq!(exact.status(), StatusCode::OK);
+            }
+        }
         cleanup_pg_trace_tenant(&backend, "tenant-a").await;
     }
 

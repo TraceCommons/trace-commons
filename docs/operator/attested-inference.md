@@ -36,6 +36,40 @@ Related runbooks, all of which this one assumes rather than repeats:
 
 ---
 
+## Certificate profile rollout: verifiers first
+
+The witness defaults to the original V1 certificate on the text, structured
+contribution, and token-bundle routes, including the contribution certificate
+inside a token bundle. V1 preserves its five-field JSON shape and signing
+bytes. It carries **unknown inference provenance**, not a signed claim that
+inference was unattested. Offered receipts are still verified even when V1 is
+issued.
+
+V2 adds the witness's signed final-call verification statement: explicitly
+unattested, or attested with class, optional receipt-bound model, and verified
+signer. It omits raw inference request/response hashes and receipt identities.
+Those values could confirm guessed raw content or correlate a redacted
+contribution with provider-side conversation records. Exact body hashes,
+receipt signatures, final-call projection, and class-specific pins are still
+checked inside the witness before raw bodies are removed. Downstream parties
+verify the witness's statement; they cannot independently verify the provider
+receipt from this certificate. Model, signer, class and timing remain visible
+metadata. The base `redacted_sha256` binds the exact redacted ingest submission
+bytes; it is not a digest of a raw inference request or response.
+
+1. Deploy ingest verifiers accepting corrected V2 while the witness remains V1.
+2. Ship contributor clients that accept both profiles, including nested bundle
+   certificates, and verify supported deployed clients have upgraded.
+3. Explicitly configure `TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION=v2` (or
+   `--certificate-version v2`) and restart the witness. Only `v1` and `v2` are
+   accepted; malformed or empty configuration fails startup. The profile is
+   parsed once and remains fixed for that service instance.
+
+This is a deployment-wide switch, without client negotiation. Older clients
+still fail after V2 activation; the flag alone does not make a mixed-client
+rollout safe. Roll back by configuring `v1` and restarting. Keep both-profile
+verifiers deployed so previously issued V2 certificates remain verifiable.
+
 ## The three switches, and who owns each
 
 Attested inference is off unless **three independent parties** each turn
@@ -553,17 +587,25 @@ was stale stays held. Both are submit-path decisions.
 
 ## Z2 provenance capture and rollout
 
-Deploy a witness that issues v2 certificates, then clients that preserve and
-forward the original certificate header, signature header, and response body
-bytes. Deploy ingest with the signing address and measurement set pinned before
-enabling provenance-dependent policy. The pin controls verification even when
+Follow the verifiers-first order above: ingest and clients that accept both
+profiles first, and only then a witness configured to issue v2. Clients must
+forward the original certificate header, signature header, and ingest request
+body bytes unchanged. Deploy ingest with the signing address and measurement
+set pinned before enabling provenance-dependent policy. The pin controls verification even when
 `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false`; the bypass also requires its
 own explicit policy-version allowlist. A half-configured pin refuses ingest
 startup. Apply V76 and grant the ingest database login membership in
 `trace_witness_evidence_runtime` when it is not the migration owner. The table
-uses forced tenant RLS. The runtime role may update only the derived
-`artifact_sha256` link after an exact signed-source retry; it cannot rewrite
-the original certificate, signature, or received-body identity.
+uses forced tenant RLS. Only the derived `artifact_sha256` link may change
+after insert, on an exact signed-source retry. The runtime role's column
+grants allow nothing else, and a `BEFORE UPDATE` trigger
+(`trace_witness_evidence_signed_source_immutable`) refuses any change to the
+certificate, signature, received-body digest, provenance fields, or times for
+every role, including a table owner that ingest connects as in a single-login
+deployment. A row is removed only with its submission, or when a quarantined
+submission is remediated with a new body: the prior body's evidence is then
+replaced by the new body's evidence, or dropped when the re-POST carries no
+certificate, in the same transaction as the submission update.
 
 For each verified submission, ingest persists the original certificate and
 signature header bytes, raw submitted body SHA-256, certificate issue time,

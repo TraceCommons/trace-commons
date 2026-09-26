@@ -260,15 +260,11 @@
 //! [`TraceContributionEventType::HttpExchange`]: trace_commons_protocol::trace_contribution::TraceContributionEventType::HttpExchange
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use trace_commons_protocol::trace_contribution::{
     RawTraceContribution, RawTraceContributionEvent, TraceContributionEnvelope,
     TraceContributionEventType,
 };
-use trace_commons_protocol::witness_provenance::{
-    AttestationClass, FinalCallAttestation, ReceiptSignatureKind as IdentityKind,
-    ReceiptSigningAlgorithm, receipt_identity_sha256,
-};
+use trace_commons_protocol::witness_provenance::{AttestationClass, FinalCallAttestation};
 
 use std::collections::BTreeMap;
 
@@ -906,48 +902,24 @@ pub fn check_inference_attestation_with(
         if !signed_by_a_pinned_key {
             return Err(WitnessError::InferenceReceiptUnverified);
         }
-        let (class, kind) = match verdict.signature_kind {
-            ReceiptSignatureKind::ProviderTee => (
-                AttestationClass::ProviderTeeFinalCall,
-                IdentityKind::ProviderTee,
-            ),
-            ReceiptSignatureKind::Gateway => {
-                (AttestationClass::GatewayFinalCall, IdentityKind::Gateway)
-            }
+        let class = match verdict.signature_kind {
+            ReceiptSignatureKind::ProviderTee => AttestationClass::ProviderTeeFinalCall,
+            ReceiptSignatureKind::Gateway => AttestationClass::GatewayFinalCall,
             ReceiptSignatureKind::Unrecognised => {
                 return Err(WitnessError::InferenceReceiptUnverified);
             }
         };
-        let signature = hex::decode(
-            receipt
-                .signature
-                .strip_prefix("0x")
-                .unwrap_or(&receipt.signature),
-        )
-        .map_err(|_| WitnessError::InferenceReceiptUnverified)?;
-        let signer = hex::decode(
-            verdict
-                .signing_address
-                .strip_prefix("0x")
-                .unwrap_or(&verdict.signing_address),
-        )
-        .map_err(|_| WitnessError::InferenceReceiptUnverified)?;
+        // Only gateway receipts permit an empty signed model. Normalize after
+        // signature, exact-body, projection and class-specific pin verification.
+        // Nonempty models remain byte-for-byte as signed; never infer one.
+        let model = if class == AttestationClass::GatewayFinalCall {
+            verdict.model.filter(|model| !model.is_empty())
+        } else {
+            verdict.model
+        };
         Some(
-            FinalCallAttestation::new(
-                class,
-                receipt_identity_sha256(
-                    receipt.text.as_bytes(),
-                    &signature,
-                    &signer,
-                    ReceiptSigningAlgorithm::Ed25519,
-                    kind,
-                ),
-                verdict.model,
-                verdict.signing_address,
-                hex::encode(Sha256::digest(request_body.as_bytes())),
-                hex::encode(Sha256::digest(response_body.as_bytes())),
-            )
-            .map_err(|_| WitnessError::InferenceReceiptUnverified)?,
+            FinalCallAttestation::new(class, model, verdict.signing_address)
+                .map_err(|_| WitnessError::InferenceReceiptUnverified)?,
         )
     } else {
         None
@@ -1147,6 +1119,7 @@ mod tests {
     use super::*;
     use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptSignatureKind};
     use k256::ecdsa::SigningKey;
+    use sha2::{Digest, Sha256};
     use sha3::Keccak256;
     use trace_commons_protocol::trace_contribution::{
         RawTraceCaptureTurn, RecordedTraceContributionOptions,
@@ -1748,18 +1721,6 @@ mod tests {
         assert_eq!(call.class(), AttestationClass::ProviderTeeFinalCall);
         assert_eq!(call.model(), Some(MODEL));
         assert_eq!(call.receipt_signer(), signed_receipt.signing_address);
-        assert_eq!(call.request_sha256(), sha256_hex(&request));
-        assert_eq!(call.response_sha256(), sha256_hex(&response));
-        assert_eq!(
-            call.receipt_sha256(),
-            receipt_identity_sha256(
-                signed_receipt.text.as_bytes(),
-                &hex::decode(&signed_receipt.signature).expect("signature hex"),
-                &hex::decode(&signed_receipt.signing_address).expect("signer hex"),
-                ReceiptSigningAlgorithm::Ed25519,
-                IdentityKind::ProviderTee,
-            )
-        );
     }
 
     /// The defect, as a witness-level assertion. The shipped code compared
@@ -2310,6 +2271,61 @@ mod tests {
             .expect("well formed gateway pins")
     }
 
+    #[test]
+    fn empty_signed_gateway_model_remains_valid_after_verification() {
+        let request = r#"{"messages":[{"role":"user","content":"hello"}]}"#.to_string();
+        let response = response_body("hi there");
+        let raw = contribution(&[(request.clone(), response.clone())]);
+        let mut receipt = ed25519_receipt(MODEL_A_SEED_HEX, "", &request, &response);
+        receipt.signature_kind = ReceiptSignatureKind::Gateway;
+        for policy in [required(), InferenceAttestationPolicy::not_required()] {
+            let policy = gateway_pinned(policy, &[&ed25519_key_hex(MODEL_A_SEED_HEX)]);
+            let outcome =
+                check(&policy, Some(&receipt), &raw).expect("empty gateway model is absent");
+            assert_eq!(outcome.final_call.unwrap().model(), None);
+            let mut corrupt = receipt.clone();
+            corrupt.signature = "00".repeat(64);
+            assert_eq!(
+                check(&policy, Some(&corrupt), &raw),
+                Err(WitnessError::InferenceReceiptUnverified)
+            );
+            let changed = contribution(&[(request.clone(), response_body("changed"))]);
+            assert_eq!(
+                check(&policy, Some(&receipt), &changed),
+                Err(WitnessError::InferenceReceiptUnverified)
+            );
+        }
+        let wrong_pin = gateway_pinned(required(), &[&ed25519_key_hex(IMPOSTOR_SEED_HEX)]);
+        assert_eq!(
+            check(&wrong_pin, Some(&receipt), &raw),
+            Err(WitnessError::InferenceReceiptUnverified)
+        );
+    }
+
+    #[test]
+    fn nonempty_signed_gateway_model_is_preserved_exactly() {
+        let model = " model with spaces ";
+        let request = request_body(model, "hello");
+        let response = response_body("hi there");
+        let raw = contribution(&[(request.clone(), response.clone())]);
+        let mut receipt = ed25519_receipt(MODEL_A_SEED_HEX, model, &request, &response);
+        receipt.signature_kind = ReceiptSignatureKind::Gateway;
+        let policy = gateway_pinned(required(), &[&ed25519_key_hex(MODEL_A_SEED_HEX)]);
+        assert_eq!(
+            check(&policy, Some(&receipt), &raw)
+                .unwrap()
+                .final_call
+                .unwrap()
+                .model(),
+            Some(model)
+        );
+        let wrong_pin = gateway_pinned(required(), &[&ed25519_key_hex(IMPOSTOR_SEED_HEX)]);
+        assert_eq!(
+            check(&wrong_pin, Some(&receipt), &raw),
+            Err(WitnessError::InferenceReceiptUnverified)
+        );
+    }
+
     /// The case that was refused in production: a Codex-shaped receipt,
     /// signed by the attested gateway key, admitted by the gateway pin.
     #[test]
@@ -2330,18 +2346,6 @@ mod tests {
         assert_eq!(call.class(), AttestationClass::GatewayFinalCall);
         assert_eq!(call.model(), None);
         assert_eq!(call.receipt_signer(), signed_receipt.signing_address);
-        assert_eq!(call.request_sha256(), sha256_hex(&request));
-        assert_eq!(call.response_sha256(), sha256_hex(&response));
-        assert_eq!(
-            call.receipt_sha256(),
-            receipt_identity_sha256(
-                signed_receipt.text.as_bytes(),
-                &hex::decode(&signed_receipt.signature).expect("signature hex"),
-                &hex::decode(&signed_receipt.signing_address).expect("signer hex"),
-                ReceiptSigningAlgorithm::Ed25519,
-                IdentityKind::Gateway,
-            )
-        );
     }
 
     /// The defect, at the witness: a witness pinning only model keys refuses

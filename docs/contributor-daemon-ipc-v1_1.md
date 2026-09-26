@@ -1308,7 +1308,8 @@ and must never echo the correction text or the detected value.
   "flagged": 1,
   "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
   "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ],
-  "excluded_ineligible": 4
+  "excluded_ineligible": 4,
+  "excluded_held": 1
 }
 ```
 
@@ -1328,6 +1329,21 @@ account of what this call was asked to act on.
 `excluded_ineligible` is **absent** when no filter ran -- an invited
 contributor, or a single `entry_id`. Absent, never zero: zero would read as
 "nothing was left out", which is a claim about a filter that did not run.
+
+**A group `approve` also leaves out sessions held for a person's review**, and
+`excluded_held` is how many. An entry is held when it was revoked for a
+reason no unattended approval can satisfy -- today only
+`token-distribution-review-required`, which clears through a witness review
+of that one session. A group control is by definition not a review of one
+session, so held entries are left out for every contributor, invited or not,
+and are not in `skipped`. The watcher does not re-approve them under an
+`auto_upload` opt-in either; before it stopped, it re-approved one on the
+next poll, the uploader revoked it again, and the session never uploaded.
+
+`excluded_held` is present on every group call, because this filter always
+runs on one, and absent on a single `entry_id`, where it does not. It is kept
+apart from `excluded_ineligible` because the two say different things: an
+ineligible session cannot be sent, and a held one can once someone looks.
 
 Render it through `tc_contribution_withheld_line`, which turns the count into
 a sentence and answers the **empty string** for zero. A button reading
