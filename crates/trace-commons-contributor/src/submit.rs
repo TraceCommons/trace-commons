@@ -135,6 +135,9 @@ pub const PRECONDITION_CANARY_FAILED: &str = "privacy-filter-canary-failed";
 pub const PRECONDITION_NEAR_AI_NOTICE_UNRECORDED: &str = "near-ai-notice-not-acknowledged";
 /// No usable device identity, so nothing can be signed.
 pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
+/// Upstream classifier outage after its own retries. The daemon may retry
+/// this exact outcome with its approval and current-source checks intact.
+pub(crate) const REASON_TRANSIENT_REDACTION: &str = "privacy-filter-transient";
 
 impl std::fmt::Display for SubmitPreconditionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -171,7 +174,7 @@ pub enum SubmitOutcome {
     }, // canary hit, fail-closed PII filter, too large
     Failed {
         reason_label: String,
-    }, // network/auth after retries
+    }, // network/auth or transient classifier failure after retries
     /// The witness certified this session, and its verdict is one a person
     /// has to see before it goes to the commons. Nothing was uploaded. Only
     /// returned when the caller asked for it with
@@ -1315,7 +1318,13 @@ impl<'a> SubmitContext<'a> {
                                 e
                             }
                             Err(label) => {
-                                return Ok(refused(label, &transcript.session_hash));
+                                return Ok(if label == REASON_TRANSIENT_REDACTION {
+                                    SubmitOutcome::Failed {
+                                        reason_label: label.to_string(),
+                                    }
+                                } else {
+                                    refused(label, &transcript.session_hash)
+                                });
                             }
                         }
                     }
@@ -2036,6 +2045,12 @@ pub(crate) async fn checked_local_redaction(
     // was compensating for at its own call site; fixing it here means every
     // caller of this function gets the distinction rather than one of them.
     let envelope = redact_to_envelope(redactor, raw).await.map_err(|error| {
+        if error
+            .downcast_ref::<crate::envelope::TransientRedactionFailure>()
+            .is_some()
+        {
+            return REASON_TRANSIENT_REDACTION;
+        }
         // Named refusals survive; everything else is a condition of the
         // machine and stays generic. A credential the contributor typed and a
         // filter backend that collapsed two metadata keys are both things a
@@ -3086,6 +3101,47 @@ mod tests {
             public_since: None,
             witness: None,
         }
+    }
+
+    #[tokio::test]
+    async fn transient_classifier_failure_is_failed_without_uploading_the_session() {
+        let classifier = spawn(Router::new().route(
+            "/privacy/classify",
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        ))
+        .await;
+        let uploads = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(uploads.clone())).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        cfg.pii_filter = Some("near-ai".into());
+        let near_ai = NearAiSettings {
+            api_key: "test-key".into(),
+            base_url: Some(classifier),
+            model: None,
+        };
+        let opts = review_options();
+        let mut context = SubmitContext::new(&store, &cfg, &opts, Some(near_ai)).unwrap();
+        // Model an already-passed canary so this test reaches the per-session
+        // classifier failure, rather than the separate canary precondition.
+        context.canary_checked = true;
+        let (source, reference) = fixture_selection().remove(0);
+
+        let outcome = context
+            .submit_one(source.as_ref(), &reference)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(outcome, SubmitOutcome::Failed { reason_label } if reason_label == "privacy-filter-transient"),
+            "a 5xx is retryable and must not consume the unchanged session"
+        );
+        assert!(
+            uploads.lock().unwrap().is_empty(),
+            "redaction failure must send no envelope"
+        );
     }
 
     async fn outcome_for_fixture(

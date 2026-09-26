@@ -46,7 +46,53 @@ pub fn arming_offer_question(project_label: &str) -> String {
 
 pub const ARMING_OFFER_CONFIRM: &str = "Turn on automatic contributing";
 pub const ARMING_OFFER_DECLINE: &str = "Not now";
-pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
-     contributed without asking you. You won't review them first.\n\nA session is sent a day \
-     after you last work on it, so there is time to change your mind.\n\nYou can turn this off \
-     at any time.";
+/// The confirmation shown before a project is armed.
+///
+/// Each sentence is held to what the daemon does, because this is the only
+/// thing a contributor reads before sessions start leaving without a look.
+/// It used to say three things that were not true:
+///
+/// - "Every future session" -- arming also sends sessions already waiting,
+///   because the watcher approves every settled pending entry of an armed
+///   project on its next poll.
+/// - "A session is sent a day after you last work on it, so there is time to
+///   change your mind" -- a waiting session already quiet for a day goes out
+///   at once, and the settle window is not a control (`ARMED_SETTLE_SECS`).
+///   What is true, and stated instead, is that nothing goes before it.
+/// - "You can turn this off at any time", with nothing said about what that
+///   does -- turning automatic off left every session it had approved still
+///   uploading. It now returns them to waiting, and the sentence says so.
+pub const ARMING_BODY: &str = "Sessions from this project will be scrubbed and contributed \
+     without asking you, including any already waiting. You won't review them first.\n\nNo \
+     session is sent until it has been quiet for a day.\n\nYou can turn this off at any time. \
+     Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays \
+     sent.";
+
+#[cfg(test)]
+mod arming_body_tests {
+    use super::ARMING_BODY;
+
+    /// Verbatim, because the macOS shell holds its own copy and pins it to
+    /// this one; a change here is a change there.
+    #[test]
+    fn the_arming_body_is_exactly_what_was_agreed() {
+        assert_eq!(
+            ARMING_BODY,
+            "Sessions from this project will be scrubbed and contributed without asking you, including any already waiting. You won't review them first.\n\nNo session is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
+        );
+    }
+
+    /// The three claims review found untrue may not come back.
+    #[test]
+    fn the_arming_body_makes_none_of_the_retracted_claims() {
+        for claim in [
+            "Every future session",
+            "change your mind",
+            "a day after you last work",
+        ] {
+            assert!(!ARMING_BODY.contains(claim), "{claim:?} is not true");
+        }
+        assert!(ARMING_BODY.contains("including any already waiting"));
+        assert!(ARMING_BODY.contains("goes back to waiting"));
+    }
+}
