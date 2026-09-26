@@ -94313,7 +94313,7 @@ mod witness_receipt {
             .unwrap();
         held.status = TraceCorpusStatus::Quarantined;
         write_submission_record(temp.path(), &held).unwrap();
-        review_decision_handler(
+        let _review = review_decision_handler(
             State(state.clone()),
             auth_headers("review-token-a"),
             AxumPath(envelope.submission_id),
