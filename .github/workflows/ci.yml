@@ -395,7 +395,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"
