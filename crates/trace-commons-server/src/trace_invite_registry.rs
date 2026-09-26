@@ -33,8 +33,11 @@ pub enum InviteTenantMode {
 }
 
 /// Tenant prefixes allocated only by provisioned account admission.
-/// Keep invite creation and admission classification on the same list.
-pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] = ["near-", "nearai-"];
+/// Keep invite creation and admission classification on the same list: this
+/// is the protocol's own list, which admission (server and contributor gate)
+/// reads through `is_anchored_tenant`.
+pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] =
+    trace_commons_protocol::admission::ANCHOR_NAMESPACES;
 
 /// Fixed invite grants must not claim a provisioned account tenant namespace.
 pub fn fixed_invite_tenant_uses_reserved_namespace(tenant_id: &str) -> bool {

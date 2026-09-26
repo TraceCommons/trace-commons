@@ -4,7 +4,7 @@
 use super::*;
 use trace_commons_protocol::admission::{
     AdmissionBinding, AdmissionEvidence, AdmissionRefusal, EVIDENCE_HEADER, SIGNATURE_HEADER,
-    hash_hex, is_hash,
+    hash_hex, is_anchored_tenant, is_hash,
 };
 use trace_commons_server::account_trust::{
     BoundedPolicy, TrustAccount, parse_bounded_policy, resolve_contribution_account,
@@ -16,7 +16,6 @@ use trace_commons_server::admission_ledger::{
     AccountAdmissionReservation, AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard,
     AdmissionReservation,
 };
-use trace_commons_server::trace_invite_registry::RESERVED_ACCOUNT_TENANT_PREFIXES;
 
 #[derive(Clone)]
 pub(super) struct AdmissionConfig {
@@ -152,10 +151,7 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
     //
     // A tenant in neither namespace is not refused, it is `None`: this is the
     // legacy invite-free path. Global account cutover refuses unlinked identities.
-    if !RESERVED_ACCOUNT_TENANT_PREFIXES
-        .iter()
-        .any(|prefix| tenant.tenant_id().strip_prefix(prefix).is_some_and(is_hash))
-    {
+    if !is_anchored_tenant(tenant.tenant_id()) {
         return Ok(None);
     }
     let db = state.db_mirror.as_ref().ok_or_else(denied)?;
@@ -774,10 +770,7 @@ pub(super) async fn account_status_handler(
     Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<axum::response::Response> {
     let mut response = if let Some(config) = state.account_admission.as_ref() {
-        if !RESERVED_ACCOUNT_TENANT_PREFIXES
-            .iter()
-            .any(|prefix| ctx.tenant_id.strip_prefix(prefix).is_some_and(is_hash))
-        {
+        if !is_anchored_tenant(&ctx.tenant_id) {
             return Err(api_error(
                 StatusCode::FORBIDDEN,
                 AdmissionRefusal::AccountIdentityUnlinked.label(),

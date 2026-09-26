@@ -113,14 +113,7 @@ pub async fn resolve_contribution_account(
     tenant_id: &str,
     principal_ref: &str,
 ) -> Result<TrustAccount, TrustRefusal> {
-    let in_near_namespace = crate::trace_invite_registry::RESERVED_ACCOUNT_TENANT_PREFIXES
-        .iter()
-        .any(|prefix| {
-            tenant_id
-                .strip_prefix(prefix)
-                .is_some_and(trace_commons_protocol::admission::is_hash)
-        });
-    if !in_near_namespace {
+    if !trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
         return Err(TrustRefusal::Unlinked);
     }
     if principal_ref.is_empty() {
