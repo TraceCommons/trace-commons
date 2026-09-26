@@ -22,7 +22,9 @@ pub(super) struct Evidence {
     raw_body_sha256: String,
     certificate_version: i16,
     class: AttestationClass,
-    receipt_sha256: Option<String>,
+    /// The pinned receipt signer the witness verified, as the database
+    /// evidence row records it. The receipt bytes themselves are not kept.
+    receipt_signer: Option<String>,
     object_key: String,
     artifact_sha256: String,
 }
@@ -180,10 +182,13 @@ pub(super) fn for_submission(
         body,
         &digest,
     )?;
-    let (class, receipt_sha256) = match verified.inference_provenance() {
-        InferenceProvenance::Unattested => (AttestationClass::Unattested, None),
-        InferenceProvenance::Attested(call) => {
-            (call.class(), Some(call.receipt_sha256().to_string()))
+    // A v1 certificate carries no provenance claim (`None`); it is stored as
+    // unattested, and `certificate_version = 1` keeps it distinguishable from
+    // a signed v2 unattested statement, exactly as the database row does.
+    let (class, receipt_signer) = match verified.inference_provenance() {
+        None | Some(InferenceProvenance::Unattested) => (AttestationClass::Unattested, None),
+        Some(InferenceProvenance::Attested(call)) => {
+            (call.class(), Some(call.receipt_signer().to_string()))
         }
     };
     Ok(Some(Evidence {
@@ -192,7 +197,7 @@ pub(super) fn for_submission(
         raw_body_sha256: source.raw_body_sha256().to_string(),
         certificate_version: source.certificate_version(),
         class,
-        receipt_sha256,
+        receipt_signer,
         object_key: record.object_key.clone(),
         artifact_sha256: digest,
     }))
@@ -286,7 +291,6 @@ pub(super) fn current_claim(
         class: AttestationClass::Unattested,
         coverage: Coverage::Missing,
         raw_body_sha256: None,
-        receipt_sha256: None,
     };
     anyhow::ensure!(
         state.db_mirror.is_none(),
@@ -302,7 +306,6 @@ pub(super) fn current_claim(
         return Ok(claim);
     };
     claim.raw_body_sha256 = Some(evidence.raw_body_sha256.clone());
-    claim.receipt_sha256 = evidence.receipt_sha256.clone();
     let tombstones = read_all_revocations(&state.root, tenant.tenant_id())?;
     let current_object = read_current_object(state, &record)
         .ok()
