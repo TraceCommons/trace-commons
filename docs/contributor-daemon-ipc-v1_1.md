@@ -217,6 +217,12 @@ What replaces the restriction is **visibility, not gatekeeping**:
   is rolled back and the call returns `audit-write-failed`. It does not
   succeed with a warning: an unrecorded change is exactly what removing the
   terminal-only restriction was not supposed to make possible.
+- Arming records the terms it is granted under (see `auto-upload-voided`
+  below). With no config to read them from -- not yet enrolled, or a config
+  that cannot be read -- `set_project_mode: "auto_upload"` is refused with
+  `arming-terms-unavailable` (`ERR_UNAVAILABLE`) before anything is recorded.
+  Arming the unknown-project bucket is refused for its own reason first,
+  also before anything is recorded.
 - The durable log is capped and rotates oldest-first, so it cannot grow
   until appending to it starts failing. Capping `list_audit`'s output alone
   would not have bounded the file.
@@ -1302,7 +1308,8 @@ and must never echo the correction text or the detected value.
   "flagged": 1,
   "redactions": { "private_email": 2, "secret:openai_api_key": 1 },
   "skipped": [ { "entry_id": "…", "reason_label": "not-enrolled" } ],
-  "excluded_ineligible": 4
+  "excluded_ineligible": 4,
+  "excluded_held": 1
 }
 ```
 
@@ -1322,6 +1329,21 @@ account of what this call was asked to act on.
 `excluded_ineligible` is **absent** when no filter ran -- an invited
 contributor, or a single `entry_id`. Absent, never zero: zero would read as
 "nothing was left out", which is a claim about a filter that did not run.
+
+**A group `approve` also leaves out sessions held for a person's review**, and
+`excluded_held` is how many. An entry is held when it was revoked for a
+reason no unattended approval can satisfy -- today only
+`token-distribution-review-required`, which clears through a witness review
+of that one session. A group control is by definition not a review of one
+session, so held entries are left out for every contributor, invited or not,
+and are not in `skipped`. The watcher does not re-approve them under an
+`auto_upload` opt-in either; before it stopped, it re-approved one on the
+next poll, the uploader revoked it again, and the session never uploaded.
+
+`excluded_held` is present on every group call, because this filter always
+runs on one, and absent on a single `entry_id`, where it does not. It is kept
+apart from `excluded_ineligible` because the two say different things: an
+ineligible session cannot be sent, and a held one can once someone looks.
 
 Render it through `tc_contribution_withheld_line`, which turns the count into
 a sentence and answers the **empty string** for zero. A button reading
@@ -1534,11 +1556,77 @@ one entry -- a `cancel` against a project with nothing `approved` appends
 nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
 as the single-`entry_id` form of `approve`.
 
+An `auto-upload-voided` entry records a standing `auto_upload` grant that the
+daemon voided because the terms in force widened past what it was armed under
+-- a new recipient (destination, identity, witness, classifier host or model,
+receipt endpoint) or more leaving the machine (scopes gaining an entry, a
+filter added or removed, attested bodies turning on, a witness measurement
+admitted). `project_label` names the project and `detail` is a comma-separated
+list of fixed reason labels: `destination-changed`, `identity-changed`,
+`scopes-widened`, `privacy-filter-changed`, `receipt-endpoint-changed`,
+`witness-changed`, `witness-measurement-admitted`, `attested-bodies-on`. The
+project is `notify_only` from that pass on; arming it again records the new
+terms. Narrowing voids nothing. Unlike arming, the void is written **after**
+the mode change and a failed write does not undo it, because voiding is the
+safe direction.
+
+Four entries belong to the automatic grant (`grant_automatic`, below):
+`automatic-granted` and `automatic-grant-withdrawn` record it being given and
+withdrawn; `armed-by-default` records a project it armed, with that project's
+`project_label`; `automatic-grant-voided` records the grant itself voided by
+widened terms, with the same `detail` labels as `auto-upload-voided`.
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
 never free text, a path, or a token. See "Authorization" above for what this
 log is (and is not) for.
+
+### `grant_automatic`, `withdraw_automatic_grant`, `automatic_grant`
+
+The Flow 1 grant (the connect-and-forget design, K3 and K4): contribute
+automatically from projects discovered from now on.
+
+```json
+{ "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
+```
+
+`grant_automatic` takes no params and returns the grant as `automatic_grant`
+reports it. It is refused with `arming-terms-unavailable` (`ERR_UNAVAILABLE`)
+when there is no config to record terms from, and with `audit-write-failed`
+when its `automatic-granted` entry cannot be written, in which case nothing is
+granted. A second call replaces the first, and records what is on disk again.
+
+**It arms nothing already on disk**, recorded per source. Each source's first
+successful discovery in a full watcher pass under the grant records every
+session in it and the project each belongs to, and arms nothing from them. So
+a harness connected after the grant, one pointed at another root, and one whose
+discovery failed on an earlier pass are all recorded before they can arm
+anything; until a source is recorded, none of its sessions arms a project.
+`on_disk_recorded` is true once any source has been recorded. A grant given
+while a pass is listing the disk is recorded by a later pass.
+
+After a source is recorded, a session from it in a project that no recorded
+source had on disk, with no policy entry of its own, and not the
+unknown-project bucket, arms its project: an explicit `auto_upload` entry, the
+terms it is granted under, and an `armed-by-default` audit row written first.
+A project with any session on disk at the grant keeps asking, for its new
+sessions too. And a session that was on disk at the grant is **never approved
+unattended in a project the grant armed**, whichever project it reads as now;
+it waits for the contributor. That holds after the grant is withdrawn or
+voided, and stops holding for a project once the contributor sets its mode
+themselves.
+
+That is what makes a re-grant after logout safe. Logout wipes the policy,
+including a project set to `ignore`; a re-grant records the disk again, so that
+project asks rather than being armed as new.
+
+Widened terms void the grant itself as well as the projects it armed, with an
+`automatic-grant-voided` entry. `withdraw_automatic_grant` returns
+`{"withdrawn": bool}` and leaves the projects the grant armed as they are;
+each is withdrawn with `set_project_mode`. `automatic_grant` returns
+`{"granted": false}` when none is in force. None of the three returns a path
+or a count of them.
 
 ### `queue_outcome_counts`
 

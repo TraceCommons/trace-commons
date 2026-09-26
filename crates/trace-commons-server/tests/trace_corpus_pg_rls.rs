@@ -1552,6 +1552,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!("../../../migrations/V75__account_trust.sql"));
     sql.push_str(include_str!(
+        "../../../migrations/V76__trace_witness_certificate_evidence.sql"
+    ));
+    sql.push_str(include_str!(
         "../../../migrations/V79__inference_connection.sql"
     ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
@@ -1642,6 +1645,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
         "../../../migrations/V71__reward_participant_access.sql"
     ));
     sql.push_str(include_str!("../../../migrations/V75__account_trust.sql"));
+    sql.push_str(include_str!(
+        "../../../migrations/V76__trace_witness_certificate_evidence.sql"
+    ));
     sql.push_str(include_str!(
         "../../../migrations/V79__inference_connection.sql"
     ));

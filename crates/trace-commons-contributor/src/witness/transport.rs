@@ -725,6 +725,30 @@ fn certificate_signing_bytes(certificate: &serde_json::Value) -> Option<Vec<u8>>
         _ => return None,
     };
 
+    let object = certificate.as_object()?;
+    match object.get("version") {
+        None if object.len() == 5 && !object.contains_key("inference_provenance") => {}
+        Some(serde_json::Value::Number(version))
+            if version.as_u64() == Some(2) && object.len() == 7 =>
+        {
+            let provenance: trace_commons_protocol::witness_provenance::InferenceProvenance =
+                serde_json::from_value(object.get("inference_provenance")?.clone()).ok()?;
+            return Some(
+                trace_commons_protocol::witness_provenance::witness_certificate_v2_signing_bytes(
+                    trace_commons_protocol::witness_provenance::WitnessCertificateV2Base {
+                        redacted_sha256: digest,
+                        redaction_policy_version: policy,
+                        witness_measurement: measurement,
+                        residual_risk_tag: verdict_tag,
+                        timestamp,
+                    },
+                    &provenance,
+                ),
+            );
+        }
+        _ => return None,
+    }
+
     let mut bytes = Vec::new();
     bytes.extend_from_slice(SIGNING_DOMAIN);
     for field in [digest, policy, measurement] {

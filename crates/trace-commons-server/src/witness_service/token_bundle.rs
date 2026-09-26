@@ -49,7 +49,7 @@ impl ContributionRedactor for MappedRedactor<'_> {
 }
 
 pub async fn witness_token_bundle(
-    mut request: WitnessContributionRequest,
+    request: WitnessContributionRequest,
     options: TokenBundleOptions,
     policy: &InferenceAttestationPolicy,
     redactor: &dyn ContributionRedactor,
@@ -57,6 +57,28 @@ pub async fn witness_token_bundle(
     signer: &dyn Signer,
     enclave: &dyn Enclave,
 ) -> Result<WitnessTokenBundle, WitnessError> {
+    witness_token_bundle_with_issuance(
+        request,
+        options,
+        (policy, WitnessCertificateIssuance::V1),
+        redactor,
+        alternative_redactor,
+        signer,
+        enclave,
+    )
+    .await
+}
+
+pub(crate) async fn witness_token_bundle_with_issuance(
+    mut request: WitnessContributionRequest,
+    options: TokenBundleOptions,
+    policy_and_issuance: (&InferenceAttestationPolicy, WitnessCertificateIssuance),
+    redactor: &dyn ContributionRedactor,
+    alternative_redactor: &dyn TranscriptRedactor,
+    signer: &dyn Signer,
+    enclave: &dyn Enclave,
+) -> Result<WitnessTokenBundle, WitnessError> {
+    let (policy, issuance) = policy_and_issuance;
     use trace_commons_protocol::trace_contribution::TraceContributionEventType;
     let refuse = || WitnessError::ArtifactBindingFailed;
     for id in [&options.capture_store_id, &options.capture_id] {
@@ -151,7 +173,9 @@ pub async fn witness_token_bundle(
         inner: redactor,
         maps: Default::default(),
     };
-    let contribution = witness_contribution(request, policy, &mapped, signer, enclave).await?;
+    let contribution =
+        witness_contribution_with_issuance(request, policy, issuance, &mapped, signer, enclave)
+            .await?;
     let envelope: TraceContributionEnvelope =
         serde_json::from_slice(&contribution.envelope_bytes).map_err(|_| refuse())?;
     if contribution.certificate.claimed_redaction_policy_version()
@@ -251,7 +275,7 @@ pub async fn witness_token_bundle(
     let manifest_bytes = manifest.canonical_bytes().map_err(|_| refuse())?;
     let text = std::str::from_utf8(&manifest_bytes).map_err(|_| refuse())?;
     let proof = check_correspondence(text, text, &[]).map_err(|_| refuse())?;
-    let certificate = WitnessCertificate::from_proof(
+    let certificate = issuance.issue_certificate(
         proof,
         CertificateDetails {
             residual_risk_verdict: contribution.residual_risk_verdict(),
@@ -262,6 +286,7 @@ pub async fn witness_token_bundle(
                 .map_err(|_| WitnessError::MeasurementUnavailable)?,
             timestamp: chrono::Utc::now().timestamp(),
         },
+        trace_commons_protocol::witness_provenance::InferenceProvenance::Unattested,
     );
     let signature_hex = signer
         .sign_eip191(&certificate.signing_bytes())

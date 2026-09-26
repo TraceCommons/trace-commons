@@ -414,13 +414,14 @@ impl std::fmt::Debug for WitnessVerificationError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedWitnessCertificate {
     certificate: WitnessCertificate,
+    signature_header: String,
 }
 
 impl std::fmt::Debug for VerifiedWitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Delegates to the certificate's own hand-written Debug. No field
-        // on a certificate identifies a contributor or an upstream
-        // conversation any more -- see that type's Logging note.
+        // in provenance Debug exposes a model, signer or raw inference
+        // correlator -- see that type's Logging note.
         formatter
             .debug_struct("VerifiedWitnessCertificate")
             .field("certificate", &self.certificate)
@@ -429,6 +430,36 @@ impl std::fmt::Debug for VerifiedWitnessCertificate {
 }
 
 impl VerifiedWitnessCertificate {
+    /// Confirm that evidence bytes are the header pair that produced this
+    /// verified value. Parsing alone never gives untrusted headers authority.
+    pub fn matches_received_headers(&self, headers: &axum::http::HeaderMap) -> bool {
+        matches!(
+            super::request::witness_headers(headers),
+            Ok(Some((certificate, signature)))
+                if certificate == self.certificate && signature == self.signature_header
+        )
+    }
+
+    pub fn issued_at_unix_seconds(&self) -> i64 {
+        self.certificate.claimed_timestamp()
+    }
+
+    /// The signed provenance claim. V1 is unknown, not a signed negative claim.
+    pub fn inference_provenance(
+        &self,
+    ) -> Option<trace_commons_protocol::witness_provenance::InferenceProvenance> {
+        match self.certificate.version() {
+            super::certificate::CertificateVersion::V1 => None,
+            super::certificate::CertificateVersion::V2(provenance) => Some(provenance.clone()),
+        }
+    }
+
+    pub fn certificate_version(&self) -> i16 {
+        match self.certificate.version() {
+            super::certificate::CertificateVersion::V1 => 1,
+            super::certificate::CertificateVersion::V2(_) => 2,
+        }
+    }
     /// Lowercase hex SHA-256 of the artifact this certificate covers, which
     /// verification has proven is the artifact the caller passed.
     pub fn redacted_sha256(&self) -> &str {
@@ -606,7 +637,10 @@ pub(crate) fn verify_witness_certificate_at(
         return Err(WitnessVerificationError::ArtifactMismatch);
     }
 
-    Ok(VerifiedWitnessCertificate { certificate })
+    Ok(VerifiedWitnessCertificate {
+        certificate,
+        signature_header: signature_hex.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -696,6 +730,50 @@ mod tests {
         let pin = WitnessPin::new(&address_of_key(&k), [PINNED_MEASUREMENT.to_string()])
             .expect("pin is well formed");
         (k, pin)
+    }
+
+    #[test]
+    fn verified_certificate_binds_the_exact_received_header_pair() {
+        use crate::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+        let (key, pin) = witness();
+        let cert = certificate();
+        let signature = sign(&key, &cert);
+        let json = format!(
+            "{{\"redacted_sha256\":\"{}\",\"redaction_policy_version\":\"policy-v3\",\"witness_measurement\":\"{}\",\"residual_risk_verdict\":\"medium\",\"timestamp\":{}}}",
+            digest_of(ARTIFACT),
+            PINNED_MEASUREMENT,
+            cert.claimed_timestamp()
+        );
+        let verified = verify_witness_certificate(cert, &signature, Some(&pin), ARTIFACT).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(CERTIFICATE_HEADER, json.parse().unwrap());
+        headers.insert(SIGNATURE_HEADER, signature.parse().unwrap());
+        assert!(verified.matches_received_headers(&headers));
+        let evidence =
+            crate::trace_corpus_storage::TraceWitnessCertificateEvidenceWrite::from_verified(
+                "tenant",
+                uuid::Uuid::new_v4(),
+                &verified,
+                &headers,
+                ARTIFACT,
+                &digest_of(ARTIFACT),
+            )
+            .unwrap();
+        assert_eq!(evidence.raw_body_sha256(), digest_of(ARTIFACT));
+        assert_eq!(evidence.certificate_version(), 1);
+        headers.insert(SIGNATURE_HEADER, format!("{signature}0").parse().unwrap());
+        assert!(!verified.matches_received_headers(&headers));
+        assert!(
+            crate::trace_corpus_storage::TraceWitnessCertificateEvidenceWrite::from_verified(
+                "tenant",
+                uuid::Uuid::new_v4(),
+                &verified,
+                &headers,
+                ARTIFACT,
+                &digest_of(ARTIFACT),
+            )
+            .is_err()
+        );
     }
 
     /// A certificate stamped at `at`, covering [`ARTIFACT`].

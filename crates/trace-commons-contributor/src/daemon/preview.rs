@@ -297,6 +297,24 @@ pub fn input_fingerprint(
     near_ai: Option<&NearAiSettings>,
     attested_bodies: bool,
 ) -> String {
+    input_fingerprint_with_env_filter(
+        cfg,
+        near_ai,
+        attested_bodies,
+        &super::grant_terms::env_filter_backend(),
+    )
+}
+
+/// `input_fingerprint`, with the environment's privacy filter passed in
+/// (as `grant_terms::env_filter_backend` gives it) rather than read from
+/// the process environment, so a test can vary it without mutating process
+/// state.
+pub(crate) fn input_fingerprint_with_env_filter(
+    cfg: &ContributorConfig,
+    near_ai: Option<&NearAiSettings>,
+    attested_bodies: bool,
+    env_backend: &str,
+) -> String {
     let mut h = Sha256::new();
     h.update(envelope_determining_config_bytes(cfg).as_slice());
     h.update(b"\x00redactor\x00");
@@ -328,6 +346,16 @@ pub fn input_fingerprint(
     // is about. The switch is the consent-relevant fact.
     h.update(b"\x00attested_bodies\x00");
     h.update(if attested_bodies { "on" } else { "off" }.as_bytes());
+    // A privacy filter the environment attaches (`TRACE_PRIVACY_FILTER_BACKEND`)
+    // whatever the config says. Adding, changing or removing one changes who
+    // reads the prose, so an approval taken under one setting must not be
+    // sent under another. Hashed only when one is attached: a daemon without
+    // one keeps the fingerprints it already had, so an upgrade re-offers
+    // nothing.
+    if env_backend != "none" {
+        h.update(b"\x00env_filter\x00");
+        h.update(env_backend.as_bytes());
+    }
     format!("sha256:{:x}", h.finalize())
 }
 

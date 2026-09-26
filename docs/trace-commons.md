@@ -1295,3 +1295,37 @@ Operators using sidecar witnesses must update the witness and explicitly add
 its new exact version to their operator allowlist before accepting it; no
 operator allowlist is broadened automatically. Existing v1 signatures remain
 historically verifiable but do not satisfy this full-pipeline contract.
+
+### Final-call inference provenance (#991 Z2)
+
+A v2 witness certificate may carry one of three closed inference classes:
+`provider_tee_final_call`, `gateway_final_call`, or explicit `unattested`.
+An attested class means the witness verified a pinned receipt for the **last
+declared inference call** and bound the receipt to that call's original request
+and response body bytes. The model is recorded only when the verified receipt
+bound one. The certificate signs the provenance fields and the SHA-256 of the
+exact redacted request body the contributor submits to ingest (the
+`POST /v1/traces` body), not of any inference request or response. It does not prove
+whole-session authenticity, that earlier calls were included, receipt
+uniqueness or replay prevention, or the correctness of a model's output.
+
+Legacy v1 certificates have no inference claim. Reads label them `legacy_v1`
+and expose the conservative `unattested` policy class; v2 `unattested` is an
+explicit signed claim. The server records a verified certificate's original
+header bytes and the SHA-256 of the received request body in a forced-RLS
+PostgreSQL row. It never stores a transcript in that row or puts the evidence
+bytes in an exported envelope. The PII-backstop bypass is a separate operator
+decision: provenance capture can be enabled by a signing-address and
+measurement pin while that bypass remains off.
+
+The server rescrubs a submission after verification. A matching stored-object
+digest links the active rescrubbed artifact to the historical certificate; it
+does not mean the witness signed the rescrubbed bytes. Policy consumers use the
+tenant-scoped `get_current_verified_witness_evidence` read, which selects the
+current object reference and active submission state in the same database
+transaction without trusting a caller-supplied digest. The object loader must
+verify the selected object's bytes before use. Exact signed-source retries may
+rebind the derived object digest without changing original certificate or body
+evidence. Missing evidence, v1, inactive or revoked submissions, and
+object-digest mismatches do not expose an attested class. File-only ingestion
+has no durable inference-provenance read and makes no such claim.

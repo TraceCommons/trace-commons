@@ -266,10 +266,14 @@ async fn a_certificate_this_client_accepts_is_one_the_server_issued() {
 
     let envelope = WitnessedEnvelope {
         admission: None,
-        envelope_bytes: wire.envelope_bytes,
-        certificate_json: wire.certificate_header,
-        signature_hex: wire.signature_header,
+        envelope_bytes: wire.envelope_bytes.clone(),
+        certificate_json: wire.certificate_header.clone(),
+        signature_hex: wire.signature_header.clone(),
     };
+
+    assert_eq!(envelope.envelope_bytes, wire.envelope_bytes);
+    assert_eq!(envelope.certificate_json, wire.certificate_header);
+    assert_eq!(envelope.signature_hex, wire.signature_header);
 
     verify_certificate(&envelope, &address)
         .expect("the client must accept a certificate this witness issued");
@@ -297,6 +301,198 @@ async fn the_headers_this_witness_serves_are_the_headers_ingest_reads() {
     let pin = WitnessPin::new(&address, [MEASUREMENT.to_string()]).expect("the pin is well formed");
     verify_witness_certificate(certificate, &signature, Some(&pin), &wire.envelope_bytes)
         .expect("ingest must verify a certificate this witness issued");
+}
+
+#[test]
+fn v2_provenance_survives_both_verifiers_and_tampering_fails() {
+    use trace_commons_protocol::witness_provenance::{
+        AttestationClass, FinalCallAttestation, InferenceProvenance,
+    };
+    let signer = TestSigner::new("cross-v2");
+    let address = signer.address();
+    let artifact = b"{\"schema_version\":1,\"turns\":[]}";
+    let pin = WitnessPin::new(&address, [MEASUREMENT.to_string()]).expect("pin");
+    for provenance in [
+        InferenceProvenance::Unattested,
+        InferenceProvenance::Attested(
+            FinalCallAttestation::new(
+                AttestationClass::ProviderTeeFinalCall,
+                Some("model".into()),
+                "b".repeat(64),
+            )
+            .expect("provider claim"),
+        ),
+        InferenceProvenance::Attested(
+            FinalCallAttestation::new(AttestationClass::GatewayFinalCall, None, "b".repeat(64))
+                .expect("gateway claim"),
+        ),
+    ] {
+        let text = std::str::from_utf8(artifact).expect("utf8");
+        let proof = check_correspondence(text, text, &[]).expect("proof");
+        let certificate = WitnessCertificate::from_proof_v2(
+            proof,
+            CertificateDetails {
+                residual_risk_verdict: ResidualPiiRisk::Low,
+                redaction_policy_version: "deterministic-only-v1".into(),
+                witness_measurement: MEASUREMENT.into(),
+                timestamp: chrono::Utc::now().timestamp(),
+            },
+            provenance.clone(),
+        );
+        let signature = signer
+            .sign_eip191(&certificate.signing_bytes())
+            .expect("sign");
+        let json = serde_json::to_string(&certificate_json(&certificate, ResidualPiiRisk::Low))
+            .expect("json");
+        let envelope = WitnessedEnvelope {
+            envelope_bytes: artifact.to_vec(),
+            certificate_json: json.clone(),
+            signature_hex: signature.clone(),
+            admission: None,
+        };
+        verify_certificate(&envelope, &address).expect("client accepts server v2");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(CERTIFICATE_HEADER, json.parse().expect("header"));
+        headers.insert(SIGNATURE_HEADER, signature.parse().expect("header"));
+        let (decoded, signature) = witness_headers(&headers)
+            .expect("parse")
+            .expect("certificate");
+        let verified = verify_witness_certificate(decoded, &signature, Some(&pin), artifact)
+            .expect("server accepts v2");
+        assert_eq!(verified.inference_provenance(), Some(provenance.clone()));
+        assert_eq!(verified.certificate_version(), 2);
+        let (decoded, signature) = witness_headers(&headers).unwrap().unwrap();
+        assert_eq!(
+            verify_witness_certificate(decoded, &signature, Some(&pin), b"different artifact").err(),
+            Some(trace_commons_server::redaction_witness::verification::WitnessVerificationError::ArtifactMismatch),
+        );
+        let other_signer = TestSigner::new("wrong-v2-pin");
+        let wrong_pin =
+            WitnessPin::new(&other_signer.address(), [MEASUREMENT.to_string()]).unwrap();
+        let (decoded, signature) = witness_headers(&headers).unwrap().unwrap();
+        assert_eq!(
+            verify_witness_certificate(decoded, &signature, Some(&wrong_pin), artifact).err(),
+            Some(trace_commons_server::redaction_witness::verification::WitnessVerificationError::Signature(trace_commons_server::redaction_witness::certificate::CertificateError::SignerMismatch)),
+        );
+
+        if let InferenceProvenance::Attested(call) = &provenance {
+            let debug = format!("{certificate:?} {verified:?}");
+            assert!(!debug.contains(call.receipt_signer()));
+            if let Some(model) = call.model() {
+                assert!(!debug.contains(model));
+            }
+            for (field, value) in [
+                ("model", serde_json::json!("altered-model")),
+                ("receipt_signer", serde_json::json!("e".repeat(64))),
+                (
+                    "class",
+                    serde_json::json!(if call.class() == AttestationClass::GatewayFinalCall {
+                        "provider_tee_final_call"
+                    } else {
+                        "gateway_final_call"
+                    }),
+                ),
+            ] {
+                let mut changed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                changed["inference_provenance"]["final_call"][field] = value;
+                let changed_json = serde_json::to_string(&changed).unwrap();
+                let altered = WitnessedEnvelope {
+                    certificate_json: changed_json.clone(),
+                    ..envelope.clone()
+                };
+                assert!(
+                    verify_certificate(&altered, &address).is_err(),
+                    "unsigned mutation: {field}"
+                );
+                let mut changed_headers = headers.clone();
+                changed_headers.insert(CERTIFICATE_HEADER, changed_json.parse().unwrap());
+                let (decoded, signature) = witness_headers(&changed_headers).unwrap().unwrap();
+                assert!(
+                    verify_witness_certificate(decoded, &signature, Some(&pin), artifact).is_err()
+                );
+            }
+            for field in ["request_sha256", "response_sha256", "receipt_sha256"] {
+                assert!(!json.contains(field));
+                assert!(!debug.contains(field));
+                let mut changed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                changed["inference_provenance"]["final_call"][field] =
+                    serde_json::json!("a".repeat(64));
+                let changed_json = serde_json::to_string(&changed).unwrap();
+                let altered = WitnessedEnvelope {
+                    certificate_json: changed_json.clone(),
+                    ..envelope.clone()
+                };
+                assert!(verify_certificate(&altered, &address).is_err());
+                let mut changed_headers = headers.clone();
+                changed_headers.insert(CERTIFICATE_HEADER, changed_json.parse().unwrap());
+                assert!(witness_headers(&changed_headers).is_err());
+            }
+        }
+
+        let mut tampered: serde_json::Value = serde_json::from_str(&json).expect("json");
+        tampered["inference_provenance"] = serde_json::json!({"status":"unattested"});
+        if provenance != InferenceProvenance::Unattested {
+            let tampered_json = serde_json::to_string(&tampered).expect("json");
+            let altered = WitnessedEnvelope {
+                certificate_json: tampered_json.clone(),
+                ..envelope.clone()
+            };
+            assert!(verify_certificate(&altered, &address).is_err());
+            headers.insert(CERTIFICATE_HEADER, tampered_json.parse().expect("header"));
+            let (decoded, signature) = witness_headers(&headers)
+                .expect("parse")
+                .expect("certificate");
+            assert_eq!(verify_witness_certificate(decoded, &signature, Some(&pin), artifact).err(), Some(trace_commons_server::redaction_witness::verification::WitnessVerificationError::Signature(trace_commons_server::redaction_witness::certificate::CertificateError::SignerMismatch)));
+        }
+    }
+
+    let text = std::str::from_utf8(artifact).unwrap();
+    let old = WitnessCertificate::from_proof_v2(
+        check_correspondence(text, text, &[]).unwrap(),
+        CertificateDetails {
+            residual_risk_verdict: ResidualPiiRisk::Low,
+            redaction_policy_version: "deterministic-only-v1".into(),
+            witness_measurement: MEASUREMENT.into(),
+            timestamp: 1,
+        },
+        InferenceProvenance::Unattested,
+    );
+    let old_signature = signer.sign_eip191(&old.signing_bytes()).unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        CERTIFICATE_HEADER,
+        serde_json::to_string(&certificate_json(&old, ResidualPiiRisk::Low))
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(SIGNATURE_HEADER, old_signature.parse().unwrap());
+    let (decoded, signature) = witness_headers(&headers).unwrap().unwrap();
+    assert!(matches!(
+        verify_witness_certificate(decoded, &signature, Some(&pin), artifact),
+        Err(trace_commons_server::redaction_witness::verification::WitnessVerificationError::CertificateExpired { .. })
+    ));
+}
+
+#[test]
+fn implicit_v1_cannot_gain_an_unsigned_provenance_field() {
+    let signer = TestSigner::new("legacy-ambiguous");
+    let artifact = b"legacy artifact";
+    let (json, signature_hex) = issued(&signer, "legacy artifact", ResidualPiiRisk::Low);
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["inference_provenance"] = serde_json::json!({"status":"attested"});
+    let tampered = serde_json::to_string(&value).unwrap();
+    let envelope = WitnessedEnvelope {
+        envelope_bytes: artifact.to_vec(),
+        certificate_json: tampered.clone(),
+        signature_hex: signature_hex.clone(),
+        admission: None,
+    };
+    assert!(verify_certificate(&envelope, &signer.address()).is_err());
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(CERTIFICATE_HEADER, tampered.parse().unwrap());
+    headers.insert(SIGNATURE_HEADER, signature_hex.parse().unwrap());
+    assert!(witness_headers(&headers).is_err());
 }
 
 /// A certificate, rendered by the real producer and signed over the real
