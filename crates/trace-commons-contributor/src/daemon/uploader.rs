@@ -77,7 +77,7 @@ pub enum UploadDecision {
     /// is not the one the contributor was shown. Nothing was sent; the
     /// entry goes back in front of the contributor under `reason_label`.
     ApprovalStale { reason_label: String },
-    /// Network or auth failure.
+    /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
     /// A daily volume cap is in force.
     CapReached,
@@ -242,6 +242,7 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         },
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "claim-mint-failed" => Some(LABEL_CLAIM_MINT_FAILED),
+            crate::submit::REASON_TRANSIENT_REDACTION => Some(LABEL_PII_FILTER_UNAVAILABLE),
             // A refusal the commons sent on purpose, before the catch-all
             // that reads everything else as an outage.
             other => match AdmissionRefusal::from_label(other) {
@@ -793,6 +794,13 @@ mod tests {
             }),
             Some(LABEL_ADMISSION_LIMIT_REACHED)
         );
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::AccountLimitReached.label().into()
+            }),
+            Some(LABEL_ADMISSION_LIMIT_REACHED),
+            "the shared allowance health condition promises no window or reset"
+        );
         // A lease another attempt is holding is resolved by the retry that
         // follows it. Reporting a condition for it would put a banner up for
         // a race that clears itself.
@@ -1208,6 +1216,113 @@ mod tests {
             "an approval must not transfer to an envelope built from different inputs"
         );
         assert_eq!(state.uploads_today, 0, "nothing may be uploaded");
+    }
+
+    /// Reviewed on #1024: an entry approved before a grant is voided is not
+    /// sent after it. Voiding stops *new* unattended approvals; what stops an
+    /// approval already made is this guard, so every change that voids a
+    /// grant is run through the uploader here, not only compared as
+    /// fingerprints. (The environment's filter reaches the same fingerprint
+    /// through `env_filter_backend`; `grant_terms`'s test covers it without
+    /// mutating the process environment.)
+    #[tokio::test]
+    async fn an_approval_taken_before_a_voiding_change_is_not_sent_after_it() {
+        use crate::config::WitnessSettings;
+        type Change = Box<dyn Fn(&mut crate::config::ContributorConfig, &mut SettingsLike)>;
+        struct SettingsLike {
+            near_ai: Option<crate::envelope::NearAiSettings>,
+            attested_bodies: bool,
+        }
+        let changes: Vec<(&str, Change)> = vec![
+            (
+                "destination",
+                Box::new(|c, _| c.ingest_url = "http://elsewhere.invalid".into()),
+            ),
+            (
+                "identity",
+                Box::new(|c, _| c.tenant_id = "tenant-other".into()),
+            ),
+            (
+                "scopes widened",
+                Box::new(|c, _| c.consent_scopes.push("model_training".into())),
+            ),
+            (
+                "privacy filter",
+                Box::new(|c, _| c.pii_filter = Some("near-ai".into())),
+            ),
+            (
+                "receipt endpoint",
+                Box::new(|c, _| c.inference_receipt_endpoint = Some("https://r.invalid".into())),
+            ),
+            (
+                "witness",
+                Box::new(|c, _| {
+                    c.witness = Some(WitnessSettings {
+                        admission_evidence: false,
+                        url: "https://witness.invalid".into(),
+                        signing_address: "0x0000000000000000000000000000000000000001".into(),
+                        expected_measurements: Vec::new(),
+                    })
+                }),
+            ),
+            (
+                "classifier",
+                Box::new(|_, s| {
+                    s.near_ai = Some(crate::envelope::NearAiSettings {
+                        api_key: "k".into(),
+                        base_url: Some("https://classifier.invalid".into()),
+                        model: Some("m".into()),
+                    })
+                }),
+            ),
+            ("attested bodies", Box::new(|_, s| s.attested_bodies = true)),
+        ];
+        for (name, change) in &changes {
+            let session = GrowingSession::new();
+            let (_d, store) = temp_store();
+            let approved_under = fixture_cfg(&store);
+            store.save_config(&approved_under).unwrap();
+            let entry = session.entry_for(&session.current_hash(), &approved_under);
+
+            let mut cfg = approved_under.clone();
+            let mut now = SettingsLike {
+                near_ai: None,
+                attested_bodies: false,
+            };
+            change(&mut cfg, &mut now);
+            store.save_config(&cfg).unwrap();
+
+            let opts = dry_run_opts();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts, now.near_ai.clone()).unwrap();
+            let mut state = DaemonState::new();
+            let mut health = HealthState::default();
+            let mut settings = settings();
+            settings.ironwire_attested_bodies = now.attested_bodies;
+            let mut up = Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            };
+            let decision = up
+                .upload_entry(
+                    &session.source(),
+                    &session.session_ref(),
+                    &entry,
+                    at("2026-08-08T16:00:00Z"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                decision,
+                UploadDecision::ApprovalStale {
+                    reason_label: crate::daemon::preview::REASON_INPUTS_CHANGED.to_string(),
+                },
+                "{name}: an approval from before the void must not be sent"
+            );
+            assert_eq!(state.uploads_today, 0, "{name}");
+        }
     }
 
     #[tokio::test]

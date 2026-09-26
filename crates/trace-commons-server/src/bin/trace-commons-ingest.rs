@@ -3910,6 +3910,32 @@ impl AppState {
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        if account_admission.is_some() {
+            let db = db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("account_admission_database_unavailable"))?;
+            if !db
+                .account_admission_runtime_ready()
+                .await
+                .map_err(|_| anyhow::anyhow!("account_admission_readiness_unavailable"))?
+            {
+                anyhow::bail!("account_admission_permissions_or_linkage_not_ready");
+            }
+            // Static contributor credentials are not necessarily represented
+            // by a device row. Validate the local replica's inventory as well.
+            for auth in tokens
+                .values()
+                .filter(|auth| auth.role == TokenRole::Contributor)
+            {
+                trace_commons_server::account_trust::resolve_contribution_account(
+                    db.as_ref(),
+                    &auth.tenant_id,
+                    &auth.principal_ref,
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("account_identity_unlinked"))?;
+            }
+        }
         if admission.is_some()
             && !db_mirror
                 .as_ref()
@@ -13532,11 +13558,7 @@ async fn submit_trace_handler(
         )?;
         // Same-id quarantine remediation does not consume a new quota slot — the
         // prior quarantined row already counted.
-        if remediating_prior.is_none()
-            && !admission
-                .as_ref()
-                .is_some_and(admission::Attempt::is_invited)
-        {
+        if remediating_prior.is_none() {
             enforce_submission_quota(state.as_ref(), &tenant)?;
         }
         apply_embedding_precheck(&mut envelope, &derived_precheck);
@@ -15452,12 +15474,14 @@ async fn account_invite_redeem_handler(
             "cross-origin account mutation",
         ));
     }
-    // Bound the user-controlled code before hashing or issuing a database call.
-    if body.invite_code.len() > 128 || body.invite_code.is_empty() {
+    // Match the issuer: trim pasted whitespace, require exactly 16 uppercase
+    // ASCII letters/digits, and never case-fold a secret.
+    let invite_code = body.invite_code.trim();
+    if !trace_commons_server::trace_upload_claim_issuer::valid_onboard_invite_code(invite_code) {
         return Err(api_error(StatusCode::BAD_REQUEST, "invalid invite"));
     }
     let invite_hash =
-        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(&body.invite_code);
+        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(invite_code);
     let outcome = account_db(state.as_ref())?
         .redeem_account_invite(
             &ctx.tenant_id,
@@ -16855,11 +16879,7 @@ async fn account_trace_withdraw_handler(
         read_credit_settlement_batches_for_admin(state.as_ref(), &credit_tenant)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
-    let credit_retained = withdrawal_retains_all_credit(
-        submission_id,
-        &credit_events,
-        &finalized_settlement_credit_event_ids(&settlement_batches),
-    );
+    let finalized_credit_event_ids = finalized_settlement_credit_event_ids(&settlement_batches);
 
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
@@ -16889,9 +16909,14 @@ async fn account_trace_withdraw_handler(
         (tombstone, vec![submission_id])
     };
 
+    // Credit is retained only if it is retained for every withdrawn version.
+    let credit_retained = affected_ids.iter().all(|affected_id| {
+        withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+    });
+
     // Retained mappings make this list stable across retries. Complete the
     // external deletion for every content version before reporting success.
-    for affected_id in affected_ids {
+    for affected_id in affected_ids.iter().copied() {
         evict_withdrawn_trace_from_derived_surfaces(
             state.as_ref(),
             &db,
@@ -16905,45 +16930,63 @@ async fn account_trace_withdraw_handler(
             .map_err(|error| withdrawal_failed(&error))?;
     }
 
-    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
-    // account-actor ref, never contributor identity.
+    // Hash-only audit, one event per withdrawn version. The reason is a fixed
+    // label; the actor is the synthetic account-actor ref, never contributor
+    // identity.
     let audit_tenant = account_audit_tenant(&ctx);
-    let audit_event =
-        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
-    if let Err(error) = append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &audit_tenant,
-        audit_event,
-        StorageTraceAuditAction::Revoke,
-        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
-    )
-    .await
-    {
-        // The content is already gone and the tombstone is durable; a failed
-        // audit append must not resurrect either. Log hash-only and continue.
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(&error),
-            %submission_id,
-            "Trace Commons withdrawal audit append failed"
-        );
+    for affected_id in affected_ids.iter().copied() {
+        let audit_event =
+            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
+        if let Err(error) = append_audit_event_with_db_mirror(
+            state.as_ref(),
+            &audit_tenant,
+            audit_event,
+            StorageTraceAuditAction::Revoke,
+            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+        )
+        .await
+        {
+            // The content is already gone and the tombstone is durable; a
+            // failed audit append must not resurrect either. Log hash-only
+            // and continue.
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                submission_id = %affected_id,
+                "Trace Commons withdrawal audit append failed"
+            );
+        }
     }
 
     let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
-        let pending = db
-            .pending_token_bundle_deletions(&ctx.tenant_id, Some(submission_id))
-            .await
-            .map_err(internal_error)?;
-        response.token_deletion_state = Some(if pending.is_empty() {
-            "completed"
-        } else if state
-            .legal_hold_retention_policy_ids
-            .contains(&record.retention_policy_id)
-        {
-            "held"
-        } else {
-            "pending"
-        });
+        // Report the least-finished state across every withdrawn version:
+        // any legal hold is "held", any other outstanding deletion "pending".
+        let mut state_label = "completed";
+        for affected_id in affected_ids.iter().copied() {
+            let pending = db
+                .pending_token_bundle_deletions(&ctx.tenant_id, Some(affected_id))
+                .await
+                .map_err(internal_error)?;
+            if pending.is_empty() {
+                continue;
+            }
+            let retention_policy_id = if affected_id == submission_id {
+                Some(record.retention_policy_id.clone())
+            } else {
+                db.get_trace_submission(&ctx.tenant_id, affected_id)
+                    .await
+                    .map_err(internal_error)?
+                    .map(|sibling| sibling.retention_policy_id)
+            };
+            if retention_policy_id
+                .is_some_and(|policy| state.legal_hold_retention_policy_ids.contains(&policy))
+            {
+                state_label = "held";
+            } else if state_label == "completed" {
+                state_label = "pending";
+            }
+        }
+        response.token_deletion_state = Some(state_label);
     }
     Ok(Json(response))
 }

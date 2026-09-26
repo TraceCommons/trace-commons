@@ -2934,6 +2934,94 @@ pub fn privacy_filter_backend_from_env() -> Result<PrivacyFilterBackendTag, Priv
         .unwrap_or(PrivacyFilterBackendTag::None))
 }
 
+/// What tells one environment-attached privacy filter from another of the
+/// same kind: the host and model a remote backend sends prose to, or the
+/// program and arguments a sidecar runs. `None` when no backend is named.
+///
+/// Read the way the adapters are built -- trimmed, empty as unset, the
+/// canonical sidecar variable before its legacy name, and a remote backend's
+/// unset host or model as the default it would use -- so two environments
+/// that build the same filter give the same identity. Credentials and limits
+/// are left out: they change nothing about who reads the prose.
+///
+/// `var` reads one environment variable; pass `|k| std::env::var(k).ok()` for
+/// the process environment. Taking it as a parameter keeps this testable
+/// without mutating process state.
+pub fn privacy_filter_backend_identity(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let backend = get("TRACE_PRIVACY_FILTER_BACKEND")?;
+    let parts: Vec<String> = match backend.as_str() {
+        "sidecar" => {
+            let pick = |canonical: &str, legacy: &str| get(canonical).or_else(|| get(legacy));
+            vec![
+                pick(
+                    "TRACE_PRIVACY_FILTER_COMMAND",
+                    "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
+                )
+                .unwrap_or_default(),
+                pick(
+                    "TRACE_PRIVACY_FILTER_ARGS",
+                    "IRONCLAW_TRACE_PRIVACY_FILTER_ARGS",
+                )
+                .map(|raw| raw.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default(),
+            ]
+        }
+        "near-ai" => vec![
+            get("TRACE_NEAR_AI_PRIVACY_BASE_URL")
+                .unwrap_or_else(|| near_ai_default(NearAiDefault::BaseUrl)),
+            get("TRACE_NEAR_AI_PRIVACY_MODEL")
+                .unwrap_or_else(|| near_ai_default(NearAiDefault::Model)),
+        ],
+        "self-hosted" => vec![
+            get("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL").unwrap_or_default(),
+            get("TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL").unwrap_or_else(self_hosted_default_model),
+        ],
+        _ => Vec::new(),
+    };
+    let mut identity = backend;
+    for part in parts {
+        identity.push('\n');
+        identity.push_str(&part);
+    }
+    Some(identity)
+}
+
+enum NearAiDefault {
+    BaseUrl,
+    Model,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn near_ai_default(which: NearAiDefault) -> String {
+    match which {
+        NearAiDefault::BaseUrl => crate::privacy_filter_near_ai::DEFAULT_BASE_URL,
+        NearAiDefault::Model => crate::privacy_filter_near_ai::DEFAULT_MODEL,
+    }
+    .to_string()
+}
+
+// Without the feature the backend cannot be built at all, so there is no
+// default to resolve to.
+#[cfg(not(feature = "near-ai-privacy-filter"))]
+fn near_ai_default(_which: NearAiDefault) -> String {
+    String::new()
+}
+
+#[cfg(feature = "self-hosted-privacy-filter")]
+fn self_hosted_default_model() -> String {
+    crate::privacy_filter_self_hosted::DEFAULT_MODEL.to_string()
+}
+
+#[cfg(not(feature = "self-hosted-privacy-filter"))]
+fn self_hosted_default_model() -> String {
+    String::new()
+}
+
 fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     let command = read_privacy_env(
         "TRACE_PRIVACY_FILTER_COMMAND",

@@ -82,7 +82,9 @@ DO $$ BEGIN
     END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO trace_account_admission_runtime;
-GRANT SELECT (tenant_id, account_id, closed_at), UPDATE (account_id)
+-- Row locks need a column UPDATE privilege. Grant one that cannot rewrite
+-- account identity, matching V75's invite runtime.
+GRANT SELECT (tenant_id, account_id, closed_at), UPDATE (created_at)
     ON trace_accounts TO trace_account_admission_runtime;
 GRANT SELECT (tenant_id, account_id, principal_ref, unlinked_at)
     ON trace_account_principals TO trace_account_admission_runtime;
@@ -92,7 +94,8 @@ GRANT SELECT (tenant_id, device_key_id, revoked_at, onboarding_origin)
     ON device_keys TO trace_account_admission_runtime;
 GRANT SELECT (tenant_id, account_id)
     ON trace_near_account_anchors TO trace_account_admission_runtime;
-GRANT SELECT, INSERT, UPDATE ON trace_account_trust TO trace_account_admission_runtime;
+GRANT SELECT, INSERT ON trace_account_trust TO trace_account_admission_runtime;
+GRANT UPDATE (authority, trust_version, updated_at) ON trace_account_trust TO trace_account_admission_runtime;
 GRANT SELECT (tenant_id, account_id, revoked_at)
     ON trace_account_invite_grants TO trace_account_admission_runtime;
 GRANT SELECT, INSERT, UPDATE ON trace_account_admission_budget,
@@ -118,8 +121,6 @@ GRANT SELECT (tenant_id, account_id, principal_ref, unlinked_at), UPDATE (unlink
     ON trace_account_principals TO trace_account_admission_guard;
 GRANT SELECT (tenant_id, account_id, revoked_at), UPDATE (revoked_at)
     ON trace_account_invite_grants TO trace_account_admission_guard;
-GRANT SELECT (tenant_id, account_id, principal_ref, unlinked_at)
-    ON trace_account_principals TO trace_account_admission_guard;
 GRANT SELECT (tenant_id, submission_id, auth_principal_ref, status)
     ON trace_submissions TO trace_account_admission_guard;
 GRANT SELECT (tenant_id, submission_id, event_type)
@@ -251,3 +252,52 @@ REVOKE ALL ON FUNCTION trace_resume_legacy_admission(TEXT,TEXT,UUID,TEXT,UUID,BI
 GRANT EXECUTE ON FUNCTION trace_resume_legacy_admission(TEXT,TEXT,UUID,TEXT,UUID,BIGINT)
     TO trace_account_admission_runtime;
 REVOKE trace_admission_guard FROM CURRENT_USER;
+
+-- Both account resolution and V59 resume must work with this role alone.
+GRANT SELECT (anchor_hash) ON trace_near_provisioned_devices TO trace_account_admission_runtime;
+GRANT EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT)
+    TO trace_account_admission_runtime;
+
+-- Fleet readiness is the only cross-tenant view. Its owner cannot log in,
+-- bypass RLS, mutate data, or return identifiers; ingest gets only a boolean.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='trace_account_readiness_guard') THEN
+        CREATE ROLE trace_account_readiness_guard NOLOGIN NOBYPASSRLS;
+    END IF;
+END $$;
+GRANT trace_account_readiness_guard TO CURRENT_USER;
+GRANT USAGE ON SCHEMA public TO trace_account_readiness_guard;
+GRANT SELECT (tenant_id,device_key_id,revoked_at,onboarding_origin) ON device_keys TO trace_account_readiness_guard;
+GRANT SELECT (tenant_id,account_id,closed_at) ON trace_accounts TO trace_account_readiness_guard;
+GRANT SELECT (tenant_id,account_id,principal_ref,device_key_id) ON trace_near_provisioned_devices TO trace_account_readiness_guard;
+GRANT SELECT (tenant_id,account_id,principal_ref,unlinked_at) ON trace_account_principals TO trace_account_readiness_guard;
+CREATE POLICY account_readiness_devices ON device_keys FOR SELECT TO trace_account_readiness_guard USING (TRUE);
+CREATE POLICY account_readiness_accounts ON trace_accounts FOR SELECT TO trace_account_readiness_guard USING (TRUE);
+CREATE POLICY account_readiness_provisioned ON trace_near_provisioned_devices FOR SELECT TO trace_account_readiness_guard USING (TRUE);
+CREATE POLICY account_readiness_principals ON trace_account_principals FOR SELECT TO trace_account_readiness_guard USING (TRUE);
+CREATE FUNCTION trace_account_admission_linkage_ready() RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
+    SELECT NOT EXISTS (
+        SELECT 1 FROM public.trace_accounts a
+        WHERE a.closed_at IS NULL AND a.tenant_id !~ '^(near-|nearai-)[0-9a-f]{64}$'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM public.device_keys d WHERE d.revoked_at IS NULL AND (
+            d.tenant_id !~ '^(near-|nearai-)[0-9a-f]{64}$'
+            OR d.onboarding_origin NOT IN ('near','near_ai')
+            OR NOT EXISTS (
+                SELECT 1 FROM public.trace_near_provisioned_devices n
+                JOIN public.trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id
+                JOIN public.trace_account_principals p ON p.tenant_id=n.tenant_id
+                    AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref
+                WHERE n.tenant_id=d.tenant_id AND n.device_key_id=d.device_key_id
+                    AND a.closed_at IS NULL AND p.unlinked_at IS NULL
+            )
+        )
+    );
+$$;
+GRANT CREATE ON SCHEMA public TO trace_account_readiness_guard;
+ALTER FUNCTION trace_account_admission_linkage_ready() OWNER TO trace_account_readiness_guard;
+REVOKE CREATE ON SCHEMA public FROM trace_account_readiness_guard;
+REVOKE ALL ON FUNCTION trace_account_admission_linkage_ready() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION trace_account_admission_linkage_ready() TO trace_account_admission_runtime;
+REVOKE trace_account_readiness_guard FROM CURRENT_USER;

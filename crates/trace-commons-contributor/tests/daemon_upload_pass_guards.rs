@@ -552,7 +552,11 @@ async fn an_entry_claimed_for_upload_can_no_longer_be_cancelled() {
     let entry_id = h.only_entry().entry_id;
 
     assert!(
-        h.shared.queue.lock().unwrap().claim_for_upload(entry_id),
+        h.shared
+            .queue
+            .lock()
+            .unwrap()
+            .claim_for_upload(entry_id, chrono::Utc::now()),
         "an approved entry must be claimable"
     );
 

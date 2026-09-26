@@ -62,13 +62,19 @@ DO $$ BEGIN
     END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO trace_account_invite_runtime;
-GRANT SELECT (tenant_id, account_id, closed_at), UPDATE (account_id)
+-- Row locking needs UPDATE on one column; never grant identity/closure writes.
+GRANT SELECT (tenant_id, account_id, closed_at), UPDATE (created_at)
     ON trace_accounts TO trace_account_invite_runtime;
 GRANT SELECT (tenant_id, account_id)
     ON trace_near_account_anchors TO trace_account_invite_runtime;
-GRANT SELECT (invite_subject_hash, consumed_uses, max_uses, revoked_at, expires_at),
+GRANT SELECT (invite_subject_hash, consumed_uses, max_uses, revoked_at, expires_at, tenant_mode, fixed_tenant_id),
       UPDATE (consumed_uses, updated_at)
     ON onboarding_invite_grants TO trace_account_invite_runtime;
 GRANT SELECT, INSERT, UPDATE ON trace_account_trust TO trace_account_invite_runtime;
 GRANT SELECT, INSERT ON trace_account_invite_grants, trace_account_trust_events
+    TO trace_account_invite_runtime;
+
+-- Actual elevation appends a hash-only audit entry in the same transaction.
+GRANT INSERT ON trace_account_audit TO trace_account_invite_runtime;
+GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq
     TO trace_account_invite_runtime;

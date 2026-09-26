@@ -2615,7 +2615,7 @@ fn audience_claim_contains(audience: Option<&serde_json::Value>, expected: &str)
     }
 }
 
-fn valid_onboard_invite_code(invite_code: &str) -> bool {
+pub fn valid_onboard_invite_code(invite_code: &str) -> bool {
     invite_code.len() == 16
         && invite_code
             .chars()

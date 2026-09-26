@@ -32,6 +32,8 @@ pub enum AdmissionRefusal {
     LimitReached,
     /// Explicit account-authority allowance is exhausted.
     AccountLimitReached,
+    /// Authenticated legacy identity requires verified account linkage.
+    AccountIdentityUnlinked,
     /// Another attempt at the same submission holds the lease.
     InProgress,
     /// This submission id is already bound to different bytes or a different
@@ -44,10 +46,11 @@ pub enum AdmissionRefusal {
 
 impl AdmissionRefusal {
     /// Every refusal, for tests and exhaustive mappings.
-    pub const ALL: [AdmissionRefusal; 6] = [
+    pub const ALL: [AdmissionRefusal; 7] = [
         AdmissionRefusal::Refused,
         AdmissionRefusal::LimitReached,
         AdmissionRefusal::AccountLimitReached,
+        AdmissionRefusal::AccountIdentityUnlinked,
         AdmissionRefusal::InProgress,
         AdmissionRefusal::IdentityConflict,
         AdmissionRefusal::EvidenceRefused,
@@ -59,6 +62,7 @@ impl AdmissionRefusal {
             AdmissionRefusal::Refused => "admission_refused",
             AdmissionRefusal::LimitReached => "admission_limit_reached",
             AdmissionRefusal::AccountLimitReached => "account_limit_reached",
+            AdmissionRefusal::AccountIdentityUnlinked => "account_identity_unlinked",
             AdmissionRefusal::InProgress => "admission_in_progress",
             AdmissionRefusal::IdentityConflict => "admission_identity_conflict",
             AdmissionRefusal::EvidenceRefused => "admission_evidence_refused",
@@ -68,7 +72,9 @@ impl AdmissionRefusal {
     /// The status this refusal is sent with.
     pub const fn status(self) -> u16 {
         match self {
-            AdmissionRefusal::Refused | AdmissionRefusal::EvidenceRefused => 403,
+            AdmissionRefusal::Refused
+            | AdmissionRefusal::EvidenceRefused
+            | AdmissionRefusal::AccountIdentityUnlinked => 403,
             AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached => 429,
             AdmissionRefusal::InProgress | AdmissionRefusal::IdentityConflict => 409,
         }
@@ -189,6 +195,31 @@ pub fn is_hash(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The tenant prefixes that carry a provisioned admission anchor.
+///
+/// Deliberately a list rather than a `starts_with("near")`: `nearai-` is not a
+/// sub-namespace of `near-`, and a prefix test that treated it as one would
+/// make the two identity systems substitutable at the only place that decides
+/// which of them a request is on.
+pub const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
+
+/// Whether `tenant_id` is in an anchored namespace: one of
+/// [`ANCHOR_NAMESPACES`] followed by a hash. Every other tenant, including a
+/// `nearai-` one with any other suffix, is on the invite-free path and never
+/// passes through legacy admission. Shared so the server's check and the
+/// client's expectation of it are one rule.
+///
+/// Caveat: when a server enables account admission
+/// (`TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`), a tenant outside these
+/// namespaces is refused with `account_identity_unlinked` instead of taking
+/// the invite-free path. That switch is global, default-off, and refuses to
+/// start while unlinked identities remain.
+pub fn is_anchored_tenant(tenant_id: &str) -> bool {
+    ANCHOR_NAMESPACES
+        .iter()
+        .any(|prefix| tenant_id.strip_prefix(prefix).is_some_and(is_hash))
 }
 
 impl AdmissionEvidence {
@@ -312,6 +343,23 @@ pub fn receipt_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tenant_is_anchored_only_with_a_hash_after_its_namespace() {
+        let hash = "a".repeat(64);
+        assert!(is_anchored_tenant(&format!("near-{hash}")));
+        assert!(is_anchored_tenant(&format!("nearai-{hash}")));
+        for tenant in [
+            "nearai-abc".to_string(),
+            "near-abc".to_string(),
+            format!("near-{}", "A".repeat(64)),
+            format!("nearish-{hash}"),
+            format!("tenant-{hash}"),
+            hash.clone(),
+        ] {
+            assert!(!is_anchored_tenant(&tenant), "{tenant}");
+        }
+    }
     #[test]
     fn evidence_v2_signs_admission_policy_inputs_and_refuses_v1() {
         let evidence = AdmissionEvidence {
@@ -444,6 +492,7 @@ mod tests {
                 ("admission_refused", 403),
                 ("admission_limit_reached", 429),
                 ("account_limit_reached", 429),
+                ("account_identity_unlinked", 403),
                 ("admission_in_progress", 409),
                 ("admission_identity_conflict", 409),
                 ("admission_evidence_refused", 403),

@@ -140,6 +140,22 @@ pub(crate) fn witness_review_copy() -> Value {
     json!(trace_commons_contributor::witness_copy::witness_copy().review)
 }
 
+/// The sentences a contributor reads when granting automatic contribution.
+///
+/// Taken from the shared consent payload rather than written here, so this
+/// client says what GTK, macOS and Windows say. Not rendered yet: it exists so
+/// the grant screen, when it is built, reaches for these instead of writing
+/// its own.
+#[tauri::command]
+pub(crate) fn automatic_contribution_copy() -> Value {
+    let copy = trace_commons_contributor::consent_copy::consent_copy();
+    json!({
+        "auto_scrub_scope": copy.auto_scrub_scope,
+        "auto_scrub_limit": copy.auto_scrub_limit,
+        "auto_no_review": copy.auto_no_review,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn near_ai_account_enroll(
     state: State<'_, AppState>,

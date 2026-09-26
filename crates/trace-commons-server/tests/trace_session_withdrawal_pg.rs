@@ -1055,3 +1055,255 @@ async fn foreign_legacy_claim_cannot_poison_bulk_withdrawal() {
         before
     );
 }
+
+fn owned_submission(
+    tenant: &str,
+    id: Uuid,
+    principal: &str,
+    status: TraceCorpusStatus,
+) -> TraceSubmissionWrite {
+    TraceSubmissionWrite {
+        auth_principal_ref: principal.into(),
+        ..submission(tenant, id, status)
+    }
+}
+
+#[tokio::test]
+async fn terminal_status_writes_on_a_withdrawn_session_are_idempotent_no_ops() {
+    let Some(url) = database_url() else { return };
+    let client = migrated_client(&url).await;
+    let backend = PgBackend::new(&database_config(&url)).await.unwrap();
+    let tenant = format!("z4-{}", Uuid::new_v4());
+    let account = Uuid::new_v4();
+    let requested = Uuid::new_v4();
+    let sibling = Uuid::new_v4();
+    let digest = [0x3cu8; 32];
+    client
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "WITH account AS (INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2) RETURNING tenant_id, account_id) INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) SELECT tenant_id,account_id, 'principal:z4' FROM account ON CONFLICT DO NOTHING",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    for id in [requested, sibling] {
+        backend
+            .claim_trace_source_session(&tenant, account, &digest, id)
+            .await
+            .unwrap();
+        backend
+            .upsert_trace_submission(submission(&tenant, id, TraceCorpusStatus::Accepted))
+            .await
+            .unwrap();
+    }
+    let withdrawal = backend
+        .withdraw_trace_source_session(&tenant, account, requested, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(withdrawal.affected_submission_ids.contains(&sibling));
+
+    // Retention and legacy revocation mirror terminal statuses onto a sibling
+    // whose file record never saw the account withdrawal. Refusing them aborts
+    // the whole maintenance run; they must succeed and leave it revoked.
+    for status in [
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Rejected,
+    ] {
+        backend
+            .update_trace_submission_status(&tenant, sibling, status, "system", None)
+            .await
+            .unwrap_or_else(|error| panic!("{status:?} on a withdrawn sibling: {error}"));
+        assert_eq!(
+            backend
+                .get_trace_submission(&tenant, sibling)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            TraceCorpusStatus::Revoked,
+            "{status:?} is a no-op over the withdrawal"
+        );
+    }
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Received,
+    ] {
+        assert!(
+            backend
+                .update_trace_submission_status(&tenant, sibling, status, "system", None)
+                .await
+                .is_err(),
+            "{status:?} stays refused on a withdrawn session"
+        );
+    }
+    client
+        .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor() {
+    let Some(url) = database_url() else { return };
+    let client = migrated_client(&url).await;
+    let backend = PgBackend::new(&database_config(&url)).await.unwrap();
+    let tenant = format!("z4-merge-{}", Uuid::new_v4());
+    let survivor = backend
+        .create_or_reuse_account(&tenant, "principal:z4-survivor")
+        .await
+        .unwrap();
+    let absorbed = backend
+        .create_or_reuse_account(&tenant, "principal:z4-absorbed")
+        .await
+        .unwrap();
+    let live_digest = [0x11u8; 32];
+    let withdrawn_digest = [0x22u8; 32];
+    let shared_digest = [0x33u8; 32];
+    let (first, second, gone, absorbed_shared, survivor_shared) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    for (account, principal, digest, id) in [
+        (absorbed, "principal:z4-absorbed", live_digest, first),
+        (absorbed, "principal:z4-absorbed", live_digest, second),
+        (absorbed, "principal:z4-absorbed", withdrawn_digest, gone),
+        (
+            absorbed,
+            "principal:z4-absorbed",
+            shared_digest,
+            absorbed_shared,
+        ),
+        (
+            survivor,
+            "principal:z4-survivor",
+            shared_digest,
+            survivor_shared,
+        ),
+    ] {
+        assert_eq!(
+            backend
+                .claim_trace_source_session(&tenant, account, &digest, id)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Active
+        );
+        backend
+            .upsert_trace_submission(owned_submission(
+                &tenant,
+                id,
+                principal,
+                TraceCorpusStatus::Accepted,
+            ))
+            .await
+            .unwrap();
+    }
+    backend
+        .withdraw_trace_source_session(&tenant, absorbed, gone, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    backend
+        .withdraw_trace_source_session(&tenant, absorbed, absorbed_shared, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let code_hash = format!(
+        "sha256:{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    client
+        .execute(
+            "INSERT INTO trace_login_links (tenant_id, link_id, account_id, code_hash,
+                created_principal_ref, created_at, expires_at, consumed_at)
+             VALUES ($1, $2, $3, $4, 'principal:z4-link', now(), now() + interval '1 hour', NULL)",
+            &[&tenant, &Uuid::new_v4(), &absorbed, &code_hash],
+        )
+        .await
+        .unwrap();
+    let staged = backend
+        .stage_merge_proposal(&tenant, survivor, &code_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    backend
+        .execute_merge(&tenant, survivor, staged.proposal_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Withdrawing one version as the survivor withdraws every version the
+    // absorbed account submitted from that session.
+    let withdrawal = backend
+        .withdraw_trace_source_session(&tenant, survivor, first, chrono::Utc::now())
+        .await
+        .unwrap()
+        .expect("the merged mapping resolves under the surviving account");
+    assert_eq!(withdrawal.affected_submission_ids.len(), 2);
+    assert!(withdrawal.affected_submission_ids.contains(&second));
+    assert_eq!(
+        backend
+            .get_trace_submission(&tenant, second)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TraceCorpusStatus::Revoked
+    );
+    // A session withdrawn before the merge stays withdrawn for resumed uploads.
+    assert_eq!(
+        backend
+            .claim_trace_source_session(&tenant, survivor, &withdrawn_digest, Uuid::new_v4())
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Withdrawn
+    );
+    // When both accounts held the same session, a withdrawal on either wins.
+    assert_eq!(
+        backend
+            .get_trace_source_session_status(&tenant, survivor, &shared_digest)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Withdrawn
+    );
+    assert!(
+        backend
+            .update_trace_submission_status(
+                &tenant,
+                survivor_shared,
+                TraceCorpusStatus::Accepted,
+                "system",
+                None
+            )
+            .await
+            .is_err(),
+        "the survivor's version of a withdrawn shared session cannot be re-accepted"
+    );
+    // Mappings are still immutable outside a consumed merge.
+    assert!(
+        client
+            .execute(
+                "UPDATE trace_submission_sessions SET account_id = $3
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant, &survivor_shared, &absorbed],
+            )
+            .await
+            .is_err(),
+        "a mapping cannot be moved back to the absorbed account"
+    );
+}

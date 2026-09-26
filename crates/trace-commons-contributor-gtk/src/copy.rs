@@ -490,6 +490,10 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // about what leaves this machine kept in three places is three claims that
 // have not diverged yet.
 //
+// The `AUTO_*` sentences are the Flow 1 grant screen's, re-exported ahead
+// of that screen for the same reason: when it is built here it reaches for
+// these rather than writing its own.
+//
 // `GATE_READY_HELP`, `GATE_NOT_PINNED_HELP` and `gate_help` are re-exported
 // and not rendered: this shell puts no tooltip on `Contribute`. That is
 // deliberate rather than an oversight -- they are here so that a screen
@@ -504,7 +508,8 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // beside a re-export is the word this shell would render while the other
 // two render the shared one.
 pub use trace_commons_contributor::consent_copy::{
-    GATE_NOT_PINNED_HELP, GATE_READY_HELP, GATE_STATEMENT, gate_help,
+    AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, GATE_NOT_PINNED_HELP, GATE_READY_HELP,
+    GATE_STATEMENT, gate_help,
 };
 // COPY-MIGRATED-END
 
