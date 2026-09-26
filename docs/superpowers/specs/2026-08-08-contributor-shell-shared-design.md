@@ -347,7 +347,11 @@ the machine is still watching:**
   > it keeps sending sessions you've already approved, and any session from a
   > project set to contribute automatically, including ones that finish after
   > you quit. Everything else waits for you.
-  > [ Quit ]  [ Quit and stop watching ]
+  > [ Cancel ]  [ Quit ]
+
+  There is deliberately no "Quit and stop watching" action here. A shell
+  attached to the watcher through `AttachedDaemon` cannot send `shutdown`
+  (it is refused before it reaches the wire), so the button would do nothing.
 
 An earlier draft of this spec gave only the second wording, which is false on
 the platform the first application was built for. The second wording itself

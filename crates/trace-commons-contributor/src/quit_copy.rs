@@ -44,8 +44,8 @@ pub const QUIT_HOSTING_BODY: &str = concat!(
 /// while nobody's approving", which was false in both cases and steered a
 /// contributor towards quitting as though it stopped uploads.
 ///
-/// Worded to be true whether or not any folder is armed, so no shell has to
-/// know the project policy to say it. "Unless it's paused" is there because
+/// Worded to be true whether or not any project is set to contribute
+/// automatically, so no shell has to know the project policy to say it. "Unless it's paused" is there because
 /// pause is the one state in which the watcher does neither.
 pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running after you quit. \
      Unless it's paused, it keeps sending sessions you've already approved, and any session \
