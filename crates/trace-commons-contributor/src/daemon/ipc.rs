@@ -7229,6 +7229,122 @@ mod tests {
         assert_eq!(row["project_label"], void["project_label"]);
     }
 
+    /// The notice's "Turn back on", end to end: a shell sends
+    /// `set_project_mode` with the element's `project_id`, exactly as it
+    /// arms a project by hand. The project is armed under the terms now in
+    /// force, the audit gets the same `armed-auto-upload` row as manual
+    /// arming, and the notice is gone from `status`.
+    #[test]
+    fn rearming_from_the_notice_arms_audits_and_clears_it() {
+        let key = "/tmp/rearmproj";
+        let s = armed_then_voided(key);
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        let void = status["grant_voids"][0].clone();
+        let notice = crate::consent_copy::void_notice_for_wire(&void).unwrap();
+        assert!(
+            notice.rearm_action.is_some(),
+            "the notice offers the button"
+        );
+        let actions = |s: &DaemonShared| -> Vec<String> {
+            audit::load(&s.store)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.action)
+                .collect()
+        };
+        let before = actions(&s);
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": void["project_id"], "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            status["grant_voids"],
+            serde_json::json!([]),
+            "re-arming clears it"
+        );
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(key), ProjectMode::AutoUpload);
+        let terms = policy.projects[key]
+            .armed_under
+            .clone()
+            .expect("armed under terms");
+        assert_eq!(
+            terms.ingest_url, "https://elsewhere.invalid",
+            "the new terms"
+        );
+        drop(policy);
+        // Exactly one entry more, and it is the manual-arming row.
+        let after = actions(&s);
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        let count = |list: &[String]| list.iter().filter(|a| *a == "armed-auto-upload").count();
+        assert_eq!(
+            count(&after),
+            count(&before) + 1,
+            "the same trail as manual arming"
+        );
+        assert!(
+            ProjectPolicy::load(&s.store)
+                .unwrap()
+                .grant_voids
+                .is_empty()
+        );
+    }
+
+    /// A refused re-arm changes nothing: with no config there are no terms
+    /// to arm under, so `set_project_mode` refuses with
+    /// `arming-terms-unavailable`, the project still asks first, and the
+    /// notice stays for the contributor.
+    #[test]
+    fn a_refused_rearm_keeps_the_notice_and_the_project_asking() {
+        let key = "/tmp/rearmrefused";
+        let s = armed_then_voided(key);
+        let id = project_id_for(key);
+        std::fs::remove_file(s.store.dir().join("contributor.json")).unwrap();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": id, "mode": "auto_upload" }),
+            ),
+        );
+        let err = r.error.expect("refused without terms");
+        assert_eq!(err.message, "arming-terms-unavailable");
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(key), ProjectMode::NotifyOnly);
+        assert_eq!(policy.grant_voids.len(), 1, "the notice stays");
+    }
+
+    /// The unknown bucket can never be armed, so a re-arm naming it is
+    /// refused and leaves every outstanding notice where it was.
+    #[test]
+    fn a_rearm_of_the_unknown_bucket_is_refused_and_clears_nothing() {
+        let s = armed_then_voided("/tmp/rearmunknown");
+        seed_entry_with_eligibility(&s, UNKNOWN_PROJECT_KEY, None);
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": project_id_for(UNKNOWN_PROJECT_KEY),
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        assert!(r.error.is_some());
+        assert_eq!(s.policy.lock().unwrap().grant_voids.len(), 1);
+    }
+
     /// A healthy daemon reports an empty list, not a missing key, so a shell
     /// can tell "nothing to show" from "a daemon too old to say".
     #[test]

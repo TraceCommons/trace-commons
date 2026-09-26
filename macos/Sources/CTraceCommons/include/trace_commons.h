@@ -1508,12 +1508,18 @@ char*       tc_consent_gate_help(int32_t pinned);
  *
  * void_json is ONE element of status's grant_voids list, passed through as
  * the JSON object the daemon sent. Returns an owned JSON object with title,
- * body, reasons_heading, reasons (a list of sentences), rearm and
- * acknowledge; free it with tc_string_free.
+ * body, reasons_heading, reasons (a list of sentences), rearm, acknowledge,
+ * rearm_action and rearm_failed; free it with tc_string_free.
  *
  * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read kind or reasons to
  * choose words natively. Once shown, call acknowledge_grant_voids with the
- * element's id; acknowledging is all the button does.
+ * element's id; acknowledging is all that button does.
+ *
+ * rearm_action and rearm_failed are null except on a project void that
+ * carries a project_id. When rearm_action is present, draw a second button
+ * with it that calls set_project_mode with the element's project_id and
+ * mode auto_upload -- the same call as arming by hand -- and show
+ * rearm_failed if the daemon refuses it. No other notice gets that button.
  *
  * An unknown kind, or a project void without a label, gets a notice that
  * says automatic contributing stopped without saying for what: do not write
