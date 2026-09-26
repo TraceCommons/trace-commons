@@ -27676,20 +27676,85 @@ async fn db_reconciliation_drill_without_db_mirror_returns_operator_error() {
     );
 }
 
-/// The file audit log is canonical and the DB audit table mirrors it: the DB
-/// row for a submission, and for a quarantine remediation re-POST, is the file
-/// event's row -- same id, same hash-chain fields -- not a second row with an
-/// id of its own. File-first dual-write (`require_db_mirror_writes` off)
-/// mirrors after the file append, so the chain fields are the file's. With
-/// `require_db_mirror_writes` on, the DB row is written before the file append
-/// has computed the chain, so -- as for every other audit event mirrored in
-/// that mode -- the row carries the file event's id and no chain fields.
+/// Asserts the DB audit table is an exact mirror of the file audit log: the
+/// same events, in the same order, with the same ids and chain fields, and
+/// every row's canonical payload is its file event. Returns the DB rows.
+async fn assert_db_audit_mirrors_file_log(
+    backend: &PgBackend,
+    root: &Path,
+    context: &str,
+) -> Vec<StorageTraceAuditEventRecord> {
+    let file_events = read_all_audit_events(root, "tenant-a").expect("file audit log");
+    let db_events = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB audit rows");
+    assert_eq!(
+        db_events
+            .iter()
+            .map(|row| (
+                row.audit_event_id,
+                row.previous_event_hash.clone(),
+                row.event_hash.clone()
+            ))
+            .collect::<Vec<_>>(),
+        file_events
+            .iter()
+            .map(|event| (
+                event.event_id,
+                event.previous_event_hash.clone(),
+                event.event_hash.clone()
+            ))
+            .collect::<Vec<_>>(),
+        "{context}: DB rows are the file events, in order, with their chain fields \
+         (file kinds: {:?})",
+        file_events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (row, event) in db_events.iter().zip(&file_events) {
+        assert!(
+            event.event_hash.is_some(),
+            "{context}: file event is chained"
+        );
+        let canonical: TraceCommonsAuditEvent = serde_json::from_str(
+            row.canonical_event_json
+                .as_deref()
+                .expect("mirrored row carries its canonical payload"),
+        )
+        .expect("canonical payload parses");
+        assert_eq!(canonical.kind, event.kind, "{context}");
+        assert_eq!(canonical.reason, event.reason, "{context}");
+    }
+    let projection_failures = collect_db_audit_canonical_projection_failures(&db_events)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(
+        projection_failures.is_empty(),
+        "{context}: {projection_failures:?}"
+    );
+    let chain_failures = collect_db_audit_hash_chain_failures(&db_events)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(chain_failures.is_empty(), "{context}: {chain_failures:?}");
+    db_events
+}
+
+/// The file audit log is canonical and the DB audit table mirrors it exactly,
+/// in both dual-write modes: every event the submit, remediation, idempotent
+/// retry, operator re-scrub, review and revocation paths write is one row
+/// with the file event's id, chain fields and canonical payload, and the DB
+/// holds no audit row the file log lacks.
 #[tokio::test]
-async fn db_submit_audit_row_mirrors_the_file_audit_event() {
+async fn db_audit_table_mirrors_the_file_audit_log_in_both_dual_write_modes() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
     for require_db_mirror_writes in [false, true] {
+        let context = format!("require_db_mirror_writes={require_db_mirror_writes}");
         cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
         let temp = tempfile::tempdir().expect("temp dir");
         let db_mirror: Arc<dyn Database> = backend.clone();
@@ -27708,7 +27773,8 @@ async fn db_submit_audit_row_mirrors_the_file_audit_event() {
             state_mut.accept_medium_risk_submissions = false;
         }
 
-        // Lands quarantined, so the second POST below is a remediation.
+        // First landing, quarantined; then a remediation re-POST and an
+        // idempotent retry of the remediated body.
         let mut first = sample_envelope().await;
         make_metadata_only_low_risk(&mut first);
         first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
@@ -27718,107 +27784,283 @@ async fn db_submit_audit_row_mirrors_the_file_audit_event() {
             submit_body(first.clone()),
         )
         .await
-        .expect("first submission mirrors to DB");
+        .expect("first submission");
         let mut corrected = first.clone();
         corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(corrected.clone()),
+        )
+        .await
+        .expect("remediation");
         let _ = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
             submit_body(corrected),
         )
         .await
-        .expect("remediation mirrors to DB");
+        .expect("idempotent retry");
 
-        // A second, accepted submission, so the file chain is longer than one
-        // submission's events.
+        // A second quarantined submission, re-scrubbed twice by an operator
+        // (it stays quarantined), then reviewed.
         let mut second = sample_envelope().await;
-        make_metadata_only_low_risk(&mut second);
-        let _ = submit_trace_handler(
+        second.events[0].redacted_content =
+            Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+        let Json(receipt) = submit_trace_handler(
             State(state.clone()),
             auth_headers("token-a"),
             submit_body(second.clone()),
         )
         .await
-        .expect("second submission mirrors to DB");
-
-        let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
-        let file_submit_events = file_events
-            .iter()
-            .filter(|event| matches!(event.kind.as_str(), "submitted" | "quarantine_remediated"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            file_submit_events
-                .iter()
-                .map(|event| (event.kind.as_str(), event.submission_id))
-                .collect::<Vec<_>>(),
-            vec![
-                ("submitted", first.submission_id),
-                ("quarantine_remediated", first.submission_id),
-                ("submitted", second.submission_id),
-            ],
-            "require_db_mirror_writes={require_db_mirror_writes}"
-        );
-        let db_events = backend
-            .list_trace_audit_events("tenant-a")
+        .expect("second submission");
+        assert_eq!(receipt.status, "quarantined", "{context}");
+        for _ in 0..2 {
+            let _ = review_quarantine_rescrub_handler(
+                State(state.clone()),
+                auth_headers("review-token-a"),
+                AxumPath(second.submission_id),
+                Json(TraceQuarantineRescrubRequest {
+                    reason: Some("operator free text that must not reach the DB".into()),
+                }),
+            )
             .await
-            .expect("DB audit rows");
-        let db_submit_rows = db_events
-            .iter()
-            .filter(|event| event.action == StorageTraceAuditAction::Submit)
+            .expect("operator rescrub");
+        }
+        let _ = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(second.submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("reviewer free text that must not reach the DB".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect("review decision");
+
+        // And the first submission is revoked.
+        let revoked = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(first.submission_id),
+        )
+        .await
+        .expect("revocation");
+        assert_eq!(revoked, StatusCode::NO_CONTENT);
+
+        let db_events = assert_db_audit_mirrors_file_log(&backend, temp.path(), &context).await;
+        let kinds = read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file audit log")
+            .into_iter()
+            .map(|event| event.kind)
             .collect::<Vec<_>>();
-        assert_eq!(
-            db_submit_rows.len(),
-            file_submit_events.len(),
-            "one DB submit row per file submit event \
-             (require_db_mirror_writes={require_db_mirror_writes})"
-        );
-        for (file_event, db_row) in file_submit_events.iter().zip(&db_submit_rows) {
-            assert_eq!(
-                db_row.audit_event_id, file_event.event_id,
-                "DB submit row carries the file event id ({} , \
-                 require_db_mirror_writes={require_db_mirror_writes})",
-                file_event.kind
-            );
-            assert_eq!(db_row.submission_id, Some(file_event.submission_id));
-            let (expected_previous, expected_hash) = if require_db_mirror_writes {
-                (None, None)
-            } else {
-                (
-                    file_event.previous_event_hash.clone(),
-                    file_event.event_hash.clone(),
-                )
-            };
+        for expected in [
+            "submitted",
+            "quarantine_remediated",
+            "idempotent_submit",
+            "quarantine_operator_rescrub",
+            "review_decision",
+            "revoked",
+            "revocation_artifact_invalidation",
+        ] {
             assert!(
-                require_db_mirror_writes || expected_hash.is_some(),
-                "the file event is hash-chained"
-            );
-            assert_eq!(
-                db_row.previous_event_hash, expected_previous,
-                "{} previous_event_hash (require_db_mirror_writes={require_db_mirror_writes})",
-                file_event.kind
-            );
-            assert_eq!(
-                db_row.event_hash, expected_hash,
-                "{} event_hash (require_db_mirror_writes={require_db_mirror_writes})",
-                file_event.kind
+                kinds.iter().any(|kind| kind == expected),
+                "{context}: {expected} in {kinds:?}"
             );
         }
-        // The mirrored rows carry the file event as their canonical payload,
-        // including the remediation's `quarantine_remediated` kind, and the
-        // projection check accepts them.
-        let projection_failures = collect_db_audit_canonical_projection_failures(&db_events)
-            .into_iter()
-            .map(|failure| failure.first_failure)
-            .collect::<Vec<_>>();
-        assert!(
-            projection_failures.is_empty(),
-            "require_db_mirror_writes={require_db_mirror_writes}: {projection_failures:?}"
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "quarantine_operator_rescrub")
+                .count(),
+            2,
+            "{context}: a second re-scrub records a row of its own"
         );
-        assert!(
-            collect_db_audit_hash_chain_failures(&db_events).is_empty(),
-            "require_db_mirror_writes={require_db_mirror_writes}"
-        );
+        // Hash-only: the free text reached neither the rows nor their payloads.
+        for row in &db_events {
+            let row_text = format!("{:?} {:?}", row.reason, row.canonical_event_json.as_deref());
+            assert!(
+                !row_text.contains("free text"),
+                "{context}: free text leaked into audit row {}",
+                row.audit_event_id
+            );
+        }
     }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Concurrent submissions: the append lock orders each event's chain fields,
+/// its DB row and its file line together, so both logs hold one unforked
+/// chain in the same order, in both dual-write modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for require_db_mirror_writes in [false, true] {
+        let context = format!("require_db_mirror_writes={require_db_mirror_writes}");
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = require_db_mirror_writes;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            let state = state.clone();
+            tasks.push(tokio::spawn(async move {
+                submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+                    .await
+                    .map(|_| ())
+                    .map_err(|(status, _)| status)
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("submission task joins")
+                .unwrap_or_else(|status| panic!("{context}: submission failed with {status}"));
+        }
+
+        let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
+        assert_eq!(file_events.len(), 8, "{context}");
+        let mut previous = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+        for event in &file_events {
+            assert_eq!(
+                event.previous_event_hash.as_deref(),
+                Some(previous.as_str()),
+                "{context}: the file chain does not fork"
+            );
+            previous = event.event_hash.clone().expect("chained");
+        }
+        assert_db_audit_mirrors_file_log(&backend, temp.path(), &context).await;
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// A submit row written before the DB mirrored the file event -- the id
+/// derived from the submission, no chain fields, no canonical payload -- is
+/// counted as legacy, with its file `submitted` event, and neither is drift.
+#[tokio::test]
+async fn reconciliation_counts_legacy_submit_audit_rows_apart_from_drift() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission");
+
+    // Replace the mirrored row with the row the old scheme wrote.
+    let file_event = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file audit log")
+        .into_iter()
+        .find(|event| event.kind == "submitted")
+        .expect("submitted event");
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw client");
+    client
+        .execute(
+            "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
+            &[&file_event.event_id],
+        )
+        .await
+        .expect("mirrored row removed");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let legacy_id = deterministic_trace_uuid("submit-audit", &record);
+    backend
+        .append_trace_audit_event(StorageTraceAuditEventWrite {
+            audit_event_id: legacy_id,
+            tenant_id: "tenant-a".to_string(),
+            actor_principal_ref: record.auth_principal_ref.clone(),
+            actor_role: "contributor".to_string(),
+            action: StorageTraceAuditAction::Submit,
+            reason: Some("auth_method=static_token".to_string()),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Submission {
+                status: storage_corpus_status(record.status),
+                privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
+            },
+        })
+        .await
+        .expect("legacy row writes");
+
+    let Json(response) = maintenance_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceMaintenanceRequest {
+            purpose: Some("legacy_submit_audit_reconcile".to_string()),
+            dry_run: true,
+            backfill_db_mirror: false,
+            index_vectors: false,
+            reconcile_db_mirror: true,
+            verify_audit_chain: false,
+            prune_export_cache: false,
+            max_export_age_hours: None,
+            purge_expired_before: None,
+        }),
+    )
+    .await
+    .expect("maintenance reconciles");
+    let report = response
+        .db_reconciliation
+        .expect("reconciliation report exists");
+    assert_eq!(report.legacy_submit_audit_row_count, 1);
+    assert!(
+        report.missing_audit_event_ids_in_db.is_empty(),
+        "{:?}",
+        report.missing_audit_event_ids_in_db
+    );
+    assert!(report.missing_audit_event_ids_in_files.is_empty());
+    assert!(
+        !report
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap.starts_with("missing_audit_event_ids")),
+        "{:?}",
+        report.blocking_gaps
+    );
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
@@ -27854,6 +28096,20 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     )
     .await
     .expect("submission mirrors to DB");
+    // An accepted submission is indexed by the vector worker; reconciliation
+    // reports one without an active vector entry as a gap, so index it first,
+    // as a deployment's worker would.
+    let _ = vector_index_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceVectorIndexRequest {
+            purpose: Some("reconciliation drill vector index".to_string()),
+            dry_run: false,
+            limit: None,
+        }),
+    )
+    .await
+    .expect("vector worker indexes the accepted submission");
 
     let response = app(state.clone())
         .oneshot(
