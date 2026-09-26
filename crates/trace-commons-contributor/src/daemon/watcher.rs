@@ -833,27 +833,46 @@ fn visit_session(
 ///
 /// Only when it mattered, so a daemon with nothing armed logs nothing. What
 /// the gate holds is a level, so it is logged when a full pass finds it
-/// changed rather than on every poll: one session held for a day would
-/// otherwise log the same line every poll interval. The reasons are labels,
-/// never paths or content.
+/// changed -- the count or the unmet reasons -- rather than on every poll:
+/// one session held for a day would otherwise log the same line every poll
+/// interval, and a count-only comparison would leave the last line showing
+/// stale reasons. The reasons are labels, never paths or content.
 fn report_gate(
     shared: &DaemonShared,
     gate: &super::automatic_gate::GateVerdict,
     report: &TickReport,
-) {
-    let reasons: Vec<&str> = gate.unmet.iter().map(|u| u.reason).collect();
+) -> Option<HeldLog> {
+    let reasons: Vec<&'static str> = gate.unmet.iter().map(|u| u.reason).collect();
+    let mut logged = None;
     if let Some(held) = report.gate_blocked {
-        let before = shared
-            .gate_held_logged
-            .swap(held, std::sync::atomic::Ordering::Relaxed);
-        if held != before && held > 0 {
+        // What the last "held" line said: the count and the reasons, so a
+        // change of reasons at the same count is logged too. Nothing held has
+        // no reasons worth comparing.
+        let now = (
+            held,
+            if held > 0 {
+                reasons.clone()
+            } else {
+                Vec::new()
+            },
+        );
+        let before = std::mem::replace(
+            &mut *shared
+                .gate_held_logged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            now.clone(),
+        );
+        if now != before && held > 0 {
             tracing::info!(
                 held,
                 unmet = ?reasons,
                 "the automatic-contribution gate is holding sessions in armed folders for the contributor"
             );
-        } else if held != before {
+            logged = Some(HeldLog::Holding);
+        } else if now != before {
             tracing::info!("the automatic-contribution gate is no longer holding any sessions");
+            logged = Some(HeldLog::Released);
         }
     }
     if report.gate_would_refuse > 0 {
@@ -863,6 +882,15 @@ fn report_gate(
             "approved on the contributor's behalf; the automatic-contribution gate would have refused these"
         );
     }
+    logged
+}
+
+/// Which "held" line `report_gate` wrote, if any. Returned so the log-on-change
+/// rule can be tested without capturing log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldLog {
+    Holding,
+    Released,
 }
 
 /// Everything a pass owes once it has visited its sessions: the relabel pass,
@@ -1626,6 +1654,62 @@ mod tests {
 
         assert_eq!(full.gate_blocked, Some(1), "{full:?}");
         assert_eq!(scoped.gate_blocked, None, "{scoped:?}");
+    }
+
+    /// The "holding" line is written when what the gate holds changes: the
+    /// count, or the reasons it holds for. The same pair on the next poll
+    /// logs nothing; a new reason at the same count logs again, so the last
+    /// line never shows stale reasons. A scoped pass measures nothing and
+    /// logs nothing.
+    #[tokio::test]
+    async fn the_held_line_is_logged_when_the_count_or_the_reasons_change() {
+        use super::super::automatic_gate::{
+            GateVerdict, REASON_ACCOUNT_ALLOWANCE_SPENT, REASON_ADMISSION_PER_SESSION,
+            REASON_NO_SCOPE, Requirement, Unmet,
+        };
+        let f = WatcherFixture::new();
+        let verdict = |unmet: &[(Requirement, &'static str)]| GateVerdict {
+            unmet: unmet
+                .iter()
+                .map(|&(requirement, reason)| Unmet {
+                    requirement,
+                    reason,
+                })
+                .collect(),
+            enforced: true,
+        };
+        let held = |n| TickReport {
+            gate_blocked: n,
+            ..TickReport::default()
+        };
+        let r3 = verdict(&[(Requirement::R3Admission, REASON_ADMISSION_PER_SESSION)]);
+        let r3_spent = verdict(&[(Requirement::R3Admission, REASON_ACCOUNT_ALLOWANCE_SPENT)]);
+        let r7 = verdict(&[(Requirement::R7Scope, REASON_NO_SCOPE)]);
+
+        let log = |g: &GateVerdict, r: &TickReport| report_gate(&f.shared, g, r);
+        assert_eq!(log(&r3, &held(Some(2))), Some(HeldLog::Holding));
+        assert_eq!(log(&r3, &held(Some(2))), None, "unchanged: not every poll");
+        assert_eq!(
+            log(&r3, &held(None)),
+            None,
+            "a scoped pass measures nothing"
+        );
+        assert_eq!(
+            log(&r3_spent, &held(Some(2))),
+            Some(HeldLog::Holding),
+            "same count, new reason"
+        );
+        assert_eq!(
+            log(&r7, &held(Some(2))),
+            Some(HeldLog::Holding),
+            "same count, R3 lifted and R7 unmet"
+        );
+        assert_eq!(log(&r7, &held(Some(3))), Some(HeldLog::Holding));
+        assert_eq!(log(&r7, &held(Some(0))), Some(HeldLog::Released));
+        // Nothing held: a change of reasons alone is not news, since the
+        // unenforced gate reports would-refuse approvals on their own line.
+        assert_eq!(log(&r3, &held(Some(0))), None);
+        assert_eq!(log(&r3, &held(Some(1))), Some(HeldLog::Holding));
     }
 
     #[tokio::test]

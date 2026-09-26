@@ -28,16 +28,20 @@
 //! - **R7** -- a data-use scope has been chosen.
 //! - **R3** -- the tenant is not one whose uploads need per-session admission
 //!   evidence (#706), which an armed folder never prepares. **A runtime check,
-//!   never removed in code.** It stops applying only while the configured
-//!   ingest says it admits by account instead ([`AccountAdmission`]), which
-//!   #1020 reports on `/v1/account/contribution-status` (see
-//!   [`AccountAdmission::from_status`]).
-//!   That switch is per ingest replica and off whenever its environment
+//!   never removed in code.** It is built to stop applying only while the
+//!   configured ingest says it admits by account instead
+//!   ([`AccountAdmission`]), which #1020 reports on
+//!   `/v1/account/contribution-status` (see [`AccountAdmission::from_status`]).
+//!   **This build has only the decision half.** The status fetch that feeds
+//!   it lands in a follow-up; until then the watcher calls [`evaluate`],
+//!   which passes [`AccountAdmission::NotAdvertised`], so R3 always applies.
+//!   Account admission is per ingest replica and off whenever its environment
 //!   variable is missing, so it can revert on any redeploy; a client that had
 //!   dropped R3 for good would then send every armed session through the
 //!   witness and classifier only for ingest to refuse it. Anything short of
-//!   an affirmative answer -- no answer, an older ingest, a different commons,
-//!   `legacy_evidence` -- keeps R3.
+//!   an affirmative answer -- no answer, a non-200 or unparseable status
+//!   response, an older ingest, a different commons, `legacy_evidence`, a
+//!   spent allowance -- keeps R3.
 //!
 //! **R1 is not a gate.** Full trust lets a folder with no verified model pass
 //! send after deterministic redaction. What R1 still decides is what the
@@ -98,6 +102,7 @@ impl GateVerdict {
 
 pub const REASON_ADMISSION_PER_SESSION: &str = "admission-evidence-is-per-session";
 pub const REASON_NO_SCOPE: &str = "no-data-use-scope-chosen";
+pub const REASON_ACCOUNT_ALLOWANCE_SPENT: &str = "account-allowance-spent";
 
 /// Whether this tenant's uploads need receipt-bound admission evidence: the
 /// server's own rule, from the protocol crate, so the two cannot drift. A
@@ -115,6 +120,12 @@ pub enum AccountAdmission {
     /// No affirmative answer. The default, and the only safe one: R3 applies.
     #[default]
     NotAdvertised,
+    /// It admits by account, but this account's allowance for the period is
+    /// spent (`bounded` with `ready: false`), so every send would be refused
+    /// until it resets. R3 still holds -- the gate fails closed exactly as
+    /// for [`Self::NotAdvertised`] -- but under its own reason, because no
+    /// per-session evidence would help: the remedy is to wait.
+    AllowanceSpent,
 }
 
 impl AccountAdmission {
@@ -124,7 +135,15 @@ impl AccountAdmission {
     /// Account admission only when the authority is `bounded` or `invited`
     /// **and** `ready` is true. A `bounded` account whose allowance is spent
     /// answers `ready: false`, and every send it made would be refused, so it
-    /// keeps R3 like `legacy_evidence` and any label this build does not know.
+    /// keeps R3, as [`Self::AllowanceSpent`]. `legacy_evidence`, an
+    /// `invited` answer that is not ready (which #1020 never gives), and any
+    /// label this build does not know keep R3 as [`Self::NotAdvertised`].
+    ///
+    /// Only for a 200 whose body parses. The endpoint's own failures are not
+    /// answers: #1020 returns 403 (`account_identity_unlinked`, or a missing
+    /// DB mirror) rather than `legacy_evidence` when it cannot resolve the
+    /// account, so the fetcher maps any non-200, transport error or parse
+    /// failure to `NotAdvertised` without calling this.
     ///
     /// One answer comes from one ingest replica, so it is provisional: the
     /// caller re-reads it on every full pass and drops back to
@@ -133,6 +152,7 @@ impl AccountAdmission {
     pub fn from_status(authority: &str, ready: bool) -> Self {
         match authority {
             "bounded" | "invited" if ready => Self::Advertised,
+            "bounded" => Self::AllowanceSpent,
             _ => Self::NotAdvertised,
         }
     }
@@ -163,12 +183,18 @@ pub fn evaluate_with(
         return GateVerdict { unmet, enforced };
     };
 
-    if needs_admission_evidence(&cfg.tenant_id) && account_admission != AccountAdmission::Advertised
-    {
-        unmet.push(Unmet {
-            requirement: Requirement::R3Admission,
-            reason: REASON_ADMISSION_PER_SESSION,
-        });
+    if needs_admission_evidence(&cfg.tenant_id) {
+        let reason = match account_admission {
+            AccountAdmission::Advertised => None,
+            AccountAdmission::NotAdvertised => Some(REASON_ADMISSION_PER_SESSION),
+            AccountAdmission::AllowanceSpent => Some(REASON_ACCOUNT_ALLOWANCE_SPENT),
+        };
+        if let Some(reason) = reason {
+            unmet.push(Unmet {
+                requirement: Requirement::R3Admission,
+                reason,
+            });
+        }
     }
 
     if cfg.consent_scopes.is_empty() {
@@ -318,12 +344,12 @@ mod tests {
             with(AccountAdmission::NotAdvertised)
         );
 
-        use AccountAdmission::{Advertised, NotAdvertised};
+        use AccountAdmission::{Advertised, AllowanceSpent, NotAdvertised};
         for (label, ready, expected) in [
             ("bounded", true, Advertised),
             ("invited", true, Advertised),
             // An exhausted allowance: ingest would refuse every send.
-            ("bounded", false, NotAdvertised),
+            ("bounded", false, AllowanceSpent),
             ("invited", false, NotAdvertised),
             ("legacy_evidence", true, NotAdvertised),
             ("", true, NotAdvertised),
@@ -337,6 +363,35 @@ mod tests {
             );
         }
         assert_eq!(AccountAdmission::default(), AccountAdmission::NotAdvertised);
+    }
+
+    /// A spent allowance still holds, but says so: it is not missing
+    /// per-session evidence, and nothing the contributor could prepare
+    /// would help.
+    #[test]
+    fn a_spent_allowance_holds_under_its_own_reason() {
+        assert_eq!(
+            AccountAdmission::from_status("bounded", false),
+            AccountAdmission::AllowanceSpent
+        );
+        let nearai = format!("nearai-{}", "b".repeat(64));
+        let anchored = cfg(&nearai, &["debugging_evaluation"], false, None);
+        let v = evaluate_with(Some(&anchored), true, AccountAdmission::AllowanceSpent);
+        assert_eq!(
+            v.unmet,
+            vec![Unmet {
+                requirement: Requirement::R3Admission,
+                reason: REASON_ACCOUNT_ALLOWANCE_SPENT,
+            }]
+        );
+        assert!(v.blocks(), "fails closed, as before");
+        // Outside the anchored namespaces admission never applies.
+        let invited = cfg("tenant-1", &["debugging_evaluation"], false, None);
+        assert!(
+            evaluate_with(Some(&invited), true, AccountAdmission::AllowanceSpent)
+                .unmet
+                .is_empty()
+        );
     }
 
     #[test]
