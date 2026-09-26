@@ -33,10 +33,20 @@ public sealed record GrantVoidNotice
     /// </summary>
     [JsonPropertyName("acknowledge")] public string Acknowledge { get; init; } = string.Empty;
 
+    /// <summary>
+    /// "Turn back on", or null when the notice has no project to arm: the
+    /// automatic grant's, and an unplaced one.
+    /// </summary>
+    [JsonPropertyName("rearm_action")] public string? RearmAction { get; init; }
+
+    /// <summary>Shown when the daemon refuses the re-arm; null exactly when the button is.</summary>
+    [JsonPropertyName("rearm_failed")] public string? RearmFailed { get; init; }
+
     /// <summary>The payload fields this shell decodes, by wire name.</summary>
     public static readonly IReadOnlyList<string> ConsumedFields = new[]
     {
         "title", "body", "reasons_heading", "reasons", "rearm", "acknowledge",
+        "rearm_action", "rearm_failed",
     };
 }
 
@@ -44,9 +54,15 @@ public sealed record GrantVoidNotice
 /// One void notice as the window draws it: the id
 /// <c>acknowledge_grant_voids</c> takes, and the notice.
 /// </summary>
-public sealed record GrantVoidCard(ulong? Id, GrantVoidNotice Notice)
+public sealed record GrantVoidCard(ulong? Id, GrantVoidNotice Notice, string? RearmProjectId = null)
 {
     public bool CanAcknowledge => Id.HasValue;
+
+    /// <summary>
+    /// Whether to draw "Turn back on": the core offered it and the element
+    /// names a project. Never for the grant's notice or an unplaced one.
+    /// </summary>
+    public bool CanRearm => RearmProjectId is not null && Notice.RearmAction is not null;
 }
 
 /// <summary>
@@ -90,11 +106,33 @@ public static class GrantVoidNotices
                 && raw.TryGetUInt64(out ulong value)
                 ? value
                 : null;
-            cards.Add(new GrantVoidCard(id, notice));
+            string? project = notice.RearmAction is not null
+                && element.ValueKind == JsonValueKind.Object
+                && element.TryGetProperty("project_id", out JsonElement rawProject)
+                && rawProject.ValueKind == JsonValueKind.String
+                && rawProject.GetString() is { Length: > 0 } projectId
+                ? projectId
+                : null;
+            cards.Add(new GrantVoidCard(id, notice, project));
         }
 
         return cards;
     }
+
+    /// <summary>
+    /// The <c>set_project_mode</c> params "Turn back on" sends, or null when
+    /// the card has no button. The same request Settings sends to arm a
+    /// project, so the daemon applies the same refusals, writes the same
+    /// <c>armed-auto-upload</c> row, and clears the notice.
+    /// </summary>
+    public static string? RearmParams(GrantVoidCard card) =>
+        card.CanRearm
+            ? JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                ["project_id"] = card.RearmProjectId!,
+                ["mode"] = "auto_upload",
+            })
+            : null;
 
     /// <summary>The cards for <paramref name="voids"/>, worded by the ABI.</summary>
     public static IReadOnlyList<GrantVoidCard> Cards(IReadOnlyList<JsonElement>? voids) =>
@@ -141,6 +179,15 @@ public static class GrantVoidNotices
                 {
                     return null;
                 }
+            }
+
+            // The button and its refusal line travel together, and neither
+            // is ever an empty string.
+            if ((notice.RearmAction is null) != (notice.RearmFailed is null)
+                || notice.RearmAction?.Length == 0
+                || notice.RearmFailed?.Length == 0)
+            {
+                return null;
             }
 
             return notice;

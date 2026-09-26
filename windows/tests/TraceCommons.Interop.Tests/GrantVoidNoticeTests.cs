@@ -17,7 +17,7 @@ public sealed class GrantVoidNoticeTests
         "{\"id\":4,\"kind\":\"project\",\"project_id\":\"p\",\"project_label\":\"api\","
         + "\"reasons\":[\"witness-changed\"],\"voided_at\":\"2026-09-26T12:00:00Z\"}";
 
-    private static readonly IReadOnlyDictionary<string, object> Complete = new Dictionary<string, object>
+    private static readonly IReadOnlyDictionary<string, object?> Complete = new Dictionary<string, object?>
     {
         ["title"] = "T",
         ["body"] = "B",
@@ -25,6 +25,14 @@ public sealed class GrantVoidNoticeTests
         ["reasons"] = new[] { "R" },
         ["rearm"] = "A",
         ["acknowledge"] = "K",
+        ["rearm_action"] = "Turn back on",
+        ["rearm_failed"] = "F",
+    };
+
+    private static Dictionary<string, object?> NoButton() => new(Complete)
+    {
+        ["rearm_action"] = null,
+        ["rearm_failed"] = null,
     };
 
     private static List<JsonElement> Elements(params string[] json) =>
@@ -56,6 +64,48 @@ public sealed class GrantVoidNoticeTests
             JsonDocument.Parse(Assert.Single(seen)).RootElement.ToString());
     }
 
+    /// <summary>
+    /// "Turn back on" is offered only when the core offered it, and it arms
+    /// the element's own project through the Settings call, unchanged.
+    /// </summary>
+    [Fact]
+    public void TheRearmButtonArmsTheElementsProjectOnlyWhenOffered()
+    {
+        GrantVoidCard offered = Assert.Single(GrantVoidNotices.Cards(
+            Elements(ProjectVoid), _ => JsonSerializer.Serialize(Complete)));
+        Assert.True(offered.CanRearm);
+        Assert.Equal("p", offered.RearmProjectId);
+        Assert.Equal("Turn back on", offered.Notice.RearmAction);
+        using JsonDocument request = JsonDocument.Parse(
+            GrantVoidNotices.RearmParams(offered) ?? throw new InvalidOperationException());
+        Assert.Equal("p", request.RootElement.GetProperty("project_id").GetString());
+        Assert.Equal("auto_upload", request.RootElement.GetProperty("mode").GetString());
+
+        GrantVoidCard withheld = Assert.Single(GrantVoidNotices.Cards(
+            Elements(ProjectVoid), _ => JsonSerializer.Serialize(NoButton())));
+        Assert.False(withheld.CanRearm);
+        Assert.Null(GrantVoidNotices.RearmParams(withheld));
+    }
+
+    /// <summary>The button and its refusal line come as a pair.</summary>
+    [Fact]
+    public void TheRearmButtonAndItsRefusalLineComeAsAPair()
+    {
+        Assert.NotNull(GrantVoidNotices.Parse(JsonSerializer.Serialize(NoButton())));
+        foreach ((object? action, object? failed) in new (object?, object?)[]
+                 {
+                     ("a", null), (null, "f"), ("", "f"),
+                 })
+        {
+            var odd = new Dictionary<string, object?>(Complete)
+            {
+                ["rearm_action"] = action,
+                ["rearm_failed"] = failed,
+            };
+            Assert.Null(GrantVoidNotices.Parse(JsonSerializer.Serialize(odd)));
+        }
+    }
+
     [Fact]
     public void ADaemonOlderThanTheFieldHasNoCards()
     {
@@ -70,9 +120,10 @@ public sealed class GrantVoidNoticeTests
     public void ANoticeMissingASentenceIsRefused()
     {
         Assert.NotNull(GrantVoidNotices.Parse(JsonSerializer.Serialize(Complete)));
-        foreach (string field in GrantVoidNotice.ConsumedFields)
+        foreach (string field in GrantVoidNotice.ConsumedFields
+                     .Where(f => f != "rearm_action" && f != "rearm_failed"))
         {
-            var partial = new Dictionary<string, object>(Complete)
+            var partial = new Dictionary<string, object?>(Complete)
             {
                 [field] = field == "reasons" ? Array.Empty<string>() : string.Empty,
             };
@@ -114,6 +165,9 @@ public sealed class GrantVoidNoticeTests
         Assert.Equal(2, cards.Count);
         Assert.Contains("api", cards[0].Notice.Title, StringComparison.Ordinal);
         Assert.NotEqual(cards[0].Notice.Title, cards[1].Notice.Title);
+        // Only the project's notice offers "Turn back on".
+        Assert.True(cards[0].CanRearm);
+        Assert.False(cards[1].CanRearm);
 
         string json = NativeMethods.TakeOwnedString(NativeMethods.tc_grant_void_notice(ProjectVoid))
             ?? throw new InvalidOperationException("tc_grant_void_notice returned NULL");
@@ -131,5 +185,6 @@ public sealed class GrantVoidNoticeTests
         GrantVoidCard card = Assert.Single(GrantVoidNotices.Cards(Elements("{\"id\":9,\"kind\":\"folder\"}")));
         Assert.Equal(9UL, card.Id);
         Assert.False(string.IsNullOrEmpty(card.Notice.Title));
+        Assert.False(card.CanRearm, "no project to arm");
     }
 }

@@ -1682,6 +1682,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await RefreshAsync().ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// "Turn back on" on a project's void notice: the Settings arming call,
+    /// unchanged. The daemon clears the notice when it arms the project; a
+    /// refusal changes nothing, and the notice stays with the core's
+    /// refusal line shown.
+    /// </summary>
+    public async Task RearmGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (GrantVoidNotices.RearmParams(card) is not { } payload)
+        {
+            return;
+        }
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
+            .ConfigureAwait(true);
+
+        Notice = response.IsError ? card.Notice.RearmFailed ?? string.Empty : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
     private void SetPaused(bool paused)
     {
         if (_isPaused == paused)

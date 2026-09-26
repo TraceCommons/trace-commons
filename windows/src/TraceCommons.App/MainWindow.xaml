@@ -548,13 +548,23 @@
                                                TextWrapping="Wrap" />
                                 </StackPanel>
 
-                                <Button Grid.Column="2"
-                                        Visibility="{x:Bind CanAcknowledge}"
-                                        Style="{StaticResource TcSecondaryButtonStyle}"
-                                        Content="{x:Bind Notice.Acknowledge}"
-                                        Tag="{x:Bind}"
-                                        VerticalAlignment="Center"
-                                        Click="OnAcknowledgeGrantVoid" />
+                                <!-- Turn back on sits beside the sentence saying
+                                     that doing so agrees to the new settings.
+                                     It is the Settings arming call. -->
+                                <StackPanel Grid.Column="2"
+                                            Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <Button Visibility="{x:Bind CanRearm}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.RearmAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnRearmGrantVoid" />
+                                    <Button Visibility="{x:Bind CanAcknowledge}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.Acknowledge}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAcknowledgeGrantVoid" />
+                                </StackPanel>
                             </Grid>
                         </Border>
                     </DataTemplate>
