@@ -24,33 +24,6 @@ impl TrustAccount {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContributionAuthority {
-    Invited,
-    Bounded { policy_version: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccountTrustSnapshot {
-    account: TrustAccount,
-    version: i64,
-    authority: ContributionAuthority,
-}
-
-impl AccountTrustSnapshot {
-    pub fn account(&self) -> &TrustAccount {
-        &self.account
-    }
-
-    pub fn version(&self) -> i64 {
-        self.version
-    }
-
-    pub fn authority(&self) -> &ContributionAuthority {
-        &self.authority
-    }
-}
-
 /// Safe public refusal labels: no tenant, principal, or database detail escapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TrustRefusal {
