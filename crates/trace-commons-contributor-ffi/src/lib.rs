@@ -3036,6 +3036,49 @@ pub extern "C" fn tc_consent_gate_help(pinned: i32) -> *mut c_char {
     })
 }
 
+/// The notice for one void R6 made, from one element of `status`'s
+/// `grant_voids` list, passed as the JSON object the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `VoidNoticeCopy`'s fields --
+/// `title`, `body`, `reasons_heading`, `reasons` (a list of sentences),
+/// `rearm`, `acknowledge`, and `rearm_action` / `rearm_failed`, which are
+/// `null` except on a project void carrying a `project_id` -- free it with
+/// [`tc_string_free`].
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS. The choice between the project
+/// and the automatic-grant wording, and each reason label's sentence, are
+/// made in `consent_copy`; a shell passes the wire object through and does
+/// not read `kind` or `reasons` to pick words itself.
+///
+/// A `kind` this build does not know, or a project void without a label,
+/// gets a notice that says automatic contributing stopped without saying for
+/// what, so no shell writes its own fallback. Returns NULL only for a NULL,
+/// non-UTF-8 or unparseable argument, one that is not a JSON object, and on
+/// a caught panic.
+///
+/// # Safety
+/// `void_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_grant_void_notice(void_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if void_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(void_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) = trace_commons_contributor::consent_copy::void_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// The sentence for one `private_inference_state` label.
 ///
 /// `state` is the `state` field of `get_settings`/`status`'s
