@@ -4885,11 +4885,7 @@ fn a_void_notice_crosses_the_abi_as_the_rust_builds_it() {
 fn an_unreadable_void_gets_null_not_a_guess() {
     use std::ffi::CString;
     assert!(unsafe { tc_grant_void_notice(std::ptr::null()) }.is_null());
-    for text in [
-        "not json",
-        "{\"kind\":\"folder\"}",
-        "{\"kind\":\"project\"}",
-    ] {
+    for text in ["not json", "\"project\"", "[]"] {
         let arg = CString::new(text).unwrap();
         assert!(
             unsafe { tc_grant_void_notice(arg.as_ptr()) }.is_null(),

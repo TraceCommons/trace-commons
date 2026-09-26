@@ -1630,7 +1630,10 @@ yet, oldest first:
 - A shell does not write the notice. It passes one element to
   `consent_copy::void_notice_for_wire` (across the C ABI,
   `tc_grant_void_notice`), which returns the title, body, one sentence per
-  reason, how to turn it back on, and the button's label.
+  reason, how to turn it back on, and the button's label. An element it
+  cannot place (an unknown `kind`, or a project without a label) still gets
+  a notice, saying automatic contributing stopped without saying for what,
+  so no shell writes a fallback of its own.
 - The list is in the policy file, so a void during a pass no shell saw is
   shown at the next launch. A sweep that voids publishes `status_changed`.
 
