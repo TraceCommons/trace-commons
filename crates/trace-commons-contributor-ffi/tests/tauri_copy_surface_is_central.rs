@@ -138,6 +138,12 @@ fn tauri_commands_project_shared_contributor_copy() {
     let withdrawal = rust_function(&history, "fn withdrawal_confirmation_prompt");
     assert!(withdrawal.contains("confirmation_prompt_unknown"));
 
+    // A void notice's words, and the project-or-grant choice, come from the
+    // contributor core; Tauri passes the wire element through.
+    let consent = read(&root, "tauri-desktop/src-tauri/src/commands/consent.rs");
+    let void_notice = rust_function(&consent, "fn grant_void_notice");
+    assert!(void_notice.contains("consent_copy::void_notice_for_wire"));
+
     let preview = rust_function(&daemon, "fn preview_entry");
     assert!(preview.contains("consent_copy::consent_copy"));
     assert!(preview.contains("gate_statement"));
@@ -182,6 +188,8 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "history::withdrawal_confirmation_prompt",
         ),
         ("quit_confirmation_copy", "platform::quit_confirmation_copy"),
+        ("grant_void_notice", "consent::grant_void_notice"),
+        ("acknowledge_grant_voids", "consent::acknowledge_grant_voids"),
     ] {
         assert!(
             build.contains(&format!("\"{name}\"")),
@@ -210,6 +218,33 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "frontend copy adapter no longer invokes `{command}`"
         );
     }
+
+    // The void notice (R6's ship condition) is rendered from the core's
+    // copy, in the app shell above every page, and cannot be acknowledged
+    // before it is on screen.
+    assert!(
+        api.contains("invokeTauri(\"grant_void_notice\""),
+        "frontend copy adapter no longer invokes `grant_void_notice`"
+    );
+    let void_notices = read(&root, "tauri-desktop/frontend/src/app/grant-void-notices.tsx");
+    for rendered_copy in [
+        "useGrantVoidNotice",
+        "copy.data.title",
+        "copy.data.body",
+        "copy.data.reasons_heading",
+        "copy.data.reasons",
+        "copy.data.rearm",
+        "copy.data.acknowledge",
+        "!copy.data",
+        "acknowledgeGrantVoids([grantVoid.id])",
+    ] {
+        assert!(
+            void_notices.contains(rendered_copy),
+            "the void notice must use `{rendered_copy}`"
+        );
+    }
+    let shell = read(&root, "tauri-desktop/frontend/src/app/app-shell.tsx");
+    assert!(shell.contains("<GrantVoidNotices"));
 
     let witness = read(
         &root,

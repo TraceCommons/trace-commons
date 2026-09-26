@@ -60,9 +60,53 @@ pub(crate) async fn acknowledge_near_ai_notice(
     .await
 }
 
+/// The notice for one element of `status.grant_voids`: the words, and the
+/// choice between the project and the automatic-grant wording, both from the
+/// contributor core. `null` when the element is not one this build can read,
+/// which the frontend reports rather than guessing at.
+#[tauri::command]
+pub(crate) fn grant_void_notice(void: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::void_notice_for_wire(&void)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Record that the notices with these ids were shown. Acknowledging re-arms
+/// nothing.
+#[tauri::command]
+pub(crate) async fn acknowledge_grant_voids(
+    state: State<'_, AppState>,
+    ids: Vec<u64>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "acknowledge_grant_voids",
+        serde_json::json!({ "ids": ids }),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scrubber_pattern_names;
+    use super::{grant_void_notice, scrubber_pattern_names};
+
+    #[test]
+    fn a_void_notice_is_the_contributor_cores_copy() {
+        let wire = serde_json::json!({
+            "id": 1, "kind": "project", "project_id": "p", "project_label": "api",
+            "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T00:00:00Z",
+        });
+        let expected = serde_json::to_value(
+            trace_commons_contributor::consent_copy::void_notice_for_wire(&wire).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(grant_void_notice(wire), expected);
+    }
+
+    #[test]
+    fn an_unreadable_void_gets_null() {
+        assert!(grant_void_notice(serde_json::json!({ "kind": "folder" })).is_null());
+    }
 
     #[test]
     fn scrubber_disclosure_exposes_names_without_patterns() {

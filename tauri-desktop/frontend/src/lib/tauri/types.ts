@@ -35,6 +35,10 @@ export const coreStatusSchema = z.object({
       last_error_label: z.string().nullable(),
       since: z.string().nullable(),
     }),
+    // Grants the core voided and no shell has shown yet. Read by
+    // `parseGrantVoids`, which refuses a malformed list rather than letting
+    // it fail the whole status payload.
+    grant_voids: z.unknown().optional(),
   }),
 });
 
