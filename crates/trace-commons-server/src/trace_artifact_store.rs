@@ -313,6 +313,20 @@ pub trait TraceArtifactStore: Send + Sync {
     ) -> anyhow::Result<bool> {
         anyhow::bail!("trace artifact store does not support restore-after-delete")
     }
+
+    /// Whether an object is stored at `object_key`: `Some(true)` present,
+    /// `Some(false)` absent, `None` when this store cannot tell. Presence
+    /// says nothing about whether the object verifies; an absent answer is
+    /// only ever used to treat a delete as already done.
+    fn artifact_present_by_object_key(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _expected_artifact_kind: TraceArtifactKind,
+        _object_key: &str,
+        _expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +366,15 @@ pub trait RemoteTraceArtifactProvider: Send + Sync {
         _object_ref: &TraceArtifactObjectRef,
     ) -> anyhow::Result<bool> {
         anyhow::bail!("remote trace artifact provider does not support restore-after-delete")
+    }
+
+    /// Whether an object is stored under `object_ref`'s key: `Some(true)`
+    /// present, `Some(false)` absent, `None` when the provider cannot tell.
+    fn encrypted_artifact_present(
+        &self,
+        _object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(None)
     }
 }
 
@@ -490,6 +513,13 @@ impl FileRemoteTraceArtifactProvider {
 }
 
 impl RemoteTraceArtifactProvider for FileRemoteTraceArtifactProvider {
+    fn encrypted_artifact_present(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(Some(self.object_path(object_ref)?.exists()))
+    }
+
     fn put_encrypted_artifact(
         &self,
         object_ref: TraceArtifactObjectRef,
@@ -951,6 +981,25 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
         self.read_scoped_json(&scope, &object_ref)
     }
 
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        let scope = legacy_trace_artifact_scope(expected_tenant_storage_ref);
+        let object_ref = legacy_remote_object_ref_from_object_key(
+            &self.config,
+            &scope,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )?;
+        validate_remote_object_ref(&scope, &self.config, &object_ref)?;
+        self.provider.encrypted_artifact_present(&object_ref)
+    }
+
     fn delete_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -1256,6 +1305,19 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
         receipt: &EncryptedTraceArtifactReceipt,
     ) -> anyhow::Result<bool> {
         Self::delete_artifact(self, expected_tenant_storage_ref, receipt)
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        _expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        _expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(Some(
+            self.artifact_path(expected_tenant_storage_ref, object_key)?
+                .exists(),
+        ))
     }
 }
 
@@ -1780,6 +1842,17 @@ struct InMemoryRemoteTraceArtifactRecord {
 
 #[cfg(test)]
 impl RemoteTraceArtifactProvider for InMemoryRemoteTraceArtifactProvider {
+    fn encrypted_artifact_present(
+        &self,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<Option<bool>> {
+        let objects = self
+            .objects
+            .read()
+            .map_err(|_| anyhow::anyhow!("remote trace artifact provider lock poisoned"))?;
+        Ok(Some(objects.contains_key(&object_ref.object_key)))
+    }
+
     fn put_encrypted_artifact(
         &self,
         object_ref: TraceArtifactObjectRef,

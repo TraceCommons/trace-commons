@@ -2674,6 +2674,21 @@ impl ConfiguredTraceArtifactStore {
             .delete_artifact(expected_tenant_storage_ref, receipt)
     }
 
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        self.store.artifact_present_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
     fn restore_deleted_artifact(
         &self,
         expected_tenant_storage_ref: &str,
@@ -14088,9 +14103,118 @@ async fn revoke_submission(
     // than leaving the payload behind under a revoked label. Deleting an object
     // that is already gone is a no-op, so re-revoking is idempotent.
     if let Some(record) = mirrored_record.as_ref() {
-        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
+        let deletion = delete_trace_objects_for_record(state, record).map_err(internal_error)?;
+        // The objects just deleted were queued for the revocation worker by
+        // the mirror above. Record them as deleted now, so the worker does not
+        // try to verify objects that are gone.
+        let completion_result = complete_revocation_object_deletes(
+            state,
+            tenant.auth(),
+            submission_id,
+            &deletion.deleted_targets,
+        )
+        .await;
+        if let Err(error) = &completion_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons revocation object delete completion failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "revocation object delete", completion_result)
+            .map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Marks the object refs of objects a revocation deleted as deleted, and
+/// completes each one's queued `DeleteObjectPayload` item with a
+/// physical-delete receipt, as the revocation worker would had it deleted
+/// them itself.
+async fn complete_revocation_object_deletes(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    deleted_targets: &[TraceObjectDeletionTarget],
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    if deleted_targets.is_empty() {
+        return Ok(());
+    }
+    for target in deleted_targets {
+        db.mark_trace_object_ref_deleted(
+            &tenant.tenant_id,
+            submission_id,
+            &target.object_store,
+            &target.object_key,
+        )
+        .await
+        .context("failed to mark revoked trace object ref deleted")?;
+    }
+    let deleted_refs = db
+        .list_trace_object_refs(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to read trace object refs after revocation delete")?
+        .into_iter()
+        .filter(|object_ref| {
+            object_ref.deleted_at.is_some()
+                && deleted_targets.iter().any(|target| {
+                    target.object_store == object_ref.object_store
+                        && target.object_key == object_ref.object_key
+                })
+        })
+        .map(|object_ref| (object_ref.object_ref_id, object_ref))
+        .collect::<BTreeMap<_, _>>();
+    let items = db
+        .list_trace_revocation_propagation_items(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to read revocation propagation items after revocation delete")?;
+    for item in items {
+        if item.action != StorageTraceRevocationPropagationAction::DeleteObjectPayload
+            || matches!(
+                item.status,
+                StorageTraceRevocationPropagationItemStatus::Done
+                    | StorageTraceRevocationPropagationItemStatus::Skipped
+            )
+        {
+            continue;
+        }
+        let StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id } = &item.target
+        else {
+            continue;
+        };
+        let Some(object_ref) = deleted_refs.get(object_ref_id) else {
+            continue;
+        };
+        record_physical_delete_receipt_for_revocation_propagation(db.as_ref(), &item, object_ref)
+            .await?;
+        let TraceRevocationPropagationItemOutcome::Done { evidence_hash } =
+            done_revocation_propagation_object_payload_item(
+                &item,
+                object_ref,
+                "delete_object_payload_by_revocation",
+            )
+        else {
+            unreachable!("a done object payload outcome is Done");
+        };
+        db.update_trace_revocation_propagation_item_status(
+            &tenant.tenant_id,
+            item.propagation_item_id,
+            StorageTraceRevocationPropagationItemStatusUpdate {
+                status: StorageTraceRevocationPropagationItemStatus::Done,
+                attempt_count: item.attempt_count,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: Some(Utc::now()),
+                evidence_hash: Some(evidence_hash),
+            },
+        )
+        .await
+        .context("failed to complete revocation object delete item")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60646,6 +60770,33 @@ async fn delete_object_payload_for_revocation_propagation(
         TRACE_OBJECT_REF_STORE_MISMATCH
     );
     let tenant_ref = tenant_storage_ref(&tenant.tenant_id);
+    // Backstop: an object that is already gone has been deleted -- by the
+    // revocation that queued this item, or by anything else. Only a store
+    // that can say the object is absent takes this path; an object that is
+    // present is verified below, and one that fails verification stays a
+    // failure, with no receipt.
+    if store.artifact_present_by_object_key(
+        &tenant_ref,
+        artifact_kind.clone(),
+        &object_ref.object_key,
+        &object_ref.content_sha256,
+    )? == Some(false)
+    {
+        db.mark_trace_object_ref_deleted(
+            &tenant.tenant_id,
+            item.source_submission_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+        )
+        .await
+        .context("failed to mark absent trace object ref deleted")?;
+        record_physical_delete_receipt_for_revocation_propagation(db, item, &object_ref).await?;
+        return Ok(done_revocation_propagation_object_payload_item(
+            item,
+            &object_ref,
+            "delete_object_payload_already_absent",
+        ));
+    }
     match artifact_kind.clone() {
         TraceArtifactKind::ContributionEnvelope => {
             store
