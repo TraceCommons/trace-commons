@@ -175,6 +175,12 @@ struct Args {
     )]
     max_concurrent_requests: usize,
 
+    /// Slots left available to ordinary calls when background calls fill
+    /// their cooperative budget. Defaults to one, or zero for a one-slot
+    /// witness. This does not increase the global concurrency limit.
+    #[arg(long, env = "TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS")]
+    reserved_interactive_slots: Option<usize>,
+
     /// How long one `POST /v1/witness` request may take before it is
     /// abandoned and its slot released. See [`DEFAULT_REQUEST_TIMEOUT_SECS`].
     #[arg(
@@ -305,6 +311,20 @@ struct Args {
     gateway_receipt_key_pins: Option<String>,
 }
 
+fn resolved_reserved_interactive_slots(
+    max_concurrent_requests: usize,
+    configured: Option<usize>,
+) -> Result<usize, &'static str> {
+    if max_concurrent_requests == 0 {
+        return Err("witness concurrency limit must be positive");
+    }
+    let reserved = configured.unwrap_or(usize::from(max_concurrent_requests > 1));
+    if reserved >= max_concurrent_requests {
+        return Err("reserved interactive slots must be below the concurrency limit");
+    }
+    Ok(reserved)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -331,6 +351,11 @@ async fn main() -> Result<()> {
     if args.max_concurrent_requests == 0 {
         bail!("TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS must be greater than zero");
     }
+    let reserved_interactive_slots = resolved_reserved_interactive_slots(
+        args.max_concurrent_requests,
+        args.reserved_interactive_slots,
+    )
+    .map_err(anyhow::Error::msg)?;
     if args.request_timeout_secs == 0 {
         bail!("TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS must be greater than zero");
     }
@@ -557,15 +582,32 @@ async fn main() -> Result<()> {
     }
     let service = Arc::new(service);
 
+    let load = WitnessLoadBound::with_reservation(
+        args.max_concurrent_requests,
+        reserved_interactive_slots,
+        Duration::from_secs(args.request_timeout_secs),
+    )
+    .map_err(anyhow::Error::msg)?;
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
-    let load = WitnessLoadBound::new(
-        args.max_concurrent_requests,
-        Duration::from_secs(args.request_timeout_secs),
-    );
     axum::serve(listener, witness_router(service, load))
         .await
         .context("the witness listener stopped")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reserved_interactive_tests {
+    use super::resolved_reserved_interactive_slots;
+
+    #[test]
+    fn default_and_explicit_reservations_respect_global_limit() {
+        assert_eq!(resolved_reserved_interactive_slots(4, None), Ok(1));
+        assert_eq!(resolved_reserved_interactive_slots(4, Some(0)), Ok(0));
+        assert_eq!(resolved_reserved_interactive_slots(1, None), Ok(0));
+        assert!(resolved_reserved_interactive_slots(1, Some(1)).is_err());
+        assert!(resolved_reserved_interactive_slots(4, Some(4)).is_err());
+        assert!(resolved_reserved_interactive_slots(0, None).is_err());
+    }
 }

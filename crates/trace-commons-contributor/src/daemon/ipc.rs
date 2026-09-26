@@ -2663,10 +2663,16 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         // that number reports a change that did not happen -- "7 waiting
         // traces were removed, not 2", where the other five were never on
         // screen. A shell may render this or ignore it.
-        let retracted = if mode == ProjectMode::Ignore {
-            queue.retract_unattended_for_project(&key)
-        } else {
-            0
+        //
+        // For `Ignore` they are refused; for ask-first they go back to
+        // waiting, because turning automatic off means "ask me", not "never".
+        // Either way they stop being sent without the contributor deciding.
+        let retracted = match mode {
+            ProjectMode::Ignore => queue.retract_unattended_for_project(&key),
+            ProjectMode::NotifyOnly => {
+                queue.return_unattended_to_waiting_for_project(&key, Utc::now())
+            }
+            ProjectMode::AutoUpload => 0,
         };
         let restored = if mode == ProjectMode::Ignore {
             0
@@ -6790,6 +6796,48 @@ mod tests {
                 .iter()
                 .any(|s| s["entry_id"] == serde_json::json!(eligible)),
             "the eligible row was selected: {result}"
+        );
+    }
+
+    /// Turning automatic off stops what it had approved and not yet sent.
+    ///
+    /// Before this, only `Ignore` retracted unattended approvals, so moving a
+    /// project to ask-first -- the ordinary way to turn automatic off -- left
+    /// every session it had already approved uploading. They now go back to
+    /// waiting. A session the contributor approved themselves is theirs and
+    /// is left alone; `purged` keeps meaning waiting cards removed.
+    #[test]
+    fn turning_automatic_off_returns_its_unsent_approvals_to_waiting() {
+        let s = shared();
+        let key = "/tmp/armedproj";
+        let unattended = seed_entry_with_eligibility(&s, key, None);
+        let theirs = seed_entry_with_eligibility(&s, key, None);
+        {
+            let mut q = s.queue.lock().unwrap();
+            assert!(q.approve_unattended(unattended, &[], None));
+            assert!(q.approve(theirs, &[], None, None, None, None));
+        }
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "notify_only" }),
+            ),
+        );
+        let result = r.result.expect("set_project_mode answers");
+        assert_eq!(result["retracted"], 1, "{result}");
+        assert_eq!(result["purged"], 0, "no waiting card was removed: {result}");
+
+        let q = s.queue.lock().unwrap();
+        let back = q.all().iter().find(|e| e.entry_id == unattended).unwrap();
+        assert_eq!(back.state, super::super::queue::QueueState::Pending);
+        assert!(!back.approved_unattended);
+        let kept = q.all().iter().find(|e| e.entry_id == theirs).unwrap();
+        assert_eq!(
+            kept.state,
+            super::super::queue::QueueState::Approved,
+            "the contributor's own approval stands"
         );
     }
 
