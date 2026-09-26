@@ -246,6 +246,26 @@ export async function getWitnessReviewCopy(): Promise<WitnessReviewCopy> {
   return parseWitnessReview(await invokeTauri("witness_review_copy"));
 }
 
+/** What a contributor is told when granting automatic contribution. */
+export type AutomaticContributionCopy = {
+  auto_scrub_scope: string;
+  auto_scrub_limit: string;
+  auto_no_review: string;
+};
+
+function parseAutomaticContribution(value: unknown): AutomaticContributionCopy {
+  const item = record(value, "automatic contribution copy");
+  return {
+    auto_scrub_scope: string(item, "auto_scrub_scope"),
+    auto_scrub_limit: string(item, "auto_scrub_limit"),
+    auto_no_review: string(item, "auto_no_review"),
+  };
+}
+
+export async function getAutomaticContributionCopy(): Promise<AutomaticContributionCopy> {
+  return parseAutomaticContribution(await invokeTauri("automatic_contribution_copy"));
+}
+
 export async function getContributorDisclosureCopy(): Promise<ContributorDisclosureCopy> {
   const value = record(
     await invokeTauri("contributor_disclosure_copy"),
