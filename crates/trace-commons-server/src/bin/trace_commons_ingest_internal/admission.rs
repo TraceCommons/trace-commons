@@ -16,6 +16,7 @@ use trace_commons_server::admission_ledger::{
     AccountAdmissionReservation, AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard,
     AdmissionReservation,
 };
+use trace_commons_server::trace_invite_registry::RESERVED_ACCOUNT_TENANT_PREFIXES;
 
 #[derive(Clone)]
 pub(super) struct AdmissionConfig {
@@ -126,14 +127,6 @@ fn denied() -> (StatusCode, Json<ApiError>) {
     api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
 }
 
-/// The tenant prefixes that carry a provisioned admission anchor.
-///
-/// Deliberately a list rather than a `starts_with("near")`: `nearai-` is not a
-/// sub-namespace of `near-`, and a prefix test that treated it as one would
-/// make the two identity systems substitutable at the only place that decides
-/// which of them a request is on.
-pub(super) const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
-
 /// This namespace is allocated only by verified NEAR provisioning. Both the
 /// tenant and the principal come from authentication, never envelope attribution.
 ///
@@ -159,7 +152,7 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
     //
     // A tenant in neither namespace is not refused, it is `None`: this is the
     // legacy invite-free path. Global account cutover refuses unlinked identities.
-    if !ANCHOR_NAMESPACES
+    if !RESERVED_ACCOUNT_TENANT_PREFIXES
         .iter()
         .any(|prefix| tenant.tenant_id().strip_prefix(prefix).is_some_and(is_hash))
     {
@@ -724,7 +717,7 @@ pub(super) async fn account_status_handler(
     Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<axum::response::Response> {
     let mut response = if let Some(config) = state.account_admission.as_ref() {
-        if !ANCHOR_NAMESPACES
+        if !RESERVED_ACCOUNT_TENANT_PREFIXES
             .iter()
             .any(|prefix| ctx.tenant_id.strip_prefix(prefix).is_some_and(is_hash))
         {
