@@ -125,7 +125,13 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
         s.max_queue_entries
     };
     let source_roots = shared.source_roots_with_routing();
-    tick_over(shared, now, all_sources(&source_roots), max_queue_entries)
+    tick_over(
+        shared,
+        now,
+        all_sources(&source_roots),
+        source_roots.source_identities(),
+        max_queue_entries,
+    )
 }
 
 /// The pass itself, over an explicit source list.
@@ -134,12 +140,12 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
 /// counts its own `load` calls: "this poll did not re-read anything" is a
 /// claim about how often `TraceSource::load` runs, and nothing observable
 /// from the queue alone can prove it.
-/// The pass itself, over an explicit source list.
 ///
-/// Split out from `tick_blocking` only so tests can hand it a source that
-/// counts its own `load` calls: "this poll did not re-read anything" is a
-/// claim about how often `TraceSource::load` runs, and nothing observable
-/// from the queue alone can prove it.
+/// `source_identities` must come from the same `SourceRoots` as `sources`:
+/// the automatic grant records each source under its name and root, and a
+/// root read separately could name one a `set_settings` has since swapped
+/// in, so root A's listing would be recorded as root B's and B's history
+/// would read as new. See `PassContext::source_key`.
 ///
 /// This is the full-scan path: it asks every source what it has. The scoped
 /// path (`tick_over_paths`) visits a supplied set of sessions instead. Both
@@ -150,22 +156,167 @@ fn tick_over(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
+    source_identities: SourceIdentities,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
-    let ctx = PassContext::read(shared, now, max_queue_entries);
+    let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
+    // Before any session is visited, so a project whose grant was just
+    // voided is already ask-first when its sessions are looked at -- and
+    // against the same config snapshot the pass uses, so a widening written
+    // between two reads cannot be missed by the sweep and used by the pass.
+    sweep_grants(shared, &ctx);
     let mut out = PassOutcome::default();
 
-    for source in &sources {
-        let refs = match source.discover() {
-            Ok(refs) => refs,
-            Err(_) => continue,
-        };
+    // Read before anything is listed: a grant given while discovery walks the
+    // disk is recorded by a later pass, from a listing taken after it.
+    let grant = shared.policy.lock().expect("policy lock").grant_id();
+    let discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = sources
+        .iter()
+        .filter_map(|source| source.discover().ok().map(|refs| (source.as_ref(), refs)))
+        .collect();
+    // Before any session is visited, so nothing on disk in a source recorded
+    // now can be armed by the grant. A source whose discovery failed is not
+    // recorded, and arms nothing until a pass records it.
+    if let Some(grant) = grant {
+        record_sources_for_grant(shared, &ctx, grant, &discovered);
+    }
+    for (source, refs) in &discovered {
         for session_ref in refs {
-            visit_session(shared, &ctx, source.as_ref(), &session_ref, &mut out);
+            visit_session(shared, &ctx, *source, session_ref, &mut out);
         }
     }
 
     finish_pass(shared, out, true)
+}
+
+/// Record what is on disk for the Flow 1 grant `grant`, per source: each
+/// source this full pass discovered that the grant has not recorded yet --
+/// the first pass after the grant, a harness connected or re-rooted since,
+/// or one whose discovery failed before -- has every session and the project
+/// each belongs to recorded, eligible or not. Only a full pass may do this; a
+/// scoped pass sees only what changed. See `policy::AutomaticGrant`.
+fn record_sources_for_grant(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    grant: DateTime<Utc>,
+    discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+) {
+    for (source, refs) in discovered {
+        let key = ctx.source_key(source.name());
+        if !shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .needs_source_record(grant, &key)
+        {
+            continue;
+        }
+        let mut sessions = std::collections::BTreeSet::new();
+        let mut projects = std::collections::BTreeSet::new();
+        for session_ref in refs {
+            sessions.insert(session_ref.path.to_string_lossy().to_string());
+            projects.insert(project_key_of(shared, *source, session_ref));
+        }
+        let mut policy = shared.policy.lock().expect("policy lock");
+        if policy.record_source(grant, &key, sessions, projects)
+            && policy.save(&shared.store).is_err()
+        {
+            tracing::warn!("could not persist what was on disk for the automatic grant");
+        }
+    }
+}
+
+/// The project a session belongs to, through the same cwd cache the pass
+/// uses.
+fn project_key_of(
+    shared: &DaemonShared,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+) -> String {
+    let modified_at = session_ref.group_modified_at.or_else(|| {
+        std::fs::metadata(&session_ref.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(DateTime::<Utc>::from)
+    });
+    let cwd = match modified_at {
+        Some(modified_at) => {
+            let obs = Observation {
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                modified_at,
+            };
+            resolve_cwd(shared, source, session_ref, &obs)
+        }
+        None => session_ref.cwd.clone(),
+    };
+    super::policy::project_for(cwd.as_deref()).0
+}
+
+/// Arm `project_key` under the Flow 1 grant when this session is the first
+/// sign of a project discovered after it (K3). The arming writes an explicit
+/// policy entry, the terms it is granted under, and an audit row -- recorded
+/// first, as `set_project_mode` does, so there is never an armed project
+/// with no record of how it was armed. Returns the mode now in force.
+fn arm_by_default(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    source: &dyn TraceSource,
+    project_key: &str,
+    session_path: &Path,
+) -> ProjectMode {
+    let path = session_path.to_string_lossy();
+    let source_key = ctx.source_key(source.name());
+    let Some(terms) = ctx.grant_terms.clone() else {
+        return ProjectMode::NotifyOnly;
+    };
+    let label = {
+        let policy = shared.policy.lock().expect("policy lock");
+        if !policy.arms_by_default(project_key, &path, &source_key) {
+            return ProjectMode::NotifyOnly;
+        }
+        super::policy::project_label_for(
+            super::policy::display_path_for_key(project_key)
+                .as_deref()
+                .unwrap_or(project_key),
+        )
+    };
+    let entry = super::audit::AuditEntry {
+        at: ctx.now,
+        action: "armed-by-default".to_string(),
+        project_label: Some(label),
+        detail: None,
+    };
+    if super::audit::append(&shared.store, &entry).is_err() {
+        tracing::warn!("could not record arming a new project; it asks first");
+        return ProjectMode::NotifyOnly;
+    }
+    let mut policy = shared.policy.lock().expect("policy lock");
+    // Re-checked: the grant or the project may have changed while the audit
+    // row was written.
+    if !policy.arms_by_default(project_key, &path, &source_key)
+        || policy.arm_by_grant(project_key, ctx.now, terms).is_err()
+    {
+        return ProjectMode::NotifyOnly;
+    }
+    if policy.save(&shared.store).is_err() {
+        tracing::warn!("could not persist arming a new project");
+    }
+    ProjectMode::AutoUpload
+}
+
+/// Whether a session waits for the contributor even though its project is
+/// armed: the automatic grant armed the project and the session was on disk
+/// at a grant. Arming nothing already on disk has to cover approval, not only
+/// arming -- a pre-grant session can come to read as a project the grant
+/// armed later (its recorded cwd changed, or it gained one after sitting in
+/// the unknown bucket). Both unattended approval sites ask this.
+fn held_back_from_the_grant(shared: &DaemonShared, project_key: &str, session_path: &Path) -> bool {
+    shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .holds_back_unattended(project_key, &session_path.to_string_lossy())
 }
 
 /// Maps a path something happened at to the session that owns it, without
@@ -205,6 +356,7 @@ pub async fn tick_paths(
             shared,
             now,
             all_sources(&source_roots),
+            source_roots.source_identities(),
             max_queue_entries,
             paths,
             session_at,
@@ -227,11 +379,17 @@ fn tick_over_paths(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
+    source_identities: SourceIdentities,
     max_queue_entries: usize,
     paths: &[PathBuf],
     session_at: SessionAt<'_>,
 ) -> Result<TickReport> {
-    let ctx = PassContext::read(shared, now, max_queue_entries);
+    let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
+    // Before any session is visited, so a project whose grant was just
+    // voided is already ask-first when its sessions are looked at -- and
+    // against the same config snapshot the pass uses, so a widening written
+    // between two reads cannot be missed by the sweep and used by the pass.
+    sweep_grants(shared, &ctx);
     let mut out = PassOutcome::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
@@ -251,6 +409,74 @@ fn tick_over_paths(
     finish_pass(shared, out, false)
 }
 
+/// Void every standing grant the terms in force no longer cover.
+///
+/// R6 of the connect-and-forget design; see `grant_terms` for what widens a
+/// grant. A voided project returns to ask-first: nothing more from it is
+/// approved on the contributor's behalf until they arm it again, which
+/// records the new terms. Approvals already made under the old terms are
+/// stopped by the uploader, which re-derives `input_fingerprint` before every
+/// send -- every widening this rule checks is also a change to that
+/// fingerprint -- and revokes them to `Pending`, where the watcher, the
+/// project no longer armed, leaves them for the contributor.
+///
+/// Void first and record second. Arming records first so that a failed
+/// write blocks it; voiding is the safe direction, so it must happen even
+/// when the audit cannot be written, and a failed write is logged instead.
+/// Audit and log carry labels only.
+fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
+    let Some(current) = ctx.grant_terms.as_ref() else {
+        return;
+    };
+    let now = ctx.now;
+    let sweep = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let sweep = policy.sweep_grants(current);
+        // Fixed labels, never the error: its context can carry a path.
+        if sweep.changed() && policy.save(&shared.store).is_err() {
+            tracing::warn!("could not persist the grant sweep");
+        }
+        sweep
+    };
+    for voided in &sweep.voided {
+        let entry = super::audit::AuditEntry {
+            at: now,
+            action: "auto-upload-voided".to_string(),
+            project_label: Some(voided.project_label.clone()),
+            detail: Some(voided.reasons.join(",")),
+        };
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record a voided grant");
+        }
+        tracing::info!(
+            reasons = ?voided.reasons,
+            "an automatic-contribution grant was voided; the project now asks first"
+        );
+    }
+    if let Some(reasons) = &sweep.automatic_grant_voided {
+        let entry = super::audit::AuditEntry {
+            at: now,
+            action: "automatic-grant-voided".to_string(),
+            project_label: None,
+            detail: Some(reasons.join(",")),
+        };
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record a voided automatic grant");
+        }
+        tracing::info!(
+            reasons = ?reasons,
+            "the automatic-contribution grant was voided; new projects ask first"
+        );
+    }
+    if !sweep.voided.is_empty() || sweep.automatic_grant_voided.is_some() {
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+}
+
+/// Each source's name and root, as `SourceRoots::source_identities` gives
+/// them.
+type SourceIdentities = std::collections::BTreeMap<&'static str, String>;
+
 /// What a pass reads once, up front, and hands to every session it visits.
 struct PassContext {
     now: DateTime<Utc>,
@@ -261,10 +487,31 @@ struct PassContext {
     /// invited contributor, whose entries carry no eligibility at all -- see
     /// `QueueEntry::eligibility`.
     admission_evidence: bool,
+    /// The grant terms in force, from the same config and settings this pass
+    /// reads. `None` without a config. See `sweep_grants`.
+    grant_terms: Option<super::grant_terms::GrantTerms>,
+    /// Each source's name and root, for the automatic grant's per-source
+    /// record: from the same `SourceRoots` the pass's sources were built
+    /// from, never a second read of the settings. See `tick_over`.
+    source_identities: SourceIdentities,
 }
 
 impl PassContext {
-    fn read(shared: &DaemonShared, now: DateTime<Utc>, max_queue_entries: usize) -> Self {
+    /// A source as the automatic grant records it: its name and its root, so
+    /// a harness pointed at another root is recorded afresh.
+    fn source_key(&self, name: &str) -> String {
+        match self.source_identities.get(name) {
+            Some(root) => format!("{name} {root}"),
+            None => name.to_string(),
+        }
+    }
+
+    fn read(
+        shared: &DaemonShared,
+        now: DateTime<Utc>,
+        max_queue_entries: usize,
+        source_identities: SourceIdentities,
+    ) -> Self {
         // The terms an auto-approval would be given under: the consent scopes,
         // and a fingerprint of everything else outside the session file that
         // determines the envelope. See `QueueEntry::approved_scopes` /
@@ -281,12 +528,20 @@ impl PassContext {
             .as_ref()
             .map(|c| c.consent_scopes.clone())
             .unwrap_or_default();
+        let (near_ai, attested_bodies) = {
+            let s = shared.settings.lock().expect("settings lock");
+            (s.near_ai.clone(), s.ironwire_attested_bodies)
+        };
         let approval_inputs = cfg.as_ref().map(|c| {
-            let (near_ai, attested_bodies) = {
-                let s = shared.settings.lock().expect("settings lock");
-                (s.near_ai.clone(), s.ironwire_attested_bodies)
-            };
             crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
+        });
+        let grant_terms = cfg.as_ref().map(|c| {
+            super::grant_terms::GrantTerms::current(
+                c,
+                near_ai.as_ref(),
+                attested_bodies,
+                &super::grant_terms::env_filter_backend(),
+            )
         });
         let admission_evidence = cfg
             .as_ref()
@@ -298,6 +553,8 @@ impl PassContext {
             consent_scopes,
             approval_inputs,
             admission_evidence,
+            grant_terms,
+            source_identities,
         }
     }
 }
@@ -456,7 +713,10 @@ fn visit_session(
         // it can never resurrect a dismissed, expired or uploaded
         // entry. Preserved here so skipping the load costs nothing
         // but the load.
-        if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
+        if mode == ProjectMode::AutoUpload
+            && state == QueueState::Pending
+            && !held_back_from_the_grant(shared, &project_key, &obs.path)
+        {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
                 entry_id,
@@ -488,6 +748,11 @@ fn visit_session(
     let mode = {
         let policy = shared.policy.lock().expect("policy lock");
         policy.resolve(&project_key)
+    };
+    let mode = if mode == ProjectMode::NotifyOnly {
+        arm_by_default(shared, ctx, source, &project_key, &obs.path)
+    } else {
+        mode
     };
     if mode == ProjectMode::Ignore {
         out.report.ignored += 1;
@@ -588,7 +853,8 @@ fn visit_session(
     // upload would cost one of three re-uploads and a duplicate penalty.
     let armed = mode == ProjectMode::AutoUpload
         && !from_staging
-        && armed_settle_elapsed(obs.modified_at, ctx.now);
+        && armed_settle_elapsed(obs.modified_at, ctx.now)
+        && !held_back_from_the_grant(shared, &project_key, &obs.path);
 
     // Two questions off one transcript load. The mark is answered for every
     // contributor; the eligibility verdict is a derivation from it that stays
@@ -1144,7 +1410,14 @@ mod tests {
                     }) as Box<dyn TraceSource>
                 })
                 .collect();
-            tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+            tick_over(
+                &self.shared,
+                now,
+                sources,
+                source_roots.source_identities(),
+                max_queue_entries,
+            )
+            .unwrap()
         }
 
         /// One *scoped* pass -- the same `tick_over_paths` `tick_paths` runs
@@ -1197,6 +1470,7 @@ mod tests {
                 &self.shared,
                 now,
                 sources,
+                source_roots.source_identities(),
                 max_queue_entries,
                 paths,
                 &session_at,
@@ -1441,6 +1715,430 @@ mod tests {
             q.retract_unattended_for_project(&key),
             0,
             "the contributor approved this one by hand; it is not retractable"
+        );
+    }
+
+    fn grant_test_cfg(scopes: &[&str]) -> crate::config::ContributorConfig {
+        crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
+            inference_receipt_check_attestation: false,
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+            issuer_url: "https://issuer.invalid".to_string(),
+            ingest_url: "https://ingest.invalid".to_string(),
+            audience: "aud".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            instance_id: "instance-1".to_string(),
+            user_subject: "alice".to_string(),
+            device_key_id: "sha256:aa".to_string(),
+            consent_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+            witness: None,
+        }
+    }
+
+    fn the_only_project(f: &WatcherFixture) -> crate::daemon::policy::ProjectEntry {
+        let policy = f.shared.policy.lock().unwrap();
+        assert_eq!(policy.projects.len(), 1);
+        policy.projects.values().next().unwrap().clone()
+    }
+
+    /// R6, through the watcher. A grant is baselined on the first pass, then
+    /// a change that widens what leaves -- here the scopes gaining
+    /// `model_training` -- voids it: the project asks first, a new session is
+    /// not approved on the contributor's behalf, and the void is recorded.
+    #[tokio::test]
+    async fn widening_the_terms_voids_the_grant_and_stops_new_approvals() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let first = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(first.auto_ready, 1, "{first:?}");
+        assert!(the_only_project(&f).armed_under.is_some(), "baselined");
+
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation", "model_training"]))
+            .unwrap();
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(second.auto_ready, 0, "{second:?}");
+        let project = the_only_project(&f);
+        assert_eq!(
+            project.mode,
+            ProjectMode::NotifyOnly,
+            "the project asks first"
+        );
+        assert!(project.armed_under.is_none());
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        let voided = audit
+            .iter()
+            .find(|e| e.action == "auto-upload-voided")
+            .expect("the void is recorded");
+        assert_eq!(voided.detail.as_deref(), Some("scopes-widened"));
+    }
+
+    /// Arm and baseline a project under `cfg`, apply `widen`, run a pass,
+    /// and require that the grant was voided with `label`.
+    async fn assert_widening_voids(
+        cfg: crate::config::ContributorConfig,
+        widen: impl FnOnce(&WatcherFixture),
+        label: &str,
+    ) {
+        let f = WatcherFixture::new();
+        f.shared.store.save_config(&cfg).unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert!(the_only_project(&f).armed_under.is_some(), "baselined");
+
+        widen(&f);
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let project = the_only_project(&f);
+        assert_eq!(project.mode, ProjectMode::NotifyOnly, "{label}");
+        assert!(project.armed_under.is_none(), "{label}");
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        let voided = audit
+            .iter()
+            .find(|e| e.action == "auto-upload-voided")
+            .unwrap_or_else(|| panic!("{label}: the void is recorded"));
+        assert_eq!(voided.detail.as_deref(), Some(label));
+    }
+
+    /// Turning attested bodies on sends trace bodies to a party that did not
+    /// see them when the project was armed.
+    #[tokio::test]
+    async fn turning_attested_bodies_on_voids_the_grant() {
+        assert_widening_voids(
+            grant_test_cfg(&["debugging_evaluation"]),
+            |f| f.shared.settings.lock().unwrap().ironwire_attested_bodies = true,
+            crate::daemon::grant_terms::VOID_ATTESTED_BODIES,
+        )
+        .await;
+    }
+
+    /// Pointing the client at a different witness changes who vouches for
+    /// what leaves.
+    #[tokio::test]
+    async fn changing_the_witness_voids_the_grant() {
+        let witness = |url: &str| crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: url.to_string(),
+            signing_address: "0x0000000000000000000000000000000000000001".to_string(),
+            expected_measurements: Vec::new(),
+        };
+        let mut cfg = grant_test_cfg(&["debugging_evaluation"]);
+        cfg.witness = Some(witness("https://witness-a.invalid"));
+        let mut moved = cfg.clone();
+        moved.witness = Some(witness("https://witness-b.invalid"));
+        assert_widening_voids(
+            cfg,
+            move |f| f.shared.store.save_config(&moved).unwrap(),
+            crate::daemon::grant_terms::VOID_WITNESS,
+        )
+        .await;
+    }
+
+    /// Narrowing is covered by the grant: removing a scope keeps the project
+    /// armed and approving.
+    #[tokio::test]
+    async fn narrowing_the_terms_keeps_the_grant() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation", "benchmark_only"]))
+            .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(second.auto_ready, 1, "{second:?}");
+        assert_eq!(the_only_project(&f).mode, ProjectMode::AutoUpload);
+    }
+
+    fn grant_automatic(f: &WatcherFixture) {
+        let req = super::super::ipc::Request {
+            id: 1,
+            method: "grant_automatic".to_string(),
+            params: serde_json::json!({}),
+        };
+        let resp = super::super::ipc::handle_request(&f.shared, &req);
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+    }
+
+    fn mode_of(f: &WatcherFixture, project: &str) -> (ProjectMode, bool) {
+        let key = project_key_for(Some(&abs(&format!("Users/testuser/code/{project}"))));
+        let policy = f.shared.policy.lock().unwrap();
+        (policy.resolve(&key), policy.projects.contains_key(&key))
+    }
+
+    /// K3: under the Flow 1 grant a project first seen after it is armed,
+    /// with an explicit policy entry, the terms it is granted under, and an
+    /// audit row. A project already on disk at the grant keeps asking, and
+    /// so does its new session.
+    #[tokio::test]
+    async fn the_grant_arms_projects_discovered_after_it_and_nothing_already_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic(&f);
+
+        // The first full pass records what is on disk and arms nothing.
+        let first = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(first.auto_ready, 0, "{first:?}");
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::NotifyOnly, false));
+
+        f.write_session("old", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+        assert_eq!(
+            mode_of(&f, "old"),
+            (ProjectMode::NotifyOnly, false),
+            "a project on disk at the grant asks, for its new sessions too"
+        );
+        assert_eq!(second.auto_ready, 1, "{second:?}");
+        let key = project_key_for(Some(&abs("Users/testuser/code/new")));
+        assert!(
+            f.shared.policy.lock().unwrap().projects[&key]
+                .armed_under
+                .is_some(),
+            "armed under recorded terms"
+        );
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        assert!(audit.iter().any(|e| e.action == "automatic-granted"));
+        let armed: Vec<_> = audit
+            .iter()
+            .filter(|e| e.action == "armed-by-default")
+            .collect();
+        assert_eq!(armed.len(), 1);
+        assert_eq!(armed[0].project_label.as_deref(), Some("new"));
+    }
+
+    /// K4: a re-grant after logout arms nothing already on disk. Logout
+    /// wipes the policy, so a folder set to Never loses that decision; the
+    /// re-grant must still count it as on disk and ask, for its new
+    /// sessions as well, rather than treat it as newly discovered.
+    #[tokio::test]
+    async fn a_re_grant_after_logout_arms_nothing_already_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("never", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("never", ProjectMode::Ignore);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        // What logout leaves of the policy: nothing.
+        *f.shared.policy.lock().unwrap() = crate::daemon::policy::ProjectPolicy::new();
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        f.write_session("never", "22222222-2222-2222-2222-222222222222", 0);
+        let after = f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+
+        assert_eq!(after.auto_ready, 0, "{after:?}");
+        assert_eq!(mode_of(&f, "never"), (ProjectMode::NotifyOnly, false));
+    }
+
+    /// A harness connected after the grant -- the normal onboarding order --
+    /// is recorded on its first discovery, so its history is on disk rather
+    /// than new: nothing in it is armed or sent. (Zaki's reproduction on
+    /// #1031.)
+    #[tokio::test]
+    async fn a_harness_connected_after_the_grant_arms_nothing_already_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        let watch = f.shared.settings.lock().unwrap().claude_source.clone();
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Off);
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        f.shared.settings.lock().unwrap().claude_source = watch; // connect the harness
+        let after = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(
+            (after.auto_ready, mode_of(&f, "old")),
+            (0, (ProjectMode::NotifyOnly, false)),
+            "{after:?}"
+        );
+
+        // And a project genuinely new since then is still armed.
+        f.write_session("new", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+    }
+
+    /// A session on disk at the grant is not approved unattended when it
+    /// comes to read as a project the grant armed later. (Zaki's second
+    /// reproduction on #1031: the session's first cwd changes.)
+    #[tokio::test]
+    async fn a_pre_grant_session_is_not_sent_under_a_project_the_grant_armed() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let pre = f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        f.write_session_with_cwd(
+            "-Users-testuser-code-old",
+            &abs("Users/testuser/code/new"),
+            "11111111-1111-1111-1111-111111111111",
+        );
+        f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
+        for h in 31..35 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+        let queue = f.shared.queue.lock().unwrap();
+        for e in queue.all().iter().filter(|e| e.path == pre) {
+            assert_ne!(
+                e.state,
+                QueueState::Approved,
+                "a session on disk at the grant was approved unattended under {}",
+                e.project_key
+            );
+        }
+        assert!(
+            queue
+                .all()
+                .iter()
+                .any(|e| e.path != pre && e.state == QueueState::Approved),
+            "the new session is approved"
+        );
+    }
+
+    /// A pass records each source under the root it discovered, not under
+    /// whatever root the settings name by the time the pass reads them. A
+    /// harness re-rooted between the two reads must not have root A's listing
+    /// recorded as root B's: root B's history would then read as already
+    /// recorded, and its pre-grant sessions as new.
+    #[tokio::test]
+    async fn a_root_changed_mid_pass_is_not_recorded_under_the_new_root() {
+        let mut f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("a-old", "11111111-1111-1111-1111-111111111111", 0);
+        let root_a = f.claude_root.clone();
+        let root_b = f._dir.path().join("projects-b");
+        f.claude_root = root_b.clone();
+        let pre_b = f.write_session("b-old", "22222222-2222-2222-2222-222222222222", 0);
+        f.claude_root = root_a;
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        // The pass's sources come from one read of the settings; the harness
+        // is re-rooted before the pass reads them again.
+        let (max_queue_entries, roots_a) = {
+            let s = f.shared.settings.lock().unwrap();
+            (s.max_queue_entries, s.source_roots(&f.shared.store))
+        };
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: root_b.clone(),
+            });
+        tick_over(
+            &f.shared,
+            Utc::now() + chrono::Duration::hours(31),
+            all_sources(&roots_a),
+            roots_a.source_identities(),
+            max_queue_entries,
+        )
+        .unwrap();
+        for h in 32..36 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(
+            mode_of(&f, "b-old"),
+            (ProjectMode::NotifyOnly, false),
+            "root B's pre-grant project was armed"
+        );
+        let queue = f.shared.queue.lock().unwrap();
+        for e in queue.all().iter().filter(|e| e.path == pre_b) {
+            assert_ne!(
+                e.state,
+                QueueState::Approved,
+                "a session on disk at the grant under root B was approved unattended"
+            );
+        }
+    }
+
+    /// Only a full pass records what is on disk; before it, the grant arms
+    /// nothing, however the session arrives.
+    #[tokio::test]
+    async fn the_grant_arms_nothing_before_a_full_pass_has_recorded_the_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic(&f);
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .automatic_grant
+                .as_ref()
+                .unwrap()
+                .recorded_sources
+                .is_empty(),
+            "a scoped pass records nothing"
+        );
+        let path = f.write_session("fresh", "11111111-1111-1111-1111-111111111111", 0);
+        let session_at: SessionAt<'_> =
+            &|source, p| source.discover().ok()?.into_iter().find(|r| r.path == p);
+        let now = Utc::now() + chrono::Duration::hours(30);
+        tick_paths(&f.shared, now, std::slice::from_ref(&path), session_at)
+            .await
+            .unwrap();
+        tick_paths(&f.shared, now, &[path], session_at)
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&f, "fresh"), (ProjectMode::NotifyOnly, false));
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .automatic_grant
+                .as_ref()
+                .unwrap()
+                .recorded_sources
+                .is_empty(),
+            "a scoped pass records nothing"
         );
     }
 
@@ -2295,7 +2993,14 @@ mod tests {
                 .into_iter()
                 .map(|inner| Box::new(RefusingSource { inner, err }) as Box<dyn TraceSource>)
                 .collect();
-            tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+            tick_over(
+                &self.shared,
+                now,
+                sources,
+                source_roots.source_identities(),
+                max_queue_entries,
+            )
+            .unwrap()
         }
 
         fn health_label(&self) -> Option<String> {

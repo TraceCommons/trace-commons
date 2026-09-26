@@ -1218,6 +1218,113 @@ mod tests {
         assert_eq!(state.uploads_today, 0, "nothing may be uploaded");
     }
 
+    /// Reviewed on #1024: an entry approved before a grant is voided is not
+    /// sent after it. Voiding stops *new* unattended approvals; what stops an
+    /// approval already made is this guard, so every change that voids a
+    /// grant is run through the uploader here, not only compared as
+    /// fingerprints. (The environment's filter reaches the same fingerprint
+    /// through `env_filter_backend`; `grant_terms`'s test covers it without
+    /// mutating the process environment.)
+    #[tokio::test]
+    async fn an_approval_taken_before_a_voiding_change_is_not_sent_after_it() {
+        use crate::config::WitnessSettings;
+        type Change = Box<dyn Fn(&mut crate::config::ContributorConfig, &mut SettingsLike)>;
+        struct SettingsLike {
+            near_ai: Option<crate::envelope::NearAiSettings>,
+            attested_bodies: bool,
+        }
+        let changes: Vec<(&str, Change)> = vec![
+            (
+                "destination",
+                Box::new(|c, _| c.ingest_url = "http://elsewhere.invalid".into()),
+            ),
+            (
+                "identity",
+                Box::new(|c, _| c.tenant_id = "tenant-other".into()),
+            ),
+            (
+                "scopes widened",
+                Box::new(|c, _| c.consent_scopes.push("model_training".into())),
+            ),
+            (
+                "privacy filter",
+                Box::new(|c, _| c.pii_filter = Some("near-ai".into())),
+            ),
+            (
+                "receipt endpoint",
+                Box::new(|c, _| c.inference_receipt_endpoint = Some("https://r.invalid".into())),
+            ),
+            (
+                "witness",
+                Box::new(|c, _| {
+                    c.witness = Some(WitnessSettings {
+                        admission_evidence: false,
+                        url: "https://witness.invalid".into(),
+                        signing_address: "0x0000000000000000000000000000000000000001".into(),
+                        expected_measurements: Vec::new(),
+                    })
+                }),
+            ),
+            (
+                "classifier",
+                Box::new(|_, s| {
+                    s.near_ai = Some(crate::envelope::NearAiSettings {
+                        api_key: "k".into(),
+                        base_url: Some("https://classifier.invalid".into()),
+                        model: Some("m".into()),
+                    })
+                }),
+            ),
+            ("attested bodies", Box::new(|_, s| s.attested_bodies = true)),
+        ];
+        for (name, change) in &changes {
+            let session = GrowingSession::new();
+            let (_d, store) = temp_store();
+            let approved_under = fixture_cfg(&store);
+            store.save_config(&approved_under).unwrap();
+            let entry = session.entry_for(&session.current_hash(), &approved_under);
+
+            let mut cfg = approved_under.clone();
+            let mut now = SettingsLike {
+                near_ai: None,
+                attested_bodies: false,
+            };
+            change(&mut cfg, &mut now);
+            store.save_config(&cfg).unwrap();
+
+            let opts = dry_run_opts();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts, now.near_ai.clone()).unwrap();
+            let mut state = DaemonState::new();
+            let mut health = HealthState::default();
+            let mut settings = settings();
+            settings.ironwire_attested_bodies = now.attested_bodies;
+            let mut up = Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            };
+            let decision = up
+                .upload_entry(
+                    &session.source(),
+                    &session.session_ref(),
+                    &entry,
+                    at("2026-08-08T16:00:00Z"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                decision,
+                UploadDecision::ApprovalStale {
+                    reason_label: crate::daemon::preview::REASON_INPUTS_CHANGED.to_string(),
+                },
+                "{name}: an approval from before the void must not be sent"
+            );
+            assert_eq!(state.uploads_today, 0, "{name}");
+        }
+    }
+
     #[tokio::test]
     async fn upload_refuses_when_the_approved_envelope_bytes_are_gone() {
         // An entry pinned to a preview whose stored bytes are missing. The
