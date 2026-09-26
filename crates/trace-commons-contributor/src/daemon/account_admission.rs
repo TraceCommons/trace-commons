@@ -752,7 +752,9 @@ mod tests {
         }
 
         fn arm(&self, armed: bool) {
-            let key = super::super::policy::project_key_for(Some("/tmp/armed-project"));
+            let key = super::super::policy::project_key_for(Some(&super::super::test_paths::abs(
+                "tmp/armed-project",
+            )));
             let mode = if armed {
                 super::super::policy::ProjectMode::AutoUpload
             } else {
