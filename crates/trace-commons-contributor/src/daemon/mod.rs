@@ -38,6 +38,7 @@ pub mod contribution_eligibility;
 pub(crate) mod credential_store;
 pub mod eligibility;
 pub mod enroll;
+pub mod grant_terms;
 pub mod harness;
 pub mod health;
 pub mod history;
