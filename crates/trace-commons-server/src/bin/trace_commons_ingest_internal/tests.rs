@@ -30437,6 +30437,330 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// An object-primary state backed by a filesystem "remote" artifact store,
+/// with DB mirror writes required.
+fn object_primary_revocation_test_state(
+    root: &Path,
+    remote_root: &Path,
+    backend: Arc<PgBackend>,
+) -> Arc<AppState> {
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+        Some("file_system"),
+        Some(remote_root.to_str().expect("utf8 temp path")),
+        Some("test-kms-key-ref"),
+        Some("test-credential-ref"),
+    )
+    .expect("filesystem remote config parses");
+    let artifact_store =
+        ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+            .expect("filesystem remote service store builds");
+    let mut state =
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            root.to_path_buf(),
+            Some(backend),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            true,
+            false,
+        );
+    {
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.db_reviewer_require_object_refs = true;
+        state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+            tenant_ids_by_feature: Arc::new(BTreeMap::from([(
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                BTreeSet::from(["tenant-a".to_string()]),
+            )])),
+        };
+    }
+    state
+}
+
+async fn submit_object_primary_revocation_fixture(state: &Arc<AppState>) -> Uuid {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("object-primary submission mirrors to DB");
+    submission_id
+}
+
+/// Revocation deletes an object-primary submission's envelope at once. The
+/// envelope's object ref must say so, and its queued delete item must be
+/// complete with a physical-delete receipt -- otherwise the revocation worker
+/// later finds an active ref for an object that is gone and fails the item
+/// on every attempt.
+#[tokio::test]
+async fn revoking_an_object_primary_submission_marks_its_envelope_ref_deleted() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let state =
+        object_primary_revocation_test_state(temp.path(), remote_temp.path(), backend.clone());
+    let submission_id = submit_object_primary_revocation_fixture(&state).await;
+
+    let revoked = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("contributor revokes");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
+
+    let envelope_ref = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read")
+        .into_iter()
+        .find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope
+        })
+        .expect("submitted envelope ref");
+    assert!(
+        envelope_ref.deleted_at.is_some(),
+        "revocation deleted the envelope, so its object ref is marked deleted"
+    );
+    let items = backend
+        .list_trace_revocation_propagation_items("tenant-a", submission_id)
+        .await
+        .expect("propagation items read");
+    let delete_item = items
+        .iter()
+        .find(|item| {
+            item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id }
+                        if object_ref_id == envelope_ref.object_ref_id
+                )
+        })
+        .expect("the envelope's delete item");
+    assert_eq!(
+        delete_item.status,
+        StorageTraceRevocationPropagationItemStatus::Done,
+        "the envelope's queued delete is complete"
+    );
+    assert!(delete_item.evidence_hash.is_some());
+    assert!(
+        items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(object_ref_id),
+                        ..
+                    } if object_ref_id == envelope_ref.object_ref_id
+                )
+        }),
+        "a physical-delete receipt records the envelope's deletion"
+    );
+
+    // The worker has nothing left to fail on for the envelope.
+    let Json(worker) = revocation_propagation_worker_handler(
+        State(state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("revocation_envelope_ref_deleted".to_string()),
+            dry_run: false,
+            limit: 20,
+        }),
+    )
+    .await
+    .expect("revocation worker runs");
+    assert_eq!(worker.failed, 0);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Backstop: an object that is already gone is deleted, and the worker
+/// completes its item with a receipt. An object that is present but fails
+/// verification is not: that stays a failure, with no receipt.
+#[tokio::test]
+async fn revocation_worker_treats_a_missing_object_as_deleted_but_not_a_failing_one() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let state =
+        object_primary_revocation_test_state(temp.path(), remote_temp.path(), backend.clone());
+    let submission_id = submit_object_primary_revocation_fixture(&state).await;
+    let tenant_ref = tenant_storage_ref("tenant-a");
+    let store = state.artifact_store.as_ref().expect("artifact store");
+
+    // A second service-owned object for the submission that exists but will
+    // fail verification: its ref records a different ciphertext hash.
+    let tampered_receipt = store
+        .put_json(
+            &tenant_ref,
+            TraceArtifactKind::ContributionEnvelope,
+            "revocation-backstop-review-snapshot",
+            &serde_json::json!({ "artifact": "review_snapshot" }),
+        )
+        .expect("review snapshot artifact writes");
+    let tampered_ref_id = deterministic_trace_uuid_for_external_ref(
+        "revocation-backstop-tampered-object-ref",
+        "tenant-a",
+        submission_id,
+        "review_snapshot",
+    );
+    backend
+        .append_trace_object_ref(StorageTraceObjectRefWrite {
+            object_ref_id: tampered_ref_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ReviewSnapshot,
+            object_store: store.object_store_name().to_string(),
+            object_key: tampered_receipt.object_key,
+            content_sha256: sha256_prefixed("not the stored ciphertext"),
+            encryption_key_ref: format!("tenant:{tenant_ref}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("tampered object ref writes");
+
+    // The envelope's object disappears before revocation reaches it, so the
+    // revocation path has nothing to delete and leaves its ref active.
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope_receipt = record
+        .artifact_receipt
+        .clone()
+        .expect("object-primary receipt");
+    assert!(
+        store
+            .delete_artifact(&tenant_ref, &envelope_receipt)
+            .expect("envelope object deletes"),
+        "the envelope object existed"
+    );
+
+    let revoked = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("contributor revokes");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
+    let envelope_ref_id = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read")
+        .into_iter()
+        .find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope
+        })
+        .expect("submitted envelope ref")
+        .object_ref_id;
+
+    let Json(worker) = revocation_propagation_worker_handler(
+        State(state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("revocation_missing_object_backstop".to_string()),
+            dry_run: false,
+            limit: 20,
+        }),
+    )
+    .await
+    .expect("revocation worker runs");
+    assert_eq!(worker.failed, 1, "only the tampered object fails");
+
+    let object_refs = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read");
+    let envelope_ref = object_refs
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == envelope_ref_id)
+        .expect("envelope ref");
+    assert!(
+        envelope_ref.deleted_at.is_some(),
+        "an already-missing object is marked deleted"
+    );
+    let tampered_ref = object_refs
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == tampered_ref_id)
+        .expect("tampered ref");
+    assert!(
+        tampered_ref.deleted_at.is_none(),
+        "an object that fails verification is not deleted"
+    );
+
+    let items = backend
+        .list_trace_revocation_propagation_items("tenant-a", submission_id)
+        .await
+        .expect("propagation items read");
+    let receipt_for = |object_ref_id: Uuid| {
+        items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(receipt_ref),
+                        ..
+                    } if receipt_ref == object_ref_id
+                )
+        })
+    };
+    assert!(
+        receipt_for(envelope_ref_id),
+        "a receipt records the missing object"
+    );
+    assert!(
+        !receipt_for(tampered_ref_id),
+        "no receipt for an object that failed verification"
+    );
+    let delete_item_status = |object_ref_id: Uuid| {
+        items
+            .iter()
+            .find(|item| {
+                item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                    && matches!(
+                        item.target,
+                        StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id: target }
+                            if target == object_ref_id
+                    )
+            })
+            .map(|item| item.status)
+    };
+    assert_eq!(
+        delete_item_status(envelope_ref_id),
+        Some(StorageTraceRevocationPropagationItemStatus::Done)
+    );
+    assert_ne!(
+        delete_item_status(tampered_ref_id),
+        Some(StorageTraceRevocationPropagationItemStatus::Done)
+    );
+    let tampered_path_count = count_files_under_dir(remote_temp.path());
+    assert!(
+        tampered_path_count >= 1,
+        "the object that failed verification is still stored"
+    );
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn revocation_effects_drill_records_remote_credit_reversal_and_object_delete_evidence() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
