@@ -4,8 +4,11 @@
 //! In-process invite registry: cache, invalidation, and code generation.
 //!
 //! The cache is a latency optimization and never a correctness boundary.
-//! Expiry, revocation, and use-count are re-checked inside the redemption
-//! transaction, so a revoke racing a redemption is resolved by the database.
+//! Account invite redemption runs in the ingest process, so its committed use
+//! does not synchronously evict the issuer process's cache entry. The issuer's
+//! final database use-count update is authoritative even when that entry is
+//! still cached. New account redemption reads and locks the durable invite row
+//! directly, without consulting this cache.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -30,8 +33,11 @@ pub enum InviteTenantMode {
 }
 
 /// Tenant prefixes allocated only by provisioned account admission.
-/// Keep invite creation and admission classification on the same list.
-pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] = ["near-", "nearai-"];
+/// Keep invite creation and admission classification on the same list: this
+/// is the protocol's own list, which admission (server and contributor gate)
+/// reads through `is_anchored_tenant`.
+pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] =
+    trace_commons_protocol::admission::ANCHOR_NAMESPACES;
 
 /// Fixed invite grants must not claim a provisioned account tenant namespace.
 pub fn fixed_invite_tenant_uses_reserved_namespace(tenant_id: &str) -> bool {

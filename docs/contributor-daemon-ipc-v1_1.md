@@ -217,6 +217,12 @@ What replaces the restriction is **visibility, not gatekeeping**:
   is rolled back and the call returns `audit-write-failed`. It does not
   succeed with a warning: an unrecorded change is exactly what removing the
   terminal-only restriction was not supposed to make possible.
+- Arming records the terms it is granted under (see `auto-upload-voided`
+  below). With no config to read them from -- not yet enrolled, or a config
+  that cannot be read -- `set_project_mode: "auto_upload"` is refused with
+  `arming-terms-unavailable` (`ERR_UNAVAILABLE`) before anything is recorded.
+  Arming the unknown-project bucket is refused for its own reason first,
+  also before anything is recorded.
 - The durable log is capped and rotates oldest-first, so it cannot grow
   until appending to it starts failing. Capping `list_audit`'s output alone
   would not have bounded the file.
@@ -491,7 +497,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
-| `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
+| `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
@@ -1534,11 +1540,77 @@ one entry -- a `cancel` against a project with nothing `approved` appends
 nothing. The single-`entry_id` form of `cancel` stays unaudited, the same
 as the single-`entry_id` form of `approve`.
 
+An `auto-upload-voided` entry records a standing `auto_upload` grant that the
+daemon voided because the terms in force widened past what it was armed under
+-- a new recipient (destination, identity, witness, classifier host or model,
+receipt endpoint) or more leaving the machine (scopes gaining an entry, a
+filter added or removed, attested bodies turning on, a witness measurement
+admitted). `project_label` names the project and `detail` is a comma-separated
+list of fixed reason labels: `destination-changed`, `identity-changed`,
+`scopes-widened`, `privacy-filter-changed`, `receipt-endpoint-changed`,
+`witness-changed`, `witness-measurement-admitted`, `attested-bodies-on`. The
+project is `notify_only` from that pass on; arming it again records the new
+terms. Narrowing voids nothing. Unlike arming, the void is written **after**
+the mode change and a failed write does not undo it, because voiding is the
+safe direction.
+
+Four entries belong to the automatic grant (`grant_automatic`, below):
+`automatic-granted` and `automatic-grant-withdrawn` record it being given and
+withdrawn; `armed-by-default` records a project it armed, with that project's
+`project_label`; `automatic-grant-voided` records the grant itself voided by
+widened terms, with the same `detail` labels as `auto-upload-voided`.
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
 never free text, a path, or a token. See "Authorization" above for what this
 log is (and is not) for.
+
+### `grant_automatic`, `withdraw_automatic_grant`, `automatic_grant`
+
+The Flow 1 grant (the connect-and-forget design, K3 and K4): contribute
+automatically from projects discovered from now on.
+
+```json
+{ "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
+```
+
+`grant_automatic` takes no params and returns the grant as `automatic_grant`
+reports it. It is refused with `arming-terms-unavailable` (`ERR_UNAVAILABLE`)
+when there is no config to record terms from, and with `audit-write-failed`
+when its `automatic-granted` entry cannot be written, in which case nothing is
+granted. A second call replaces the first, and records what is on disk again.
+
+**It arms nothing already on disk**, recorded per source. Each source's first
+successful discovery in a full watcher pass under the grant records every
+session in it and the project each belongs to, and arms nothing from them. So
+a harness connected after the grant, one pointed at another root, and one whose
+discovery failed on an earlier pass are all recorded before they can arm
+anything; until a source is recorded, none of its sessions arms a project.
+`on_disk_recorded` is true once any source has been recorded. A grant given
+while a pass is listing the disk is recorded by a later pass.
+
+After a source is recorded, a session from it in a project that no recorded
+source had on disk, with no policy entry of its own, and not the
+unknown-project bucket, arms its project: an explicit `auto_upload` entry, the
+terms it is granted under, and an `armed-by-default` audit row written first.
+A project with any session on disk at the grant keeps asking, for its new
+sessions too. And a session that was on disk at the grant is **never approved
+unattended in a project the grant armed**, whichever project it reads as now;
+it waits for the contributor. That holds after the grant is withdrawn or
+voided, and stops holding for a project once the contributor sets its mode
+themselves.
+
+That is what makes a re-grant after logout safe. Logout wipes the policy,
+including a project set to `ignore`; a re-grant records the disk again, so that
+project asks rather than being armed as new.
+
+Widened terms void the grant itself as well as the projects it armed, with an
+`automatic-grant-voided` entry. `withdraw_automatic_grant` returns
+`{"withdrawn": bool}` and leaves the projects the grant armed as they are;
+each is withdrawn with `set_project_mode`. `automatic_grant` returns
+`{"granted": false}` when none is in force. None of the three returns a path
+or a count of them.
 
 ### `queue_outcome_counts`
 
@@ -2723,6 +2795,26 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+Acknowledging also re-offers every session the gate had refused, and
+`reoffered` is how many. A session sent while the notice was outstanding is
+refused with `near-ai-notice-not-acknowledged`, which is a refusal about
+timing rather than about the session -- but a refused entry is never moved
+again, and the watcher does not re-offer a session whose file is unchanged,
+so without this those sessions were lost for good. They return as `Pending`
+with their old approval cleared, because that approval was given before the
+disclosure it depended on: an `auto_upload` folder re-approves them on the
+next poll, and any other folder asks again. A `queue_changed` event is
+published when any move.
+
+A refused entry whose file already has a live entry (the session grew while
+it sat refused, and the watcher offered the new content) is not revived: it
+is marked `superseded` with `session-changed-after-offer`, and is not counted
+in `reoffered`. The same step -- clear the label, re-offer, supersede -- also
+runs on every daemon tick once the notice marker exists, so a notice
+acknowledged through the CLI, which writes the marker without calling this
+method, gets the same result. It runs whether or not the daemon is paused,
+quiesced for an update, or in dry-run, since it sends nothing.
 
 ### `near_ai_balance`
 

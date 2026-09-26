@@ -450,15 +450,40 @@ impl PgBackend {
     /// this reads either. The caller's tenant prefix already decided which
     /// namespace the request is on, and a row is only ever written under the
     /// matching one.
+    async fn near_provisioned_row_for_principal(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<(String, uuid::Uuid)>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx.query("SELECT n.anchor_hash, n.account_id FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id WHERE n.tenant_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL AND a.closed_at IS NULL LIMIT 2", &[&tenant,&principal]).await?;
+        tx.commit().await?;
+        if rows.len() > 1 {
+            return Err(DatabaseError::Query("near_provisioning_ambiguous".into()));
+        }
+        Ok(rows.into_iter().next().map(|r| (r.get(0), r.get(1))))
+    }
+
     pub(super) async fn near_anchor_for_principal(
         &self,
         tenant: &str,
         principal: &str,
     ) -> Result<Option<String>, DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let row = tx.query_opt("SELECT n.anchor_hash FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id WHERE n.tenant_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL AND a.closed_at IS NULL", &[&tenant,&principal]).await?;
-        tx.commit().await?;
-        Ok(row.map(|r| r.get(0)))
+        Ok(self
+            .near_provisioned_row_for_principal(tenant, principal)
+            .await?
+            .map(|(anchor, _)| anchor))
+    }
+
+    pub(super) async fn near_account_for_principal(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Ok(self
+            .near_provisioned_row_for_principal(tenant, principal)
+            .await?
+            .map(|(_, account)| account))
     }
 }

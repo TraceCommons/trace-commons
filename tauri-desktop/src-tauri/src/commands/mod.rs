@@ -91,6 +91,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         native_flows::native_wallet_flow,
         native_flows::contributor_disclosure_copy,
         native_flows::witness_review_copy,
+        native_flows::automatic_contribution_copy,
         native_flows::near_ai_account_enroll,
         native_flows::prepare_admission_session,
         native_flows::witness_preview_support,
