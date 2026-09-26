@@ -30,6 +30,16 @@
 //! GTK links this crate directly and re-exports these names; the macOS and
 //! Windows shells reach them through `tc_consent_copy` and
 //! `tc_consent_gate_help`.
+//!
+//! # Void notices
+//!
+//! The same module holds the notice a shell shows when R6 of the
+//! connect-and-forget design voids a grant (`status.grant_voids`): that
+//! automatic contributing stopped, for which project or for new projects,
+//! why, and that it can be turned back on. [`void_notice_for_wire`] takes
+//! one element of that list and returns the finished notice; across the ABI
+//! it is `tc_grant_void_notice`. It is consent copy -- the other half of the
+//! arming disclosure -- which is why it lives here.
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -166,6 +176,159 @@ pub fn gate_help(pinned: bool) -> &'static str {
     }
 }
 
+/// The heading over a void notice's reasons.
+pub const VOID_REASONS_HEADING: &str = "What changed";
+
+/// The button that records a void notice as shown.
+///
+/// It acknowledges and does nothing else. Turning automatic contributing
+/// back on is a separate act with its own disclosure, never a side effect of
+/// dismissing the sentence that says it stopped.
+pub const VOID_ACKNOWLEDGE: &str = "Got it";
+
+/// What a project's void notice says happened.
+pub const VOID_PROJECT_BODY: &str = "It was turned on under settings that have since changed, so it now asks before contributing. Its new sessions wait for you to review them, and nothing more is sent from it on its own.";
+
+/// What the Flow 1 grant's void notice says happened.
+pub const VOID_GRANT_BODY: &str = "It was turned on under settings that have since changed, so new projects now ask before contributing. Nothing is sent from a new project on its own.";
+
+/// How a project is armed again, and what that means.
+pub const VOID_PROJECT_REARM: &str = "You can turn automatic contributing back on for this project. Doing so agrees to the new settings.";
+
+/// How the Flow 1 grant is given again, and what that means.
+pub const VOID_GRANT_REARM: &str = "You can turn automatic contributing back on for new projects. Doing so agrees to the new settings.";
+
+/// The sentence for a reason label this build does not know.
+///
+/// A newer daemon may void for a reason an older shell has no sentence for.
+/// The notice is still shown -- the grant still stopped -- with this line in
+/// place of the one it lacks, rather than dropped for want of a sentence.
+pub const VOID_REASON_UNKNOWN: &str = "Something else it was turned on under changed.";
+
+/// The title of a void notice: the project it stopped for, or new projects
+/// when it was the Flow 1 grant that stopped.
+#[must_use]
+pub fn void_notice_title(project_label: Option<&str>) -> String {
+    match project_label {
+        Some(label) => format!("Automatic contributing stopped for {label}"),
+        None => "Automatic contributing stopped for new projects".to_string(),
+    }
+}
+
+/// One reason label from the daemon's void rule, as a sentence.
+///
+/// The labels are the fixed set `daemon::grant_terms` defines and the audit
+/// records (`docs/contributor-daemon-ipc-v1_1.md`, `auto-upload-voided`).
+/// Each sentence names the change in terms of who would see a session or
+/// what would leave with it, because that is what the grant was consent to.
+#[must_use]
+pub fn void_reason_line(label: &str) -> &'static str {
+    match label {
+        "destination-changed" => "Your sessions would now go to a different Trace Commons server.",
+        "identity-changed" => {
+            "Your sessions would now be sent under a different account, identity or device."
+        }
+        "scopes-widened" => "You now allow your contributions to be used in more ways.",
+        "privacy-filter-changed" => {
+            "The privacy filter that reads your sessions before they are sent was added, removed or changed."
+        }
+        "receipt-endpoint-changed" => {
+            "Your AI provider would now be asked for receipts for the calls in your sessions, which tells it they are being contributed."
+        }
+        "witness-changed" => {
+            "A different witness, the service that checks and scrubs your sessions before they are contributed, would now read them."
+        }
+        "witness-measurement-admitted" => {
+            "A new version of the witness, the service that checks and scrubs your sessions before they are contributed, was approved to read them."
+        }
+        "attested-bodies-on" => {
+            "The full text of your attested AI calls would now be sent with your sessions."
+        }
+        _ => VOID_REASON_UNKNOWN,
+    }
+}
+
+/// Everything a shell shows for one void, assembled here.
+///
+/// The branch crosses, as with [`gate_help`]: a shell hands over the
+/// project label (or none, for the Flow 1 grant) and the reason labels off
+/// the wire, and gets back the finished notice. It never picks between the
+/// project and grant wording, and never maps a label to a sentence itself.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct VoidNoticeCopy {
+    pub title: String,
+    pub body: &'static str,
+    pub reasons_heading: &'static str,
+    /// One sentence per reason label, in the daemon's order, duplicates
+    /// removed. Never empty: a void with no label still says something
+    /// changed.
+    pub reasons: Vec<&'static str>,
+    pub rearm: &'static str,
+    pub acknowledge: &'static str,
+}
+
+/// The notice for one void. See [`VoidNoticeCopy`].
+#[must_use]
+pub fn void_notice(project_label: Option<&str>, reasons: &[String]) -> VoidNoticeCopy {
+    let mut lines: Vec<&'static str> = Vec::new();
+    for reason in reasons {
+        let line = void_reason_line(reason);
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(VOID_REASON_UNKNOWN);
+    }
+    let (body, rearm) = match project_label {
+        Some(_) => (VOID_PROJECT_BODY, VOID_PROJECT_REARM),
+        None => (VOID_GRANT_BODY, VOID_GRANT_REARM),
+    };
+    VoidNoticeCopy {
+        title: void_notice_title(project_label),
+        body,
+        reasons_heading: VOID_REASONS_HEADING,
+        reasons: lines,
+        rearm,
+        acknowledge: VOID_ACKNOWLEDGE,
+    }
+}
+
+/// The notice for one element of `status.grant_voids`, as it came off the
+/// wire.
+///
+/// The `kind` branch lives here with the rest, so no shell decides between
+/// the project and the grant wording: `automatic_grant` gets the grant's
+/// notice, and `project` the project's, titled with its `project_label`.
+/// `None` for anything else -- a value that is not an object, a kind this
+/// build does not know, or a project void without a label -- which is a
+/// daemon and shell out of step, not something to paper over with a guess
+/// at which grant stopped.
+#[must_use]
+pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> {
+    let object = void.as_object()?;
+    let reasons: Vec<String> = object
+        .get("reasons")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    match object.get("kind").and_then(serde_json::Value::as_str)? {
+        "automatic_grant" => Some(void_notice(None, &reasons)),
+        "project" => {
+            let label = object
+                .get("project_label")
+                .and_then(serde_json::Value::as_str)
+                .filter(|l| !l.is_empty())?;
+            Some(void_notice(Some(label), &reasons))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +456,125 @@ mod tests {
         assert!(AUTO_NO_REVIEW.contains("including you"));
         for hedge in ["usually", "may ", "might", "generally", "typically"] {
             assert!(!AUTO_NO_REVIEW.contains(hedge), "hedged with {hedge:?}");
+        }
+    }
+
+    /// Every reason the daemon's void rule can give has its own sentence.
+    /// Listed from the daemon's constants, so a label added there without a
+    /// sentence here fails this test rather than reaching a contributor as
+    /// "something else changed".
+    #[test]
+    fn every_void_reason_the_daemon_gives_has_its_own_sentence() {
+        use crate::daemon::grant_terms as g;
+        let labels = [
+            g::VOID_DESTINATION,
+            g::VOID_IDENTITY,
+            g::VOID_SCOPES_WIDENED,
+            g::VOID_FILTER,
+            g::VOID_RECEIPT_ENDPOINT,
+            g::VOID_WITNESS,
+            g::VOID_MEASUREMENT_ADMITTED,
+            g::VOID_ATTESTED_BODIES,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for label in labels {
+            let line = void_reason_line(label);
+            assert_ne!(line, VOID_REASON_UNKNOWN, "{label} has no sentence");
+            assert!(seen.insert(line), "{label} shares a sentence");
+        }
+    }
+
+    /// The notice says plainly that automatic contributing stopped, for
+    /// what, why, and that it can be turned back on -- the four things R6's
+    /// ship condition asks a shell to say.
+    #[test]
+    fn a_project_notice_says_it_stopped_why_and_how_to_rearm() {
+        let notice = void_notice(Some("api"), &["witness-measurement-admitted".to_string()]);
+        assert_eq!(notice.title, "Automatic contributing stopped for api");
+        assert!(notice.body.contains("asks before contributing"));
+        assert!(
+            notice
+                .body
+                .contains("nothing more is sent from it on its own")
+        );
+        assert_eq!(
+            notice.reasons,
+            vec![void_reason_line("witness-measurement-admitted")]
+        );
+        assert!(notice.rearm.contains("turn automatic contributing back on"));
+        assert!(notice.rearm.contains("agrees to the new settings"));
+        assert_eq!(notice.acknowledge, VOID_ACKNOWLEDGE);
+    }
+
+    /// The Flow 1 grant's notice is about new projects, not one project.
+    #[test]
+    fn the_grant_notice_is_about_new_projects() {
+        let notice = void_notice(None, &["destination-changed".to_string()]);
+        assert_eq!(
+            notice.title,
+            "Automatic contributing stopped for new projects"
+        );
+        assert_eq!(notice.body, VOID_GRANT_BODY);
+        assert_eq!(notice.rearm, VOID_GRANT_REARM);
+    }
+
+    /// A label this build does not know still produces a notice, and an
+    /// empty list still says something changed: the grant stopped either
+    /// way, and a notice dropped for want of a sentence is a silent void.
+    #[test]
+    fn an_unknown_or_missing_reason_still_produces_a_notice() {
+        let unknown = void_notice(Some("api"), &["from-a-newer-daemon".to_string()]);
+        assert_eq!(unknown.reasons, vec![VOID_REASON_UNKNOWN]);
+        let none = void_notice(Some("api"), &[]);
+        assert_eq!(none.reasons, vec![VOID_REASON_UNKNOWN]);
+        let repeated = void_notice(
+            Some("api"),
+            &["scopes-widened".to_string(), "scopes-widened".to_string()],
+        );
+        assert_eq!(repeated.reasons.len(), 1);
+    }
+
+    /// The copy is a notice, not a control: it never tells the contributor
+    /// the grant is still on, and its button does not re-arm.
+    #[test]
+    fn the_acknowledge_button_does_not_claim_to_rearm() {
+        let lower = VOID_ACKNOWLEDGE.to_lowercase();
+        assert!(!lower.contains("turn on"));
+        assert!(!lower.contains("keep"));
+    }
+
+    /// The wire's `kind` picks the wording here, not in a shell.
+    #[test]
+    fn the_wire_kind_picks_the_wording() {
+        let project = void_notice_for_wire(&serde_json::json!({
+            "id": 1, "kind": "project", "project_id": "p", "project_label": "api",
+            "reasons": ["witness-changed"], "voided_at": "2026-09-26T00:00:00Z",
+        }))
+        .expect("a project notice");
+        assert_eq!(
+            project,
+            void_notice(Some("api"), &["witness-changed".to_string()])
+        );
+
+        let grant = void_notice_for_wire(&serde_json::json!({
+            "id": 2, "kind": "automatic_grant", "project_id": null, "project_label": null,
+            "reasons": ["scopes-widened"], "voided_at": "2026-09-26T00:00:00Z",
+        }))
+        .expect("a grant notice");
+        assert_eq!(grant, void_notice(None, &["scopes-widened".to_string()]));
+    }
+
+    /// A shape this build cannot read is refused rather than guessed at.
+    #[test]
+    fn an_unreadable_wire_void_is_refused_not_guessed() {
+        for value in [
+            serde_json::json!("project"),
+            serde_json::json!({ "kind": "folder", "reasons": [] }),
+            serde_json::json!({ "kind": "project", "reasons": [] }),
+            serde_json::json!({ "kind": "project", "project_label": "", "reasons": [] }),
+            serde_json::json!({ "reasons": [] }),
+        ] {
+            assert!(void_notice_for_wire(&value).is_none(), "{value}");
         }
     }
 }

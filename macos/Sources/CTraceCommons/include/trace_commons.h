@@ -1502,6 +1502,24 @@ char*       tc_consent_copy(void);
  */
 char*       tc_consent_gate_help(int32_t pinned);
 
+/* The notice for one grant R6 voided (the connect-and-forget design): that
+ * automatic contributing stopped, for which project or for new projects, why,
+ * and that it can be turned back on.
+ *
+ * void_json is ONE element of status's grant_voids list, passed through as
+ * the JSON object the daemon sent. Returns an owned JSON object with title,
+ * body, reasons_heading, reasons (a list of sentences), rearm and
+ * acknowledge; free it with tc_string_free.
+ *
+ * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read kind or reasons to
+ * choose words natively. Once shown, call acknowledge_grant_voids with the
+ * element's id; acknowledging is all the button does.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, an unknown kind, a
+ * project void without a label, and on a caught panic.
+ */
+char*       tc_grant_void_notice(const char* void_json);
+
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
  * the opencode-export-version-unsupported health label. No daemon handle needed. */

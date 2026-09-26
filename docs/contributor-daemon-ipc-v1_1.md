@@ -497,6 +497,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
+| `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
@@ -531,9 +532,12 @@ pins. No account token, device key or PKCE verifier is returned to native views.
     "blocked_entries": 14,
     "blocked_bytes": 137283584
   },
-  "routing": { "state": "not_declared", "last_refresh_at": null }
+  "routing": { "state": "not_declared", "last_refresh_at": null },
+  "grant_voids": []
 }
 ```
+
+`grant_voids` is additive; see "Void notices" below.
 
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
@@ -1592,6 +1596,58 @@ value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
 never free text, a path, or a token. See "Authorization" above for what this
 log is (and is not) for.
+
+A `grant-voids-acknowledged` entry records `acknowledge_grant_voids`;
+`detail` is how many notices it cleared.
+
+### Void notices
+
+R6 of the connect-and-forget design makes a void notice a ship condition:
+when widened terms void a grant, every shell tells the contributor, not only
+the audit. `status.grant_voids` lists every void no shell has acknowledged
+yet, oldest first:
+
+```json
+{
+  "grant_voids": [
+    { "id": 4, "kind": "project", "voided_at": "2026-09-26T12:00:00Z",
+      "project_id": "3f1c...", "project_label": "api",
+      "reasons": ["witness-measurement-admitted"] },
+    { "id": 5, "kind": "automatic_grant", "voided_at": "2026-09-26T12:00:00Z",
+      "project_id": null, "project_label": null,
+      "reasons": ["witness-measurement-admitted"] }
+  ]
+}
+```
+
+- `kind` is `project` for an `auto-upload-voided` void and `automatic_grant`
+  for an `automatic-grant-voided` one. `project_id` and `project_label` are
+  the ones `list_projects` gives that project, and are `null` for the grant.
+  No path crosses.
+- `reasons` are the same fixed labels as the audit's `detail`.
+- The list is always present, and `[]` when there is nothing to show, so a
+  shell can tell that from a daemon too old to report voids.
+- A shell does not write the notice. It passes one element to
+  `consent_copy::void_notice_for_wire` (across the C ABI,
+  `tc_grant_void_notice`), which returns the title, body, one sentence per
+  reason, how to turn it back on, and the button's label.
+- The list is in the policy file, so a void during a pass no shell saw is
+  shown at the next launch. A sweep that voids publishes `status_changed`.
+
+`acknowledge_grant_voids` takes `ids`, the ids of the notices actually
+shown, and removes them. It is required, and there is no "all": a void
+raised between a shell drawing and the contributor pressing the button would
+otherwise be cleared unseen. An id that is not outstanding is ignored, since
+another shell may have acknowledged it first. It is audited
+(`grant-voids-acknowledged`) before anything is cleared, and refused with
+`audit-write-failed` when that entry cannot be written; it publishes
+`status_changed` when it clears anything. Acknowledging only records that
+the notice was seen: it re-arms nothing.
+
+A notice also goes when the contributor acts on what it is about: setting
+that project's mode (`set_project_mode`, including re-arming it) clears the
+project's notice, and `grant_automatic` clears the grant's. Ids are never
+reused. Logout clears the policy file and every notice with it.
 
 ### `grant_automatic`, `withdraw_automatic_grant`, `automatic_grant`
 
