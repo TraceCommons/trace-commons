@@ -1420,6 +1420,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "inference_connection",
         include_str!("../../../../migrations/V79__inference_connection.sql"),
     ),
+    (
+        80,
+        "account_trust_merge",
+        include_str!("../../../../migrations/V80__account_trust_merge.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -4795,6 +4800,26 @@ impl Database for PgBackend {
             .map_err(DatabaseError::Postgres)?
             .get(0);
 
+        // Invite trust follows the identity: B's grant rows (with their
+        // revocations) are copied onto A, and A's authority is re-derived from
+        // its combined unrevoked grants, so an invited B does not come out
+        // uninvited and a revoked grant confers nothing. V80's definer function
+        // does this under the same consumed-proposal proof as the hooks above;
+        // the rule is stated in that migration.
+        let invite_grants_carried: i64 = tx
+            .query_one(
+                "SELECT public.trace_account_trust_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.
         tx.execute(
@@ -4829,6 +4854,7 @@ impl Database for PgBackend {
             "authenticators_moved": authenticators_moved,
             "public_runs_moved": public_runs_moved,
             "source_sessions_moved": source_sessions_moved,
+            "invite_grants_carried": invite_grants_carried,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (
