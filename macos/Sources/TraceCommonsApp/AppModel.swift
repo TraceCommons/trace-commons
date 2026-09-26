@@ -1478,6 +1478,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Void notices whose "Turn back on" the daemon refused, by notice id,
+    /// so the card can show the Rust's refusal line. Cleared on a retry.
+    @Published private(set) var grantVoidRearmRefused: Set<UInt64> = []
+
+    /// "Turn back on" on a project's void notice. The same call as arming a
+    /// project in Settings -- `set_project_mode` with the project's id and
+    /// `auto_upload` -- so the daemon applies the same refusals, writes the
+    /// same `armed-auto-upload` row, and clears the notice itself. A refusal
+    /// changes nothing; the notice stays and says so.
+    func rearmGrantVoid(id: UInt64, projectID: String) {
+        guard let client else { return }
+        grantVoidRearmRefused.remove(id)
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.setProjectMode(projectID: projectID, mode: .autoUpload) }
+            await MainActor.run {
+                if case .failure = outcome {
+                    self.grantVoidRearmRefused.insert(id)
+                }
+                self.refreshStatus()
+                self.refreshProjects()
+                self.refreshAudit()
+            }
+        }
+    }
+
     func acknowledgeNearAINotice() {
         perform(
             "acknowledge_near_ai_notice",

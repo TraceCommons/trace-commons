@@ -92,9 +92,12 @@ struct MainWindowView: View {
             if model.isAttachedDaemon { AttachedDaemonNotice() }
             // Above the shell for the same reason: a void changes what the
             // contributor agreed to, and they are told wherever they are.
-            GrantVoidNotices(voids: model.status.grantVoids) { id in
-                model.acknowledgeGrantVoid(id: id)
-            }
+            GrantVoidNotices(
+                voids: model.status.grantVoids,
+                refused: model.grantVoidRearmRefused,
+                onAcknowledge: { id in model.acknowledgeGrantVoid(id: id) },
+                onRearm: { id, projectID in model.rearmGrantVoid(id: id, projectID: projectID) }
+            )
             shell
         }
     }
@@ -753,7 +756,9 @@ struct AttachedDaemonNotice: View {
 /// ABI; this view only lays them out.
 struct GrantVoidNotices: View {
     let voids: [GrantVoidWire]
+    let refused: Set<UInt64>
     let onAcknowledge: (UInt64) -> Void
+    let onRearm: (UInt64, String) -> Void
 
     var body: some View {
         if !voids.isEmpty {
@@ -769,7 +774,11 @@ struct GrantVoidNotices: View {
                     {
                         GrantVoidNoticeCard(
                             notice: notice,
-                            onAcknowledge: { onAcknowledge(void.id) }
+                            refused: refused.contains(void.id),
+                            onAcknowledge: { onAcknowledge(void.id) },
+                            onRearm: notice.rearmTarget(for: void).map { projectID in
+                                { onRearm(void.id, projectID) }
+                            }
                         )
                     }
                 }
@@ -782,7 +791,11 @@ struct GrantVoidNotices: View {
 
 struct GrantVoidNoticeCard: View {
     let notice: GrantVoidNotice
+    let refused: Bool
     let onAcknowledge: () -> Void
+    /// Present only when the Rust offered "Turn back on" and the element
+    /// names a project: never on the grant's notice or an unplaced one.
+    let onRearm: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: TC.Space.m) {
@@ -814,13 +827,28 @@ struct GrantVoidNoticeCard: View {
                     .foregroundStyle(TC.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, TC.Space.xxs)
+                if refused, let failed = notice.rearmFailed {
+                    Text(failed)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.Tone.attention.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: TC.Space.m)
-            // Acknowledging records that the notice was shown, and re-arms
-            // nothing.
-            Button(notice.acknowledge, action: onAcknowledge)
-                .lineLimit(1)
-                .fixedSize()
+            VStack(alignment: .trailing, spacing: TC.Space.xs) {
+                // "Turn back on" sits beside the sentence saying that doing
+                // so agrees to the new settings. It is Settings' arming call.
+                if let onRearm, let action = notice.rearmAction {
+                    Button(action, action: onRearm)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                // Acknowledging records that the notice was shown, and
+                // re-arms nothing.
+                Button(notice.acknowledge, action: onAcknowledge)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
         }
         .padding(.vertical, TC.Space.m)
         .padding(.horizontal, TC.Space.md)

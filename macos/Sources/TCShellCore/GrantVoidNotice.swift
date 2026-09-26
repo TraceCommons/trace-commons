@@ -17,6 +17,10 @@ public struct GrantVoidWire: Decodable, Equatable, Sendable {
     public let id: UInt64
     /// The element as the daemon sent it, re-encoded.
     public let json: String
+    /// The project a project void names, for "Turn back on". Read only
+    /// through `GrantVoidNotice.rearmTarget(for:)`, which returns it only
+    /// when the Rust offered the button.
+    public let projectId: String?
 
     public init(from decoder: Decoder) throws {
         let value = try JSONValue(from: decoder)
@@ -27,6 +31,11 @@ public struct GrantVoidWire: Decodable, Equatable, Sendable {
                 .init(codingPath: decoder.codingPath, debugDescription: "grant_voids.id"))
         }
         id = UInt64(n)
+        if case .string(let project)? = fields["project_id"], !project.isEmpty {
+            projectId = project
+        } else {
+            projectId = nil
+        }
         let data = try JSONEncoder().encode(value)
         json = String(decoding: data, as: UTF8.self)
     }
@@ -88,18 +97,34 @@ public struct GrantVoidNotice: Decodable, Equatable, Sendable {
     /// The button. It records that the notice was shown and does nothing
     /// else.
     public let acknowledge: String
+    /// "Turn back on", or nil when the notice has no project to arm (the
+    /// automatic grant's, and an unplaced one).
+    public let rearmAction: String?
+    /// Shown when the daemon refuses the re-arm; nil exactly when
+    /// `rearmAction` is.
+    public let rearmFailed: String?
 
     enum CodingKeys: String, CodingKey {
         case title, body
         case reasonsHeading = "reasons_heading"
         case reasons, rearm, acknowledge
+        case rearmAction = "rearm_action"
+        case rearmFailed = "rearm_failed"
     }
 
     /// The payload fields this shell decodes, by wire name. Compared against
     /// the live export by `TCBridgeTests`.
     public static let consumedFields = [
         "title", "body", "reasons_heading", "reasons", "rearm", "acknowledge",
+        "rearm_action", "rearm_failed",
     ]
+
+    /// The project "Turn back on" arms, or nil when there is no button. The
+    /// button sends `set_project_mode` with this id and `auto_upload`, the
+    /// same call as arming a project in Settings.
+    public func rearmTarget(for void: GrantVoidWire) -> String? {
+        rearmAction == nil ? nil : void.projectId
+    }
 
     /// Decode the payload, or nil if it will not parse, a field is empty, or
     /// there is no reason. Shown whole or not at all: a notice that says
@@ -114,6 +139,10 @@ public struct GrantVoidNotice: Decodable, Equatable, Sendable {
         let sentences = [notice.title, notice.body, notice.reasonsHeading, notice.rearm, notice.acknowledge]
             + notice.reasons
         if notice.reasons.isEmpty || sentences.contains(where: \.isEmpty) { return nil }
+        // The button and its refusal line travel together, and neither is
+        // ever an empty string.
+        if (notice.rearmAction == nil) != (notice.rearmFailed == nil) { return nil }
+        if notice.rearmAction?.isEmpty == true || notice.rearmFailed?.isEmpty == true { return nil }
         return notice
     }
 }

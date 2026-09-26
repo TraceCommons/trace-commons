@@ -24,7 +24,7 @@ final class GrantVoidNoticeBridgeTests: XCTestCase {
     /// The grant's own void gets different words, chosen by the ABI.
     func testTheGrantsVoidIsWordedByTheAbiNotHere() throws {
         let project = try wire("""
-        {"id":4,"kind":"project","project_label":"api","reasons":["destination-changed"]}
+        {"id":4,"kind":"project","project_id":"3f1c","project_label":"api","reasons":["destination-changed"]}
         """)
         let grant = try wire("""
         {"id":5,"kind":"automatic_grant","project_label":null,"reasons":["destination-changed"]}
@@ -35,6 +35,12 @@ final class GrantVoidNoticeBridgeTests: XCTestCase {
             TCConsentCopy.voidNoticeJSON(forVoid: grant.json).flatMap(GrantVoidNotice.decode(fromJSON:)))
         XCTAssertNotEqual(a.title, b.title)
         XCTAssertNotEqual(a.body, b.body)
+        // Only the project's notice offers "Turn back on"; no shell can
+        // give the automatic grant again yet.
+        XCTAssertNotNil(a.rearmAction)
+        XCTAssertNotNil(a.rearmFailed)
+        XCTAssertNil(b.rearmAction)
+        XCTAssertNil(b.rearmTarget(for: grant))
     }
 
     /// The exported field set is exactly what this shell decodes, so a
@@ -52,6 +58,7 @@ final class GrantVoidNoticeBridgeTests: XCTestCase {
     func testAnElementTheAbiCannotPlaceIsStillWordedByTheAbi() throws {
         let void = try wire(#"{"id":9,"kind":"folder"}"#)
         let json = try XCTUnwrap(TCConsentCopy.voidNoticeJSON(forVoid: void.json))
-        XCTAssertNotNil(GrantVoidNotice.decode(fromJSON: json))
+        let notice = try XCTUnwrap(GrantVoidNotice.decode(fromJSON: json))
+        XCTAssertNil(notice.rearmAction, "no project to arm, so no button")
     }
 }
