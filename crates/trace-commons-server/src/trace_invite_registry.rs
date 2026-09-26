@@ -29,6 +29,19 @@ pub enum InviteTenantMode {
     Derived,
 }
 
+/// Tenant prefixes allocated only by provisioned account admission.
+/// Keep invite creation and admission classification on the same list.
+pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] = ["near-", "nearai-"];
+
+/// Fixed invite grants must not claim a provisioned account tenant namespace.
+pub fn fixed_invite_tenant_uses_reserved_namespace(tenant_id: &str) -> bool {
+    RESERVED_ACCOUNT_TENANT_PREFIXES.iter().any(|prefix| {
+        tenant_id
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct InviteEntry {
     pub invite_subject_hash: String,
@@ -299,6 +312,13 @@ pub async fn import_file_invites(
                 "PilotAllowlistMalformed: invite entry missing tenant_id",
             ));
         };
+        if fixed_invite_tenant_uses_reserved_namespace(tenant_id) {
+            return Err(import_failure(
+                &summary,
+                entry_number,
+                "PilotAllowlistMalformed: fixed tenant namespace reserved",
+            ));
+        }
         let write = InviteGrantWrite {
             invite_subject_hash: subject_hash.to_string(),
             policy_label: policy_label.to_string(),
@@ -348,6 +368,19 @@ pub struct DbInviteRegistry {
 }
 
 impl DbInviteRegistry {
+    #[cfg(test)]
+    pub(crate) fn unwarmed_for_test(
+        backend: Arc<PgBackend>,
+        refresh_interval: Duration,
+        max_stale: Duration,
+    ) -> Self {
+        Self {
+            backend,
+            cache: InviteCache::new(max_stale),
+            refresh_interval,
+        }
+    }
+
     /// Warms the cache once before returning. A failed warm is an error: the
     /// issuer must not come up believing it has a usable registry.
     pub async fn new(
@@ -422,6 +455,31 @@ mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn fixed_invite_tenant_uses_reserved_namespace_for_any_suffix() {
+        for tenant_id in [
+            "near-",
+            "nearai-",
+            "near-abc",
+            "nearai-abc",
+            "NeAr-xyz",
+            "NEARAI-xyz",
+            "near-not-hex!",
+            "nearai-?",
+        ] {
+            assert!(
+                fixed_invite_tenant_uses_reserved_namespace(tenant_id),
+                "reserved tenant ID must be refused: {tenant_id}"
+            );
+        }
+        for tenant_id in ["nearby-1", "nearaiX-1", "tenant-zaki-pilot", ""] {
+            assert!(
+                !fixed_invite_tenant_uses_reserved_namespace(tenant_id),
+                "ordinary tenant ID must remain available: {tenant_id}"
+            );
+        }
+    }
 
     fn entry(hash: &str) -> InviteEntry {
         InviteEntry {

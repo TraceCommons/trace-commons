@@ -77,7 +77,7 @@ pub enum UploadDecision {
     /// is not the one the contributor was shown. Nothing was sent; the
     /// entry goes back in front of the contributor under `reason_label`.
     ApprovalStale { reason_label: String },
-    /// Network or auth failure.
+    /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
     /// A daily volume cap is in force.
     CapReached,
@@ -242,6 +242,7 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         },
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "claim-mint-failed" => Some(LABEL_CLAIM_MINT_FAILED),
+            crate::submit::REASON_TRANSIENT_REDACTION => Some(LABEL_PII_FILTER_UNAVAILABLE),
             // A refusal the commons sent on purpose, before the catch-all
             // that reads everything else as an outage.
             other => match AdmissionRefusal::from_label(other) {
