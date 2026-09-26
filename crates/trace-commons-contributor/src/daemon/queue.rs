@@ -1247,9 +1247,6 @@ impl Queue {
         changed
     }
 
-    /// Revoke an approval and put the entry back in front of the
-    /// contributor, because the terms it was approved under no longer hold.
-    /// Returns whether anything changed.
     /// Revoke an unattended approval and pin the certified review the
     /// witness has just produced for it, so a person opening the entry sees
     /// those bytes instead of running the witness again (the spec's R5).
@@ -1268,6 +1265,9 @@ impl Queue {
         self.record_previewed_envelope(entry_id, pin, attested_inference)
     }
 
+    /// Revoke an approval and put the entry back in front of the
+    /// contributor, because the terms it was approved under no longer hold.
+    /// Returns whether anything changed.
     pub fn revoke_approval(&mut self, entry_id: Uuid, reason_label: &str) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;

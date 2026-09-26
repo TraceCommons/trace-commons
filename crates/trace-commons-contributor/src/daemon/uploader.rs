@@ -519,6 +519,29 @@ impl Uploader<'_, '_> {
                             reason_label: "token-distribution-consent-changed".into(),
                         });
                     }
+                    // A pinned review is not a person's approve. A contributor
+                    // can open a review on a waiting session in an automatic
+                    // project, see a verdict that is not `low`, and close it;
+                    // the watcher then approves the entry on their behalf with
+                    // the pin still in place. The same hold as a fresh witness
+                    // run, read from the certificate `approved_witness_for`
+                    // has just validated, and before anything is handed to
+                    // the pipeline.
+                    if entry.approved_unattended
+                        && !crate::submit::verdict_is_low(artifact.response())
+                    {
+                        if let Some(pin) = entry.previewed_envelope_digest.clone() {
+                            return Ok(UploadDecision::HeldForReview {
+                                reason_label: crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED
+                                    .to_string(),
+                                pin,
+                                attested_inference: entry.attested_inference.clone(),
+                            });
+                        }
+                        return Ok(UploadDecision::ApprovalStale {
+                            reason_label: "witness-review-stale".to_string(),
+                        });
+                    }
                     self.ctx
                         .use_approved_token_bundle(artifact.token_bundle.clone());
                     if self
