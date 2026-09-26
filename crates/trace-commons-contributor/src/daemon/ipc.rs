@@ -514,6 +514,11 @@ pub struct DaemonShared {
     /// "has rows". Compared against on every refresh so a transition is
     /// reported once, not on every poll -- see [`Self::routing_transition`].
     routing_had_rows: AtomicBool,
+    /// How many sessions the last full pass reported the automatic gate as
+    /// holding, and the unmet reasons (labels) it held them for. Compared
+    /// against by `watcher::report_gate` so the level is logged when either
+    /// moves, not on every poll.
+    pub(crate) gate_held_logged: Mutex<(usize, Vec<&'static str>)>,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -692,6 +697,7 @@ impl DaemonShared {
             routing,
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
+            gate_held_logged: Mutex::new((0, Vec::new())),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
