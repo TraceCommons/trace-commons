@@ -11,10 +11,122 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use trace_commons_protocol::trace_contribution::ResidualRiskCondition;
+use trace_commons_protocol::witness_provenance::{AttestationClass, InferenceProvenance};
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
+use crate::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+use crate::redaction_witness::verification::VerifiedWitnessCertificate;
+
+/// Private exact-byte evidence. The only constructor requires the completed
+/// signature, freshness, pin and raw-body verification result. The original
+/// headers are compared to that result before they can be persisted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TraceWitnessCertificateEvidenceWrite {
+    pub(crate) tenant_id: String,
+    pub(crate) submission_id: Uuid,
+    pub(crate) certificate_json: Vec<u8>,
+    pub(crate) signature_header: Vec<u8>,
+    pub(crate) raw_body_sha256: String,
+    pub(crate) artifact_sha256: String,
+    pub(crate) certificate_version: i16,
+    pub(crate) inference_class: AttestationClass,
+    pub(crate) bound_model: Option<String>,
+    pub(crate) receipt_signer: Option<String>,
+    pub(crate) issued_at: DateTime<Utc>,
+}
+
+impl TraceWitnessCertificateEvidenceWrite {
+    pub fn from_verified(
+        tenant_id: &str,
+        submission_id: Uuid,
+        verified: &VerifiedWitnessCertificate,
+        headers: &axum::http::HeaderMap,
+        raw_body: &[u8],
+        artifact_sha256: &str,
+    ) -> Result<Self, DatabaseError> {
+        let raw_body_sha256 = hex::encode(Sha256::digest(raw_body));
+        if !verified.matches_received_headers(headers)
+            || !verified
+                .redacted_sha256()
+                .eq_ignore_ascii_case(&raw_body_sha256)
+            || artifact_sha256.len() != 64
+            || !artifact_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceBindingMismatch".into(),
+            ));
+        }
+        let issued_at = DateTime::<Utc>::from_timestamp(verified.issued_at_unix_seconds(), 0)
+            .ok_or_else(|| DatabaseError::Query("WitnessEvidenceTimestampInvalid".into()))?;
+        let certificate_json = headers
+            .get(CERTIFICATE_HEADER)
+            .expect("matched verified headers have certificate")
+            .as_bytes()
+            .to_vec();
+        let signature_header = headers
+            .get(SIGNATURE_HEADER)
+            .expect("matched verified headers have signature")
+            .as_bytes()
+            .to_vec();
+        // A v1 certificate carries no provenance claim (`None`); it is stored
+        // as unattested and `certificate_version = 1` keeps it distinguishable
+        // from a signed v2 unattested statement.
+        let (inference_class, bound_model, receipt_signer) = match verified.inference_provenance() {
+            None | Some(InferenceProvenance::Unattested) => {
+                (AttestationClass::Unattested, None, None)
+            }
+            Some(InferenceProvenance::Attested(call)) => (
+                call.class(),
+                call.model().map(str::to_string),
+                Some(call.receipt_signer().to_string()),
+            ),
+        };
+        Ok(Self {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            certificate_json,
+            signature_header,
+            raw_body_sha256,
+            artifact_sha256: artifact_sha256.to_string(),
+            certificate_version: verified.certificate_version(),
+            inference_class,
+            bound_model,
+            receipt_signer,
+            issued_at,
+        })
+    }
+
+    pub fn raw_body_sha256(&self) -> &str {
+        &self.raw_body_sha256
+    }
+
+    pub fn certificate_version(&self) -> i16 {
+        self.certificate_version
+    }
+}
+
+/// A policy-facing read never carries private certificate or signature bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceWitnessEvidenceCoverage {
+    Missing,
+    LegacyV1,
+    ExplicitUnattested,
+    Inactive,
+    ArtifactMismatch,
+    VerifiedV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceWitnessEvidenceClaim {
+    pub class: AttestationClass,
+    pub coverage: TraceWitnessEvidenceCoverage,
+    pub raw_body_sha256: Option<String>,
+}
 
 fn default_trace_ranking_min_label_source_count() -> u32 {
     1
@@ -2345,6 +2457,82 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError>;
+
+    /// Commit submission metadata and its optional verified witness evidence
+    /// together. Stores lacking this transaction must refuse evidence writes.
+    async fn upsert_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        if evidence.is_some() {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceStorageUnavailable".into(),
+            ));
+        }
+        self.upsert_trace_submission(submission).await
+    }
+
+    /// Quarantine remediation: a re-POST replaces a quarantined submission's
+    /// body under the same id, so any evidence for the prior body no longer
+    /// describes the submission. In the same transaction as the submission
+    /// update, a store removes the prior evidence of a submission whose stored
+    /// status is `quarantined` and records `evidence` (if any) for the new
+    /// body. Evidence of a submission in any other state is never removed, so
+    /// offering different evidence for it conflicts exactly as
+    /// [`Self::upsert_trace_submission_with_witness`] does.
+    async fn remediate_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        // Stores without evidence storage hold no prior evidence to replace.
+        self.upsert_trace_submission_with_witness(submission, evidence)
+            .await
+    }
+
+    /// Low-level diagnostic lookup. Its caller-provided digest is not an
+    /// authorization boundary; policy consumers use the current-object read
+    /// below, which obtains the object reference from the database itself.
+    async fn get_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _current_artifact_sha256: &str,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Policy read with the current submitted object selected by the database
+    /// in the same tenant transaction as evidence and active submission state.
+    async fn get_current_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Compare an idempotent retry to exact signed-source bytes already stored.
+    /// `None` means no durable evidence exists for this submission; `Some(false)`
+    /// is a conflict. Both witness headers may be omitted for an exact-body
+    /// receipt read, but a partial pair or changed offered evidence conflicts.
+    async fn witness_retry_identity_matches(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _certificate_json: Option<&[u8]>,
+        _signature_header: Option<&[u8]>,
+        _raw_body: &[u8],
+    ) -> Result<Option<bool>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
 
     async fn get_trace_submission(
         &self,

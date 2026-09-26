@@ -561,11 +561,12 @@ PID=$(systemctl show -p MainPID --value trace-commons-ingest)
 sudo tr '\0' '\n' < /proc/$PID/environ | grep -c '^TRACE_COMMONS_WITNESS_'
 ```
 
-Expected: `0`. With the switch off an arriving certificate is ignored
-entirely and every content-bearing trace holds exactly as it did before. This
-is safe to do at any moment: it can only make the server hold more, never
-less. Setting `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false` while leaving the
-pins in place is the same outcome and keeps the pins ready to re-enable.
+Expected: `0`. With all witness pins removed an arriving certificate cannot
+verify, and every content-bearing trace takes the ordinary PII-backstop path.
+Setting `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false` while leaving the pins in
+place disables the bypass but still permits independent verified provenance
+capture. That choice holds more traces without discarding evidence for
+PostgreSQL-backed submissions.
 
 **The witness requirement, back off:** redeploy the witness without
 `TRACE_COMMONS_WITNESS_REQUIRE_ATTESTED_INFERENCE`. If it was set in the
@@ -583,3 +584,47 @@ was exposure rather than breakage.
 Nothing in this rollback re-evaluates anything already decided. A submission
 admitted on a verified certificate stays admitted; a trace held while the pin
 was stale stays held. Both are submit-path decisions.
+
+## Z2 provenance capture and rollout
+
+Follow the verifiers-first order above: ingest and clients that accept both
+profiles first, and only then a witness configured to issue v2. Clients must
+forward the original certificate header, signature header, and ingest request
+body bytes unchanged. Deploy ingest with the signing address and measurement
+set pinned before enabling provenance-dependent policy. The pin controls verification even when
+`TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false`; the bypass also requires its
+own explicit policy-version allowlist. A half-configured pin refuses ingest
+startup. Apply V76 and grant the ingest database login membership in
+`trace_witness_evidence_runtime` when it is not the migration owner. The table
+uses forced tenant RLS. Only the derived `artifact_sha256` link may change
+after insert, on an exact signed-source retry. The runtime role's column
+grants allow nothing else, and a `BEFORE UPDATE` trigger
+(`trace_witness_evidence_signed_source_immutable`) refuses any change to the
+certificate, signature, received-body digest, provenance fields, or times for
+every role, including a table owner that ingest connects as in a single-login
+deployment. A row is removed only with its submission, or when a quarantined
+submission is remediated with a new body: the prior body's evidence is then
+replaced by the new body's evidence, or dropped when the re-POST carries no
+certificate, in the same transaction as the submission update.
+
+For each verified submission, ingest persists the original certificate and
+signature header bytes, raw submitted body SHA-256, certificate issue time,
+and closed provenance class. A failed evidence transaction prevents a success
+receipt when the database mirror is required. File-only ingestion has no
+durable provenance read. A v1 certificate is labeled `legacy_v1` and remains
+policy-unattested; v2 `unattested` is an explicit signed claim. A provider TEE
+or gateway class covers only the last declared call's original request and
+response bytes and the pinned receipt signer. It says nothing about earlier
+session calls, replay, or model correctness. Gateway receipts need not bind a
+model.
+
+The server rescrubs after verifying the original request body. The resulting
+stored artifact has a separate digest. Evidence tied to that stored object is
+historical proof of the received body; the rescrubbed bytes were not signed by
+the witness. Gate, credit, and export integrations use the tenant-scoped
+`get_current_verified_witness_evidence` read, which joins the active submission,
+historical evidence, and selected current object reference in one database
+transaction. The caller does not supply an object digest. The object loader must
+still verify stored bytes against that reference before consuming them. An
+inactive, revoked, or mismatched object cannot receive an attested source
+class. This release does not assign new scoring or credit weights.

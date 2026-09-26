@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
@@ -50,7 +51,8 @@ use crate::trace_corpus_storage::{
     TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
     TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
     TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWithdrawalRecord, TraceWorkerKind,
+    TraceWithdrawalRecord, TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim,
+    TraceWitnessEvidenceCoverage, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -354,6 +356,59 @@ fn row_to_submission(row: &Row) -> Result<TraceSubmissionRecord, DatabaseError> 
             .map(|value| json_array_strings(value, "residual_risk_basis"))
             .transpose()?,
     })
+}
+
+fn witness_claim_from_row(
+    row: Option<Row>,
+    current_artifact_sha256: Option<&str>,
+) -> TraceWitnessEvidenceClaim {
+    use trace_commons_protocol::witness_provenance::AttestationClass;
+    let missing = || TraceWitnessEvidenceClaim {
+        class: AttestationClass::Unattested,
+        coverage: TraceWitnessEvidenceCoverage::Missing,
+        raw_body_sha256: None,
+    };
+    let Some(row) = row else {
+        return missing();
+    };
+    let Some(version) = row.get::<_, Option<i16>>(4) else {
+        return missing();
+    };
+    let raw_body_sha256: Option<String> = row.get(6);
+    let conservative = |coverage| TraceWitnessEvidenceClaim {
+        class: AttestationClass::Unattested,
+        coverage,
+        raw_body_sha256: raw_body_sha256.clone(),
+    };
+    if version == 1 {
+        return conservative(TraceWitnessEvidenceCoverage::LegacyV1);
+    }
+    let class = match row.get::<_, Option<String>>(5).as_deref() {
+        Some("provider_tee_final_call") => AttestationClass::ProviderTeeFinalCall,
+        Some("gateway_final_call") => AttestationClass::GatewayFinalCall,
+        _ => return conservative(TraceWitnessEvidenceCoverage::ExplicitUnattested),
+    };
+    let status: String = row.get(0);
+    let revoked_at: Option<DateTime<Utc>> = row.get(1);
+    let purged_at: Option<DateTime<Utc>> = row.get(2);
+    let expires_at: Option<DateTime<Utc>> = row.get(3);
+    if status != "accepted"
+        || revoked_at.is_some()
+        || purged_at.is_some()
+        || expires_at.is_some_and(|at| at <= Utc::now())
+    {
+        return conservative(TraceWitnessEvidenceCoverage::Inactive);
+    }
+    if current_artifact_sha256.is_none()
+        || row.get::<_, Option<String>>(7).as_deref() != current_artifact_sha256
+    {
+        return conservative(TraceWitnessEvidenceCoverage::ArtifactMismatch);
+    }
+    TraceWitnessEvidenceClaim {
+        class,
+        coverage: TraceWitnessEvidenceCoverage::VerifiedV2,
+        raw_body_sha256,
+    }
 }
 
 fn row_to_tenant_policy(row: &Row) -> Result<TraceTenantPolicyRecord, DatabaseError> {
@@ -1548,114 +1603,123 @@ impl TraceCorpusStore for PgBackend {
         &self,
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError> {
-        self.ensure_trace_tenant(&submission.tenant_id).await?;
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
-        let status = enum_to_storage(submission.status)?;
-        let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|e| {
-            DatabaseError::Serialization(format!("trace consent scopes encode failed: {e}"))
-        })?;
-        let allowed_uses = serde_json::to_value(&submission.allowed_uses).map_err(|e| {
-            DatabaseError::Serialization(format!("trace allowed uses encode failed: {e}"))
-        })?;
-        let redaction_counts = serde_json::to_value(&submission.redaction_counts).map_err(|e| {
-            DatabaseError::Serialization(format!("trace redaction counts encode failed: {e}"))
-        })?;
-        // NULL when the caller recorded no basis, which reads as "not
-        // recorded" -- never as a claim that no condition held.
-        //
-        // The DO UPDATE below is deliberately COALESCE-free. It overwrites
-        // `privacy_risk` unconditionally, so preserving an older basis
-        // underneath a fresh risk would leave the two describing different
-        // passes, and a basis that disagrees with the risk on its own row is
-        // worse than an absent one, because it will be believed. The pair is
-        // written together or cleared together.
-        let residual_risk_basis = submission
-            .residual_risk_basis
-            .as_ref()
-            .map(|labels| {
-                serde_json::to_value(labels).map_err(|e| {
-                    DatabaseError::Serialization(format!(
-                        "trace residual risk basis encode failed: {e}"
-                    ))
-                })
-            })
-            .transpose()?;
+        self.upsert_trace_submission_with_witness(submission, None)
+            .await
+    }
 
+    async fn upsert_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        self.upsert_submission_and_witness_evidence(submission, evidence, false)
+            .await
+    }
+
+    async fn remediate_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        self.upsert_submission_and_witness_evidence(submission, evidence, true)
+            .await
+    }
+
+    async fn get_verified_witness_evidence(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        current_artifact_sha256: &str,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
-            .query_one(
-                "INSERT INTO trace_submissions (
-                    tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
-                    submitted_tenant_scope_ref, schema_version, consent_policy_version,
-                    consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
-                    redaction_pipeline_version, redaction_hash, redaction_counts, canonical_summary_hash,
-                    submission_score, credit_points_pending, credit_points_final, expires_at,
-                    residual_risk_basis
-                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
-                 )
-                 ON CONFLICT (tenant_id, submission_id) DO UPDATE SET
-                    trace_id = excluded.trace_id,
-                    auth_principal_ref = excluded.auth_principal_ref,
-                    contributor_pseudonym = excluded.contributor_pseudonym,
-                    submitted_tenant_scope_ref = excluded.submitted_tenant_scope_ref,
-                    schema_version = excluded.schema_version,
-                    consent_policy_version = excluded.consent_policy_version,
-                    consent_scopes = excluded.consent_scopes,
-                    allowed_uses = excluded.allowed_uses,
-                    retention_policy_id = excluded.retention_policy_id,
-                    status = excluded.status,
-                    privacy_risk = excluded.privacy_risk,
-                    redaction_pipeline_version = excluded.redaction_pipeline_version,
-                    redaction_hash = excluded.redaction_hash,
-                    redaction_counts = excluded.redaction_counts,
-                    canonical_summary_hash = excluded.canonical_summary_hash,
-                    submission_score = excluded.submission_score,
-                    credit_points_pending = excluded.credit_points_pending,
-                    credit_points_final = excluded.credit_points_final,
-                    expires_at = excluded.expires_at,
-                    residual_risk_basis = excluded.residual_risk_basis,
-                    updated_at = NOW()
-                 RETURNING
-                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
-                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
-                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-                    privacy_risk, redaction_pipeline_version, redaction_hash,
-                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
-                    credit_points_final, received_at, updated_at, reviewed_at,
-                    review_assigned_to_principal_ref, review_assigned_at,
-                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
-                &[
-                    &submission.tenant_id,
-                    &submission.submission_id,
-                    &submission.trace_id,
-                    &submission.auth_principal_ref,
-                    &submission.contributor_pseudonym,
-                    &submission.submitted_tenant_scope_ref,
-                    &submission.schema_version,
-                    &submission.consent_policy_version,
-                    &consent_scopes,
-                    &allowed_uses,
-                    &submission.retention_policy_id,
-                    &status,
-                    &submission.privacy_risk,
-                    &submission.redaction_pipeline_version,
-                    &submission.redaction_hash,
-                    &redaction_counts,
-                    &submission.canonical_summary_hash,
-                    &submission.submission_score,
-                    &submission.credit_points_pending,
-                    &submission.credit_points_final,
-                    &submission.expires_at,
-                    &residual_risk_basis,
-                ],
+            .query_opt(
+                "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
+                    e.certificate_version, e.inference_class, e.raw_body_sha256,
+                    e.artifact_sha256
+             FROM trace_submissions s
+             LEFT JOIN trace_witness_certificate_evidence e
+               ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
+             WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                &[&tenant_id, &submission_id],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        let record = row_to_submission(&row)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(record)
+        Ok(witness_claim_from_row(row, Some(current_artifact_sha256)))
+    }
+
+    async fn get_current_verified_witness_evidence(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
+                    e.certificate_version, e.inference_class, e.raw_body_sha256,
+                    e.artifact_sha256,
+                    current_object.content_sha256 AS current_object_sha256
+             FROM trace_submissions s
+             LEFT JOIN trace_witness_certificate_evidence e
+               ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
+             LEFT JOIN LATERAL (
+                 SELECT content_sha256 FROM trace_object_refs o
+                 WHERE o.tenant_id = s.tenant_id AND o.submission_id = s.submission_id
+                   AND o.artifact_kind = 'submitted_envelope'
+                   AND o.invalidated_at IS NULL AND o.deleted_at IS NULL
+                 ORDER BY o.updated_at DESC, o.created_at DESC LIMIT 1
+             ) current_object ON true
+             WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let selected_digest = row
+            .as_ref()
+            .and_then(|r| r.get::<_, Option<String>>(8))
+            .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_string));
+        let claim = witness_claim_from_row(row, selected_digest.as_deref());
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(claim)
+    }
+
+    async fn witness_retry_identity_matches(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        certificate_json: Option<&[u8]>,
+        signature_header: Option<&[u8]>,
+        raw_body: &[u8],
+    ) -> Result<Option<bool>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT certificate_json, signature_header, raw_body_sha256
+                 FROM trace_witness_certificate_evidence
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.map(|stored| {
+            let body_matches = stored.get::<_, String>(2) == hex::encode(Sha256::digest(raw_body));
+            let witness_matches = match (certificate_json, signature_header) {
+                // A receipt read can omit expired/unavailable witness headers.
+                // It makes no new witness claim and cannot change durable evidence.
+                (None, None) => true,
+                (Some(cert), Some(sig)) => {
+                    stored.get::<_, Vec<u8>>(0) == cert && stored.get::<_, Vec<u8>>(1) == sig
+                }
+                _ => false,
+            };
+            body_matches && witness_matches
+        }))
     }
 
     async fn get_trace_submission(
@@ -6795,6 +6859,216 @@ impl TraceCorpusStore for PgBackend {
                 chunks_capped: row.get("chunks_capped"),
             })
             .collect())
+    }
+}
+
+impl PgBackend {
+    /// One transaction for the submission row and its witness evidence.
+    /// `replace_quarantined_evidence` is quarantine remediation: the prior
+    /// body's evidence is removed first, but only while the stored submission
+    /// is still `quarantined` (checked in this transaction, before the upsert
+    /// changes the status). Any other stored state keeps its evidence, so
+    /// different offered evidence conflicts below.
+    async fn upsert_submission_and_witness_evidence(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+        replace_quarantined_evidence: bool,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        if evidence.as_ref().is_some_and(|e| {
+            e.tenant_id != submission.tenant_id || e.submission_id != submission.submission_id
+        }) {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceSubmissionMismatch".into(),
+            ));
+        }
+        self.ensure_trace_tenant(&submission.tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
+        let status = enum_to_storage(submission.status)?;
+        if replace_quarantined_evidence {
+            tx.execute(
+                "DELETE FROM trace_witness_certificate_evidence e
+                 USING trace_submissions s
+                 WHERE e.tenant_id = $1 AND e.submission_id = $2
+                   AND s.tenant_id = e.tenant_id AND s.submission_id = e.submission_id
+                   AND s.status = 'quarantined'",
+                &[&submission.tenant_id, &submission.submission_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
+        let consent_scopes = serde_json::to_value(&submission.consent_scopes).map_err(|e| {
+            DatabaseError::Serialization(format!("trace consent scopes encode failed: {e}"))
+        })?;
+        let allowed_uses = serde_json::to_value(&submission.allowed_uses).map_err(|e| {
+            DatabaseError::Serialization(format!("trace allowed uses encode failed: {e}"))
+        })?;
+        let redaction_counts = serde_json::to_value(&submission.redaction_counts).map_err(|e| {
+            DatabaseError::Serialization(format!("trace redaction counts encode failed: {e}"))
+        })?;
+        // NULL when the caller recorded no basis, which reads as "not
+        // recorded" -- never as a claim that no condition held.
+        //
+        // The DO UPDATE below is deliberately COALESCE-free. It overwrites
+        // `privacy_risk` unconditionally, so preserving an older basis
+        // underneath a fresh risk would leave the two describing different
+        // passes, and a basis that disagrees with the risk on its own row is
+        // worse than an absent one, because it will be believed. The pair is
+        // written together or cleared together.
+        let residual_risk_basis = submission
+            .residual_risk_basis
+            .as_ref()
+            .map(|labels| {
+                serde_json::to_value(labels).map_err(|e| {
+                    DatabaseError::Serialization(format!(
+                        "trace residual risk basis encode failed: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+
+        let row = tx
+            .query_one(
+                "INSERT INTO trace_submissions (
+                    tenant_id, submission_id, trace_id, auth_principal_ref, contributor_pseudonym,
+                    submitted_tenant_scope_ref, schema_version, consent_policy_version,
+                    consent_scopes, allowed_uses, retention_policy_id, status, privacy_risk,
+                    redaction_pipeline_version, redaction_hash, redaction_counts, canonical_summary_hash,
+                    submission_score, credit_points_pending, credit_points_final, expires_at,
+                    residual_risk_basis
+                 ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+                 )
+                 ON CONFLICT (tenant_id, submission_id) DO UPDATE SET
+                    trace_id = excluded.trace_id,
+                    auth_principal_ref = excluded.auth_principal_ref,
+                    contributor_pseudonym = excluded.contributor_pseudonym,
+                    submitted_tenant_scope_ref = excluded.submitted_tenant_scope_ref,
+                    schema_version = excluded.schema_version,
+                    consent_policy_version = excluded.consent_policy_version,
+                    consent_scopes = excluded.consent_scopes,
+                    allowed_uses = excluded.allowed_uses,
+                    retention_policy_id = excluded.retention_policy_id,
+                    status = excluded.status,
+                    privacy_risk = excluded.privacy_risk,
+                    redaction_pipeline_version = excluded.redaction_pipeline_version,
+                    redaction_hash = excluded.redaction_hash,
+                    redaction_counts = excluded.redaction_counts,
+                    canonical_summary_hash = excluded.canonical_summary_hash,
+                    submission_score = excluded.submission_score,
+                    credit_points_pending = excluded.credit_points_pending,
+                    credit_points_final = excluded.credit_points_final,
+                    expires_at = excluded.expires_at,
+                    residual_risk_basis = excluded.residual_risk_basis,
+                    updated_at = NOW()
+                 RETURNING
+                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis",
+                &[
+                    &submission.tenant_id,
+                    &submission.submission_id,
+                    &submission.trace_id,
+                    &submission.auth_principal_ref,
+                    &submission.contributor_pseudonym,
+                    &submission.submitted_tenant_scope_ref,
+                    &submission.schema_version,
+                    &submission.consent_policy_version,
+                    &consent_scopes,
+                    &allowed_uses,
+                    &submission.retention_policy_id,
+                    &status,
+                    &submission.privacy_risk,
+                    &submission.redaction_pipeline_version,
+                    &submission.redaction_hash,
+                    &redaction_counts,
+                    &submission.canonical_summary_hash,
+                    &submission.submission_score,
+                    &submission.credit_points_pending,
+                    &submission.credit_points_final,
+                    &submission.expires_at,
+                    &residual_risk_basis,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let record = row_to_submission(&row)?;
+        if let Some(evidence) = evidence {
+            let class = match evidence.inference_class {
+                trace_commons_protocol::witness_provenance::AttestationClass::Unattested => "unattested",
+                trace_commons_protocol::witness_provenance::AttestationClass::ProviderTeeFinalCall => "provider_tee_final_call",
+                trace_commons_protocol::witness_provenance::AttestationClass::GatewayFinalCall => "gateway_final_call",
+            };
+            tx.execute(
+                "INSERT INTO trace_witness_certificate_evidence (
+                    tenant_id, submission_id, certificate_json, signature_header,
+                    raw_body_sha256, artifact_sha256, certificate_version, inference_class,
+                    bound_model, receipt_signer, issued_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+                &[
+                    &evidence.tenant_id,
+                    &evidence.submission_id,
+                    &evidence.certificate_json,
+                    &evidence.signature_header,
+                    &evidence.raw_body_sha256,
+                    &evidence.artifact_sha256,
+                    &evidence.certificate_version,
+                    &class,
+                    &evidence.bound_model,
+                    &evidence.receipt_signer,
+                    &evidence.issued_at,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+            let existing = tx
+                .query_one(
+                    "SELECT certificate_json, signature_header, raw_body_sha256, artifact_sha256,
+                        certificate_version, inference_class, bound_model, receipt_signer,
+                        issued_at
+                 FROM trace_witness_certificate_evidence
+                 WHERE tenant_id = $1 AND submission_id = $2
+                 FOR UPDATE",
+                    &[&evidence.tenant_id, &evidence.submission_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            let same_signed_source = existing.get::<_, Vec<u8>>(0) == evidence.certificate_json
+                && existing.get::<_, Vec<u8>>(1) == evidence.signature_header
+                && existing.get::<_, String>(2) == evidence.raw_body_sha256
+                && existing.get::<_, i16>(4) == evidence.certificate_version
+                && existing.get::<_, String>(5) == class
+                && existing.get::<_, Option<String>>(6) == evidence.bound_model
+                && existing.get::<_, Option<String>>(7) == evidence.receipt_signer
+                && existing.get::<_, DateTime<Utc>>(8) == evidence.issued_at;
+            if !same_signed_source {
+                return Err(DatabaseError::Query("WitnessEvidenceConflict".into()));
+            }
+            if existing.get::<_, String>(3) != evidence.artifact_sha256 {
+                tx.execute(
+                    "UPDATE trace_witness_certificate_evidence
+                     SET artifact_sha256 = $3
+                     WHERE tenant_id = $1 AND submission_id = $2",
+                    &[
+                        &evidence.tenant_id,
+                        &evidence.submission_id,
+                        &evidence.artifact_sha256,
+                    ],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            }
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(record)
     }
 }
 

@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route; do
+          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -259,6 +259,14 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_corpus_pg_store
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_store
+      # V76 witness evidence: forced tenant RLS, the runtime role's column
+      # grants, the owner-proof immutability trigger, and quarantine
+      # remediation replacing a submission's evidence. Self-skips without a
+      # URL, so the no-activity guard below covers it.
+      - name: witness_evidence_pg
+        run: cargo test -p trace-commons-server --test witness_evidence_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_witness_evidence
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -368,7 +376,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route; do
+          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"

@@ -5502,6 +5502,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         perplexity_score_driver: None,
         pii_backstop_driver: None,
         witness_bypass: None,
+        witness_capture_pin: None,
         admission: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
@@ -26634,6 +26635,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         perplexity_score_driver: None,
         pii_backstop_driver: None,
         witness_bypass: None,
+        witness_capture_pin: None,
         admission: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
@@ -93589,6 +93591,36 @@ mod witness_receipt {
             "witness_measurement": MEASUREMENT,
             "timestamp": chrono::Utc::now().timestamp(),
         });
+        sign_certificate_json(json)
+    }
+
+    fn certificate_v2_over(body: &[u8]) -> (String, String) {
+        use trace_commons_protocol::witness_provenance::{
+            AttestationClass, FinalCallAttestation, InferenceProvenance, inference_provenance_json,
+        };
+        let provenance = InferenceProvenance::Attested(
+            FinalCallAttestation::new(
+                AttestationClass::ProviderTeeFinalCall,
+                Some("model".into()),
+                "b".repeat(64),
+            )
+            .unwrap(),
+        );
+        let json = serde_json::json!({
+            "version": 2,
+            "redacted_sha256": hex::encode(sha2::Sha256::digest(body)),
+            "residual_risk_verdict": "low",
+            "redaction_policy_version": ALIAS,
+            "witness_measurement": MEASUREMENT,
+            "timestamp": chrono::Utc::now().timestamp(),
+            "inference_provenance": serde_json::from_str::<serde_json::Value>(
+                &inference_provenance_json(&provenance)
+            ).unwrap(),
+        });
+        sign_certificate_json(json)
+    }
+
+    fn sign_certificate_json(json: serde_json::Value) -> (String, String) {
         let encoded = serde_json::to_string(&json).expect("the certificate serialises");
 
         // Sign the same way the enclave does: the decoder rebuilds the
@@ -93693,6 +93725,365 @@ mod witness_receipt {
             .expect("record reads")
             .expect("record exists");
         std::fs::read(root.join(record.object_key)).expect("stored envelope reads")
+    }
+
+    #[tokio::test]
+    async fn real_router_persists_exact_v2_evidence_and_rejects_conflicting_retry() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone() as Arc<dyn Database>),
+            Some(test_artifact_store(temp.path())),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.require_db_mirror_writes = true;
+        state_mut.witness_capture_pin = Some(
+            trace_commons_server::redaction_witness::verification::WitnessPin::new(
+                &signing_address(),
+                [MEASUREMENT.to_string()],
+            )
+            .unwrap(),
+        );
+        state_mut.witness_bypass = None;
+        state_mut.accept_medium_risk_submissions = true;
+        state_mut.pii_backstop_driver = Some(PiiBackstopDriverConfig {
+            interval: StdDuration::from_secs(60),
+            batch_size: 1,
+            max_attempts: 3,
+            backoff_base_seconds: 1,
+            per_submission_timeout: StdDuration::from_secs(30),
+        });
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        let response = post_through_the_real_router(
+            state.clone(),
+            body.clone(),
+            Some((&certificate, &signature)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            stored_status(temp.path(), envelope.submission_id),
+            TraceCorpusStatus::AwaitingPiiBackstop,
+            "capture pin must not enable bypass"
+        );
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let row = client.query_one(
+            "SELECT certificate_json, signature_header, raw_body_sha256, artifact_sha256, inference_class
+             FROM trace_witness_certificate_evidence WHERE tenant_id='tenant-a' AND submission_id=$1",
+            &[&envelope.submission_id],
+        ).await.unwrap();
+        assert_eq!(row.get::<_, Vec<u8>>(0), certificate.as_bytes());
+        assert_eq!(row.get::<_, Vec<u8>>(1), signature.as_bytes());
+        assert_eq!(
+            row.get::<_, String>(2),
+            hex::encode(sha2::Sha256::digest(&body))
+        );
+        assert_eq!(row.get::<_, String>(4), "provider_tee_final_call");
+        let evidence_artifact: String = row.get(3);
+        let object_digest: String = client.query_one(
+            "SELECT content_sha256 FROM trace_object_refs WHERE tenant_id='tenant-a' AND submission_id=$1 AND artifact_kind='submitted_envelope'",
+            &[&envelope.submission_id],
+        ).await.unwrap().get(0);
+        assert_eq!(object_digest, format!("sha256:{evidence_artifact}"));
+        assert_ne!(
+            evidence_artifact,
+            hex::encode(sha2::Sha256::digest(&body)),
+            "encrypted stored object is distinct from original signed body"
+        );
+        let exact = post_through_the_real_router(
+            state.clone(),
+            body.clone(),
+            Some((&certificate, &signature)),
+        )
+        .await;
+        assert_eq!(exact.status(), StatusCode::OK);
+        let headerless = post_through_the_real_router(state.clone(), body.clone(), None).await;
+        assert_eq!(
+            headerless.status(),
+            StatusCode::OK,
+            "exact-body receipt read may omit the historical witness headers"
+        );
+        let mut changed_body = body.clone();
+        changed_body.push(b' ');
+        let changed = post_through_the_real_router(state.clone(), changed_body, None).await;
+        assert_eq!(
+            changed.status(),
+            StatusCode::CONFLICT,
+            "headerless retry cannot change the originally witnessed body"
+        );
+        let (other_certificate, other_signature) = certificate_v2_over(b"other body");
+        let changed = post_through_the_real_router(
+            state.clone(),
+            body,
+            Some((&other_certificate, &other_signature)),
+        )
+        .await;
+        assert_eq!(changed.status(), StatusCode::CONFLICT);
+        let invalid = holdable_envelope().await;
+        let invalid_body = serde_json::to_vec(&invalid).unwrap();
+        let bad_headers = post_through_the_real_router(
+            state.clone(),
+            invalid_body,
+            Some(("not-a-certificate", "0xgarbage")),
+        )
+        .await;
+        assert_eq!(bad_headers.status(), StatusCode::OK);
+        assert_eq!(client.query_one(
+            "SELECT count(*) FROM trace_witness_certificate_evidence WHERE tenant_id='tenant-a' AND submission_id=$1",
+            &[&invalid.submission_id],
+        ).await.unwrap().get::<_, i64>(0), 0);
+        let failed = holdable_envelope().await;
+        let failed_body = serde_json::to_vec(&failed).unwrap();
+        let (failed_certificate, failed_signature) = certificate_v2_over(&failed_body);
+        client.batch_execute(&format!(
+            "ALTER TABLE trace_witness_certificate_evidence ADD CONSTRAINT z2_test_refuse_{} CHECK (submission_id <> '{}')",
+            failed.submission_id.simple(), failed.submission_id,
+        )).await.unwrap();
+        let failed_response = post_through_the_real_router(
+            state,
+            failed_body,
+            Some((&failed_certificate, &failed_signature)),
+        )
+        .await;
+        assert_ne!(
+            failed_response.status(),
+            StatusCode::OK,
+            "required evidence persistence failure cannot return a receipt"
+        );
+        assert_eq!(client.query_one(
+            "SELECT count(*) FROM trace_submissions WHERE tenant_id='tenant-a' AND submission_id=$1",
+            &[&failed.submission_id],
+        ).await.unwrap().get::<_, i64>(0), 0,
+            "submission metadata and evidence insertion must roll back together");
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE trace_witness_certificate_evidence DROP CONSTRAINT z2_test_refuse_{}",
+                failed.submission_id.simple(),
+            ))
+            .await
+            .unwrap();
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    }
+
+    #[tokio::test]
+    async fn identical_signed_retry_recovers_after_partial_encrypted_mirror_failure() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone() as Arc<dyn Database>),
+            Some(test_artifact_store(temp.path())),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.require_db_mirror_writes = true;
+        state_mut.witness_capture_pin = Some(
+            trace_commons_server::redaction_witness::verification::WitnessPin::new(
+                &signing_address(),
+                [MEASUREMENT.to_string()],
+            )
+            .unwrap(),
+        );
+        state_mut.accept_medium_risk_submissions = true;
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        client.batch_execute(&format!(
+            "ALTER TABLE trace_object_refs ADD CONSTRAINT z2_test_refuse_object_{} CHECK (submission_id <> '{}')",
+            envelope.submission_id.simple(), envelope.submission_id,
+        )).await.unwrap();
+        let first = post_through_the_real_router(
+            state.clone(),
+            body.clone(),
+            Some((&certificate, &signature)),
+        )
+        .await;
+        assert_ne!(first.status(), StatusCode::OK);
+        let original_artifact: String = client.query_one(
+            "SELECT artifact_sha256 FROM trace_witness_certificate_evidence WHERE tenant_id='tenant-a' AND submission_id=$1",
+            &[&envelope.submission_id],
+        ).await.expect("evidence transaction committed before object-ref failure").get(0);
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE trace_object_refs DROP CONSTRAINT z2_test_refuse_object_{}",
+                envelope.submission_id.simple(),
+            ))
+            .await
+            .unwrap();
+        let retry =
+            post_through_the_real_router(state, body, Some((&certificate, &signature))).await;
+        assert_eq!(
+            retry.status(),
+            StatusCode::OK,
+            "exact signed source must recover after partial mirror failure"
+        );
+        let row = client.query_one(
+            "SELECT artifact_sha256, certificate_json, signature_header FROM trace_witness_certificate_evidence WHERE tenant_id='tenant-a' AND submission_id=$1",
+            &[&envelope.submission_id],
+        ).await.unwrap();
+        assert_ne!(
+            row.get::<_, String>(0),
+            original_artifact,
+            "fresh encryption must produce a new derived ciphertext digest"
+        );
+        assert_eq!(row.get::<_, Vec<u8>>(1), certificate.as_bytes());
+        assert_eq!(row.get::<_, Vec<u8>>(2), signature.as_bytes());
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    }
+
+    /// Quarantine remediation (#214) replaces a quarantined submission's body
+    /// under the same id. Evidence for the prior body must be replaced by the
+    /// new body's evidence, or removed when the re-POST is unwitnessed, so the
+    /// remediation succeeds and later retries of the remediated body are not
+    /// judged against the pre-remediation body.
+    #[tokio::test]
+    async fn real_router_remediating_a_witnessed_quarantined_submission_replaces_evidence() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone() as Arc<dyn Database>),
+            Some(test_artifact_store(temp.path())),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.require_db_mirror_writes = true;
+        state_mut.witness_capture_pin = Some(
+            trace_commons_server::redaction_witness::verification::WitnessPin::new(
+                &signing_address(),
+                [MEASUREMENT.to_string()],
+            )
+            .unwrap(),
+        );
+        state_mut.witness_bypass = None;
+        state_mut.accept_medium_risk_submissions = false;
+        state_mut.pii_backstop_driver = None;
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let evidence_row = |submission_id: Uuid| {
+            let client = &client;
+            async move {
+                client
+                    .query_opt(
+                        "SELECT certificate_json, raw_body_sha256
+                         FROM trace_witness_certificate_evidence
+                         WHERE tenant_id='tenant-a' AND submission_id=$1",
+                        &[&submission_id],
+                    )
+                    .await
+                    .unwrap()
+                    .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, String>(1)))
+            }
+        };
+
+        for remediation_is_witnessed in [true, false] {
+            let mut first = sample_envelope().await;
+            make_metadata_only_low_risk(&mut first);
+            first.consent.message_text_included = true;
+            first.consent.tool_payloads_included = true;
+            first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+            let first_body = serde_json::to_vec(&first).unwrap();
+            let (first_certificate, first_signature) = certificate_v2_over(&first_body);
+            let response = post_through_the_real_router(
+                state.clone(),
+                first_body,
+                Some((&first_certificate, &first_signature)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                stored_status(temp.path(), first.submission_id),
+                TraceCorpusStatus::Quarantined,
+                "the fixture must land quarantined to exercise remediation"
+            );
+            assert_eq!(
+                evidence_row(first.submission_id).await.map(|row| row.0),
+                Some(first_certificate.as_bytes().to_vec()),
+            );
+
+            let mut corrected = first.clone();
+            make_metadata_only_low_risk(&mut corrected);
+            corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+            let corrected_body = serde_json::to_vec(&corrected).unwrap();
+            let (corrected_certificate, corrected_signature) = certificate_v2_over(&corrected_body);
+            let witness = remediation_is_witnessed
+                .then_some((corrected_certificate.as_str(), corrected_signature.as_str()));
+            let remediated =
+                post_through_the_real_router(state.clone(), corrected_body.clone(), witness).await;
+            assert_eq!(
+                remediated.status(),
+                StatusCode::OK,
+                "remediation of a witnessed quarantined submission must succeed \
+                 (witnessed re-POST: {remediation_is_witnessed})"
+            );
+            assert_eq!(
+                stored_status(temp.path(), first.submission_id),
+                TraceCorpusStatus::Accepted,
+            );
+            let expected = remediation_is_witnessed.then(|| {
+                (
+                    corrected_certificate.as_bytes().to_vec(),
+                    hex::encode(sha2::Sha256::digest(&corrected_body)),
+                )
+            });
+            assert_eq!(
+                evidence_row(first.submission_id).await,
+                expected,
+                "evidence describes the remediated body, or is gone"
+            );
+
+            let retry =
+                post_through_the_real_router(state.clone(), corrected_body.clone(), None).await;
+            assert_eq!(
+                retry.status(),
+                StatusCode::OK,
+                "an idempotent retry of the remediated body is not a witness conflict"
+            );
+            if remediation_is_witnessed {
+                let exact = post_through_the_real_router(
+                    state.clone(),
+                    corrected_body,
+                    Some((&corrected_certificate, &corrected_signature)),
+                )
+                .await;
+                assert_eq!(exact.status(), StatusCode::OK);
+            }
+        }
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
     }
 
     /// The control: the same envelope, the same state, no certificate. It
