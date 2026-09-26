@@ -295,7 +295,9 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
             // A refusal the commons sent on purpose, before the catch-all
             // that reads everything else as an outage.
             other => match AdmissionRefusal::from_label(other) {
-                Some(AdmissionRefusal::LimitReached) => Some(LABEL_ADMISSION_LIMIT_REACHED),
+                Some(AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached) => {
+                    Some(LABEL_ADMISSION_LIMIT_REACHED)
+                }
                 // A lease another attempt holds, which the next retry
                 // resolves. Nothing for a contributor to be told about.
                 Some(AdmissionRefusal::InProgress) => None,
@@ -929,6 +931,13 @@ mod tests {
                 reason_label: AdmissionRefusal::LimitReached.label().into(),
             }),
             Some(LABEL_ADMISSION_LIMIT_REACHED)
+        );
+        assert_eq!(
+            health_label_for(&UploadDecision::Failed {
+                reason_label: AdmissionRefusal::AccountLimitReached.label().into()
+            }),
+            Some(LABEL_ADMISSION_LIMIT_REACHED),
+            "the shared allowance health condition promises no window or reset"
         );
         // A lease another attempt is holding is resolved by the retry that
         // follows it. Reporting a condition for it would put a banner up for

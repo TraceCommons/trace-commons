@@ -7,10 +7,37 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::PgBackend;
+use crate::account_trust::{TrustAccount, TrustFactOutcome, TrustFactSource};
 use crate::db::AccountInviteRedemption;
 use crate::error::DatabaseError;
 
 impl PgBackend {
+    /// The definer function verifies the server-owned accepted credit event or
+    /// gate decision and source ownership. Caller-supplied claims alone cannot
+    /// create a positive fact. No admission policy reads this table yet.
+    pub async fn record_account_trust_fact(
+        &self,
+        account: &TrustAccount,
+        source: TrustFactSource,
+    ) -> Result<Option<TrustFactOutcome>, DatabaseError> {
+        let tenant = account.tenant_id();
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let raw: Option<String> = tx
+            .query_one(
+                "SELECT trace_record_account_trust_fact($1,$2,$3,$4)",
+                &[
+                    &tenant,
+                    &account.account_id(),
+                    &source.kind(),
+                    &source.source_id(),
+                ],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(raw.as_deref().and_then(TrustFactOutcome::from_storage))
+    }
     pub(super) async fn redeem_account_invite_in_tx(
         &self,
         tenant: &str,
@@ -129,6 +156,21 @@ impl PgBackend {
             existing.get::<_, i64>(0)
         } else {
             if consumed >= maximum {
+                return Ok(AccountInviteRedemption::InvalidInvite);
+            }
+            // A grant row for this invite already exists but the account is
+            // no longer invited: the grant was revoked and admission demoted
+            // the account. Re-presenting the same invite must not resurrect
+            // it, and must not reach the primary key as a database error.
+            let prior_grant: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_account_invite_grants
+                      WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3)",
+                    &[&tenant, &account, &invite_hash],
+                )
+                .await?
+                .get(0);
+            if prior_grant {
                 return Ok(AccountInviteRedemption::InvalidInvite);
             }
             let next_version = tx

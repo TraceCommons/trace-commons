@@ -16,7 +16,7 @@ namespace TraceCommons.Interop.Tests;
 /// and Linux said "Nothing was sent.", which on this path is false. See #810.
 ///
 /// <para>
-/// On the spelling: these five labels are the server's own, with underscores,
+/// On the spelling: these seven labels are the server's own, with underscores,
 /// while <c>daemon::health</c>'s constants for the same events are hyphenated.
 /// Production never spells them -- it passes through whatever the daemon sent
 /// -- so a wrong spelling could only hide in this file, and it hides in the
@@ -40,6 +40,8 @@ public sealed class OutcomeRefusalSurfaceTests
     {
         "admission_refused",
         "admission_limit_reached",
+        "account_limit_reached",
+        "account_identity_unlinked",
         "admission_in_progress",
         "admission_identity_conflict",
         "admission_evidence_refused",

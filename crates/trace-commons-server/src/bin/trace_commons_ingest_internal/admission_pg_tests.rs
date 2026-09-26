@@ -110,6 +110,9 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     client.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='admission_ingest_runtime') THEN CREATE ROLE admission_ingest_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
       GRANT USAGE ON SCHEMA public TO admission_ingest_runtime;
       GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO admission_ingest_runtime;
+      GRANT trace_account_admission_runtime TO admission_ingest_runtime;
+      REVOKE ALL ON trace_accounts,trace_account_principals,trace_near_provisioned_devices,device_keys,trace_near_account_anchors,trace_account_trust,trace_account_invite_grants,trace_account_admission_budget,trace_account_admission_submissions FROM admission_ingest_runtime;
+
       REVOKE ALL ON trace_admission_receipts,trace_admission_global_budget FROM admission_ingest_runtime;
       GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO admission_ingest_runtime;
       GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),trace_transition_admission(TEXT,UUID,UUID,TEXT) TO admission_ingest_runtime;").await.unwrap();
@@ -407,7 +410,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     .with_admission_provider_trust(trust);
     let (response, evidence, signature) = witness
         .witness_admission_contribution(witness_service::WitnessContributionRequest {
-            raw_contribution: raw,
+            raw_contribution: raw.clone(),
             granted: witness_service::GrantedConsent {
                 scopes: vec![
                     ConsentScope::DebuggingEvaluation,
@@ -415,7 +418,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
                 ],
                 uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
             },
-            offered_receipt: Some(receipt),
+            offered_receipt: Some(receipt.clone()),
         })
         .await
         .unwrap();
@@ -496,6 +499,529 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         .await,
     )
     .await;
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"legacy-cutover-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["legacy-cutover-fixture"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    client.batch_execute("REVOKE EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT) FROM admission_ingest_runtime").await.unwrap();
+    // Account role now supplies all identity/admission privileges, including V59 transition.
+    let unlinked_response = post(
+        {
+            let mut cutover = invited_state.clone();
+            Arc::make_mut(&mut cutover).account_admission = state.account_admission.clone();
+            cutover
+        },
+        "/v1/traces",
+        window_body.clone(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(unlinked_response.status(), StatusCode::FORBIDDEN);
+    let unlinked_body = axum::body::to_bytes(unlinked_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&unlinked_body).contains("account_identity_unlinked"));
+    let unauthenticated_status = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/contribution-status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !unauthenticated_status.status().is_success(),
+        "advisory status stays behind account authentication"
+    );
+    let legacy_retry = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            response.envelope_bytes.clone(),
+            headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        accepted, legacy_retry,
+        "completed legacy receipt is readable after cutover"
+    );
+    let mut altered_raw = response.envelope_bytes.clone();
+    altered_raw.push(b' ');
+    assert_eq!(
+        post(state.clone(), "/v1/traces", altered_raw, HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::CONFLICT,
+        "legacy UUID is bound to exact bytes across ledgers"
+    );
+    let account_rows: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        account_rows, 0,
+        "legacy retry and conflict never reserve account budget"
+    );
+    let admitted: TraceContributionEnvelope =
+        serde_json::from_slice(&response.envelope_bytes).unwrap();
+    // Simulate a process crash after the trace receipt landed but before V59
+    // marked its lease completed. The old charge stays; retrying with the
+    // original signed headers acquires a new V59 lease, never account debt.
+    client.execute("UPDATE trace_admission_submissions SET status='processing',lease_expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&admitted.submission_id]).await.unwrap();
+    let mut changed_signature = headers.clone();
+    changed_signature.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        HeaderValue::from_static("invalid-replay-signature"),
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            response.envelope_bytes.clone(),
+            changed_signature
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "an offered changed replay signature cannot replace stored authority"
+    );
+    let resumed = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            response.envelope_bytes.clone(),
+            headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        accepted, resumed,
+        "expired legacy lease resumes with original headers"
+    );
+    let legacy_charge_after_expiry: i64 = client
+        .query_one(
+            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        legacy_charge_after_expiry, 20,
+        "V59 retains the crashed processing charge"
+    );
+
+    let mut released = sample_envelope().await;
+    make_metadata_only_low_risk(&mut released);
+    let released_body = serde_json::to_vec(&released).unwrap();
+    let released_hash = hash_hex(&released_body);
+    client.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','reserved',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&released.submission_id,&anchor,&released_hash,&Uuid::new_v4()]).await.unwrap();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            released_body.clone(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "a live legacy lease remains busy after cutover"
+    );
+    client.execute("UPDATE trace_admission_submissions SET status='released' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&released.submission_id]).await.unwrap();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            released_body.clone(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "released legacy reservation is reclaimable under the old ledger"
+    );
+    let total_legacy_charge: i64 = client
+        .query_one(
+            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        total_legacy_charge, 30,
+        "released retry contributes one new bound"
+    );
+    let account_rows: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        account_rows, 0,
+        "no legacy recovery creates account authority"
+    );
+    // A freshly offered proof remains checked in account mode using its
+    // independent provider policy, with no legacy environment lookup.
+    raw.submission_id = Uuid::new_v4();
+    raw.trace_id = Uuid::new_v4();
+    let (fresh, mut fresh_evidence, _) = witness
+        .witness_admission_contribution(witness_service::WitnessContributionRequest {
+            raw_contribution: raw,
+            granted: witness_service::GrantedConsent {
+                scopes: vec![
+                    ConsentScope::DebuggingEvaluation,
+                    ConsentScope::ModelTraining,
+                ],
+                uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
+            },
+            offered_receipt: Some(receipt),
+        })
+        .await
+        .unwrap();
+    fresh_evidence.expires_at = Utc::now().timestamp() + 5;
+    let fresh_signature = signer
+        .sign_eip191(&fresh_evidence.signing_bytes().unwrap())
+        .unwrap();
+    let account_providers = state.admission.as_ref().unwrap().providers.clone();
+    Arc::make_mut(&mut state)
+        .account_admission
+        .as_mut()
+        .unwrap()
+        .providers = Some(account_providers);
+    let mut offered = HeaderMap::new();
+    offered.insert(
+        AUTHORIZATION,
+        HeaderValue::from_static("Bearer admission-fixture-token"),
+    );
+    offered.insert(
+        trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
+        serde_json::to_string(&witness_service::http::certificate_json(
+            &fresh.certificate,
+            fresh.residual_risk_verdict(),
+        ))
+        .unwrap()
+        .parse()
+        .unwrap(),
+    );
+    offered.insert(
+        trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
+        fresh.signature_hex.parse().unwrap(),
+    );
+    offered.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&fresh_evidence)
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    offered.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        fresh_signature.parse().unwrap(),
+    );
+    let authenticated = authenticate_ctx(&state, &offered).unwrap();
+    let fresh_envelope: TraceContributionEnvelope =
+        serde_json::from_slice(&fresh.envelope_bytes).unwrap();
+    let mut first_use_expired = fresh_evidence.clone();
+    first_use_expired.issued_at = Utc::now().timestamp() - 120;
+    first_use_expired.expires_at = Utc::now().timestamp() - 60;
+    let mut expired_headers = offered.clone();
+    expired_headers.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&first_use_expired)
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    expired_headers.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        signer
+            .sign_eip191(&first_use_expired.signing_bytes().unwrap())
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            expired_headers
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "first use still requires unexpired evidence"
+    );
+    let first_use_rows: i64 = client.query_one("SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id]).await.unwrap().get(0);
+    assert_eq!(
+        first_use_rows, 0,
+        "refused first use creates no account binding or charge"
+    );
+    let mut attempt = admission::reserve(
+        &state,
+        &authenticated,
+        &offered,
+        &fresh.envelope_bytes,
+        fresh_envelope.submission_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let resolved = trace_commons_server::account_trust::resolve_contribution_account(
+        db.as_ref(),
+        &tenant,
+        &principal,
+    )
+    .await
+    .unwrap();
+    // Revocation makes the advisory read fail, but the charged reservation
+    // already produced its Attempt and remains releasable without a new read.
+    client
+        .execute(
+            "UPDATE device_keys SET revoked_at=clock_timestamp() WHERE device_key_id=$1",
+            &[&device],
+        )
+        .await
+        .unwrap();
+    assert!(
+        db.account_admission_status(
+            &resolved,
+            &principal,
+            &state.account_admission.as_ref().unwrap().policy
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    attempt.finish(db.as_ref(), false).await.unwrap();
+    drop(attempt);
+    client
+        .execute(
+            "UPDATE device_keys SET revoked_at=NULL WHERE device_key_id=$1",
+            &[&device],
+        )
+        .await
+        .unwrap();
+    let charged: i64 = client
+        .query_one(
+            "SELECT cost_used FROM trace_account_admission_budget WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        charged, 0,
+        "pre-processing release refunds even after revocation"
+    );
+    // The exact signed evidence accepted above now expires. Released,
+    // completed, and crashed leases all retain account/body binding.
+    let wait = (fresh_evidence.expires_at - Utc::now().timestamp() + 1).max(0) as u64;
+    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    Arc::make_mut(&mut state).account_admission.as_mut().unwrap().policy = trace_commons_server::account_trust::parse_bounded_policy(
+        r#"{"version":"account-retry-wave2","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["account-retry-wave2"]).unwrap();
+    let account_receipt = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            offered.clone(),
+        )
+        .await,
+    )
+    .await;
+    let spent = || async {
+        client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1", &[&tenant]).await.unwrap().get::<_,i64>(0)
+    };
+    assert_eq!(spent().await, 10, "released recovery charges once");
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                fresh.envelope_bytes.clone(),
+                offered.clone()
+            )
+            .await
+        )
+        .await,
+        account_receipt,
+        "completed account retry accepts its original expired evidence"
+    );
+    assert_eq!(spent().await, 10, "completed retry has zero debit");
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                fresh.envelope_bytes.clone(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        account_receipt,
+        "headerless completed retry remains valid"
+    );
+    for (status, expected) in [("reserved", 20i64), ("processing", 30i64)] {
+        client.execute("UPDATE trace_account_admission_submissions SET status=$3,lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&status]).await.unwrap();
+        assert_eq!(
+            require_ok(
+                post(
+                    state.clone(),
+                    "/v1/traces",
+                    fresh.envelope_bytes.clone(),
+                    offered.clone()
+                )
+                .await
+            )
+            .await,
+            account_receipt,
+            "expired account lease recovers with authentic stale evidence"
+        );
+        assert_eq!(
+            spent().await,
+            expected,
+            "recovery retains old work charge and reserves once"
+        );
+    }
+    let mut altered = fresh.envelope_bytes.clone();
+    altered.push(b' ');
+    assert_eq!(
+        post(state.clone(), "/v1/traces", altered, offered.clone())
+            .await
+            .status(),
+        StatusCode::CONFLICT,
+        "stored UUID rejects different body bytes"
+    );
+    let foreign_account = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &foreign_account],
+        )
+        .await
+        .unwrap();
+    client.execute("UPDATE trace_account_admission_submissions SET account_id=$3 WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&foreign_account]).await.unwrap();
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            offered.clone()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "foreign account binding cannot be resumed"
+    );
+    client.execute("UPDATE trace_account_admission_submissions SET account_id=$3 WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&account]).await.unwrap();
+    let mut invalid_signature = offered.clone();
+    invalid_signature.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        HeaderValue::from_static("invalid"),
+    );
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            fresh.envelope_bytes.clone(),
+            invalid_signature
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN,
+        "completed replay never ignores an invalid offered signature"
+    );
+    for wrong_anchor in [false, true] {
+        let mut mismatched = fresh_evidence.clone();
+        if wrong_anchor {
+            mismatched.account_anchor_sha256 = "f".repeat(64);
+        } else {
+            mismatched.artifact_sha256 = "e".repeat(64);
+        }
+        let mut mismatched_headers = offered.clone();
+        mismatched_headers.insert(
+            trace_commons_protocol::admission::EVIDENCE_HEADER,
+            serde_json::to_string(&mismatched).unwrap().parse().unwrap(),
+        );
+        mismatched_headers.insert(
+            trace_commons_protocol::admission::SIGNATURE_HEADER,
+            signer
+                .sign_eip191(&mismatched.signing_bytes().unwrap())
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            post(
+                state.clone(),
+                "/v1/traces",
+                fresh.envelope_bytes.clone(),
+                mismatched_headers
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN,
+            "signed proof must retain account and exact body binding"
+        );
+    }
+    assert_eq!(spent().await, 30, "conflicts and bad proofs never debit");
+    offered.remove(trace_commons_protocol::admission::SIGNATURE_HEADER);
+    assert!(
+        admission::reserve(
+            &state,
+            &authenticated,
+            &offered,
+            &fresh.envelope_bytes,
+            fresh_envelope.submission_id
+        )
+        .await
+        .is_err(),
+        "offered partial proof is never ignored"
+    );
+    // Invites remove cumulative account debt, but retain the hourly pacing quota.
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    client.execute("INSERT INTO trace_account_trust(tenant_id,account_id,authority,trust_version) VALUES($1,$2,'invited',1) ON CONFLICT(tenant_id,account_id) DO UPDATE SET authority='invited',trust_version=1", &[&tenant,&account]).await.unwrap();
+    client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,1)", &[&tenant,&account,&invite_hash]).await.unwrap();
+    Arc::make_mut(&mut state)
+        .submission_quota
+        .max_per_tenant_per_hour = 1;
+    let mut quota_envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut quota_envelope);
+    let quota_response = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&quota_envelope).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(
+        quota_response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "invited accounts still enforce hourly quota"
+    );
+    Arc::make_mut(&mut state)
+        .submission_quota
+        .max_per_tenant_per_hour = 0;
+    Arc::make_mut(&mut state).account_admission = None;
     let artifact: TraceContributionEnvelope =
         serde_json::from_slice(&response.envelope_bytes).unwrap();
     let receipt: serde_json::Value = serde_json::from_slice(&accepted).unwrap();
@@ -597,8 +1123,16 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         )
         .await
         .unwrap();
-    assert_eq!(row.get::<_, i64>(0), 0);
-    assert_eq!(row.get::<_, i64>(1), 10);
+    assert_eq!(
+        row.get::<_, i64>(0),
+        1,
+        "released window recovery consumes one trial attempt"
+    );
+    assert_eq!(
+        row.get::<_, i64>(1),
+        30,
+        "original, crashed retry and released retry each retain their correct bound"
+    );
     assert!(
         !db.lookup_completed_submission_admission(
             &tenant,
@@ -634,13 +1168,13 @@ async fn admission_pg_admin() -> Arc<PgBackend> {
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
     assert!(parsed.path().starts_with("/admission_test"));
     let admin = PgBackend::new(&DatabaseConfig {
-        url: SecretString::from(url),
+        url: SecretString::from(url.clone()),
         pool_size: 4,
         ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: None,
+        login_resolver_url: Some(SecretString::from(url.clone())),
         gate_driver_url: None,
         pii_backstop_driver_url: None,
-        invite_registry_url: None,
+        invite_registry_url: Some(SecretString::from(url)),
     })
     .await
     .unwrap();
@@ -813,4 +1347,200 @@ async fn the_anchor_lookup_is_what_binds_a_request_to_its_account() {
         admission::anchor(&state, &contexts[0]).await.is_err(),
         "revoking the provisioned device must withdraw the anchor"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn account_replacement_is_default_off_and_validates_offered_evidence() {
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let body = serde_json::to_vec(&envelope).unwrap();
+    assert_eq!(
+        post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN,
+        "flag off retains the zero-evidence refusal"
+    );
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"account-http-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["account-http-fixture"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let mut malformed = HeaderMap::new();
+    malformed.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        HeaderValue::from_static("{"),
+    );
+    assert_eq!(
+        post(state.clone(), "/v1/traces", body.clone(), malformed)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN,
+        "offered malformed legacy evidence is still refused"
+    );
+    let accepted = post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new()).await;
+    assert_eq!(
+        accepted.status(),
+        StatusCode::OK,
+        "authenticated account can reserve without interactive evidence"
+    );
+    let mut changed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    changed["trace_id"] = serde_json::json!(Uuid::new_v4());
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&changed).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+        "same UUID with different exact bytes conflicts"
+    );
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"account-http-fixed","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":3600},"growth_rule":"none"}"#,
+            &["account-http-fixed"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let mut fixed_first = sample_envelope().await;
+    make_metadata_only_low_risk(&mut fixed_first);
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&fixed_first).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+    );
+    let mut fixed_second = sample_envelope().await;
+    make_metadata_only_low_risk(&mut fixed_second);
+    let fixed_refusal = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&fixed_second).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(fixed_refusal.status(), StatusCode::TOO_MANY_REQUESTS);
+    let fixed_body = axum::body::to_bytes(fixed_refusal.into_body(), 4096)
+        .await
+        .unwrap();
+    let fixed_error: serde_json::Value = serde_json::from_slice(&fixed_body).unwrap();
+    assert_eq!(fixed_error["error"], "account_limit_reached");
+    assert!(
+        fixed_error["retry_after_seconds"]
+            .as_i64()
+            .is_some_and(|seconds| (1..=3600).contains(&seconds))
+    );
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let used_before_invite: i64 = client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    db.insert_invite_grant(trace_commons_server::db::InviteGrantWrite {
+        invite_subject_hash: invite_hash.clone(),
+        policy_label: "bounded-elevation".into(),
+        tenant_mode: trace_commons_server::trace_invite_registry::InviteTenantMode::Fixed,
+        fixed_tenant_id: Some(tenant.clone()),
+        tenant_template_id: None,
+        policy_version: "v1".into(),
+        allowed_consent_scopes: vec!["model_training".into()],
+        allowed_uses: vec!["research".into()],
+        max_uses: 1,
+        expires_at: None,
+        issuance_source: "operator".into(),
+        issued_by_label: None,
+        credential_binding_hash: None,
+        note_label: None,
+    })
+    .await
+    .unwrap();
+    let redemption_key = Uuid::new_v4();
+    let redemption = db
+        .redeem_account_invite(&tenant, account_id, &invite_hash, redemption_key)
+        .await
+        .unwrap();
+    assert!(matches!(
+        redemption,
+        trace_commons_server::db::AccountInviteRedemption::Invited { trust_version: 2 }
+    ));
+    assert_eq!(
+        db.redeem_account_invite(&tenant, account_id, &invite_hash, redemption_key)
+            .await
+            .unwrap(),
+        redemption
+    );
+    let authority: String = client
+        .query_one(
+            "SELECT authority FROM trace_account_trust WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        authority, "invited",
+        "real bounded-first redemption elevates authority"
+    );
+    let mut status_request = axum::http::Request::builder()
+        .uri("/v1/account/contribution-status")
+        .body(Body::empty())
+        .unwrap();
+    status_request
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    let status_bytes = require_ok(app(state.clone()).oneshot(status_request).await.unwrap()).await;
+    let status_json: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["authority"], "invited");
+    assert_eq!(status_json["ready"], true);
+    let mut invited = sample_envelope().await;
+    make_metadata_only_low_risk(&mut invited);
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&invited).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "invited deterministic-only path needs no fabricated witness"
+    );
+    let total: i64 = client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap().get(0);
+    assert_eq!(
+        total, used_before_invite,
+        "invited submission bypasses cumulative debit"
+    );
+    let consumed: i32 = client
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash=$1",
+            &[&invite_hash],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(consumed, 1);
 }

@@ -1705,6 +1705,7 @@ struct AppState {
     witness_bypass: Option<WitnessBypassConfig>,
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
+    account_admission: Option<admission::AccountAdmissionConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3901,6 +3902,35 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let account_admission = admission::account_config_from_env(
+            db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
+        )?;
+        if account_admission.is_some() {
+            let db = db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("account_admission_database_unavailable"))?;
+            if !db
+                .account_admission_runtime_ready()
+                .await
+                .map_err(|_| anyhow::anyhow!("account_admission_readiness_unavailable"))?
+            {
+                anyhow::bail!("account_admission_permissions_or_linkage_not_ready");
+            }
+            // Static contributor credentials are not necessarily represented
+            // by a device row. Validate the local replica's inventory as well.
+            for auth in tokens
+                .values()
+                .filter(|auth| auth.role == TokenRole::Contributor)
+            {
+                trace_commons_server::account_trust::resolve_contribution_account(
+                    db.as_ref(),
+                    &auth.tenant_id,
+                    &auth.principal_ref,
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("account_identity_unlinked"))?;
+            }
+        }
         if admission.is_some()
             && !db_mirror
                 .as_ref()
@@ -4211,8 +4241,9 @@ impl AppState {
             pii_backstop_driver,
             witness_bypass,
             witness_capture_pin,
-            near_provisioning_admission_ready: admission.is_some(),
+            near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
+            account_admission,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -7483,6 +7514,10 @@ fn community_routes() -> Router<Arc<AppState>> {
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reward_routes = rewards::account_routes(state.clone());
     Router::new()
+        .route(
+            "/v1/account/contribution-status",
+            get(admission::account_status_handler),
+        )
         .route(
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
@@ -40785,7 +40820,7 @@ fn all_attempts_failed_outcome(
 /// The message is never logged: `spawn_driver_loop` hashes the error, and
 /// only the hash and the class reach the log line.
 fn worker_route_error(driver: &'static str, error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    let (status, Json(ApiError { error })) = error;
+    let (status, Json(ApiError { error, .. })) = error;
     DriverTickError::WorkerRouteRejected {
         driver,
         status,
@@ -69999,6 +70034,8 @@ type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<i64>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -70006,6 +70043,21 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         status,
         Json(ApiError {
             error: message.into(),
+            retry_after_seconds: None,
+        }),
+    )
+}
+
+fn api_error_with_retry(
+    status: StatusCode,
+    message: impl Into<String>,
+    retry_after_seconds: Option<i64>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: message.into(),
+            retry_after_seconds,
         }),
     )
 }

@@ -397,6 +397,58 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
         let count: i64 = admin.query_one(&sql, &[&lock_wait]).await.unwrap().get(0);
         assert_eq!(count, 0, "expired invite must not write {table}");
     }
+    // A grant revoked for this account, followed by the admission path's
+    // demotion to bounded, must not be resurrected by presenting the same
+    // invite again: the grant row still exists, so this is a clean refusal,
+    // never a primary-key error surfaced as a 500.
+    let demoted = Uuid::new_v4();
+    seed_account(&admin, &tenant_a, demoted, true).await;
+    let reusable = seed_invite(&admin, &format!("INVITE-{}", Uuid::new_v4()), 2).await;
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, demoted, &reusable, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 1 }
+    );
+    admin
+        .execute(
+            "UPDATE trace_account_invite_grants SET revoked_at = now()
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant_a, &demoted],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "UPDATE trace_account_trust SET authority = 'bounded', trust_version = 2
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant_a, &demoted],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .redeem_account_invite(&tenant_a, demoted, &reusable, Uuid::new_v4())
+            .await
+            .expect("a revoked grant is a refusal, not a database error"),
+        Outcome::InvalidInvite
+    );
+    let after = admin
+        .query_one(
+            "SELECT t.authority, t.trust_version,
+                    (SELECT consumed_uses FROM onboarding_invite_grants
+                      WHERE invite_subject_hash = $3)
+               FROM trace_account_trust t
+              WHERE t.tenant_id = $1 AND t.account_id = $2",
+            &[&tenant_a, &demoted, &reusable],
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.get::<_, String>(0), "bounded");
+    assert_eq!(after.get::<_, i64>(1), 2);
+    assert_eq!(after.get::<_, i32>(2), 1, "a refusal consumes no use");
+
     admin
         .execute(
             "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",

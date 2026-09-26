@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -344,6 +344,7 @@ jobs:
         run: cargo test -p trace-commons-server --test admission_ledger_pg -- --ignored
         env:
           TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ledger
+          TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_ledger
       - name: the invite-free path, end to end
         run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
         env:
