@@ -491,7 +491,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
-| `acknowledge_near_ai_notice` | — | `acknowledged: true` | clears the `near-ai-notice-not-acknowledged` health label |
+| `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
@@ -942,6 +942,15 @@ A client comparing the result with the number of waiting cards it showed
 MUST compare against `purged` only; `retracted` entries were never on screen
 as waiting. Both fields are always present and may be `0`.
 
+**Turning automatic off retracts too.** Setting a project to `notify_only`
+moves the same unattended `approved` entries back to `pending`, with their
+old approval's terms cleared, and counts them in `retracted`; `purged` is
+`0`, since no waiting card is removed. They become ordinary waiting cards
+for the contributor to decide, rather than refusals: turning automatic off
+means "ask me", not "never offer this". Before this, only `ignore`
+retracted, so turning automatic off left every session it had already
+approved uploading.
+
 An `approved` entry the **contributor** approved is deliberately untouched,
 and so is an `uploading` entry. A contributor's approval is a decision
 already made about specific bytes under specific consent scopes, and a
@@ -953,8 +962,11 @@ An unattended approval that was `uploading` at the moment of the change and
 did not complete -- the daily cap, a fail-closed precondition, a restart --
 returns to `approved`. It is not sent: the upload pass re-checks the
 project's mode before sending any unattended approval, refuses it as
-`"project-ignored"` if the project is now `ignore`, and emits
-`queue_changed`. That refusal arrives on a later pass, not in this response.
+`"project-ignored"` if the project is now `ignore`, returns it to `pending`
+if the project is now `notify_only`, and emits `queue_changed`. That arrives
+on a later pass, not in this response. A project key the policy cannot
+resolve falls back to `notify_only`, so a lookup miss now waits for the
+contributor rather than sending.
 
 `"project-ignored"` is not `"dismissed-by-contributor"`. A dismissal is
 permanent and suppresses that conversation at its path forever; this is a
@@ -2711,6 +2723,26 @@ notice on stdout) can get past that gate. Because this asserts, on the
 caller's unverified word, that a disclosure was actually shown to someone,
 it is audited (`near-ai-notice-acknowledged`) -- an application must not
 call it without actually having shown the notice text first.
+
+Acknowledging also re-offers every session the gate had refused, and
+`reoffered` is how many. A session sent while the notice was outstanding is
+refused with `near-ai-notice-not-acknowledged`, which is a refusal about
+timing rather than about the session -- but a refused entry is never moved
+again, and the watcher does not re-offer a session whose file is unchanged,
+so without this those sessions were lost for good. They return as `Pending`
+with their old approval cleared, because that approval was given before the
+disclosure it depended on: an `auto_upload` folder re-approves them on the
+next poll, and any other folder asks again. A `queue_changed` event is
+published when any move.
+
+A refused entry whose file already has a live entry (the session grew while
+it sat refused, and the watcher offered the new content) is not revived: it
+is marked `superseded` with `session-changed-after-offer`, and is not counted
+in `reoffered`. The same step -- clear the label, re-offer, supersede -- also
+runs on every daemon tick once the notice marker exists, so a notice
+acknowledged through the CLI, which writes the marker without calling this
+method, gets the same result. It runs whether or not the daemon is paused,
+quiesced for an update, or in dry-run, since it sends nothing.
 
 ### `near_ai_balance`
 
