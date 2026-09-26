@@ -117,6 +117,24 @@ Retroactive consent updates on already-submitted traces remain deferred.
 
 ### Deferred
 
+- **Versioned pipeline code-revision check after deploy.** A pipeline bundle
+  does not bind policy code; qualification binds a package to the code
+  revision that it tested, and activation checks that revision. Nothing
+  checks it again after a later deploy, so an active bundle can run on an
+  unqualified revision. Before production routing, compare the runtime
+  revision with the qualified revision when the worker starts and when it
+  loads a bound bundle. On a mismatch, stop new pipeline work and keep
+  pending runs retryable until the new revision qualifies. Also record the
+  build revision with each phase outcome, so an outcome identifies the code
+  that produced it. See #971 review item R14.
+- **Versioned pipeline contract cleanup (next schema version).** Deferred
+  from the #971 review because each is harmless today and changes a stored
+  or signed shape: remove the redundant `SettleEvidence` fields; stop storing
+  `bundle_id` beside the manifest that already determines it; cache artifact
+  hashes so `BundlePackage::package_hash()` does not rehash every artifact on
+  each call; drop the three copies of the Score award set to one (they are
+  now checked for equality); and make the design's Score JSON example match
+  the wire shape (review items R18 and R23).
 - **Phase A.5 perplexity-replacement metric.** A2.6's Outcome 1 fired
   on Qwen 3.6 27B Dense (AUC 0.936), so the metric-replacement
   escalation branch did not trigger. The size-pattern finding — see
