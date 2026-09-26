@@ -906,6 +906,40 @@ pub async fn apply_and_record_migration(
     Ok(())
 }
 
+/// Decide what to do with one `MIGRATIONS` row, given the name
+/// `_trace_commons_migrations` holds for its version, if any.
+///
+/// `Ok(false)`: not recorded, so apply it. `Ok(true)`: recorded under this
+/// row's own name, so it is already applied. `Err`: recorded under a *different*
+/// name, meaning another migration already took this version number, so this
+/// row's SQL has never run here.
+///
+/// The runner used to check the version alone, and skipped the row in that
+/// last case. Two branches that each add the next free version (say two
+/// different `V75`s) both pass every check on their own, and whichever merges
+/// second never runs on a database that applied the first: its tables are
+/// missing, and nothing says so until something queries them. Refusing to start
+/// turns that into a boot failure naming both migrations, which is the only
+/// point at which it can still be fixed by renumbering.
+///
+/// Every recorded name on `main` equals its file stem and none has ever been
+/// renamed, so this check cannot refuse a database that `main` migrated.
+fn recorded_migration_state(
+    recorded_name: Option<&str>,
+    version: i32,
+    expected_name: &str,
+) -> Result<bool, DatabaseError> {
+    match recorded_name {
+        None => Ok(false),
+        Some(recorded) if recorded == expected_name => Ok(true),
+        Some(recorded) => Err(DatabaseError::Migration(format!(
+            "V{version} is already recorded as `{recorded}`, but this build's V{version} is \
+             `{expected_name}`; two migrations claim the same version, so `{expected_name}` \
+             has never been applied here. Renumber one of them; refusing to skip it"
+        ))),
+    }
+}
+
 /// Every migration in `migrations/`, in the order `run_migrations` applies
 /// them: `(version, recorded name, SQL text)`. The recorded name is the file
 /// stem and the SQL is the file itself, embedded at compile time.
@@ -1416,10 +1450,17 @@ impl Database for PgBackend {
         )
         .await
     }
+    async fn account_admission_record(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionRecord>, DatabaseError> {
+        PgBackend::account_admission_record(self, tenant, submission).await
+    }
     async fn reserve_account_admission(
         &self,
         request: &crate::admission_ledger::AccountAdmissionReservation,
-    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+    ) -> Result<crate::admission_ledger::AccountAdmissionResult, DatabaseError> {
         PgBackend::reserve_account_admission(self, request).await
     }
 
@@ -1519,6 +1560,9 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::account_admission_runtime_ready(self).await
+    }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         self.check_admission_runtime().await
     }
@@ -1702,13 +1746,15 @@ impl Database for PgBackend {
                 )
                 .await?;
             for (version, name, sql) in MIGRATIONS {
-                let already_applied = client
+                let recorded_name: Option<String> = client
                     .query_opt(
-                        "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                        "SELECT name FROM _trace_commons_migrations WHERE version = $1",
                         &[version],
                     )
                     .await?
-                    .is_some();
+                    .map(|row| row.get(0));
+                let already_applied =
+                    recorded_migration_state(recorded_name.as_deref(), *version, name)?;
                 if !already_applied {
                     apply_and_record_migration(&mut client, *version, name, sql).await?;
                 }
@@ -6981,6 +7027,74 @@ mod tests {
              unapplied and both run its DDL, and the loser dies on a system-catalog \
              unique index. Requires a real database to observe, so this is the only \
              check that runs everywhere"
+        );
+    }
+
+    /// Two changes that each add a `V75` pass every check on their own branch
+    /// and collide on merge. On a fresh database the second insert fails its
+    /// primary key; on a database that already applied the first, the runner
+    /// used to skip the second silently. Refuse the table outright instead.
+    #[test]
+    fn migration_versions_are_unique_and_strictly_increasing() {
+        for pair in super::MIGRATIONS.windows(2) {
+            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
+            assert!(
+                later > earlier,
+                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
+            );
+        }
+    }
+
+    /// The directory can hold two files with one version and different stems
+    /// (two branches, both merged); the table test above only sees the one the
+    /// table lists. Catch the duplicate at the file level too.
+    #[test]
+    fn no_two_migration_files_share_a_version() {
+        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
+            let name = entry
+                .expect("dir entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8 name");
+            let Some(rest) = name.strip_prefix('V') else {
+                continue;
+            };
+            let Some((version, _)) = rest.split_once("__") else {
+                continue;
+            };
+            let version: i32 = version.parse().expect("numeric migration version");
+            if let Some(previous) = seen.insert(version, name.clone()) {
+                panic!("V{version} is claimed by both {previous} and {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unrecorded_version_is_applied() {
+        assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
+    }
+
+    #[test]
+    fn a_version_recorded_under_its_own_name_is_skipped() {
+        assert!(
+            super::recorded_migration_state(Some("account_trust"), 75, "account_trust")
+                .expect("not an error")
+        );
+    }
+
+    #[test]
+    fn a_version_recorded_under_another_name_refuses_to_start() {
+        let err =
+            super::recorded_migration_state(Some("versioned_pipeline_runs"), 75, "account_trust")
+                .expect_err("a collision must refuse, not skip");
+        let message = err.to_string();
+        assert!(
+            message.contains("V75")
+                && message.contains("versioned_pipeline_runs")
+                && message.contains("account_trust"),
+            "the refusal must name the version and both stems: {message}"
         );
     }
 

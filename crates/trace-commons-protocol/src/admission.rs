@@ -32,6 +32,8 @@ pub enum AdmissionRefusal {
     LimitReached,
     /// Explicit account-authority allowance is exhausted.
     AccountLimitReached,
+    /// Authenticated legacy identity requires verified account linkage.
+    AccountIdentityUnlinked,
     /// Another attempt at the same submission holds the lease.
     InProgress,
     /// This submission id is already bound to different bytes or a different
@@ -44,10 +46,11 @@ pub enum AdmissionRefusal {
 
 impl AdmissionRefusal {
     /// Every refusal, for tests and exhaustive mappings.
-    pub const ALL: [AdmissionRefusal; 6] = [
+    pub const ALL: [AdmissionRefusal; 7] = [
         AdmissionRefusal::Refused,
         AdmissionRefusal::LimitReached,
         AdmissionRefusal::AccountLimitReached,
+        AdmissionRefusal::AccountIdentityUnlinked,
         AdmissionRefusal::InProgress,
         AdmissionRefusal::IdentityConflict,
         AdmissionRefusal::EvidenceRefused,
@@ -59,6 +62,7 @@ impl AdmissionRefusal {
             AdmissionRefusal::Refused => "admission_refused",
             AdmissionRefusal::LimitReached => "admission_limit_reached",
             AdmissionRefusal::AccountLimitReached => "account_limit_reached",
+            AdmissionRefusal::AccountIdentityUnlinked => "account_identity_unlinked",
             AdmissionRefusal::InProgress => "admission_in_progress",
             AdmissionRefusal::IdentityConflict => "admission_identity_conflict",
             AdmissionRefusal::EvidenceRefused => "admission_evidence_refused",
@@ -68,7 +72,9 @@ impl AdmissionRefusal {
     /// The status this refusal is sent with.
     pub const fn status(self) -> u16 {
         match self {
-            AdmissionRefusal::Refused | AdmissionRefusal::EvidenceRefused => 403,
+            AdmissionRefusal::Refused
+            | AdmissionRefusal::EvidenceRefused
+            | AdmissionRefusal::AccountIdentityUnlinked => 403,
             AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached => 429,
             AdmissionRefusal::InProgress | AdmissionRefusal::IdentityConflict => 409,
         }
@@ -444,6 +450,7 @@ mod tests {
                 ("admission_refused", 403),
                 ("admission_limit_reached", 429),
                 ("account_limit_reached", 429),
+                ("account_identity_unlinked", 403),
                 ("admission_in_progress", 409),
                 ("admission_identity_conflict", 409),
                 ("admission_evidence_refused", 403),

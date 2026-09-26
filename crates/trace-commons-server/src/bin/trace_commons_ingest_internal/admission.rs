@@ -16,6 +16,7 @@ use trace_commons_server::admission_ledger::{
     AccountAdmissionReservation, AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard,
     AdmissionReservation,
 };
+use trace_commons_server::trace_invite_registry::RESERVED_ACCOUNT_TENANT_PREFIXES;
 
 #[derive(Clone)]
 pub(super) struct AdmissionConfig {
@@ -33,7 +34,46 @@ pub(super) struct AccountAdmissionConfig {
 pub(super) fn account_config_from_env(
     durable_db: bool,
 ) -> anyhow::Result<Option<AccountAdmissionConfig>> {
-    match std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED").as_deref() {
+    account_config_from_values(
+        durable_db,
+        |key| std::env::var(key),
+        || {
+            AdmissionProviderTrust::from_env(account_evidence_prefix(|key| {
+                std::env::var_os(key).is_some()
+            }))
+        },
+    )
+}
+
+fn account_evidence_prefix(present: impl Fn(&str) -> bool) -> &'static str {
+    // A partial account policy must not silently borrow legacy values.
+    if [
+        "PROVIDER_SIGNERS",
+        "GATEWAY_SIGNERS",
+        "ACCEPTED_MODELS",
+        "MIN_REQUEST_BYTES",
+    ]
+    .iter()
+    .any(|suffix| {
+        present(&format!(
+            "TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_{suffix}"
+        ))
+    }) {
+        "TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE"
+    } else {
+        "TRACE_COMMONS_ADMISSION"
+    }
+}
+
+fn account_config_from_values(
+    durable_db: bool,
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+    providers: impl FnOnce() -> Result<
+        AdmissionProviderTrust,
+        trace_commons_server::admission_evidence::AdmissionEvidenceError,
+    >,
+) -> anyhow::Result<Option<AccountAdmissionConfig>> {
+    match read("TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("false") | Ok("0") => return Ok(None),
         Ok("true") | Ok("1") => {}
         _ => anyhow::bail!("account_admission_activation_invalid"),
@@ -41,25 +81,20 @@ pub(super) fn account_config_from_env(
     if !durable_db {
         anyhow::bail!("account_admission_requires_durable_database");
     }
-    let raw = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON")
+    let raw = read("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON")
         .map_err(|_| anyhow::anyhow!("account_admission_policy_missing"))?;
-    let version = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION")
+    let version = read("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION")
         .map_err(|_| anyhow::anyhow!("account_admission_policy_version_missing"))?;
     let policy = parse_bounded_policy(&raw, &[&version])
         .map_err(|_| anyhow::anyhow!("account_admission_policy_invalid"))?;
-    let lease_seconds = std::env::var("TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS")
+    let lease_seconds = read("TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS")
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
         .filter(|v| (1..=86400).contains(v))
         .ok_or_else(|| anyhow::anyhow!("account_admission_lease_invalid"))?;
-    let providers = if std::env::var_os("TRACE_COMMONS_ADMISSION_MIN_REQUEST_BYTES").is_some() {
-        Some(
-            AdmissionProviderTrust::from_env("TRACE_COMMONS_ADMISSION")
-                .map_err(|_| anyhow::anyhow!("admission_provider_policy_invalid"))?,
-        )
-    } else {
-        None
-    };
+    let providers = Some(
+        providers().map_err(|_| anyhow::anyhow!("account_admission_evidence_policy_invalid"))?,
+    );
     Ok(Some(AccountAdmissionConfig {
         policy,
         lease_seconds,
@@ -92,14 +127,6 @@ fn denied() -> (StatusCode, Json<ApiError>) {
     api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
 }
 
-/// The tenant prefixes that carry a provisioned admission anchor.
-///
-/// Deliberately a list rather than a `starts_with("near")`: `nearai-` is not a
-/// sub-namespace of `near-`, and a prefix test that treated it as one would
-/// make the two identity systems substitutable at the only place that decides
-/// which of them a request is on.
-pub(super) const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
-
 /// This namespace is allocated only by verified NEAR provisioning. Both the
 /// tenant and the principal come from authentication, never envelope attribution.
 ///
@@ -124,8 +151,8 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
     // value from one from ever being a value from the other.
     //
     // A tenant in neither namespace is not refused, it is `None`: this is the
-    // invite-free path, and an invited tenant simply does not use it.
-    if !ANCHOR_NAMESPACES
+    // legacy invite-free path. Global account cutover refuses unlinked identities.
+    if !RESERVED_ACCOUNT_TENANT_PREFIXES
         .iter()
         .any(|prefix| tenant.tenant_id().strip_prefix(prefix).is_some_and(is_hash))
     {
@@ -197,15 +224,11 @@ pub(super) struct Attempt {
     processing: bool,
     completed: bool,
     account: Option<(TrustAccount, String)>,
-    invited: bool,
     pub(super) source_claim: Option<(Uuid, [u8; 32])>,
 }
 impl Attempt {
     pub fn is_completed(&self) -> bool {
         self.completed
-    }
-    pub fn is_invited(&self) -> bool {
-        self.invited
     }
 
     pub async fn processing(&mut self, db: &dyn Database) -> ApiResult<()> {
@@ -341,7 +364,6 @@ pub(super) async fn reserve(
             processing: false,
             completed: true,
             account: None,
-            invited: false,
             source_claim: None,
         }));
     }
@@ -431,7 +453,6 @@ pub(super) async fn reserve(
         processing: false,
         completed,
         account: None,
-        invited: false,
         source_claim: None,
     }))
 }
@@ -452,7 +473,13 @@ async fn reserve_account(
     let account =
         resolve_contribution_account(db.as_ref(), tenant.tenant_id(), tenant.principal_ref())
             .await
-            .map_err(|_| denied())?;
+            .map_err(|refusal| match refusal {
+                trace_commons_server::account_trust::TrustRefusal::Unlinked => api_error(
+                    StatusCode::FORBIDDEN,
+                    AdmissionRefusal::AccountIdentityUnlinked.label(),
+                ),
+                _ => denied(),
+            })?;
     if let Some(existing) = tenant
         .read_submission_record(&state.root, submission)
         .map_err(internal_error)?
@@ -501,7 +528,6 @@ async fn reserve_account(
                 processing: false,
                 completed: true,
                 account: None,
-                invited: false,
                 source_claim: None,
             });
         }
@@ -586,10 +612,28 @@ async fn reserve_account(
             processing: false,
             completed,
             account: None,
-            invited: false,
             source_claim: None,
         });
     }
+    // Under the shared processing guard, only an existing exact binding may
+    // relax first-use evidence time limits. Reserve rechecks live identity,
+    // lease state and budget atomically after proof validation.
+    let body_hash = hash_hex(body);
+    let account_replay = if let Some(prior) = db
+        .account_admission_record(tenant.tenant_id(), submission)
+        .await
+        .map_err(|_| denied())?
+    {
+        if prior.account_id != account.account_id() || prior.body_hash != body_hash {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                AdmissionRefusal::IdentityConflict.label(),
+            ));
+        }
+        true
+    } else {
+        false
+    };
     // Only an exact existing V59 identity can omit source metadata. That
     // branch above retains its original submission-level withdrawal guarantee.
     let source = envelope
@@ -623,8 +667,6 @@ async fn reserve_account(
     if plan == EvidencePlan::Verify {
         // An offered legacy proof is always checked, even though account trust
         // is the new authority. A partial or malformed header cannot be ignored.
-        let providers = config.providers.as_ref().ok_or_else(denied)?;
-        let anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
         let read = |name: &str| -> ApiResult<&str> {
             let values = headers.get_all(name);
             if values.iter().count() != 1 {
@@ -643,28 +685,45 @@ async fn reserve_account(
         };
         let evidence: AdmissionEvidence =
             serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
-        let witness = verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
-        let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
-        if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
-            return Err(denied());
+        if account_replay {
+            let pin = state
+                .witness_capture_pin
+                .as_ref()
+                .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))
+                .ok_or_else(denied)?;
+            verify_stored_admission_signature(&evidence, read(SIGNATURE_HEADER)?, pin)
+                .map_err(|_| denied())?;
+            if evidence.account_anchor_sha256 != legacy_anchor
+                || evidence.artifact_sha256 != body_hash
+            {
+                return Err(denied());
+            }
+        } else {
+            let providers = config.providers.as_ref().ok_or_else(denied)?;
+            let witness =
+                verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
+            let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
+            if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
+                return Err(denied());
+            }
+            verify_admission_evidence(
+                &evidence,
+                read(SIGNATURE_HEADER)?,
+                &witness,
+                bypass.pin(),
+                providers,
+                &legacy_anchor,
+                Utc::now().timestamp(),
+            )
+            .map_err(|_| denied())?;
         }
-        verify_admission_evidence(
-            &evidence,
-            read(SIGNATURE_HEADER)?,
-            &witness,
-            bypass.pin(),
-            providers,
-            &anchor,
-            Utc::now().timestamp(),
-        )
-        .map_err(|_| denied())?;
     }
     let reservation = AccountAdmissionReservation {
         account: account.clone(),
         principal_ref: tenant.principal_ref().into(),
         expected_trust_version: None,
         submission_id: submission,
-        body_hash: hash_hex(body),
+        body_hash,
         lease_id: Uuid::new_v4(),
         policy: config.policy.clone(),
         lease_seconds: config.lease_seconds,
@@ -673,12 +732,7 @@ async fn reserve_account(
         .reserve_account_admission(&reservation)
         .await
         .map_err(|_| denied())?;
-    let status = db
-        .account_admission_status(&account, tenant.principal_ref(), &config.policy)
-        .await
-        .map_err(|_| denied())?
-        .ok_or_else(denied)?;
-    let completed = match decision {
+    let completed = match decision.decision {
         AdmissionDecision::Reserved => false,
         AdmissionDecision::Completed => true,
         AdmissionDecision::Busy => {
@@ -697,7 +751,7 @@ async fn reserve_account(
             return Err(api_error_with_retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 AdmissionRefusal::AccountLimitReached.label(),
-                status.retry_after_seconds,
+                decision.retry_after_seconds,
             ));
         }
         AdmissionDecision::Refused => return Err(denied()),
@@ -710,7 +764,6 @@ async fn reserve_account(
         processing: false,
         completed,
         account: Some((account.clone(), tenant.principal_ref().into())),
-        invited: status.authority == "invited",
         source_claim: Some((account.account_id(), digest)),
     })
 }
@@ -720,6 +773,15 @@ pub(super) async fn account_status_handler(
     Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<axum::response::Response> {
     let mut response = if let Some(config) = state.account_admission.as_ref() {
+        if !RESERVED_ACCOUNT_TENANT_PREFIXES
+            .iter()
+            .any(|prefix| ctx.tenant_id.strip_prefix(prefix).is_some_and(is_hash))
+        {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                AdmissionRefusal::AccountIdentityUnlinked.label(),
+            ));
+        }
         let db = state.db_mirror.as_ref().ok_or_else(denied)?;
         let mut resolved = None;
         for principal in ctx.principal_set.to_vec() {
@@ -810,6 +872,133 @@ pub(super) async fn challenge_handler(
 mod tests {
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
+
+    #[test]
+    fn account_configuration_is_default_off_and_requires_independent_evidence_policy() {
+        assert_eq!(
+            account_evidence_prefix(|_| false),
+            "TRACE_COMMONS_ADMISSION"
+        );
+        assert_eq!(
+            account_evidence_prefix(|key| key == "TRACE_COMMONS_ADMISSION_MIN_REQUEST_BYTES"),
+            "TRACE_COMMONS_ADMISSION"
+        );
+        assert_eq!(
+            account_evidence_prefix(
+                |key| key == "TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_PROVIDER_SIGNERS"
+            ),
+            "TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE"
+        );
+        let valid_policy = r#"{"version":"test","processing_cost_bound":1,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#;
+        let parse = |enabled: Option<&str>,
+                     durable,
+                     policy: Option<&str>,
+                     version: Option<&str>,
+                     lease: Option<&str>,
+                     evidence| {
+            account_config_from_values(
+                durable,
+                |key| {
+                    let value = match key {
+                        "TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED" => enabled,
+                        "TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON" => policy,
+                        "TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION" => version,
+                        "TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS" => lease,
+                        _ => panic!("unexpected config lookup"),
+                    };
+                    value
+                        .map(str::to_owned)
+                        .ok_or(std::env::VarError::NotPresent)
+                },
+                || {
+                    if evidence {
+                        AdmissionProviderTrust::new(Vec::new(), ["11".repeat(32)], Vec::new(), 1)
+                    } else {
+                        Err(trace_commons_server::admission_evidence::AdmissionEvidenceError)
+                    }
+                },
+            )
+        };
+        for off in [None, Some("0"), Some("false")] {
+            assert!(
+                parse(off, false, None, None, None, false)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            parse(
+                Some("yes"),
+                true,
+                Some(valid_policy),
+                Some("test"),
+                Some("1"),
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                Some("true"),
+                false,
+                Some(valid_policy),
+                Some("test"),
+                Some("1"),
+                true
+            )
+            .is_err()
+        );
+        assert!(parse(Some("true"), true, None, Some("test"), Some("1"), true).is_err());
+        assert!(
+            parse(
+                Some("true"),
+                true,
+                Some(valid_policy),
+                Some("other"),
+                Some("1"),
+                true
+            )
+            .is_err()
+        );
+        for lease in [None, Some("0"), Some("86401"), Some("invalid")] {
+            assert!(
+                parse(
+                    Some("true"),
+                    true,
+                    Some(valid_policy),
+                    Some("test"),
+                    lease,
+                    true
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            parse(
+                Some("true"),
+                true,
+                Some(valid_policy),
+                Some("test"),
+                Some("1"),
+                false
+            )
+            .is_err()
+        );
+        let configured = parse(
+            Some("true"),
+            true,
+            Some(valid_policy),
+            Some("test"),
+            Some("1"),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            configured.providers.is_some(),
+            "account evidence does not depend on legacy minimum-byte environment setting"
+        );
+    }
 
     #[test]
     fn account_limit_wire_contract_only_advertises_configured_reset() {

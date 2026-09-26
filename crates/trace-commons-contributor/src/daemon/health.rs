@@ -33,8 +33,8 @@ pub const LABEL_DAILY_CAP_REACHED: &str = "daily-cap-reached";
 /// whose evidence was declined that the service is down leaves them retrying
 /// a queue that will never drain.
 pub const LABEL_ADMISSION_REFUSED: &str = "admission-refused";
-/// The account's admission budget for this window is spent. The commons is
-/// working; it has taken as much from this account as the window allows.
+/// Account admission allowance is exhausted. The policy may be lifetime or
+/// fixed-period; this health condition does not promise an automatic reset.
 pub const LABEL_ADMISSION_LIMIT_REACHED: &str = "admission-limit-reached";
 /// The NEAR AI first-use notice has not been delivered interactively yet, so
 /// the daemon will not send anything through that filter.

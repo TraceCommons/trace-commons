@@ -541,10 +541,9 @@ pub fn verify_admission_evidence(
     Ok(())
 }
 
-/// A previously admitted row already bound the challenge and receipt. A
-/// cutover retry may repeat its signed evidence after first-use expiry; this
-/// verifies the signature and shape only. Callers must compare every stored
-/// identity binding before resuming the old ledger.
+/// Recovery may repeat authentic signed evidence after first-use expiry.
+/// This verifies signature and shape only. Callers must compare their ledger's
+/// account/body binding and any stored challenge/receipt before resuming.
 pub fn verify_stored_admission_signature(
     evidence: &AdmissionEvidence,
     signature: &str,

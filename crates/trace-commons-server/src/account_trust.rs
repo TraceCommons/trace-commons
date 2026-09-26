@@ -99,6 +99,8 @@ impl AccountTrustSnapshot {
 pub enum TrustRefusal {
     #[error("account_trust_refused")]
     Refused,
+    #[error("account_identity_unlinked")]
+    Unlinked,
     #[error("account_trust_unavailable")]
     Unavailable,
 }
@@ -111,12 +113,17 @@ pub async fn resolve_contribution_account(
     tenant_id: &str,
     principal_ref: &str,
 ) -> Result<TrustAccount, TrustRefusal> {
-    let in_near_namespace = ["near-", "nearai-"].iter().any(|prefix| {
-        tenant_id
-            .strip_prefix(prefix)
-            .is_some_and(trace_commons_protocol::admission::is_hash)
-    });
-    if !in_near_namespace || principal_ref.is_empty() {
+    let in_near_namespace = crate::trace_invite_registry::RESERVED_ACCOUNT_TENANT_PREFIXES
+        .iter()
+        .any(|prefix| {
+            tenant_id
+                .strip_prefix(prefix)
+                .is_some_and(trace_commons_protocol::admission::is_hash)
+        });
+    if !in_near_namespace {
+        return Err(TrustRefusal::Unlinked);
+    }
+    if principal_ref.is_empty() {
         return Err(TrustRefusal::Refused);
     }
     let account_id = db
@@ -181,7 +188,7 @@ struct RawPolicy {
 #[derive(Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum RawPeriod {
-    Lifetime,
+    Lifetime {},
     Fixed { seconds: i64 },
 }
 
@@ -211,7 +218,7 @@ pub fn parse_bounded_policy(
         return Err(PolicyError);
     }
     let period = match raw.period {
-        RawPeriod::Lifetime => PolicyPeriod::Lifetime,
+        RawPeriod::Lifetime {} => PolicyPeriod::Lifetime,
         RawPeriod::Fixed { seconds } if seconds > 0 && seconds.checked_mul(1000).is_some() => {
             PolicyPeriod::Fixed { seconds }
         }

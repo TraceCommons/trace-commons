@@ -8,6 +8,8 @@ final class RefusedOutcomeTests: XCTestCase {
     private static let refusalLabels = [
         "admission_refused",
         "admission_limit_reached",
+        "account_limit_reached",
+        "account_identity_unlinked",
         "admission_in_progress",
         "admission_identity_conflict",
         "admission_evidence_refused",
