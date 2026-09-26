@@ -24,22 +24,55 @@ The runtime role's UPDATE permission on `trace_accounts.created_at` exists only
 because PostgreSQL requires UPDATE privilege on a column for `SELECT FOR UPDATE`.
 The transaction never updates that column, account identity, or account closure.
 
+## Account merge
+
+Since V80, an executed account merge carries invite trust to the surviving
+account:
+
+- Every invite grant row of the absorbed account is copied onto the survivor
+  with its original invite hash, grant `trust_version`, `granted_at`, and
+  `revoked_at`. The absorbed account's rows stay on the closed account.
+- A revoked grant never confers trust, and a merge never clears a revocation.
+  When both accounts hold a grant from the same invite, a revocation on either
+  side wins.
+- The survivor's authority is re-derived from its combined grants: `invited`
+  with any unrevoked grant, otherwise `bounded` when either account had a trust
+  row. This is the invariant admission already enforces, so the survivor keeps
+  the higher of the two trusts unless the only grant behind it is revoked.
+- An authority change sets the survivor's `trust_version` past both accounts'
+  versions, so a reservation priced under the old authority is refused at
+  processing. An unchanged authority keeps the survivor's version.
+- Redemption idempotency events (`trace_account_trust_events`) stay with the
+  absorbed account. The merge audit row records `invite_grants_carried` as a
+  count only.
+
+The merge login needs no privilege on the trust tables. The carry-over runs
+through `trace_account_trust_merge`, a SECURITY DEFINER function owned by the
+NOLOGIN, NOBYPASSRLS `trace_account_trust_merge_guard`. It acts only within
+the caller's tenant context and only for a proposal consumed by the same
+transaction, the same proof the reward and source-session merge hooks use.
+`account_merge_pg` runs it under a merge login that has no trust-table rights.
+
+Still not transferred: `trace_near_account_anchors` and
+`trace_near_provisioned_devices` rows stay on the absorbed account, so a NEAR
+device provisioned to it is not a live device of the survivor. That is a
+separate identity rule and is not decided here.
+
 ## Activation blockers
 
 Two separate identity changes remain required before activating trust-based
-admission or folder arming:
+admission or folder arming (the merge half of the second is covered above):
 
 - Legacy device invitees need a reviewed migration from
   `device_keys.invite_subject_hash` to the authenticated NEAR account. It must
   preserve a legitimate spent single-use invitation without spending it again,
   establish an authenticated identity link, and coordinate client grant-identity
   re-baselining. This PR does not invent that mapping or transfer authority.
-- Account merge needs reviewed transfer and conflict rules for
-  `trace_account_trust`, `trace_account_invite_grants`, trust events, and
-  `trace_near_account_anchors`. The current merge does not transfer these rows;
-  an absorbed invited account does not confer trust on its surviving account.
-  Authorization, tenant boundaries, versions, audit, and idempotency must be
-  covered by real PostgreSQL tests before activation.
+- Account merge: trust, grants, and trust events are handled by V80 as
+  described under "Account merge" above, with real PostgreSQL coverage of
+  authorization, versions, revocation, and audit. The NEAR anchor and
+  provisioned-device rows are still not transferred and still need a reviewed
+  rule before activation.
 
 V75 permits only `invited` trust. The future account-admission V77 migration
 broadens that constraint to `bounded`; bounded-to-invited promotion must be

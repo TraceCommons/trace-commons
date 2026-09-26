@@ -883,3 +883,408 @@ async fn merge_clears_absorbed_payout_designation() {
     // A keeps its own designation (no partial-unique-index violation).
     assert!(near_identity_payout_designated(&backend, &tenant, &a_pk).await);
 }
+
+// ---------------------------------------------------------------------------
+// Invite trust carry-over (V80).
+//
+// Rule: the survivor ends with the highest trust its combined, unrevoked
+// grants support. The absorbed account's invite grant rows are copied onto the
+// survivor with their original grant version, time, and revocation. A revoked
+// grant never confers trust, and when both accounts hold a grant from the same
+// invite, a revocation on either side wins. An authority change moves the
+// survivor's trust version past both accounts' versions; an unchanged
+// authority keeps the survivor's version.
+// ---------------------------------------------------------------------------
+
+/// Trust fixture: `(authority, trust_version)` plus grants `(invite, revoked)`.
+struct TrustSeed<'a> {
+    trust: Option<(&'a str, i64)>,
+    grants: &'a [(&'a str, bool)],
+}
+
+fn invite_hash(label: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
+}
+
+async fn seed_trust(backend: &PgBackend, tenant_id: &str, account_id: Uuid, seed: &TrustSeed<'_>) {
+    if let Some((authority, version)) = seed.trust {
+        raw_execute(
+            backend,
+            tenant_id,
+            "INSERT INTO trace_account_trust (tenant_id, account_id, authority, trust_version)
+             VALUES (trace_current_tenant_id(), $1, $2, $3)",
+            &[&account_id, &authority.to_string(), &version],
+        )
+        .await;
+    }
+    for (invite, revoked) in seed.grants {
+        let revoked_sql = if *revoked {
+            "now() - interval '1 minute'"
+        } else {
+            "NULL"
+        };
+        raw_execute(
+            backend,
+            tenant_id,
+            &format!(
+                "INSERT INTO trace_account_invite_grants
+                    (tenant_id, account_id, invite_subject_hash, trust_version,
+                     granted_at, revoked_at)
+                 VALUES (trace_current_tenant_id(), $1, $2, 1,
+                     now() - interval '1 day', {revoked_sql})"
+            ),
+            &[&account_id, &invite_hash(invite)],
+        )
+        .await;
+    }
+}
+
+async fn trust_state(
+    backend: &PgBackend,
+    tenant_id: &str,
+    account_id: Uuid,
+) -> Option<(String, i64)> {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    client
+        .query_opt(
+            "SELECT authority, trust_version FROM trace_account_trust
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant_id, &account_id],
+        )
+        .await
+        .expect("read trust")
+        .map(|row| (row.get(0), row.get(1)))
+}
+
+/// `(invite_subject_hash, revoked)` for every grant row on the account, sorted.
+async fn grant_state(
+    backend: &PgBackend,
+    tenant_id: &str,
+    account_id: Uuid,
+) -> Vec<(String, bool)> {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    client
+        .query(
+            "SELECT invite_subject_hash, revoked_at IS NOT NULL
+               FROM trace_account_invite_grants
+              WHERE tenant_id = $1 AND account_id = $2
+              ORDER BY invite_subject_hash",
+            &[&tenant_id, &account_id],
+        )
+        .await
+        .expect("read grants")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// A login holding only the privileges a merge had before trust existed and
+/// nothing on the trust tables, so any carry-over must come from V80's
+/// definer function rather than the caller's rights.
+async fn restricted_merge_backend(backend: &PgBackend) -> PgBackend {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    client
+        .batch_execute(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+             GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_trust_merge_runtime;
+             GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
+                 trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
+             GRANT INSERT ON trace_account_audit TO trace_trust_merge_runtime;
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;",
+        )
+        .await
+        .expect("provision restricted merge login");
+    let trust_rights: bool = client
+        .query_one(
+            "SELECT has_table_privilege('trace_trust_merge_runtime', 'trace_account_trust', 'SELECT')
+                 OR has_table_privilege('trace_trust_merge_runtime', 'trace_account_invite_grants', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("inspect merge login")
+        .get(0);
+    assert!(!trust_rights, "the merge login holds no trust-table rights");
+    let base = postgres_test_config().expect("config");
+    let mut url = reqwest::Url::parse(secrecy::ExposeSecret::expose_secret(&base.url))
+        .expect("test database URL");
+    url.set_username("trace_trust_merge_runtime")
+        .expect("set user");
+    PgBackend::new(&DatabaseConfig {
+        url: SecretString::from(url.to_string()),
+        ..base
+    })
+    .await
+    .expect("restricted merge backend")
+}
+
+/// Seed A and B, merge B into A as the restricted login, and return the
+/// tenant, both ids, and the merge audit metadata.
+async fn merge_with_trust(
+    backend: &PgBackend,
+    label: &str,
+    survivor: TrustSeed<'_>,
+    absorbed: TrustSeed<'_>,
+) -> (String, Uuid, Uuid, serde_json::Value) {
+    let tenant = unique_tenant(label);
+    let account_a = backend
+        .create_or_reuse_account(&tenant, "principal:trust-a")
+        .await
+        .expect("mint A");
+    let account_b = backend
+        .create_or_reuse_account(&tenant, "principal:trust-b")
+        .await
+        .expect("mint B");
+    seed_trust(backend, &tenant, account_a, &survivor).await;
+    seed_trust(backend, &tenant, account_b, &absorbed).await;
+    let code_hash = unique_code_hash();
+    seed_login_link(backend, &tenant, account_b, &code_hash, false, false).await;
+    let staged = backend
+        .stage_merge_proposal(&tenant, account_a, &code_hash)
+        .await
+        .expect("stage ok")
+        .expect("staged some");
+    restricted_merge_backend(backend)
+        .await
+        .execute_merge(&tenant, account_a, staged.proposal_id)
+        .await
+        .expect("execute ok")
+        .expect("executed some");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let metadata: serde_json::Value = client
+        .query_one(
+            "SELECT safe_metadata FROM trace_account_audit
+              WHERE tenant_id = $1 AND action = 'account_merged'",
+            &[&tenant],
+        )
+        .await
+        .expect("merge audit")
+        .get(0);
+    // The definer function refuses outside the transaction that consumed the
+    // proposal, so it cannot be called to move trust on its own.
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("tenant context");
+    let replay = tx
+        .query_one(
+            "SELECT public.trace_account_trust_merge($1, $2, $3, $4)",
+            &[&tenant, &account_a, &account_b, &staged.proposal_id],
+        )
+        .await
+        .expect_err("a proposal consumed by an earlier transaction authorizes nothing");
+    assert_eq!(
+        replay.as_db_error().map(|e| e.message()),
+        Some("account_trust_merge_unauthorized"),
+        "refused by the function's own proof, not by its absence"
+    );
+    tx.rollback().await.expect("rollback");
+    (tenant, account_a, account_b, metadata)
+}
+
+#[tokio::test]
+async fn merge_bounded_into_invited_keeps_survivor_invited() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let (tenant, a, _b, metadata) = merge_with_trust(
+        &backend,
+        "trust-bounded-into-invited",
+        TrustSeed {
+            trust: Some(("invited", 3)),
+            grants: &[("x", false)],
+        },
+        TrustSeed {
+            trust: Some(("bounded", 9)),
+            grants: &[],
+        },
+    )
+    .await;
+    assert_eq!(
+        trust_state(&backend, &tenant, a).await,
+        Some(("invited".into(), 3)),
+        "an unchanged authority keeps the survivor's version"
+    );
+    assert_eq!(
+        grant_state(&backend, &tenant, a).await,
+        vec![(invite_hash("x"), false)]
+    );
+    assert_eq!(metadata["invite_grants_carried"], 0);
+
+    // The definer is a NOLOGIN, NOBYPASSRLS, non-superuser guard.
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let guard = client
+        .query_one(
+            "SELECT r.rolcanlogin, r.rolbypassrls, r.rolsuper,
+                    pg_get_userbyid(p.proowner) = r.rolname, p.prosecdef
+               FROM pg_proc p, pg_roles r
+              WHERE p.proname = 'trace_account_trust_merge'
+                AND r.rolname = 'trace_account_trust_merge_guard'",
+            &[],
+        )
+        .await
+        .expect("inspect guard");
+    assert!(!guard.get::<_, bool>(0), "guard cannot log in");
+    assert!(!guard.get::<_, bool>(1), "guard does not bypass RLS");
+    assert!(!guard.get::<_, bool>(2), "guard is not a superuser");
+    assert!(guard.get::<_, bool>(3), "guard owns the function");
+    assert!(guard.get::<_, bool>(4), "function is SECURITY DEFINER");
+}
+
+#[tokio::test]
+async fn merge_invited_into_bounded_carries_grant_and_elevates() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let (tenant, a, b, metadata) = merge_with_trust(
+        &backend,
+        "trust-invited-into-bounded",
+        TrustSeed {
+            trust: Some(("bounded", 2)),
+            grants: &[],
+        },
+        TrustSeed {
+            trust: Some(("invited", 5)),
+            grants: &[("y", false)],
+        },
+    )
+    .await;
+    assert_eq!(
+        trust_state(&backend, &tenant, a).await,
+        Some(("invited".into(), 6)),
+        "elevation moves past both accounts' versions"
+    );
+    assert_eq!(
+        grant_state(&backend, &tenant, a).await,
+        vec![(invite_hash("y"), false)]
+    );
+    // The carried row keeps its provenance.
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let preserved: bool = client
+        .query_one(
+            "SELECT a.granted_at = b.granted_at AND a.trust_version = b.trust_version
+               FROM trace_account_invite_grants a
+               JOIN trace_account_invite_grants b
+                 ON b.tenant_id = a.tenant_id AND b.invite_subject_hash = a.invite_subject_hash
+              WHERE a.tenant_id = $1 AND a.account_id = $2 AND b.account_id = $3",
+            &[&tenant, &a, &b],
+        )
+        .await
+        .expect("compare grant rows")
+        .get(0);
+    assert!(
+        preserved,
+        "granted_at and grant trust_version carry over unchanged"
+    );
+    assert_eq!(metadata["invite_grants_carried"], 1);
+}
+
+#[tokio::test]
+async fn merge_invited_into_untrusted_creates_invited_trust() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let (tenant, a, _b, _metadata) = merge_with_trust(
+        &backend,
+        "trust-invited-into-none",
+        TrustSeed {
+            trust: None,
+            grants: &[],
+        },
+        TrustSeed {
+            trust: Some(("invited", 4)),
+            grants: &[("w", false)],
+        },
+    )
+    .await;
+    assert_eq!(
+        trust_state(&backend, &tenant, a).await,
+        Some(("invited".into(), 5))
+    );
+}
+
+#[tokio::test]
+async fn merge_revoked_grant_carries_as_revoked_and_confers_nothing() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let (tenant, a, _b, metadata) = merge_with_trust(
+        &backend,
+        "trust-revoked",
+        TrustSeed {
+            trust: Some(("bounded", 1)),
+            grants: &[],
+        },
+        TrustSeed {
+            trust: Some(("invited", 4)),
+            grants: &[("z", true)],
+        },
+    )
+    .await;
+    assert_eq!(
+        trust_state(&backend, &tenant, a).await,
+        Some(("bounded".into(), 1)),
+        "a revoked grant never elevates the survivor"
+    );
+    assert_eq!(
+        grant_state(&backend, &tenant, a).await,
+        vec![(invite_hash("z"), true)]
+    );
+    assert_eq!(metadata["invite_grants_carried"], 1);
+}
+
+#[tokio::test]
+async fn merge_revocation_of_same_invite_wins_over_survivor_grant() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let (tenant, a, _b, _metadata) = merge_with_trust(
+        &backend,
+        "trust-revocation-wins",
+        TrustSeed {
+            trust: Some(("invited", 2)),
+            grants: &[("v", false)],
+        },
+        TrustSeed {
+            trust: Some(("invited", 3)),
+            grants: &[("v", true)],
+        },
+    )
+    .await;
+    assert_eq!(
+        grant_state(&backend, &tenant, a).await,
+        vec![(invite_hash("v"), true)]
+    );
+    assert_eq!(
+        trust_state(&backend, &tenant, a).await,
+        Some(("bounded".into(), 4)),
+        "with no unrevoked grant left, the survivor is bounded at a new version"
+    );
+}
