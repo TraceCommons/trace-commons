@@ -117,7 +117,7 @@ pub(super) fn current_account_binding(
     Ok(account_binding(&config, &session))
 }
 
-fn persist_rotated_token(
+pub(super) fn persist_rotated_token(
     shared: &DaemonShared,
     session: &crate::account_auth::LoadedAccountSession,
     rotated_token: Option<String>,
@@ -135,7 +135,7 @@ fn credential_storage_error(request_id: u64) -> Response {
     Response::err(request_id, ERR_UNAVAILABLE, CREDENTIAL_STORAGE_UNAVAILABLE)
 }
 
-fn attach_credential_warning(value: &mut serde_json::Value) {
+pub(super) fn attach_credential_warning(value: &mut serde_json::Value) {
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "credential_warning".to_string(),

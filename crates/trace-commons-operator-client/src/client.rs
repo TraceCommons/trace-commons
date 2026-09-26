@@ -42,6 +42,10 @@ pub struct ClientBuilder {
 pub struct CallWithResponseHeader<T> {
     pub result: Result<T>,
     pub response_header: Option<String>,
+    /// The HTTP status the server answered with, or `None` when no response
+    /// arrived (a refused URL, a transport error). A caller that needs one
+    /// exact status, rather than any success, reads it here.
+    pub status: Option<reqwest::StatusCode>,
 }
 
 impl Client {
@@ -126,6 +130,7 @@ impl Client {
                 return CallWithResponseHeader {
                     result: Err(error),
                     response_header: None,
+                    status: None,
                 };
             }
         };
@@ -133,6 +138,7 @@ impl Client {
             return CallWithResponseHeader {
                 result: Err(error),
                 response_header: None,
+                status: None,
             };
         }
         let mut request = self.inner.request(method, url.clone());
@@ -162,6 +168,7 @@ impl Client {
         CallWithResponseHeader {
             result,
             response_header: response.response_header,
+            status: response.status,
         }
     }
 
@@ -296,6 +303,7 @@ impl Client {
                 return CallWithResponseHeader {
                     result: Err(error),
                     response_header: None,
+                    status: None,
                 };
             }
         };
@@ -308,6 +316,7 @@ impl Client {
                         source,
                     }),
                     response_header: None,
+                    status: None,
                 };
             }
         };
@@ -333,6 +342,7 @@ impl Client {
                 return CallWithResponseHeader {
                     result: Err(error),
                     response_header: None,
+                    status: Some(status),
                 };
             }
         };
@@ -345,6 +355,7 @@ impl Client {
                         source,
                     }),
                     response_header: selected_header,
+                    status: Some(status),
                 };
             }
         };
@@ -368,6 +379,7 @@ impl Client {
         CallWithResponseHeader {
             result,
             response_header: selected_header,
+            status: Some(status),
         }
     }
 
@@ -615,6 +627,57 @@ mod tests {
             response.response_header.as_deref(),
             Some("rotated-synthetic-token")
         );
+        assert_eq!(response.status, Some(reqwest::StatusCode::OK));
+    }
+
+    /// Any 2xx decodes, so a caller that needs exactly one status can tell a
+    /// 202 from a 200 only by the status this exposes.
+    #[tokio::test]
+    async fn call_json_with_response_header_exposes_a_non_200_success_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/account/state"))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(serde_json::json!({"items": []})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder(server.uri(), "unused")
+            .bearer_token("synthetic-token")
+            .build()
+            .expect("client builds");
+        let response = client
+            .call_json_with_response_header::<(), ListResponse>(
+                Method::GET,
+                "/v1/account/state",
+                &[],
+                None,
+                "x-trace-commons-session-token",
+            )
+            .await;
+        assert!(response.result.is_ok());
+        assert_eq!(response.status, Some(reqwest::StatusCode::ACCEPTED));
+    }
+
+    /// No response, no status.
+    #[tokio::test]
+    async fn call_json_with_response_header_has_no_status_without_a_response() {
+        let client = Client::builder("http://127.0.0.1:1", "unused")
+            .bearer_token("synthetic-token")
+            .build()
+            .expect("client builds");
+        let response = client
+            .call_json_with_response_header::<(), ListResponse>(
+                Method::GET,
+                "/v1/account/state",
+                &[],
+                None,
+                "x-trace-commons-session-token",
+            )
+            .await;
+        assert!(matches!(response.result, Err(Error::Transport { .. })));
+        assert_eq!(response.status, None);
     }
 
     #[tokio::test]
@@ -648,6 +711,7 @@ mod tests {
             response.response_header.as_deref(),
             Some("rotated-synthetic-token")
         );
+        assert_eq!(response.status, Some(reqwest::StatusCode::CONFLICT));
     }
 
     #[tokio::test]
