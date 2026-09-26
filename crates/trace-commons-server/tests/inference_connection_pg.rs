@@ -88,7 +88,15 @@ async fn selection_is_account_scoped_versioned_idempotent_and_rls_forced() {
         eprintln!("SKIPPED: isolated inference connection PostgreSQL fixture required");
         return;
     };
-    assert!(url.contains("127.0.0.1/trace_inference_connection_z8_test"));
+    // Destructive fixture: refuse anything but a dedicated local database.
+    // Parsed, so CI's explicit `:5432` port is accepted.
+    let parsed = reqwest::Url::parse(&url).expect("test database URL");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(
+        parsed
+            .path()
+            .starts_with("/admission_test_inference_connection")
+    );
     let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
     admin_db.run_migrations().await.unwrap();
     let admin = admin_db
