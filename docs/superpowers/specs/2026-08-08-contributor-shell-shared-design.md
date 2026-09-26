@@ -343,12 +343,23 @@ the machine is still watching:**
 - Where a separate daemon runs under a service manager (Linux with the systemd
   unit), quitting the window leaves it running. Say that instead:
 
-  > The background watcher keeps running and will keep queuing sessions.
-  > Nothing will be sent while nobody's approving.
-  > [ Quit ]  [ Quit and stop watching ]
+  > The background watcher keeps running after you quit. Unless it's paused,
+  > it keeps sending sessions you've already approved, and any session from a
+  > project set to contribute automatically, including ones that finish after
+  > you quit. Everything else waits for you.
+  > [ Cancel ]  [ Quit ]
+
+  There is deliberately no "Quit and stop watching" action here. A shell
+  attached to the watcher through `AttachedDaemon` cannot send `shutdown`
+  (it is refused before it reaches the wire), so the button would do nothing.
 
 An earlier draft of this spec gave only the second wording, which is false on
-the platform the first application was built for.
+the platform the first application was built for. The second wording itself
+used to end "Nothing will be sent while nobody's approving", which is false
+for anything already approved and for any project set to contribute
+automatically. A shell that cannot reach a watcher at all says only that it
+cannot tell whether one is running. The sentences live in
+`crates/trace-commons-contributor/src/quit_copy.rs`.
 
 Pause offers `For 1 hour` / `Until tomorrow morning` / `Until I turn it back
 on`, backed by `pause {until}` so a timed pause survives the app quitting.

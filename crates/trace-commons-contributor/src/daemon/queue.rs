@@ -15,7 +15,7 @@
 //! is not the contributor declining to upload, and letting a two-week clock
 //! run through one would silently discard traces nobody chose to discard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -603,6 +603,23 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
     }
 }
 
+/// What `Queue::reoffer_refused_for_reason` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReofferOutcome {
+    /// Entries returned to a fresh `Pending` offer.
+    pub reoffered: usize,
+    /// Stale entries retired as `Superseded` because their file already had
+    /// a live entry.
+    pub superseded: usize,
+}
+
+impl ReofferOutcome {
+    /// Whether the queue changed, so the caller must save and announce it.
+    pub fn changed(&self) -> bool {
+        self.reoffered + self.superseded > 0
+    }
+}
+
 /// What `Queue::replace_live_at_path` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplaceOutcome {
@@ -924,6 +941,82 @@ impl Queue {
             }
         }
         released
+    }
+
+    /// Re-offer every entry refused for `reason_label`, returning how many
+    /// moved.
+    ///
+    /// For a refusal that says nothing about the session itself -- a gate
+    /// that was closed at the moment of the send and has since been opened.
+    /// Such an entry is stuck otherwise: it is `Refused`, nothing moves a
+    /// refused entry, and the watcher does not re-offer a session whose file
+    /// has not changed. So the send is lost, although the only thing wrong
+    /// with it was timing.
+    ///
+    /// The entry goes back to `Pending`, not `Approved`, through
+    /// [`Self::return_to_waiting`]: every term of its old approval cleared,
+    /// no reason label, and dated `now`. The approval was given before the
+    /// gate it depended on had been satisfied, so it is asked for again
+    /// rather than carried over. In an `auto_upload` folder the watcher
+    /// re-approves it on its next pass; in any other folder the contributor
+    /// decides again.
+    ///
+    /// Two further conditions, both from review:
+    ///
+    /// - The re-offer is dated `now`. Expiry counts from `discovered_at`, and
+    ///   the gate's health label held expiry off the whole time these waited,
+    ///   so an entry refused on day 0 and re-offered on day 15 would otherwise
+    ///   be expired on the next tick, before anyone saw it -- losing the
+    ///   sessions that waited longest, which this exists to recover.
+    /// - An entry whose file already has a live entry is not revived; it is
+    ///   marked `Superseded` (`REASON_CHANGED`) instead. If the session grew
+    ///   while this one sat refused, the watcher has already offered the new
+    ///   content, and reviving the old entry would put a second card beside
+    ///   it describing bytes that no longer exist. Merely skipping it only
+    ///   postponed that: it kept the gate's refusal label, so the first pass
+    ///   after the newer entry stopped being live -- uploaded, or dismissed
+    ///   by the contributor -- revived it. Superseding retires it for good.
+    ///
+    /// Returns what moved, re-offers and supersedes separately, so a caller
+    /// saves and announces when either happened.
+    pub fn reoffer_refused_for_reason(
+        &mut self,
+        reason_label: &str,
+        now: DateTime<Utc>,
+    ) -> ReofferOutcome {
+        let live_paths: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                )
+            })
+            .map(|e| e.path.clone())
+            .collect();
+        let (stale, fresh): (Vec<(Uuid, bool)>, Vec<(Uuid, bool)>) = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.state == QueueState::Refused && e.reason_label.as_deref() == Some(reason_label)
+            })
+            .map(|e| (e.entry_id, live_paths.contains(&e.path)))
+            .partition(|(_, has_live)| *has_live);
+        for (id, _) in &stale {
+            self.set_state(
+                *id,
+                QueueState::Superseded,
+                Some(REASON_CHANGED.to_string()),
+            );
+        }
+        for (id, _) in &fresh {
+            self.return_to_waiting(*id, now);
+        }
+        ReofferOutcome {
+            reoffered: fresh.len(),
+            superseded: stale.len(),
+        }
     }
 
     /// Return every unattended approval for `project_key` to waiting,
@@ -3008,6 +3101,145 @@ mod tests {
             !q.all()[0].held_for_review(),
             "an approved entry is not held"
         );
+    }
+
+    #[test]
+    fn a_refusal_for_a_since_opened_gate_is_re_offered_and_no_other_is() {
+        let mut q = Queue::default();
+        let gated = QueueEntry {
+            approved_unattended: true,
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        let gated_id = gated.entry_id;
+        q.push_for_test(gated);
+        q.push_for_test(QueueEntry {
+            reason_label: Some("secret-leak-detected".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        });
+        q.push_for_test(QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Uploaded)
+        });
+
+        assert_eq!(
+            q.reoffer_refused_for_reason("gate-closed", Utc::now())
+                .reoffered,
+            1
+        );
+
+        let e = q.all().iter().find(|e| e.entry_id == gated_id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(e.reason_label, None);
+        assert!(
+            !e.approved_unattended,
+            "the old approval's terms are cleared"
+        );
+        let states: Vec<_> = q.all().iter().map(|e| e.state).collect();
+        assert!(
+            states.contains(&QueueState::Refused),
+            "another reason is left alone"
+        );
+        assert!(
+            states.contains(&QueueState::Uploaded),
+            "only Refused entries move"
+        );
+    }
+
+    /// Reviewed as High on #1009. The gate's health label held expiry off
+    /// while these waited, so a re-offer that kept its original date would be
+    /// expired on the next tick -- losing the sessions that waited longest.
+    #[test]
+    fn a_re_offer_is_dated_now_and_survives_the_next_expiry() {
+        let now = Utc::now();
+        let mut q = Queue::default();
+        let long_ago = QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            discovered_at: now - Duration::days(20),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        q.push_for_test(long_ago);
+
+        assert_eq!(
+            q.reoffer_refused_for_reason("gate-closed", now).reoffered,
+            1
+        );
+        assert_eq!(q.expire(now, 14, false), 0, "a fresh offer is not expired");
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+        assert_eq!(q.all()[0].discovered_at, now);
+    }
+
+    /// A refused entry is not revived beside a newer live one for the same
+    /// file: the watcher has already offered the grown session, and the old
+    /// entry describes bytes that no longer exist.
+    #[test]
+    fn a_re_offer_skips_a_file_that_already_has_a_live_entry() {
+        let mut q = Queue::default();
+        let stale = QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        let path = stale.path.clone();
+        q.push_for_test(stale);
+        q.push_for_test(QueueEntry {
+            path,
+            ..entry_in("/w/alpha", QueueState::Pending)
+        });
+
+        let outcome = q.reoffer_refused_for_reason("gate-closed", Utc::now());
+        assert_eq!(outcome.reoffered, 0);
+        assert_eq!(
+            outcome.superseded, 1,
+            "the stale entry is retired, not left refused"
+        );
+    }
+
+    /// Reviewed as Medium on #1009. Skipping the stale entry only postponed
+    /// its revival: it kept the gate's refusal label, so the first pass after
+    /// the newer entry stopped being live revived it. Both ways the newer
+    /// entry stops being live are covered -- it is uploaded (the watcher then
+    /// sees the unchanged file as done and never supersedes the stale one),
+    /// or the contributor dismisses it (and a declined conversation must not
+    /// come back as a card).
+    #[test]
+    fn a_skipped_stale_entry_is_not_revived_once_the_newer_one_is_settled() {
+        for settled in [
+            (QueueState::Uploaded, None),
+            (QueueState::Refused, Some(REASON_DISMISSED.to_string())),
+        ] {
+            let mut q = Queue::default();
+            let stale = QueueEntry {
+                reason_label: Some("gate-closed".to_string()),
+                ..entry_in("/w/alpha", QueueState::Refused)
+            };
+            let stale_id = stale.entry_id;
+            let path = stale.path.clone();
+            q.push_for_test(stale);
+            let newer = QueueEntry {
+                path,
+                ..entry_in("/w/alpha", QueueState::Pending)
+            };
+            let newer_id = newer.entry_id;
+            q.push_for_test(newer);
+
+            assert_eq!(
+                q.reoffer_refused_for_reason("gate-closed", Utc::now())
+                    .reoffered,
+                0
+            );
+            q.set_state(newer_id, settled.0, settled.1.clone());
+            assert_eq!(
+                q.reoffer_refused_for_reason("gate-closed", Utc::now())
+                    .reoffered,
+                0,
+                "a later pass revived the stale entry after the newer one became {:?}",
+                settled.0
+            );
+
+            let e = q.all().iter().find(|e| e.entry_id == stale_id).unwrap();
+            assert_eq!(e.state, QueueState::Superseded);
+            assert_eq!(e.reason_label.as_deref(), Some(REASON_CHANGED));
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 7, 2026-09-24)
+Date: 2026-09-23 (rev 8, 2026-09-25)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
@@ -9,6 +9,19 @@ Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 surface in the Tauri client, named the main client for the MVP in #1003 and
 merged in #963. No production code in this PR.
 
+> **Rev 8** adopts the trust model set out in review on #991 (2026-09-25):
+> every contributor has a NEAR AI login, an invite is full trust, and trust
+> otherwise lives on the account and is enforced on the server. The consent
+> decision becomes "arm this folder"; trust decides how much an armed folder
+> may send. That changes what several requirements are *for*: R1 now governs
+> what the arming disclosure may claim rather than whether a folder may be
+> armed, R3 becomes a runtime client check that lifts only while the
+> configured ingest says it admits by account (the server then decides
+> volume), and already-armed folders stay armed rather than being disarmed.
+> R6 is now specified in full, including the invite-to-account migration. See "The
+> trust model", which takes precedence over earlier sections where they
+> disagree; those sections are kept as the record of how the design got here.
+>
 > **Rev 7** records three answers settled in review. The witness reaches an
 > invited contributor through **connected inference**, which is the
 > contributor-chosen relationship the no-server-pushed-enablement rule needs;
@@ -33,7 +46,7 @@ merged in #963. No production code in this PR.
 >
 > **Rev 5** reverses rev 3's conclusion for invited contributors. R3's
 > admission requirement is scoped to the `near-` and `nearai-` tenant
-> namespaces, which an invited tenant is never in, so the gate that blocks
+> namespaces, which a derived invite tenant is never in, so the gate that blocks
 > wallet and NEAR AI-login enrollees does not apply to them. What they lack is
 > a prose pass, and the witness supplies exactly that. Offering the witness at
 > the grant makes invite the first enrollment that can have Flow 1 -- the
@@ -102,13 +115,232 @@ decision more thoroughly than disarming would. Rev 4 also checked only R1, so a
 migrated folder could auto-contribute without R3, R6 or R7, contradicting the
 rule that the gates attach to the mode.
 
-**Rev 6 takes disarm-with-notice.** An armed folder that does not meet R1-R7
-returns to ask-first, and the contributor is told which folders moved and why,
-with re-arming one action away. It is the only option that neither sends
-ungated sessions nor leaves a folder in a state that cannot resolve.
-Grandfathering remains the coherent alternative if the disruption is judged
-worse than the gap, but it carries the gap indefinitely and should then be
-recorded per folder rather than assumed.
+**Rev 6 took disarm-with-notice; rev 8 withdraws it.** Under the trust model
+below there is no blanket disarm. An invitee's armed folders stay armed,
+because an invite is full trust. A non-invitee's armed folders stay armed and
+send within their account's server-side limits. What changes for an
+already-armed folder is its disclosure, not its mode: where R1 does not hold,
+its arming copy must not claim a model scrubs it (see "The trust model").
+"Stay armed" is about the mode only: an armed folder can still be held with a
+notice (R3 at runtime, R5) or voided by R6, including by a witness rollout;
+see "The client-side gate under this model".
+
+**The contributor is told when that happens.** A folder armed under the old
+"will be scrubbed" copy whose wording becomes deterministic-only gets the same
+notice a newly automatic folder gets, stating what its arming now means.
+Changing the words under an armed folder without saying so would break the
+"nothing silently" property this design depends on.
+
+## The trust model
+
+Adopted in review on #991 and taking precedence over the sections after it
+where they disagree.
+
+1. **Every contributor has a NEAR AI login.** Settlement is in NEAR AI
+   inference credits, so everyone has a NEAR account.
+2. **A folder whose traces have witnesses can be armed automatically, and
+   sends once the contributor consents.** What "have witnesses" means is open;
+   see below.
+3. **An invite is full trust.** An invited contributor may arm any folder,
+   with no volume limit.
+4. **Without an invite, a contributor may still arm any folder**, and sends
+   within server-side limits set by how far the server trusts their account.
+   That trust grows over time; it is Flow 3's mechanism.
+
+So **the consent decision is "arm this folder"**, and **trust decides how much
+an armed folder may send**. Trust belongs to the account and is enforced on
+the server, not in a per-session step on the client.
+
+### Which requirements full trust relaxes
+
+| | Invitee (full trust) | Non-invitee (trust-limited) |
+|---|---|---|
+| **R1** pipeline verified per session | **relaxed as a gate.** A folder without a witness may be armed and sends after deterministic redaction only. R1 still governs the **disclosure**: the model-scrub wording may be shown only where a certified full pipeline actually ran. | same as invitee: R1 governs the disclosure, not the arming. Volume is limited on the server instead |
+| **R2** pipeline specified, gate at the `AutoUpload` decision | unchanged | unchanged |
+| **R3** admission evidence | **a runtime check: applies unless the configured ingest says it admits by account (#1020, pending)**; see "R3 at runtime". Once invites move onto the NEAR account an invitee is in `nearai-`, where #706 applies whenever #1020 is off, so that migration is ordered after the configured ingest advertises account admission (see R6) | **becomes the trust-limited volume check** (see below) where ingest admits by account; elsewhere, #706 as today |
+| **R4** provenance where claimed | unchanged: claim it only where #1005 supports it | unchanged, and it feeds account trust |
+| **R5** held for review | unchanged | unchanged |
+| **R6** void rule | unchanged; see R6 | unchanged |
+| **R7** scope chosen | unchanged | unchanged |
+
+The principle behind the table: **trust relaxes what may be sent, never what
+may be said.** Full trust lets an invitee's folder send without a verified
+model pass, but no contributor is ever told a model scrubbed a session that
+none did. The arming copy therefore has two forms, chosen by whether R1
+holds: the `AUTO_*` wording where a certified full pipeline ran, and a
+deterministic-only wording otherwise, which is still to be written.
+
+### #706 under the trust model
+
+With a NEAR AI login for everyone, contributors without an invite land in the
+`nearai-` namespace, where #706 refuses submissions lacking per-session
+admission evidence -- evidence that is prepared interactively, per session,
+and that an armed folder never prepares. Left as it is, every automatic send
+from a non-invitee is refused.
+
+**The design takes the first of the two answers:** admission becomes the
+account's trust-limited volume check, enforced on the server, rather than
+evidence produced unattended under the folder-level consent. A per-session
+artefact produced by nobody attests to nothing. The server-side work titled
+"Reserve contribution processing against account trust" (#1020) is the
+candidate implementation; this spec depends on its outcome rather than
+restating it.
+
+### An invite trusts the account, not a separate tenant
+
+An invite today creates its own `tenant-…` identity from the device key, so
+one person can hold two identities, and logging out, which discards the device
+key, loses the invite. Under this model **an invite raises the trust of the
+contributor's NEAR account**: one person, one identity, and an invite that
+survives logout. "Grant invite trust to authenticated NEAR accounts" (#1016)
+is the corresponding server work. Consequences here:
+
+- R3's namespace test stops distinguishing invitees from everyone else, since
+  everyone is `nearai-`. What distinguishes them is account trust, which the
+  client does not decide. **The client-side gate's R3 check is never
+  withdrawn; it becomes a runtime check**, specified in "R3 at runtime"
+  below.
+- The logout rule below (a re-grant arms nothing already on disk) still
+  stands for folder modes, which remain local.
+
+### R3 at runtime
+
+R3 applies unless the configured ingest says it admits by account, which
+#1020 (pending) reports on `GET /v1/account/contribution-status` as
+`authority`, `ready`, and optionally `refusal_label` and
+`retry_after_seconds`.
+
+**That answer is not fleet attestation, and the client must not treat it as
+one.** #1020's operator doc (`docs/operator/account-trust.md` in #1020) says
+so directly: a contribution-status response "describes only the responding
+process", clients "must retain their R3 evidence check", and "seeing
+`bounded` or `invited` from one process is not fleet attestation". The switch
+behind it, `TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`, is read per process and
+is off whenever the variable is missing, so it can differ between replicas
+during a rolling deploy and revert on any redeploy; it also differs between
+commonses. A client that dropped R3 in a release, or treated one yes as
+lasting, would send armed sessions through the witness and classifier only
+for ingest to refuse them. The rules below therefore make a stale or
+single-replica yes cheap to recover from, rather than assume it holds
+fleet-wide.
+
+1. **What lifts R3:** an HTTP 200 whose body parses, with `authority` exactly
+   `bounded` or `invited` **and** `ready: true`. This is
+   `AccountAdmission::from_status` in #1012 (pending, at 95fb4ff1). Anything
+   else keeps R3: no answer, a timeout, an older ingest without the route,
+   `legacy_evidence` (what #1020 answers when account admission is off), an
+   unknown authority, `ready: false`, an unparseable body, or **any non-200**.
+   With account admission on, #1020 answers the status route with 403
+   rather than `legacy_evidence` in two cases: `account_identity_unlinked`
+   for a tenant outside `near-`/`nearai-` (such as a `tenant-…` invite
+   identity, for which R3 does not apply anyway), and `admission_refused`
+   when it has no database mirror or cannot resolve the account. Both keep
+   R3.
+2. **Re-read every full pass.** The daemon reads the status at the start of
+   each full watcher pass, and the answer holds only until the next one; an
+   event-driven pass uses the current pass's answer and never raises a lift
+   on its own. A failed read at the next full pass drops the lift.
+3. **Any admission refusal restores R3 at once**, until the next affirmative
+   full-pass read: `admission_refused` (#706), `account_limit_reached` (HTTP
+   429 under #1020), or `account_identity_unlinked`. The refused entry is held,
+   not disarmed.
+4. **Tied to where and for whom it was read.** A lift belongs to the ingest
+   URL and the account (tenant) it was read for. A change of either -- a
+   different commons, a switched account, the invite-to-account migration --
+   drops it.
+5. **Honour `retry_after_seconds`.** When the answer is `ready: false` with
+   `retry_after_seconds`, R3 stays on and the daemon does not re-read before
+   that time has passed.
+6. **Never persisted.** A lift lives in the running daemon's memory only; it
+   is never written to configuration, policy or the queue. A restarted daemon
+   starts with R3 on.
+
+**The residual cost, stated rather than hidden.** Because the answer
+describes one process and a status read does not reserve a slot (#1020: "a
+status read does not guarantee a slot"), a lift can still be wrong: while
+replicas disagree, or when an account's allowance runs out between the read
+and the submit, some sessions are sent through the witness and classifier
+and then refused at ingest. This design accepts that cost and discloses it
+here. It is bounded by rule 3: the first refusal restores R3, so at most the
+sessions already past the gate when that refusal arrives are affected, and
+the next ones are held until a full pass reads yes again.
+
+### "Traces with witnesses" names two different rules
+
+For automatic arming this has to mean one of two things, and they lead to
+different rules:
+
+- **(a) Redaction quality:** the contributor has a witness configured, so
+  every session in the folder is certified by the enclave. This is what R1's
+  disclosure half turns on.
+- **(b) Provenance:** the folder's sessions include NEAR AI-routed inference
+  with receipts, attested per #1005. This is what R4 and account trust turn on.
+
+Which one point 2's automatic arming turns on is to be confirmed in review;
+it is in Open. It is not a question about arming as such: any contributor may
+arm any folder (points 3 and 4).
+
+### The client-side gate under this model
+
+The gate stays where rev 6 put it, at the decision to approve on the
+contributor's behalf, before either upload branch (pending in #1012). Its
+checks change:
+
+- **R7** (scope chosen): kept.
+- **R1**: withdrawn as a gate. It moves to choosing the arming disclosure.
+- **R3**: a runtime check, under the rules in "R3 at runtime". Lifted only
+  while a full pass has read an affirmative, `ready` answer from the
+  configured ingest for this account, when the server decides volume instead.
+
+**When enforcement is switched on:** `automatic_gate::ENFORCED` ships `false`
+and is switched on only when all of these hold, so the dry run cannot become
+the permanent state by default:
+
+1. Z2 (#1005) is in place, so R4 is claimed only where it holds;
+2. the label-only would-refuse log is live (pending in #1012), together with
+   the count of sessions an enforced gate holds and a label-only health
+   condition that every shell shows, set and cleared only from full polls, so
+   enforcement cannot stop an armed folder without saying so;
+3. the gate's checks are revised to the list above, with R3 as a runtime
+   check (the decision half is pending in #1012);
+4. **the client reads `/v1/account/contribution-status` under the rules in
+   "R3 at runtime" and feeds the answer to the gate.** Owner: poldsam, as a
+   follow-up stacked on #1012. #1012 has only the decision half: at 95fb4ff1
+   the watcher calls `automatic_gate::evaluate()`, which passes
+   `AccountAdmission::NotAdvertised`; `evaluate_with()` and
+   `AccountAdmission::from_status()` have no caller, and nothing fetches the
+   endpoint. Enforcing without this item would hold every `near-`/`nearai-`
+   armed folder permanently, even on an ingest that admits by account;
+5. **two notices are shown in every shell:** the one for folders armed under
+   the old wording (see "The prior decision"), since enforcement is switched
+   on together with the disclosure change that rewords them; and the
+   held-folder notice described below, for armed folders R3 holds.
+
+#1020 itself is not on this list. With R3 checked at runtime, enforcing the
+gate on an ingest that does not admit by account holds `near-`/`nearai-`
+armed folders rather than sending sessions ingest would refuse; where ingest
+admits by account, R3 lifts on its own. **Those folders stay armed but are
+held, and the contributor is told** -- the health condition in item 2, plus a
+per-folder notice that says this commons does not yet accept automatic
+contributions from their account, that nothing is sent until it does, and
+that they can switch the folder to Ask me. That is what separates this from
+the indefinite hold rev 6 rejected (see "The prior decision"): that
+folder showed Automatic while holding everything with nothing said, and would
+never have released; this one says so, and releases on its own the first full
+pass that reads yes.
+
+R1 is not on this list, because rev 8 withdraws it as a gate. It still decides
+which disclosure an armed folder gets, and the model-scrub wording needs the
+published pipeline-version allowlist (Z1, #1013, merged) and the client's check
+against it (K6); until both exist, no folder qualifies for that wording.
+
+It is switched on together with the arming-disclosure change, not with a
+disarm. **"Already-armed folders stay armed" means one thing precisely:
+neither adopting the trust model nor switching enforcement on changes a
+folder's mode.** A folder can still be held (R3 above, R5), and a grant can
+still be voided by R6 -- including by a witness rollout, which returns armed
+folders to ask-first. Those are separate events with their own notices, not
+exceptions to this sentence.
 
 ## What automatic contribution requires
 
@@ -194,6 +426,7 @@ confirmed, per-session `prepare_admission_session` — exactly the per-session
 step Flow 1 removes. Without an answer here, a wallet or NEAR AI-login
 enrollee on Flow 1 has every session disclosed to the witness and then refused
 with `admission_refused`: the disclosure happens and the contribution does not.
+Rev 8's answer is in "R3 at runtime" above.
 
 ### R4. Provenance, where it is claimed
 
@@ -241,6 +474,105 @@ next poll under the new inputs. So a changed witness — URL, pins, or
 **Required:** a void rule whose identity includes `signing_address`, and which
 holds re-approval until re-consent rather than letting the next poll resume.
 
+**Implemented in #1024 (`daemon/grant_terms.rs`).** The identity is structured terms,
+not `input_fingerprint`, which hashes the crate version and would void every
+grant on every release: the destination (ingest and issuer endpoints, audience,
+host allowlist), the identity (tenant, instance, subject, device), the consent
+scopes, the privacy filter and its classifier host and model (including the
+filter `TRACE_PRIVACY_FILTER_BACKEND` attaches, by its host and model or
+sidecar command, hashed), the receipt endpoint, the witness URL,
+`signing_address` and measurements, and attested bodies. The NEAR AI API key
+stays out.
+
+A grant is voided -- the project returns to ask-first and the void is audited
+-- when **the parties who see content grow or change, or the content that
+leaves grows**: any change of destination, identity or classifier; any
+change of witness URL or `signing_address`, or a witness measurement
+admitted; scopes gaining an entry; a filter added or removed; a receipt
+endpoint added or changed; attested bodies turning on. Scopes narrowing,
+attested bodies off, a receipt endpoint removed and a measurement retired do
+not void: each is one fewer party or less content. Measurements are part of
+the witness term, so "a change of witness" here is deliberately narrower than
+"any change to that term": a retirement alone never voids. This matches
+#1024, which compares `witness_url` and `witness_signing_address`
+for equality and voids on measurements only when the new set is not a subset
+of the granted one.
+
+**Admitting a measurement voids**, even under an unchanged `signing_address`,
+because different code then sees the session. It happens before every witness
+rollout, so each rollout returns every armed folder to ask-first; that is the
+accepted cost. It does not contradict "already-armed folders stay armed",
+which is about the trust model and enforcement not changing a folder's mode
+(see "The client-side gate under this model"); a void is a separate event
+that the contributor is told about.
+
+**A void notice is a ship condition.** Voids are not gated by
+`automatic_gate::ENFORCED`, so once #1024 merges the next witness rollout
+returns every armed folder to ask-first. Today that would happen with only an
+audit row and a `status_changed` event: no shell shows a void notice yet. So
+either #1024 merges together with a void notice in every shell, or, if it
+merges first, no witness measurement is admitted for the commons until that
+notice has shipped. A rollout must not silently disarm folders.
+
+**The invite-to-account migration re-baselines rather than voids.** Moving an
+invitee from their `tenant-…` identity to their NEAR account changes the
+identity term, and left to the rule above it would disarm every folder they
+armed, contradicting "an invitee's armed folders stay armed". So as part of
+that migration the daemon re-records each armed folder's terms with the new
+identity. Only the identity term is re-baselined: if the migration also
+changes anything else -- destination, witness, scopes -- that still voids. A
+general same-person exception in the identity term is not taken, because the
+client cannot tell "same person" from any other identity change.
+
+**No PR defines the client step yet, and it has an owner.** #1016 (pending)
+is server-only: it adds `POST /v1/account/invites/redeem` under a NEAR
+session, and its body says it does not migrate legacy invite tenants. The
+client migration and re-baseline are a separate contributor PR, owned by
+poldsam and not yet opened. It must meet all of the following:
+
+- **Binding to server proof of this redemption.** The re-baseline runs only
+  when the daemon holds a redemption record, returned by the server, naming
+  *this* `tenant-…` identity and *this* NEAR account, and signed with the old
+  identity's device key at redemption -- so it proves the holder of the old
+  identity chose to move it onto this account. The daemon verifies the
+  signature against its own device key and the account against the one it is
+  signed into. Without a verifying record, the identity change is an ordinary
+  one and voids. This is what stops a different NEAR account signed in on
+  the same machine (a shared machine, say) from inheriting armed folders:
+  there is no record binding the old identity to that account.
+- **Unreachable over IPC.** The re-baseline primitive is not an IPC method and
+  is not reachable from any shell or the CLI; it runs only inside the
+  migration step, in the daemon.
+- **Ordered against the void sweep.** The step suspends the watcher's full
+  pass, verifies the record, writes the new configuration, then writes the
+  re-baselined terms, and only then resumes the watcher. If the configuration
+  write fails, the old configuration and the old terms stay and nothing
+  voids; the sweep never sees the new identity with the old terms, or the old
+  identity with the new ones.
+- **The contributor is told, not only audited.** Every shell shows a notice
+  that their contributions now go under their NEAR account rather than their
+  invite identity, and that their armed folders stay armed. The re-baseline is
+  also audited.
+- **Ordered after the configured ingest advertises account admission.** The
+  client switches identity only after a full pass has read an affirmative,
+  `ready` contribution-status answer (see "R3 at runtime") from the
+  configured ingest. Before that, an invitee moved into `nearai-` would meet
+  #706: their folders would be held under an enforced gate, or sent through
+  the witness and refused in dry run. This is a different step from the
+  server-side linkage: #1020's operator doc requires every legacy identity to
+  have verified linkage *before* account admission is enabled, and ingest
+  refuses to start with it on otherwise
+  (`account_admission_permissions_or_linkage_not_ready`). So the order is:
+  the server links the invite identity to the account, the operator enables
+  account admission, and then the client switches identity and re-baselines.
+  If admission later reverts on some replica, R3 at runtime holds the
+  folders, with a notice; it does not disarm them.
+- **Reconciled with the logout rule.** The migration does not pass through
+  sign-out, because the record's verification needs the old device key,
+  which logout discards. If a logout happens before the step completes, there
+  is no migration: the logout rule applies, and a re-grant arms nothing
+  already on disk.
+
 ### R7. The data-use scope is chosen
 
 Flow 1 replaces today's consent screen, and that screen **is** the "How may
@@ -256,6 +588,13 @@ get a floor-scope grant -- they get no grant, and land on Flow 2.
 
 ## Where that leaves availability
 
+> **Superseded by "The trust model".** Under it, an invitee may arm any folder
+> and a non-invitee may arm any folder within server-side limits, so
+> availability is a question of disclosure and volume rather than of the
+> table below. Kept as the record of how the design got there. Its R3 column
+> describes invites in their own `tenant-…` namespace, as shipped; once
+> invites move onto the NEAR account, R3 is as the trust-model table says.
+
 | Enrollment | R1 pipeline | R3 admission | R4 provenance | Flow 1 |
 |---|---|---|---|---|
 | Invite **with a witness** | satisfiable once the client checks the certified version | **does not apply** | #1005 | **the first path R3 does not block** |
@@ -264,8 +603,10 @@ get a floor-scope grant -- they get no grant, and land on Flow 2.
 
 **The invite path is the one that can work first, and rev 3 had this
 backwards.** R3 is scoped to two tenant namespaces and invite tenants are in
-neither. `ANCHOR_NAMESPACES` is `["near-", "nearai-"]`, and `admission.rs:76`
-is explicit about the rest:
+neither. The namespaces are `RESERVED_ACCOUNT_TENANT_PREFIXES`,
+`["near-", "nearai-"]` (`trace_invite_registry.rs`), and the ingest's
+`anchor()` in `trace_commons_ingest_internal/admission.rs` is explicit about
+the rest:
 
 > A tenant in neither namespace is not refused, it is `None`: this is the
 > invite-free path, and an invited tenant simply does not use it.
@@ -342,8 +683,11 @@ automatic, because the gates attach to the `AutoUpload` mode rather than to the
 onboarding path that reached it. What differs is *when* and *how much* becomes
 automatic, not what automatic means.
 
-**The mechanism is deliberately not fixed here** -- which signals count, what
-they accumulate toward, where thresholds sit. Two structural properties are
+**Where the mechanism lives is now settled; its details are not.** Under the
+trust model, earned trust is a property of the **account**, enforced on the
+**server** as the limit on how much an armed folder may send. It is not a
+client-side counter. Which signals count, what they accumulate toward and where
+thresholds sit remain deliberately unfixed. Two structural properties are
 fixed, because the rest of this spec depends on them:
 
 - **Whatever is earned is expressed as project mode**, so that exclusion,
@@ -372,6 +716,11 @@ each one" is false for an armed Flow 2 folder.
 flow reached it, or the spec states plainly that arming in Flow 2 is automatic
 contribution without them. This spec takes the first position: the gates belong
 to the *mode*, not to the onboarding path.
+
+Under the trust model this still holds -- the requirements attach to the mode,
+whichever path reached it -- but what they require changes: R1 chooses the
+disclosure rather than gating the arming, and R3 is a server-side volume check.
+See "The trust model".
 
 ### The default must not arm what already exists
 
@@ -501,52 +850,37 @@ contributed, and no sentence covers that.
 
 ## Open
 
-- **The earned-trust path's mechanism.** Which signals count, what they
-  accumulate toward, and where the thresholds sit. Settled in review that the
-  path exists and that its signals are gathered during and after onboarding;
-  the mechanism itself is deliberately not fixed here.
-- **Witness capacity and back-pressure.** Routing invited contributors through
-  the shared witness puts every automatic session, including pre-grant
-  backlogs, through a small fixed number of concurrent slots with a long
-  per-request timeout and limited classifier throughput, and R5 re-runs the
-  witness whenever a held session is opened. A cohort from one shared invite
-  draining backlogs at once would crowd out other enrollees' interactive
-  previews. The spec needs a stated requirement: client-side pacing, witness
-  admission control, and what a contributor sees when the witness is saturated.
-- **What stops spam on the invite path.** This is the cost of rev 5 being
-  right about availability. Invited tenants sit outside the admission ledger,
-  and the receipt mechanism does not substitute for it, so an invited
-  contributor on Flow 1 contributes at volume with neither a per-session
-  admission step nor attested provenance until #1005.
+Settled since rev 7 and removed from this list: where the earned-trust
+mechanism lives (the account, on the server), what stops spam on the invite
+path (server-side, keyed on the account), #706 under Flow 1 (the trust-limited
+volume check where ingest admits by account), the void rule's identity and
+measurement admission (R6; implementation pending in #1024), and the arming
+and quit copy (the arming copy merged in #1011; the quit copy is pending in
+#1007, and on `main` it still says "Nothing will be sent while nobody's
+approving").
 
-  **Two things are settled about the shape of any answer.** It cannot be a
-  client-side consent control: per-session approval runs on the contributor's
-  own client, and an abusive invitee already has `AutoUpload`, `--mode auto`
-  and CLI `submit`, so no consent mode and no grant-time gate changes what they
-  can send. And a per-tenant cap is the wrong unit: derived invite tenants come
-  from the device key, which logout discards, and invites are multi-use, so the
-  limit resets more easily than it appears. **Volume control belongs
-  server-side, keyed on the invite, or the invite together with an account.**
-
-  Gating the grant on #1005 is weaker than it sounds for the same reason: most
-  invitees have no receipts, so the grant would open when #1005 merges while
-  those contributors stayed unattested.
-- **#706 under Flow 1**, still open for wallet and NEAR AI-login enrollees.
-  Either admission evidence gets a non-per-session form, or Flow 1 stays
-  unavailable to them while being available to invited contributors, which is
-  an odd shape and worth deciding deliberately.
-- **Measurement.** How many sessions would satisfy R1 -- a certified pipeline
-  version on the exact allowlist. Rev 2's plan read `trace_submissions.privacy_risk`, the server's
-  re-scored value over sessions that survived client refusals — the wrong
-  population. `residual_risk_basis` (#474, V52) gives the cause breakdown.
-- **Shipped copy that this contradicts.** The arming copy's "Every future
-  session" and "time to change your mind"; and the attached-daemon quit copy,
-  which since #1000 is the shared `QUIT_ATTACHED_BODY` in `quit_copy.rs` used
-  by the Tauri confirmation as well as GTK, with macOS carrying its own. It
-  tells the contributor nothing will be sent while nobody is approving, which
-  is **already wrong today for any armed Flow 2 folder**, not only under Flow
-  1. Scoping the fix to the Linux dialog would leave Tauri and macOS users with
-  the same false sentence.
+- **"Traces with witnesses."** Whether a folder is armed automatically (trust
+  model, point 2) because of (a) a configured witness certifying redaction, or
+  (b) NEAR AI-routed inference with receipts. Arming by the contributor is not
+  in question; any contributor may arm any folder.
+- **The deterministic-only arming disclosure.** Under full trust an invitee's
+  folder without a witness may be armed, and its copy must not claim a model
+  scrubs it. That wording is not yet written, and it needs the same pinning and
+  cross-shell treatment as the `AUTO_*` constants (pending in #1008).
+- **Earned-trust signals and thresholds.** Where the mechanism lives is
+  settled; which signals count, what they accumulate toward and where the
+  limits sit are not.
+- **Witness capacity and back-pressure.** Automatic sessions, including
+  pre-grant backlogs, through a shared witness with bounded slots (#1014).
+- **Telling the contributor: the copy and the shells.** A void and a hold are
+  audited and announced as events, but no shell shows the contributor a notice
+  yet, which the "nothing silently" property requires. What is no longer open
+  is *when* each notice must exist: the void notice is a ship condition for
+  #1024 or the first measurement admission after it (R6); the notice for
+  folders armed under the old wording, and the held-folder notice, are on the
+  enforcement switch-on list; and the migration notice is part of the client
+  migration step (R6). What is open is the wording and which PR carries each
+  shell's notice.
 - **Legal posture**, unchanged: a one-time grant is a different consent basis,
   and review established that withdrawing it is currently much harder than
   giving it.

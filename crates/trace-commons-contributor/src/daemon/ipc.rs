@@ -291,6 +291,9 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "acknowledge_near_ai_notice",
     "approve",
+    "automatic_grant",
+    "grant_automatic",
+    "withdraw_automatic_grant",
     "certificate_detail",
     "cancel",
     "clear_public_profile",
@@ -511,6 +514,11 @@ pub struct DaemonShared {
     /// "has rows". Compared against on every refresh so a transition is
     /// reported once, not on every poll -- see [`Self::routing_transition`].
     routing_had_rows: AtomicBool,
+    /// How many sessions the last full pass reported the automatic gate as
+    /// holding, and the unmet reasons (labels) it held them for. Compared
+    /// against by `watcher::report_gate` so the level is logged when either
+    /// moves, not on every poll.
+    pub(crate) gate_held_logged: Mutex<(usize, Vec<&'static str>)>,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -689,6 +697,7 @@ impl DaemonShared {
             routing,
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
+            gate_held_logged: Mutex::new((0, Vec::new())),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
@@ -2033,6 +2042,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
         "set_project_mode" => handle_set_project_mode(shared, req),
+        "grant_automatic" => handle_grant_automatic(shared, req),
+        "withdraw_automatic_grant" => handle_withdraw_automatic_grant(shared, req),
+        "automatic_grant" => Response::ok(req.id, automatic_grant_value(shared)),
         "dismiss" => {
             let id = try_response!(entry_id_param(req));
             // A dismissed entry is never previewed again, so drop any
@@ -2502,6 +2514,86 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
 // are supported, deliberately, rather than one replacing the other.
 //
 // `project_id` wins when both are sent.
+/// The Flow 1 grant as a client may see it: whether one is in force, when it
+/// was given, and whether what was on disk has been recorded yet (until it
+/// is, the grant arms nothing). No paths and no counts of them.
+fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
+    let policy = shared.policy.lock().expect("policy lock");
+    match &policy.automatic_grant {
+        Some(grant) => serde_json::json!({
+            "granted": true,
+            "granted_at": grant.granted_at,
+            // A source recorded, not every source: each is recorded on its
+            // own first successful discovery under the grant.
+            "on_disk_recorded": !grant.recorded_sources.is_empty(),
+        }),
+        None => serde_json::json!({ "granted": false }),
+    }
+}
+
+// Give the Flow 1 grant: arm projects discovered from now on (K3), never
+// anything already on disk (K4). Refused without terms to grant under, like
+// arming one project, and recorded before it takes effect.
+fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    };
+    let now = Utc::now();
+    if audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: now,
+            action: "automatic-granted".to_string(),
+            project_label: None,
+            detail: None,
+        },
+    )
+    .is_err()
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.automatic_grant.clone();
+        policy.grant_automatic(now, terms);
+        if policy.save(&shared.store).is_err() {
+            policy.automatic_grant = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+    }
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, automatic_grant_value(shared))
+}
+
+// Withdraw the Flow 1 grant. Projects it armed keep their own entries.
+fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Response {
+    let withdrawn = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.automatic_grant.clone();
+        let withdrawn = policy.withdraw_automatic_grant();
+        if withdrawn && policy.save(&shared.store).is_err() {
+            policy.automatic_grant = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        withdrawn
+    };
+    if withdrawn {
+        // After the withdrawal, not before: a record that fails to write
+        // must not leave the grant in force.
+        let _ = audit::append(
+            &shared.store,
+            &AuditEntry {
+                at: Utc::now(),
+                action: "automatic-grant-withdrawn".to_string(),
+                project_label: None,
+                detail: None,
+            },
+        );
+        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    Response::ok(req.id, serde_json::json!({ "withdrawn": withdrawn }))
+}
+
 fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     let id_param = req.params.get("project_id").and_then(|v| v.as_str());
     let key_param = req.params.get("project_key").and_then(|v| v.as_str());
@@ -2525,6 +2617,11 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // sinks this crate's label-only rule exists to protect. The
     // label is now derived from the key inside `set_mode`.
     // Lock order is policy before queue, as everywhere else.
+    // The terms an arming is granted under, read before the policy lock is
+    // taken so this adds no lock ordering. See `grant_terms`.
+    let arming_terms = (mode == ProjectMode::AutoUpload)
+        .then(|| super::grant_terms::GrantTerms::in_force(shared))
+        .flatten();
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
@@ -2553,6 +2650,20 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let label = disambiguated_label(&key, shown.as_deref(), &known);
         (key, label)
     };
+
+    // Every refusal comes before the audit record below, so a refusal
+    // records nothing. The unknown bucket first, for its own reason: it can
+    // never be armed, terms or not.
+    if let Err(e) = ProjectPolicy::check_mode(&key, mode) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    // Fail closed: a grant needs terms to be a grant of. Arming with none --
+    // no config yet, or one that could not be read -- would leave the next
+    // watcher pass to adopt whatever config then exists as what was agreed,
+    // for example after enrolling with a different commons.
+    if mode == ProjectMode::AutoUpload && arming_terms.is_none() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    }
 
     // The audit entry goes down FIRST, before anything is armed,
     // the way `acknowledge_near_ai_notice` does it.
@@ -2597,6 +2708,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
 
     if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if let Some(terms) = arming_terms {
+        policy.record_grant_terms(&key, terms);
     }
     if let Err(_e) = policy.save(&shared.store) {
         return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
@@ -5379,6 +5493,16 @@ mod tests {
         DaemonShared::load(store).unwrap()
     }
 
+    /// `shared()` with a config saved, for tests that arm a project: arming
+    /// records the terms in force and is refused without a config.
+    fn enrolled_shared() -> DaemonShared {
+        let s = shared();
+        s.store
+            .save_config(&crate::commands::unenrolled_preview_config())
+            .unwrap();
+        s
+    }
+
     #[test]
     fn refresh_history_request_schedules_poll_without_postponing_earlier_request() {
         let shared = shared();
@@ -6091,7 +6215,7 @@ mod tests {
         // would in fact be a worse channel for an attacker than doing it
         // itself (rate-limited, capped, redacted, delivered somewhere it
         // cannot read back). See the module doc's "Authorization" section.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         let r = handle_request(
             &s,
@@ -6112,7 +6236,7 @@ mod tests {
         // The audit log is what replaced the removed gate: not a control,
         // but a local record a contributor can read to see when autonomy
         // was granted.
-        let s = shared();
+        let s = enrolled_shared();
         let r = handle_request(
             &s,
             &req(
@@ -6668,7 +6792,7 @@ mod tests {
         // `daemon-audit.jsonl` -- the two sinks the label-only rule exists
         // to protect. The label is now derived from the key; the param is
         // accepted and ignored.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("myproj");
         let injected = "ghp_fakeinjectedtoken/and/a/path";
         let r = handle_request(
@@ -6871,6 +6995,90 @@ mod tests {
                 .result
                 .expect("approve answers");
         assert!(one.get("excluded_held").is_none(), "{one}");
+    }
+
+    /// Arming over the socket records the terms it was granted under, so a
+    /// later widening can be compared against what was actually agreed
+    /// rather than against a baseline taken afterwards.
+    #[test]
+    fn arming_a_project_records_the_terms_it_was_granted_under() {
+        let s = shared();
+        s.store
+            .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
+                inference_receipt_check_attestation: false,
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "https://issuer.invalid".to_string(),
+                ingest_url: "https://ingest.invalid".to_string(),
+                audience: "aud".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                instance_id: "instance-1".to_string(),
+                user_subject: "alice".to_string(),
+                device_key_id: "sha256:aa".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                pii_filter: None,
+                allowed_hosts: None,
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness: None,
+            })
+            .unwrap();
+        let key = "/tmp/armedproj";
+        seed_entry_with_eligibility(&s, key, None);
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let policy = s.policy.lock().unwrap();
+        let terms = policy
+            .projects
+            .values()
+            .find(|e| e.mode == ProjectMode::AutoUpload)
+            .and_then(|e| e.armed_under.clone())
+            .expect("the grant's terms are recorded at arming");
+        assert!(terms.consent_scopes.contains("debugging_evaluation"));
+        assert_eq!(terms.tenant_id, "tenant-1");
+    }
+
+    /// Arming over the socket and then widening voids: the comparison is
+    /// against the terms recorded at arming. Were they not recorded, the
+    /// next sweep would baseline the new destination as if it had been
+    /// agreed.
+    #[test]
+    fn a_grant_armed_over_the_socket_is_voided_when_its_destination_moves() {
+        let s = enrolled_shared();
+        let key = "/tmp/armedthenmoved";
+        seed_entry_with_eligibility(&s, key, None);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let mut moved = s.store.load_config().unwrap().unwrap();
+        moved.ingest_url = "https://elsewhere.invalid".to_string();
+        s.store.save_config(&moved).unwrap();
+        let current = crate::daemon::grant_terms::GrantTerms::in_force(&s).unwrap();
+
+        let mut policy = s.policy.lock().unwrap();
+        let sweep = policy.sweep_grants(&current);
+        assert_eq!(sweep.baselined, 0, "the grant already had its terms");
+        assert_eq!(sweep.voided.len(), 1);
+        assert_eq!(
+            sweep.voided[0].reasons,
+            vec![crate::daemon::grant_terms::VOID_DESTINATION]
+        );
+        assert_eq!(policy.resolve(key), ProjectMode::NotifyOnly);
     }
 
     /// Turning automatic off stops what it had approved and not yet sent.
@@ -7167,7 +7375,7 @@ mod tests {
 
     #[test]
     fn a_project_id_from_list_projects_is_accepted_by_set_project_mode() {
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         seed_entry(&s, &key);
 
@@ -7408,6 +7616,41 @@ mod tests {
         );
     }
 
+    /// Reviewed on #1024: arming the unknown bucket is refused before the
+    /// arming is recorded, so the audit log never shows an arming that did
+    /// not happen.
+    #[test]
+    fn arming_the_unresolvable_bucket_is_refused_before_it_is_recorded() {
+        let s = enrolled_shared();
+        seed_entry(&s, UNKNOWN_PROJECT_KEY);
+        let resp = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": project_id_for(UNKNOWN_PROJECT_KEY),
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        let err = resp.error.expect("arming the bucket is refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert!(
+            !crate::daemon::audit::load(&s.store)
+                .unwrap()
+                .iter()
+                .any(|e| e.action == "armed-auto-upload"),
+            "a refused arming leaves no audit record"
+        );
+        assert!(
+            !s.policy
+                .lock()
+                .unwrap()
+                .projects
+                .contains_key(UNKNOWN_PROJECT_KEY)
+        );
+    }
+
     #[test]
     fn the_unresolvable_flag_survives_being_ruled_on() {
         // A contributor can silence the bucket even though it can never be
@@ -7446,7 +7689,7 @@ mod tests {
         // The original injection fix must survive the new entry point: the
         // id path resolves to a key the daemon already holds, so the label
         // is still derived and a caller's strings still reach neither sink.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("myproj");
         seed_entry(&s, &key);
         let id = super::super::policy::project_id_for(&key);
@@ -7510,7 +7753,7 @@ mod tests {
         // terminal-only restriction. A best-effort append reduced a
         // disk-full or permissions failure to a warning while the call
         // still returned success, silently defeating the whole replacement.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         break_the_audit_log(&s.store);
 
@@ -10155,7 +10398,7 @@ mod tests {
 
     #[test]
     fn list_audit_reads_back_what_set_project_mode_appended() {
-        let s = shared();
+        let s = enrolled_shared();
         handle_request(
             &s,
             &req(
@@ -10173,7 +10416,7 @@ mod tests {
     fn list_audit_honors_a_limit_and_reports_the_most_recent_entries() {
         // The log is append-by-whole-file-rewrite and otherwise unbounded,
         // same reason list_history caps.
-        let s = shared();
+        let s = enrolled_shared();
         for key in [tmp_project("a"), tmp_project("b"), tmp_project("c")] {
             handle_request(
                 &s,
@@ -10193,7 +10436,7 @@ mod tests {
 
     #[test]
     fn list_audit_caps_an_oversize_limit_at_one_thousand() {
-        let s = shared();
+        let s = enrolled_shared();
         handle_request(
             &s,
             &req(
@@ -10852,7 +11095,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 42, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 45, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
