@@ -13678,13 +13678,21 @@ async fn submit_trace_handler(
         // Remediating a quarantined row always clears any outstanding review lease;
         // the prior assessment is obsolete.
         clear_review_lease_metadata(&mut record);
+        // A remediation replaced the submitted body, so evidence for the prior
+        // body must not outlive it: the mirror replaces it (or removes it, when
+        // this re-POST is unwitnessed) in the submission's own transaction.
+        let mirror_kind = if remediating_prior.is_some() {
+            SubmissionMirrorKind::QuarantineRemediation
+        } else {
+            SubmissionMirrorKind::Submission
+        };
         let audit_event = if remediating_prior.is_some() {
             tenant.quarantine_remediated_audit_event(&record)
         } else {
             tenant.submitted_audit_event(&record)
         };
         if state.require_db_mirror_writes || state.account_admission.is_some() {
-            let mirror_result = mirror_submission_to_db(
+            let mirror_result = mirror_submission_to_db_with_options(
                 &state,
                 tenant.auth(),
                 &record,
@@ -13693,6 +13701,7 @@ async fn submit_trace_handler(
                 witness
                     .as_ref()
                     .map(|verified| (verified, &headers, raw_body.as_ref())),
+                mirror_kind,
             )
             .await;
             if let Err(error) = &mirror_result {
@@ -13715,7 +13724,7 @@ async fn submit_trace_handler(
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
             append_audit_event(&state.root, tenant.tenant_id(), audit_event)
                 .map_err(internal_error)?;
-            let mirror_result = mirror_submission_to_db(
+            let mirror_result = mirror_submission_to_db_with_options(
                 &state,
                 tenant.auth(),
                 &record,
@@ -13724,6 +13733,7 @@ async fn submit_trace_handler(
                 witness
                     .as_ref()
                     .map(|verified| (verified, &headers, raw_body.as_ref())),
+                mirror_kind,
             )
             .await;
             if let Err(error) = &mirror_result {
@@ -59227,6 +59237,24 @@ fn deterministic_trace_vector_payload_object_ref_uuid(
     Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
 
+/// Which submit-path write the submission mirror is recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionMirrorKind {
+    /// A first landing, or a retry of one. Offered witness evidence is
+    /// recorded, and stored evidence must match it.
+    Submission,
+    /// Quarantine remediation (#214) replaced the submitted body under the
+    /// same submission id. Evidence stored for the prior body of a quarantined
+    /// submission is replaced by the offered evidence, or removed when the
+    /// remediation is unwitnessed. The submit audit row gets an id of its own:
+    /// the first landing already holds the submission-derived one, and the
+    /// audit table is append-only.
+    QuarantineRemediation,
+    /// Replays an already-stored file submission into the database. It
+    /// appends no submit audit row: the submission was audited when it landed.
+    Backfill,
+}
+
 async fn mirror_submission_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -59241,8 +59269,8 @@ async fn mirror_submission_to_db(
         record,
         derived_record,
         envelope,
-        true,
         witness_input,
+        SubmissionMirrorKind::Submission,
     )
     .await
 }
@@ -59253,8 +59281,8 @@ async fn mirror_submission_to_db_with_options(
     record: &TraceCommonsSubmissionRecord,
     derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
-    append_submit_audit: bool,
     witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
+    mirror_kind: SubmissionMirrorKind,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -59267,6 +59295,20 @@ async fn mirror_submission_to_db_with_options(
         envelope,
     )?;
     let object_ref_id = object_ref.object_ref_id;
+    let submit_audit_event_id = match mirror_kind {
+        SubmissionMirrorKind::Backfill => None,
+        SubmissionMirrorKind::Submission => Some(deterministic_trace_uuid("submit-audit", record)),
+        // Keyed on the freshly stored object, so each remediation of the same
+        // submission records its own row.
+        SubmissionMirrorKind::QuarantineRemediation => {
+            Some(deterministic_trace_uuid_for_external_ref(
+                "submit-audit-remediation",
+                &record.tenant_id,
+                record.submission_id,
+                &content_sha256,
+            ))
+        }
+    };
     let derived_id = deterministic_trace_uuid("derived-precheck", record);
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
@@ -59288,15 +59330,21 @@ async fn mirror_submission_to_db_with_options(
             )
         })
         .transpose()?;
-    db.upsert_trace_submission_with_witness(
-        storage_submission_write_from_record(
-            record,
-            envelope,
-            Some(derived_record.canonical_summary_hash.clone()),
-        )?,
-        witness_evidence,
-    )
-    .await
+    let submission_write = storage_submission_write_from_record(
+        record,
+        envelope,
+        Some(derived_record.canonical_summary_hash.clone()),
+    )?;
+    match mirror_kind {
+        SubmissionMirrorKind::Submission | SubmissionMirrorKind::Backfill => {
+            db.upsert_trace_submission_with_witness(submission_write, witness_evidence)
+                .await
+        }
+        SubmissionMirrorKind::QuarantineRemediation => {
+            db.remediate_trace_submission_with_witness(submission_write, witness_evidence)
+                .await
+        }
+    }
     .context("failed to mirror trace submission metadata")?;
 
     db.append_trace_object_ref(object_ref)
@@ -59341,9 +59389,9 @@ async fn mirror_submission_to_db_with_options(
     .await
     .context("failed to mirror trace derived metadata")?;
 
-    if append_submit_audit {
+    if let Some(submit_audit_event_id) = submit_audit_event_id {
         db.append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: deterministic_trace_uuid("submit-audit", record),
+            audit_event_id: submit_audit_event_id,
             tenant_id: record.tenant_id.clone(),
             actor_principal_ref: record.auth_principal_ref.clone(),
             actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
@@ -67189,8 +67237,8 @@ async fn backfill_db_mirror_from_files(
             record,
             derived_record,
             &envelope,
-            false,
             None,
+            SubmissionMirrorKind::Backfill,
         )
         .await
         {

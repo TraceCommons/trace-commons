@@ -3303,6 +3303,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // than infer it from a count that came back smaller than the one it drew
     // a button for.
     let mut excluded_ineligible: u64 = 0;
+    // How many pending entries a group selector left out because they are
+    // held for a person's review. See `queue::REASONS_NEEDING_A_PERSON`.
+    let mut excluded_held: u64 = 0;
     let project_id = req.params.get("project_id").and_then(|v| v.as_str());
     // Three mutually exclusive selectors; `all` wins over `project_id` wins
     // over `entry_id` when more than one is sent -- same precedence rule as
@@ -3319,8 +3322,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // the same reason. Filtering it here as well as the project path is
         // deliberate: leaving it out would keep the defect alive behind a
         // different button.
-        let (ids, excluded) = group_selection(queue.pending().iter().copied(), group_filters);
+        let (ids, excluded, held) = group_selection(queue.pending().iter().copied(), group_filters);
         excluded_ineligible = excluded;
+        excluded_held = held;
         (ids, None)
     } else if let Some(pid) = project_id {
         // An id naming no project the daemon knows is refused, exactly as
@@ -3346,7 +3350,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         };
         // Only `Pending`: an entry already approved has had its terms
         // fixed, and a project-wide call must not silently re-pin them.
-        let (ids, excluded) = group_selection(
+        let (ids, excluded, held) = group_selection(
             queue
                 .pending()
                 .iter()
@@ -3355,6 +3359,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             group_filters,
         );
         excluded_ineligible = excluded;
+        excluded_held = held;
         // The unknown-cwd sentinel resolves here like any other project.
         // Approving what is already in that bucket is an ordinary consent
         // decision about entries the contributor can see; it is *arming*
@@ -3715,6 +3720,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     if group_filters && (all || project_id.is_some()) {
         result["excluded_ineligible"] = serde_json::Value::from(excluded_ineligible);
     }
+    // Present on every group call, because the held filter always runs on
+    // one; absent on a single-entry call, where it does not. Kept apart from
+    // `approved` and from `excluded_ineligible` so neither count changes
+    // what it has always meant.
+    if all || project_id.is_some() {
+        result["excluded_held"] = serde_json::Value::from(excluded_held);
+    }
     Response::ok(req.id, result)
 }
 
@@ -3725,10 +3737,20 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
 fn group_selection<'a>(
     entries: impl Iterator<Item = &'a super::queue::QueueEntry>,
     filters: bool,
-) -> (Vec<Uuid>, u64) {
+) -> (Vec<Uuid>, u64, u64) {
     let mut ids = Vec::new();
     let mut excluded = 0u64;
+    let mut held = 0u64;
     for entry in entries {
+        // Always, not only when the evidence filter runs. A held entry needs
+        // a person to act on that one session, and a group control is by
+        // definition not that. Counted apart from the ineligible ones, which
+        // are a different answer: those cannot be sent, these can once
+        // someone looks.
+        if entry.held_for_review() {
+            held += 1;
+            continue;
+        }
         if filters
             && !super::contribution_eligibility::contributable_in_a_group(
                 entry.eligibility.as_deref(),
@@ -3739,7 +3761,7 @@ fn group_selection<'a>(
         }
         ids.push(entry.entry_id);
     }
-    (ids, excluded)
+    (ids, excluded, held)
 }
 
 /// The socket's `"preview"` handler -- the queue-card summary.
@@ -6916,6 +6938,63 @@ mod tests {
                 .any(|s| s["entry_id"] == serde_json::json!(eligible)),
             "the eligible row was selected: {result}"
         );
+    }
+
+    /// A group approve leaves a held session for a person, and says so in its
+    /// own count.
+    ///
+    /// For an invited contributor too: the evidence filter does not run for
+    /// them, but the hold is not about evidence, so it runs regardless.
+    /// `excluded_ineligible` stays absent -- that filter did not run -- and
+    /// `excluded_held` is reported beside it rather than folded into it.
+    #[tokio::test]
+    async fn a_group_approve_leaves_held_sessions_for_a_person() {
+        let s = shared();
+        let key = "/tmp/heldproj";
+        let open = seed_entry_with_eligibility(&s, key, None);
+        let held = seed_entry_with_eligibility(&s, key, None);
+        s.queue.lock().unwrap().set_state(
+            held,
+            super::super::queue::QueueState::Pending,
+            Some(super::super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string()),
+        );
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({ "project_id": project_id_for(key) }),
+            ),
+        )
+        .await;
+        let result = r.result.expect("approve answers");
+
+        assert_eq!(result["excluded_held"], 1, "{result}");
+        assert!(
+            result.get("excluded_ineligible").is_none(),
+            "that filter did not run for an invited contributor: {result}"
+        );
+        let selected = result["skipped"].as_array().expect("a skipped list");
+        assert!(
+            selected
+                .iter()
+                .all(|e| e["entry_id"] != serde_json::json!(held)),
+            "the held session was not selected: {result}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|e| e["entry_id"] == serde_json::json!(open)),
+            "the other session was: {result}"
+        );
+
+        // A single-entry approve runs no group filter and reports none.
+        let one =
+            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": open })))
+                .await
+                .result
+                .expect("approve answers");
+        assert!(one.get("excluded_held").is_none(), "{one}");
     }
 
     /// Arming over the socket records the terms it was granted under, so a
