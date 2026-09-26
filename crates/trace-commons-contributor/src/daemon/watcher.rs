@@ -621,7 +621,11 @@ impl PassContext {
             .as_ref()
             .and_then(|c| c.witness.as_ref())
             .is_some_and(|w| w.admission_evidence);
-        let gate = super::automatic_gate::evaluate(cfg.as_ref(), gate_enforced());
+        let gate = super::automatic_gate::evaluate_with(
+            cfg.as_ref(),
+            gate_enforced(),
+            shared.account_admission.current(cfg.as_ref()),
+        );
         Self {
             now,
             max_queue_entries,
@@ -2004,6 +2008,35 @@ mod tests {
 
     /// Report-only, which is how the gate ships: the approval goes ahead as
     /// before, and is counted as one the gate would have refused.
+    /// R3 follows what ingest last said, read through the daemon's state: an
+    /// anchored tenant would be refused with no answer, and is not once
+    /// ingest says it admits by account.
+    #[tokio::test]
+    async fn r3_follows_what_ingest_last_said_about_account_admission() {
+        let f = WatcherFixture::new();
+        let mut cfg = grant_test_cfg(&["debugging_evaluation"]);
+        cfg.tenant_id = format!("nearai-{}", "a".repeat(64));
+        f.shared.store.save_config(&cfg).unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let unanswered = PassContext::read(&f.shared, Utc::now(), 100, Default::default());
+        assert!(unanswered.gate.would_refuse(), "{:?}", unanswered.gate);
+
+        f.shared
+            .account_admission
+            .record_for_test(&cfg, "bounded", true);
+        let answered = PassContext::read(&f.shared, Utc::now(), 100, Default::default());
+        assert!(!answered.gate.would_refuse(), "{:?}", answered.gate);
+
+        f.shared.account_admission.refused();
+        assert!(
+            PassContext::read(&f.shared, Utc::now(), 100, Default::default())
+                .gate
+                .would_refuse()
+        );
+    }
+
     #[tokio::test]
     async fn the_unenforced_gate_approves_as_before_and_counts_what_it_would_refuse() {
         let f = WatcherFixture::new();

@@ -519,6 +519,9 @@ pub struct DaemonShared {
     /// against by `watcher::report_gate` so the level is logged when either
     /// moves, not on every poll.
     pub(crate) gate_held_logged: Mutex<(usize, Vec<&'static str>)>,
+    /// What ingest last said about account admission, for the gate's R3.
+    /// In memory only; see `account_admission`.
+    pub(crate) account_admission: super::account_admission::AccountAdmissionState,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -698,6 +701,7 @@ impl DaemonShared {
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
             gate_held_logged: Mutex::new((0, Vec::new())),
+            account_admission: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.

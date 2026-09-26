@@ -20,6 +20,7 @@
 //! - A configured privacy filter that is unavailable stops the pipeline. It
 //!   never degrades to sending unfiltered text.
 
+pub mod account_admission;
 pub mod account_onboarding;
 pub mod admission_setup;
 pub mod approved_envelope;
@@ -489,6 +490,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // block below: it sends nothing, so pause, quiesce and dry-run
                 // do not hold it back (see `settle_near_ai_notice`).
                 settle_near_ai_notice(shared, now);
+                // What ingest says about account admission, read before every
+                // full pass for the gate's R3. See `account_admission`.
+                account_admission::refresh(shared, now).await;
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
@@ -581,6 +585,18 @@ pub(crate) fn settle_near_ai_notice(
 /// One `SubmitContext` covers the whole pass, so the claim is minted once and
 /// the privacy-filter canary runs once, exactly as an interactive `submit`
 /// batch does.
+/// An admission refusal from ingest cancels its last yes on account
+/// admission, until it says so again (see `account_admission`). A lease held
+/// by another attempt is not a refusal.
+fn cancel_account_admission_on_refusal(shared: &ipc::DaemonShared, reason_label: &str) {
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    if AdmissionRefusal::from_label(reason_label)
+        .is_some_and(|refusal| refusal != AdmissionRefusal::InProgress)
+    {
+        shared.account_admission.refused();
+    }
+}
+
 async fn drain_approved(
     shared: &Arc<ipc::DaemonShared>,
     now: chrono::DateTime<Utc>,
@@ -939,6 +955,7 @@ async fn drain_approved(
                 }
             }
             uploader::UploadDecision::Refused { reason_label } => {
+                cancel_account_admission_on_refusal(shared, &reason_label);
                 // Decision 1: a refusal for an admission reason is evidence
                 // about the entry, and the entry stops claiming otherwise.
                 // Every other refusal label says nothing about
@@ -988,6 +1005,7 @@ async fn drain_approved(
                 q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
             }
             uploader::UploadDecision::Failed { reason_label } => {
+                cancel_account_admission_on_refusal(shared, &reason_label);
                 // Same rule on the failure side: `submit_one` can report an
                 // admission refusal either way round depending on where in
                 // the pipeline it surfaced, and a row that kept its claim
@@ -1518,6 +1536,39 @@ fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only an admission refusal cancels account admission, and a lease held
+    /// by another attempt is not one.
+    #[test]
+    fn only_an_admission_refusal_cancels_account_admission() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let shared = ipc::DaemonShared::load(store).unwrap();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.tenant_id = format!("nearai-{}", "a".repeat(64));
+        let yes = || {
+            shared
+                .account_admission
+                .record_for_test(&cfg, "bounded", true)
+        };
+        let current = || shared.account_admission.current(Some(&cfg));
+
+        for (label, cancels) in [
+            (AdmissionRefusal::Refused.label(), true),
+            (AdmissionRefusal::AccountLimitReached.label(), true),
+            (AdmissionRefusal::InProgress.label(), false),
+            ("ingest-unreachable", false),
+            ("parse-failed", false),
+        ] {
+            yes();
+            cancel_account_admission_on_refusal(&shared, label);
+            assert_eq!(
+                current() == super::automatic_gate::AccountAdmission::NotAdvertised,
+                cancels,
+                "{label}"
+            );
+        }
+    }
 
     use crate::daemon::test_support::at;
     use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize};
