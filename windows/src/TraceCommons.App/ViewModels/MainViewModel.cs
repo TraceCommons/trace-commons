@@ -148,6 +148,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
 
     /// <summary>
+    /// One card per grant the daemon voided and no shell has shown yet.
+    /// Rebuilt from every status read: a card another shell already
+    /// acknowledged must go, not linger saying something stopped.
+    /// </summary>
+    public ObservableCollection<GrantVoidCard> GrantVoidCards { get; } = new();
+
+    /// <summary>
     /// This entry as the queue describes it NOW, or null if it has left the
     /// queue.
     /// </summary>
@@ -1479,6 +1486,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // this pass's budget rather than the previous pass's.
                 SetBudget(parsedStatus.DailyBudget);
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
+                SetGrantVoids(GrantVoidNotices.Cards(parsedStatus.GrantVoids));
             }
 
             DaemonResponse rollup = await _host
@@ -1641,6 +1649,60 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(HasBudgetBanner));
         Raise(nameof(BudgetTitle));
         Raise(nameof(BudgetDetail));
+    }
+
+    private void SetGrantVoids(IReadOnlyList<GrantVoidCard> cards)
+    {
+        GrantVoidCards.Clear();
+        foreach (GrantVoidCard card in cards)
+        {
+            GrantVoidCards.Add(card);
+        }
+    }
+
+    /// <summary>
+    /// The button on one void notice: records that this notice was shown,
+    /// then re-reads status so the daemon's own list decides what stays.
+    /// </summary>
+    public async Task AcknowledgeGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (card.Id is not { } id)
+        {
+            return;
+        }
+
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.AcknowledgeGrantVoids,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, ulong[]> { ["ids"] = new[] { id } }))
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Turn back on" on a project's void notice: the Settings arming call,
+    /// unchanged. The daemon clears the notice when it arms the project; a
+    /// refusal changes nothing, and the notice stays with the core's
+    /// refusal line shown.
+    /// </summary>
+    public async Task RearmGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (GrantVoidNotices.RearmParams(card) is not { } payload)
+        {
+            return;
+        }
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
+            .ConfigureAwait(true);
+
+        Notice = response.IsError ? card.Notice.RearmFailed ?? string.Empty : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
     }
 
     private void SetPaused(bool paused)

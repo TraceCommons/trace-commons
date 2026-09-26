@@ -83,6 +83,13 @@ public static class DaemonProtocol
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
 
         /// <summary>
+        /// Records that the void notices with these ids were shown. Takes
+        /// only the ids actually drawn: there is no "all", so a void raised
+        /// after the window drew is never cleared unseen. Re-arms nothing.
+        /// </summary>
+        public const string AcknowledgeGrantVoids = "acknowledge_grant_voids";
+
+        /// <summary>
         /// Asks IronWire which tools on this machine are set to send through
         /// it, one row per tool it knows about.
         ///
@@ -679,6 +686,15 @@ public sealed class DaemonStatus
     /// the daemon said nothing about it.
     /// </summary>
     public bool BudgetIsBlocking => DailyBudget?.Blocked == true;
+
+    /// <summary>
+    /// Grants the daemon voided that no shell has shown yet (R6 of the
+    /// connect-and-forget design), each kept as the daemon sent it so it can
+    /// go back to the ABI for its words. Null from a daemon older than the
+    /// field, which has voided nothing it can report.
+    /// </summary>
+    [JsonPropertyName("grant_voids")]
+    public List<JsonElement>? GrantVoids { get; set; }
 
     /// <summary>
     /// Whether there is nothing to report.

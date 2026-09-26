@@ -289,6 +289,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "acknowledge_grant_voids",
     "acknowledge_near_ai_notice",
     "approve",
     "automatic_grant",
@@ -1411,6 +1412,9 @@ impl DaemonShared {
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
         let private_inference = self.private_inference_value();
+        // Before the queue lock too: it takes the policy lock and then the
+        // queue lock, the order `list_projects` takes them in.
+        let grant_voids = self.grant_voids_value();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1449,7 +1453,57 @@ impl DaemonShared {
             // routing is about reading a proxy's ledger, this is about
             // whether this daemon is hosting one.
             "private_inference_state": private_inference,
+            // Additive. Grants R6 voided that no shell has shown yet: the
+            // void notice the connect-and-forget design makes a ship
+            // condition. Beside `health` rather than in it, because the
+            // health slot holds one label and a void must not be masked by
+            // an outage, nor mask one. An empty list, never absent, so a
+            // shell can tell "nothing to show" from a daemon too old to say.
+            "grant_voids": grant_voids,
         })
+    }
+
+    /// The `grant_voids` list of [`Self::status_value`].
+    ///
+    /// Each project void is named the way `list_projects` names the project
+    /// -- `project_id` and the disambiguated label -- and never by its key,
+    /// which is a local path. The Flow 1 grant's void has neither. `reasons`
+    /// are the fixed labels the audit records; a shell turns them into words
+    /// with `consent_copy::void_notice`, never by itself.
+    fn grant_voids_value(&self) -> serde_json::Value {
+        let policy = self.policy.lock().expect("policy lock");
+        if policy.grant_voids.is_empty() {
+            return serde_json::json!([]);
+        }
+        let queue = self.queue.lock().expect("queue lock");
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let voids: Vec<serde_json::Value> = policy
+            .grant_voids
+            .iter()
+            .map(|notice| match notice.project_key.as_deref() {
+                Some(key) => serde_json::json!({
+                    "id": notice.id,
+                    "kind": "project",
+                    "voided_at": notice.voided_at,
+                    "project_id": project_id_for(key),
+                    "project_label": disambiguated_label(
+                        key,
+                        policy.projects.get(key).and_then(|e| e.display_path.as_deref()),
+                        &known,
+                    ),
+                    "reasons": notice.reasons,
+                }),
+                None => serde_json::json!({
+                    "id": notice.id,
+                    "kind": "automatic_grant",
+                    "voided_at": notice.voided_at,
+                    "project_id": serde_json::Value::Null,
+                    "project_label": serde_json::Value::Null,
+                    "reasons": notice.reasons,
+                }),
+            })
+            .collect();
+        serde_json::Value::Array(voids)
     }
 
     /// The `routing` sub-object of [`Self::status_value`].
@@ -2043,6 +2097,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_project_mode" => handle_set_project_mode(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
+        "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
         "withdraw_automatic_grant" => handle_withdraw_automatic_grant(shared, req),
         "automatic_grant" => Response::ok(req.id, automatic_grant_value(shared)),
         "dismiss" => {
@@ -2563,6 +2618,69 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     }
     shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
     Response::ok(req.id, automatic_grant_value(shared))
+}
+
+// Record that a shell showed these void notices, so none shows them again.
+//
+// `ids` is required and names exactly the notices shown. There is no "all":
+// a void raised between the shell drawing and the contributor pressing the
+// button would be cleared unseen, which is the silent void R6 forbids.
+//
+// Audited, like `acknowledge_near_ai_notice`, because it asserts on the
+// caller's word that someone was shown something. The audit goes first: a
+// notice cleared with no record of who cleared it is the worse failure, and
+// an acknowledgement that cannot be recorded leaves the notice showing.
+fn handle_acknowledge_grant_voids(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(ids) = req
+        .params
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .and_then(|list| {
+            list.iter()
+                .map(serde_json::Value::as_u64)
+                .collect::<Option<Vec<u64>>>()
+        })
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "ids-required");
+    };
+    let outstanding = {
+        let policy = shared.policy.lock().expect("policy lock");
+        policy
+            .grant_voids
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .count()
+    };
+    if outstanding == 0 {
+        return Response::ok(req.id, serde_json::json!({ "acknowledged": 0 }));
+    }
+    if audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "grant-voids-acknowledged".to_string(),
+            project_label: None,
+            detail: Some(outstanding.to_string()),
+        },
+    )
+    .is_err()
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    let acknowledged = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.grant_voids.clone();
+        let acknowledged = policy.acknowledge_grant_voids(&ids);
+        if acknowledged > 0 && policy.save(&shared.store).is_err() {
+            policy.grant_voids = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        acknowledged
+    };
+    if acknowledged > 0 {
+        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    Response::ok(req.id, serde_json::json!({ "acknowledged": acknowledged }))
 }
 
 // Withdraw the Flow 1 grant. Projects it armed keep their own entries.
@@ -7062,6 +7180,254 @@ mod tests {
         assert_eq!(terms.tenant_id, "tenant-1");
     }
 
+    /// Arm `key` over the socket, move the destination, and sweep: the
+    /// state a witness rollout or a config change leaves behind.
+    fn armed_then_voided(key: &str) -> DaemonShared {
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let mut moved = s.store.load_config().unwrap().unwrap();
+        moved.ingest_url = "https://elsewhere.invalid".to_string();
+        s.store.save_config(&moved).unwrap();
+        let current = crate::daemon::grant_terms::GrantTerms::in_force(&s).unwrap();
+        let sweep = s.policy.lock().unwrap().sweep_grants(&current, Utc::now());
+        assert_eq!(sweep.voided.len(), 1);
+        s
+    }
+
+    /// R6's ship condition, on the wire: `status` carries every void not yet
+    /// shown, by the project's `project_id` and label as `list_projects`
+    /// gives them, with the reason labels -- and never the key, which is a
+    /// local path.
+    #[test]
+    fn status_reports_a_void_by_project_id_and_label_without_a_path() {
+        let key = "/tmp/voidedproj";
+        let s = armed_then_voided(key);
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .expect("status answers");
+        let voids = status["grant_voids"].as_array().expect("grant_voids");
+        assert_eq!(voids.len(), 1, "{voids:?}");
+        let void = &voids[0];
+        assert_eq!(void["kind"], "project");
+        assert_eq!(void["project_id"], project_id_for(key));
+        assert_eq!(void["project_label"], "voidedproj");
+        assert_eq!(void["reasons"], serde_json::json!(["destination-changed"]));
+        assert!(void["id"].is_u64());
+        assert!(void["voided_at"].is_string());
+        let wire = serde_json::to_string(&status["grant_voids"]).unwrap();
+        assert!(!wire.contains("/tmp"), "a path crossed the socket: {wire}");
+        // The shells' copy reads exactly this shape.
+        let notice = crate::consent_copy::void_notice_for_wire(void).expect("the copy reads it");
+        assert_eq!(
+            notice.title,
+            "Automatic contributing stopped for voidedproj"
+        );
+
+        let projects = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        let row = projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["project_id"] == void["project_id"])
+            .expect("the same project_id list_projects gives");
+        assert_eq!(row["project_label"], void["project_label"]);
+    }
+
+    /// The notice's "Turn back on", end to end: a shell sends
+    /// `set_project_mode` with the element's `project_id`, exactly as it
+    /// arms a project by hand. The project is armed under the terms now in
+    /// force, the audit gets the same `armed-auto-upload` row as manual
+    /// arming, and the notice is gone from `status`.
+    #[test]
+    fn rearming_from_the_notice_arms_audits_and_clears_it() {
+        let key = "/tmp/rearmproj";
+        let s = armed_then_voided(key);
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        let void = status["grant_voids"][0].clone();
+        let notice = crate::consent_copy::void_notice_for_wire(&void).unwrap();
+        assert!(
+            notice.rearm_action.is_some(),
+            "the notice offers the button"
+        );
+        let actions = |s: &DaemonShared| -> Vec<String> {
+            audit::load(&s.store)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.action)
+                .collect()
+        };
+        let before = actions(&s);
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": void["project_id"], "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            status["grant_voids"],
+            serde_json::json!([]),
+            "re-arming clears it"
+        );
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(key), ProjectMode::AutoUpload);
+        let terms = policy.projects[key]
+            .armed_under
+            .clone()
+            .expect("armed under terms");
+        assert_eq!(
+            terms.ingest_url, "https://elsewhere.invalid",
+            "the new terms"
+        );
+        drop(policy);
+        // Exactly one entry more, and it is the manual-arming row.
+        let after = actions(&s);
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        let count = |list: &[String]| list.iter().filter(|a| *a == "armed-auto-upload").count();
+        assert_eq!(
+            count(&after),
+            count(&before) + 1,
+            "the same trail as manual arming"
+        );
+        assert!(
+            ProjectPolicy::load(&s.store)
+                .unwrap()
+                .grant_voids
+                .is_empty()
+        );
+    }
+
+    /// A refused re-arm changes nothing: with no config there are no terms
+    /// to arm under, so `set_project_mode` refuses with
+    /// `arming-terms-unavailable`, the project still asks first, and the
+    /// notice stays for the contributor.
+    #[test]
+    fn a_refused_rearm_keeps_the_notice_and_the_project_asking() {
+        let key = "/tmp/rearmrefused";
+        let s = armed_then_voided(key);
+        let id = project_id_for(key);
+        std::fs::remove_file(s.store.dir().join("contributor.json")).unwrap();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": id, "mode": "auto_upload" }),
+            ),
+        );
+        let err = r.error.expect("refused without terms");
+        assert_eq!(err.message, "arming-terms-unavailable");
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(key), ProjectMode::NotifyOnly);
+        assert_eq!(policy.grant_voids.len(), 1, "the notice stays");
+    }
+
+    /// The unknown bucket can never be armed, so a re-arm naming it is
+    /// refused and leaves every outstanding notice where it was.
+    #[test]
+    fn a_rearm_of_the_unknown_bucket_is_refused_and_clears_nothing() {
+        let s = armed_then_voided("/tmp/rearmunknown");
+        seed_entry_with_eligibility(&s, UNKNOWN_PROJECT_KEY, None);
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": project_id_for(UNKNOWN_PROJECT_KEY),
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        assert!(r.error.is_some());
+        assert_eq!(s.policy.lock().unwrap().grant_voids.len(), 1);
+    }
+
+    /// A healthy daemon reports an empty list, not a missing key, so a shell
+    /// can tell "nothing to show" from "a daemon too old to say".
+    #[test]
+    fn status_reports_no_voids_as_an_empty_list() {
+        let s = enrolled_shared();
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(status["grant_voids"], serde_json::json!([]));
+    }
+
+    /// Acknowledging clears the notices named, audits it, and tells every
+    /// other shell through `status_changed` so a notice shown in one is not
+    /// shown again in another.
+    #[test]
+    fn acknowledging_grant_voids_clears_audits_and_publishes() {
+        let s = armed_then_voided("/tmp/ackproj");
+        let id = s.policy.lock().unwrap().grant_voids[0].id;
+        let mut rx = s.events.subscribe();
+
+        let r = handle_request(
+            &s,
+            &req(
+                "acknowledge_grant_voids",
+                serde_json::json!({ "ids": [id] }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["acknowledged"], 1);
+        assert!(s.policy.lock().unwrap().grant_voids.is_empty());
+        let persisted = ProjectPolicy::load(&s.store).unwrap();
+        assert!(persisted.grant_voids.is_empty(), "the clear is saved");
+
+        let audit = audit::load(&s.store).unwrap();
+        let entry = audit
+            .iter()
+            .find(|e| e.action == "grant-voids-acknowledged")
+            .expect("the acknowledgement is audited");
+        assert_eq!(entry.detail.as_deref(), Some("1"));
+        assert!(entry.project_label.is_none());
+
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "other shells are told");
+    }
+
+    /// `ids` is required and must be a list of ids: an acknowledgement that
+    /// names nothing cannot be read as "all of them", which would clear a
+    /// notice raised after the shell drew.
+    #[test]
+    fn acknowledging_grant_voids_requires_the_ids_shown() {
+        let s = armed_then_voided("/tmp/ackbad");
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({ "ids": "all" }),
+            serde_json::json!({ "ids": [-1] }),
+            serde_json::json!({ "all": true }),
+        ] {
+            let r = handle_request(&s, &req("acknowledge_grant_voids", params.clone()));
+            let err = r.error.unwrap_or_else(|| panic!("{params} accepted"));
+            assert_eq!(err.code, ERR_BAD_PARAMS, "{params}");
+        }
+        assert_eq!(s.policy.lock().unwrap().grant_voids.len(), 1);
+        assert!(METHODS.contains(&"acknowledge_grant_voids"));
+    }
+
     /// Arming over the socket and then widening voids: the comparison is
     /// against the terms recorded at arming. Were they not recorded, the
     /// next sweep would baseline the new destination as if it had been
@@ -7086,7 +7452,7 @@ mod tests {
         let current = crate::daemon::grant_terms::GrantTerms::in_force(&s).unwrap();
 
         let mut policy = s.policy.lock().unwrap();
-        let sweep = policy.sweep_grants(&current);
+        let sweep = policy.sweep_grants(&current, Utc::now());
         assert_eq!(sweep.baselined, 0, "the grant already had its terms");
         assert_eq!(sweep.voided.len(), 1);
         assert_eq!(
@@ -11110,7 +11476,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 45, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
