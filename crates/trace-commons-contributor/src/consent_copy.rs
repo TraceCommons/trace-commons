@@ -88,8 +88,11 @@ pub const GATE_NOT_PINNED_HELP: &str = "This device isn't connected yet, so this
 /// makes the witness's certified full pipeline a precondition of automatic
 /// contribution, so a shell renders this only on the grant screen for a route
 /// where that holds, never as a description of what a default config does.
-/// Until R1 can be met (the gate in `daemon::automatic_gate`), no route
-/// qualifies and no shell shows it.
+/// Nothing in this crate checks R1 yet: the gate that will is planned
+/// (`daemon::automatic_gate`, #1012, shipping unenforced first), and R1
+/// enforcement is still pending. What keeps this copy off screen today is
+/// only that no shell renders it. Until R1 can be met and is enforced, no
+/// route qualifies and no shell may show it.
 ///
 /// The model clause is conditional on purpose -- "when a model recognises
 /// it", not "by a model". [`AUTO_SCRUB_LIMIT`] says the model is not
@@ -115,9 +118,9 @@ pub const AUTO_NO_REVIEW: &str = "No one looks at a session before it is sent, i
 ///
 /// Shaped for the C ABI: `tc_consent_copy` serialises this and hands the
 /// shell one owned JSON object. One call and not one per string -- a
-/// per-string export would let a shell take two of the three sentences and
-/// hand-write the third, and the third is a claim about what leaves the
-/// machine.
+/// per-string export would let a shell take some of the six strings and
+/// hand-write the rest, and several of them (the gate statement and the
+/// three `auto_*` sentences) are claims about what leaves the machine.
 ///
 /// No version field, deliberately. A version implies a shell that can serve
 /// two of them, and the cdylib and the shell ship together in one DMG, one
