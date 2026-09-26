@@ -82,7 +82,9 @@ DO $$ BEGIN
     END IF;
 END $$;
 GRANT USAGE ON SCHEMA public TO trace_account_admission_runtime;
-GRANT SELECT (tenant_id, account_id, closed_at), UPDATE (account_id)
+-- Row locks need a column UPDATE privilege. Grant one that cannot rewrite
+-- account identity, matching V75's invite runtime.
+GRANT SELECT (tenant_id, account_id, closed_at), UPDATE (created_at)
     ON trace_accounts TO trace_account_admission_runtime;
 GRANT SELECT (tenant_id, account_id, principal_ref, unlinked_at)
     ON trace_account_principals TO trace_account_admission_runtime;

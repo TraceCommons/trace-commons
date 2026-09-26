@@ -158,6 +158,21 @@ impl PgBackend {
             if consumed >= maximum {
                 return Ok(AccountInviteRedemption::InvalidInvite);
             }
+            // A grant row for this invite already exists but the account is
+            // no longer invited: the grant was revoked and admission demoted
+            // the account. Re-presenting the same invite must not resurrect
+            // it, and must not reach the primary key as a database error.
+            let prior_grant: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_account_invite_grants
+                      WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3)",
+                    &[&tenant, &account, &invite_hash],
+                )
+                .await?
+                .get(0);
+            if prior_grant {
+                return Ok(AccountInviteRedemption::InvalidInvite);
+            }
             let next_version = tx
                 .query_one(
                     "INSERT INTO trace_account_trust

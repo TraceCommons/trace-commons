@@ -52,6 +52,35 @@ async fn account_admission_atomicity_replay_and_revocation() {
     let runtime_url: String = runtime_url.into();
     let runtime = Arc::new(PgBackend::new(&config(runtime_url.clone())).await.unwrap());
     assert!(runtime.account_admission_runtime_ready().await.unwrap());
+    // Row locks need some column UPDATE privilege, but never one that can
+    // rewrite account identity (the same rule V75 sets for invite redemption).
+    let account_identity_writable: bool = admin
+        .query_one(
+            "SELECT has_column_privilege('trace_account_admission_runtime', 'trace_accounts', 'account_id', 'UPDATE')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !account_identity_writable,
+        "account admission runtime must not mutate account identity"
+    );
+    admin
+        .batch_execute("GRANT UPDATE (account_id) ON trace_accounts TO admission_account_runtime")
+        .await
+        .unwrap();
+    assert!(
+        !runtime.account_admission_runtime_ready().await.unwrap(),
+        "readiness refuses a login that can rewrite account identity"
+    );
+    admin
+        .batch_execute(
+            "REVOKE UPDATE (account_id) ON trace_accounts FROM admission_account_runtime",
+        )
+        .await
+        .unwrap();
+    assert!(runtime.account_admission_runtime_ready().await.unwrap());
     assert!(
         !admin_db.account_admission_runtime_ready().await.unwrap(),
         "superuser is not an ingest login"
