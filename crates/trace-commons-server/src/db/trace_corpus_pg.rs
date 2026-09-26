@@ -45,14 +45,15 @@ use crate::trace_corpus_storage::{
     TraceRetentionJobWrite, TraceRevocationPropagationAction, TraceRevocationPropagationItemRecord,
     TraceRevocationPropagationItemStatus, TraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite, TraceRevocationPropagationTarget,
-    TraceRevocationPropagationTargetKind, TraceSubmissionKeysetCursor, TraceSubmissionRecord,
-    TraceSubmissionWrite, TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole,
-    TraceTenantAccessGrantStatus, TraceTenantAccessGrantWrite, TraceTenantPolicyRecord,
-    TraceTenantPolicyWrite, TraceTombstoneRecord, TraceTombstoneWrite,
-    TraceUtilityAttestationRecord, TraceUtilityAttestationWrite, TraceVectorEntryRecord,
-    TraceVectorEntrySourceProjection, TraceVectorEntryStatus, TraceVectorEntryWrite,
-    TraceWithdrawalRecord, TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim,
-    TraceWitnessEvidenceCoverage, TraceWorkerKind,
+    TraceRevocationPropagationTargetKind, TraceSourceSessionStatus, TraceSourceSessionWithdrawal,
+    TraceSubmissionKeysetCursor, TraceSubmissionRecord, TraceSubmissionWrite,
+    TraceTenantAccessGrantRecord, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+    TraceTenantAccessGrantWrite, TraceTenantPolicyRecord, TraceTenantPolicyWrite,
+    TraceTombstoneRecord, TraceTombstoneWrite, TraceUtilityAttestationRecord,
+    TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
+    TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWithdrawalRecord,
+    TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim, TraceWitnessEvidenceCoverage,
+    TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -1480,8 +1481,386 @@ async fn insert_near_credit_outbox_item_on_tx(
     Ok(())
 }
 
+async fn append_trace_audit_event_in_transaction(
+    tx: &Transaction<'_>,
+    audit_event: &TraceAuditEventWrite,
+) -> Result<(), DatabaseError> {
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        &[&audit_event.tenant_id],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    let latest_event_hash: Option<String> = tx
+        .query_opt(
+            "SELECT event_hash
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1
+                   AND event_hash IS NOT NULL
+                 ORDER BY audit_sequence DESC
+                 LIMIT 1",
+            &[&audit_event.tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .map(|row| row.get("event_hash"));
+    validate_trace_audit_append_chain(
+        &audit_event.tenant_id,
+        audit_event.audit_event_id,
+        latest_event_hash.as_deref(),
+        audit_event.previous_event_hash.as_deref(),
+        audit_event.event_hash.is_some(),
+    )?;
+    let next_audit_sequence: i64 = tx
+        .query_one(
+            "SELECT COALESCE(MAX(audit_sequence), 0) + 1
+                 FROM trace_audit_events
+                 WHERE tenant_id = $1",
+            &[&audit_event.tenant_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+        .get(0);
+    let action = enum_to_storage(audit_event.action)?;
+    let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
+        DatabaseError::Serialization(format!("trace audit metadata encode failed: {e}"))
+    })?;
+    tx.execute(
+        "INSERT INTO trace_audit_events (
+                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
+                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
+                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
+                    metadata_json
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+        &[
+            &audit_event.tenant_id,
+            &next_audit_sequence,
+            &audit_event.audit_event_id,
+            &audit_event.actor_principal_ref,
+            &audit_event.actor_role,
+            &action,
+            &audit_event.reason,
+            &audit_event.request_id,
+            &audit_event.submission_id,
+            &audit_event.object_ref_id,
+            &audit_event.export_manifest_id,
+            &audit_event.decision_inputs_hash,
+            &audit_event.previous_event_hash,
+            &audit_event.event_hash,
+            &audit_event.canonical_event_json,
+            &metadata_json,
+        ],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    Ok(())
+}
+
+/// Claims and content creation take this lock before the session lock. It
+/// covers the absent-content case, where a row lock cannot serialize ownership.
+/// Withdrawal takes the session lock then content row locks and never this lock.
+async fn lock_source_submission_identity(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    submission: Uuid,
+) -> Result<(), DatabaseError> {
+    let key = format!(
+        "trace-source-submission.v1:{}:{}:{}",
+        tenant.len(),
+        tenant,
+        submission
+    );
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&key],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Historical content and either admission ledger are independent ownership
+/// evidence. Missing principal/anchor linkage is not authority to claim a row.
+async fn source_submission_owned_by_account(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    submission: Uuid,
+    account: Uuid,
+) -> Result<bool, DatabaseError> {
+    // `owned` is the account plus every account an executed merge folded into
+    // it, transitively: a submission made before a merge still belongs to the
+    // survivor, while its admission, anchor, and unlinked-principal rows keep
+    // naming the absorbed account.
+    Ok(tx
+        .query_one(
+            "WITH RECURSIVE owned(account_id) AS (
+            SELECT $3::uuid
+            UNION
+            SELECT p.absorbed_account_id FROM trace_account_merge_proposals p
+              JOIN owned o ON p.surviving_account_id = o.account_id
+             WHERE p.tenant_id=$1 AND p.consumed_at IS NOT NULL
+         )
+         SELECT NOT EXISTS (
+            SELECT 1 FROM trace_submissions s
+            WHERE s.tenant_id=$1 AND s.submission_id=$2 AND NOT EXISTS (
+                SELECT 1 FROM trace_account_principals p
+                WHERE p.tenant_id=s.tenant_id AND p.principal_ref=s.auth_principal_ref
+                  AND p.account_id IN (SELECT account_id FROM owned)
+            )
+         ) AND NOT EXISTS (
+            SELECT 1 FROM trace_admission_submissions l
+            WHERE l.tenant_id=$1 AND l.submission_id=$2 AND NOT EXISTS (
+                SELECT 1 FROM trace_near_account_anchors a
+                WHERE a.tenant_id=l.tenant_id AND a.account_id IN (SELECT account_id FROM owned)
+                  AND a.anchor_hash='sha256:' || l.anchor_hash
+            )
+         ) AND NOT EXISTS (
+            SELECT 1 FROM trace_account_admission_submissions a
+            WHERE a.tenant_id=$1 AND a.submission_id=$2
+              AND a.account_id NOT IN (SELECT account_id FROM owned)
+         )",
+            &[&tenant, &submission, &account],
+        )
+        .await?
+        .get(0))
+}
+
+/// Lock the source-session row before any content-row status write. The mapping
+/// is immutable, so the lock serializes approval with account withdrawal even
+/// when a resumed version has a different submission ID.
+async fn lock_active_source_session_for_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<(), DatabaseError> {
+    if lock_source_session_for_submission(tx, tenant_id, submission_id).await? {
+        return Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()));
+    }
+    Ok(())
+}
+
+/// Take the same source-session row lock and report whether the session is
+/// withdrawn, without refusing. Used by writers of terminal statuses.
+async fn lock_source_session_for_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<bool, DatabaseError> {
+    let row = tx
+        .query_opt(
+            "SELECT s.withdrawn_at
+         FROM trace_submission_sessions m
+         JOIN trace_source_sessions s
+           ON s.tenant_id = m.tenant_id
+          AND s.account_id = m.account_id
+          AND s.session_digest = m.session_digest
+         WHERE m.tenant_id = $1 AND m.submission_id = $2
+         FOR UPDATE OF s",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()))
+}
+
 #[async_trait]
 impl TraceCorpusStore for PgBackend {
+    async fn claim_trace_source_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session_digest: &[u8; 32],
+        submission_id: Uuid,
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        lock_source_submission_identity(&tx, tenant_id, submission_id).await?;
+        if !source_submission_owned_by_account(&tx, tenant_id, submission_id, account_id).await? {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
+        let digest = session_digest.as_slice();
+        tx.execute(
+            "INSERT INTO trace_source_sessions (tenant_id, account_id, session_digest)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            &[&tenant_id, &account_id, &digest],
+        )
+        .await?;
+        let row = tx
+            .query_one(
+                "SELECT withdrawn_at FROM trace_source_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             FOR UPDATE",
+                &[&tenant_id, &account_id, &digest],
+            )
+            .await?;
+        if row.get::<_, Option<DateTime<Utc>>>(0).is_some() {
+            return Ok(TraceSourceSessionStatus::Withdrawn);
+        }
+        tx.execute(
+            "INSERT INTO trace_submission_sessions
+                (tenant_id, submission_id, account_id, session_digest)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+            &[&tenant_id, &submission_id, &account_id, &digest],
+        )
+        .await?;
+        let mapping = tx
+            .query_one(
+                "SELECT account_id, session_digest FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        let mapped_account: Uuid = mapping.get(0);
+        let mapped_digest: Vec<u8> = mapping.get(1);
+        if mapped_account != account_id || mapped_digest != digest {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
+        tx.commit().await?;
+        Ok(TraceSourceSessionStatus::Active)
+    }
+
+    async fn get_trace_source_session_status(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        session_digest: &[u8; 32],
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let digest = session_digest.as_slice();
+        let row = tx
+            .query_opt(
+                "SELECT withdrawn_at FROM trace_source_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3",
+                &[&tenant_id, &account_id, &digest],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(
+            if row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()) {
+                TraceSourceSessionStatus::Withdrawn
+            } else {
+                TraceSourceSessionStatus::Active
+            },
+        )
+    }
+
+    async fn withdraw_trace_source_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        submission_id: Uuid,
+        withdrawn_at: DateTime<Utc>,
+    ) -> Result<Option<TraceSourceSessionWithdrawal>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let mapping = tx
+            .query_opt(
+                "SELECT session_digest FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
+                &[&tenant_id, &account_id, &submission_id],
+            )
+            .await?;
+        let Some(mapping) = mapping else {
+            return Ok(None);
+        };
+        let digest: Vec<u8> = mapping.get(0);
+        let row = tx
+            .query_one(
+                "UPDATE trace_source_sessions
+             SET withdrawn_at = COALESCE(withdrawn_at, $4)
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             RETURNING withdrawn_at",
+                &[&tenant_id, &account_id, &digest, &withdrawn_at],
+            )
+            .await?;
+        let first_withdrawn_at: DateTime<Utc> = row.get(0);
+        let mapped = tx
+            .query(
+                "SELECT submission_id FROM trace_submission_sessions
+             WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+             ORDER BY submission_id",
+                &[&tenant_id, &account_id, &digest],
+            )
+            .await?;
+        // Validate all siblings before any content mutation or returning IDs
+        // to the file/object cleanup caller. The session lock prevents new
+        // mappings and cooperating content writes while this snapshot is used.
+        for mapped_row in &mapped {
+            let id: Uuid = mapped_row.get(0);
+            if !source_submission_owned_by_account(&tx, tenant_id, id, account_id).await? {
+                return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+            }
+        }
+        let mut affected_submission_ids = Vec::with_capacity(mapped.len());
+        for mapped_row in mapped {
+            let id: Uuid = mapped_row.get(0);
+            affected_submission_ids.push(id);
+            let content = tx
+                .query_opt(
+                    "SELECT status FROM trace_submissions
+                 WHERE tenant_id = $1 AND submission_id = $2 FOR UPDATE",
+                    &[&tenant_id, &id],
+                )
+                .await?;
+            let prior_status: String = content
+                .as_ref()
+                .map(|row| row.get(0))
+                .unwrap_or_else(|| "purged".into());
+            let exported: bool = tx
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM trace_export_manifest_items
+                  WHERE tenant_id = $1 AND submission_id = $2)",
+                    &[&tenant_id, &id],
+                )
+                .await?
+                .get(0);
+            let reach = if exported {
+                "commons_distributed"
+            } else if prior_status == "accepted" || content.is_none() {
+                "commons_not_distributed"
+            } else {
+                "not_distributed"
+            };
+            tx.execute(
+                "INSERT INTO trace_withdrawals
+                    (tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+                &[&tenant_id, &id, &first_withdrawn_at, &prior_status, &reach],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE trace_submissions SET status = 'revoked',
+                    withdrawn_at = COALESCE(withdrawn_at, $3),
+                    revoked_at = COALESCE(revoked_at, $3),
+                    purged_at = COALESCE(purged_at, $3), updated_at = NOW()
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &id, &first_withdrawn_at],
+            )
+            .await?;
+        }
+        let row = tx
+            .query_one(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(Some(TraceSourceSessionWithdrawal {
+            withdrawn_at: first_withdrawn_at,
+            affected_submission_ids,
+            requested_tombstone: TraceWithdrawalRecord {
+                tenant_id: row.get(0),
+                submission_id: row.get(1),
+                withdrawn_at: row.get(2),
+                prior_status: row.get(3),
+                distribution_reach: row.get(4),
+            },
+        }))
+    }
+
     fn supports_token_bundles(&self) -> bool {
         true
     }
@@ -2165,6 +2544,28 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        if lock_source_session_for_submission(&tx, tenant_id, submission_id).await? {
+            // A withdrawn session already revoked this row. Retention and
+            // legacy revocation still mirror terminal statuses from file
+            // records that never saw the account withdrawal; those are
+            // idempotent no-ops here, so one withdrawn sibling cannot abort a
+            // maintenance run. Every consumer-visible status stays refused.
+            return match status {
+                TraceCorpusStatus::Revoked
+                | TraceCorpusStatus::Expired
+                | TraceCorpusStatus::Purged
+                | TraceCorpusStatus::Rejected => {
+                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    Ok(())
+                }
+                TraceCorpusStatus::Received
+                | TraceCorpusStatus::Accepted
+                | TraceCorpusStatus::Quarantined
+                | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()))
+                }
+            };
+        }
         let status_value = enum_to_storage(status)?;
         // Allowlisted label only -- never the caller's text. See
         // `safe_status_reason_label`.
@@ -2256,6 +2657,7 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<u64, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        lock_active_source_session_for_submission(&tx, tenant_id, submission_id).await?;
         let status_value = enum_to_storage(status)?;
         // Allowlisted label only -- never the caller's text. See
         // `safe_status_reason_label`.
@@ -2333,9 +2735,7 @@ impl TraceCorpusStore for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
-
-        self.append_trace_audit_event(TraceAuditEventWrite {
+        let audit_event = TraceAuditEventWrite {
             audit_event_id: Uuid::new_v4(),
             tenant_id: tenant_id.to_string(),
             actor_principal_ref: actor_principal_ref.to_string(),
@@ -2355,8 +2755,9 @@ impl TraceCorpusStore for PgBackend {
                 resulting_status: status,
                 reason_code: reason.map(str::to_string),
             },
-        })
-        .await?;
+        };
+        append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
 
         Ok(invalidated)
     }
@@ -2458,6 +2859,12 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&object_ref.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &object_ref.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &object_ref.tenant_id,
+            object_ref.submission_id,
+        )
+        .await?;
         let artifact_kind = enum_to_storage(object_ref.artifact_kind)?;
         tx.execute(
             "INSERT INTO trace_object_refs (
@@ -2558,6 +2965,12 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx =
             Self::begin_trace_tenant_transaction(&mut client, &derived_record.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &derived_record.tenant_id,
+            derived_record.submission_id,
+        )
+        .await?;
         if let Some(object_ref) = derived_record.input_object_ref.as_ref() {
             validate_tenant_scoped_trace_object_ref(
                 "derived input",
@@ -2706,6 +3119,12 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&vector_entry.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &vector_entry.tenant_id).await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &vector_entry.tenant_id,
+            vector_entry.submission_id,
+        )
+        .await?;
         ensure_pg_derived_record_belongs_to_submission(
             &tx,
             &vector_entry.tenant_id,
@@ -3926,6 +4345,7 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&item.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &item.tenant_id).await?;
+        lock_active_source_session_for_submission(&tx, &item.tenant_id, item.submission_id).await?;
         if let Some(derived_id) = item.derived_id {
             ensure_pg_derived_record_belongs_to_submission(
                 &tx,
@@ -4294,74 +4714,7 @@ impl TraceCorpusStore for PgBackend {
         self.ensure_trace_tenant(&audit_event.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-            &[&audit_event.tenant_id],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        let latest_event_hash: Option<String> = tx
-            .query_opt(
-                "SELECT event_hash
-                 FROM trace_audit_events
-                 WHERE tenant_id = $1
-                   AND event_hash IS NOT NULL
-                 ORDER BY audit_sequence DESC
-                 LIMIT 1",
-                &[&audit_event.tenant_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .map(|row| row.get("event_hash"));
-        validate_trace_audit_append_chain(
-            &audit_event.tenant_id,
-            audit_event.audit_event_id,
-            latest_event_hash.as_deref(),
-            audit_event.previous_event_hash.as_deref(),
-            audit_event.event_hash.is_some(),
-        )?;
-        let next_audit_sequence: i64 = tx
-            .query_one(
-                "SELECT COALESCE(MAX(audit_sequence), 0) + 1
-                 FROM trace_audit_events
-                 WHERE tenant_id = $1",
-                &[&audit_event.tenant_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-            .get(0);
-        let action = enum_to_storage(audit_event.action)?;
-        let metadata_json = serde_json::to_value(&audit_event.metadata).map_err(|e| {
-            DatabaseError::Serialization(format!("trace audit metadata encode failed: {e}"))
-        })?;
-        tx.execute(
-            "INSERT INTO trace_audit_events (
-                    tenant_id, audit_sequence, audit_event_id, actor_principal_ref, actor_role,
-                    action, reason, request_id, submission_id, object_ref_id, export_manifest_id,
-                    decision_inputs_hash, previous_event_hash, event_hash, canonical_event_json,
-                    metadata_json
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
-            &[
-                &audit_event.tenant_id,
-                &next_audit_sequence,
-                &audit_event.audit_event_id,
-                &audit_event.actor_principal_ref,
-                &audit_event.actor_role,
-                &action,
-                &audit_event.reason,
-                &audit_event.request_id,
-                &audit_event.submission_id,
-                &audit_event.object_ref_id,
-                &audit_event.export_manifest_id,
-                &audit_event.decision_inputs_hash,
-                &audit_event.previous_event_hash,
-                &audit_event.event_hash,
-                &audit_event.canonical_event_json,
-                &metadata_json,
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
@@ -6885,6 +7238,34 @@ impl PgBackend {
         self.ensure_trace_tenant(&submission.tenant_id).await?;
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &submission.tenant_id).await?;
+        // Source-session ownership: serialize with claims and withdrawals,
+        // refuse writes into a withdrawn session, and refuse a principal that
+        // does not belong to the account the submission is mapped to.
+        lock_source_submission_identity(&tx, &submission.tenant_id, submission.submission_id)
+            .await?;
+        lock_active_source_session_for_submission(
+            &tx,
+            &submission.tenant_id,
+            submission.submission_id,
+        )
+        .await?;
+        let foreign_mapping: bool = tx
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM trace_submission_sessions m
+             WHERE m.tenant_id=$1 AND m.submission_id=$2 AND NOT EXISTS (
+                SELECT 1 FROM trace_account_principals p WHERE p.tenant_id=m.tenant_id
+                AND p.account_id=m.account_id AND p.principal_ref=$3))",
+                &[
+                    &submission.tenant_id,
+                    &submission.submission_id,
+                    &submission.auth_principal_ref,
+                ],
+            )
+            .await?
+            .get(0);
+        if foreign_mapping {
+            return Err(DatabaseError::Query("TraceSourceSessionConflict".into()));
+        }
         let status = enum_to_storage(submission.status)?;
         if replace_quarantined_evidence {
             tx.execute(

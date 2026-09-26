@@ -2487,7 +2487,7 @@ pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
 /// weight. See #810.
 ///
 /// **Keyed off [`AdmissionRefusal`] rather than off re-typed strings, and
-/// that is the point.** These five labels reach a queue entry's
+/// that is the point.** These seven labels reach a queue entry's
 /// `reason_label` in the server's wire spelling -- `admission_refused`, with
 /// an underscore -- while `daemon::health`'s constants for the same events
 /// are hyphenated. A table written against the wrong spelling would match
@@ -2495,7 +2495,7 @@ pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
 /// while looking fixed. Matching on the enum takes the spelling from the
 /// protocol crate and makes the set exhaustive, so neither can drift.
 ///
-/// `None` for anything that is not one of the five. The shells' existing
+/// `None` for anything that is not one of the seven. The shells' existing
 /// tables still answer those, and claiming them here would silently take over
 /// wording that has not been moved into this crate yet -- see the follow-up
 /// for the rest of `queue_outcome_counts`.
@@ -2505,6 +2505,10 @@ pub fn outcome_refusal_line(label: &str) -> Option<&'static str> {
     Some(match AdmissionRefusal::from_label(label)? {
         AdmissionRefusal::Refused => OUTCOME_ADMISSION_REFUSED,
         AdmissionRefusal::LimitReached => OUTCOME_ADMISSION_LIMIT_REACHED,
+        AdmissionRefusal::AccountLimitReached => OUTCOME_ACCOUNT_LIMIT_REACHED,
+        AdmissionRefusal::AccountIdentityUnlinked => {
+            "Sent, and this identity needs a verified account link"
+        }
         AdmissionRefusal::InProgress => OUTCOME_ADMISSION_IN_PROGRESS,
         AdmissionRefusal::IdentityConflict => OUTCOME_ADMISSION_IDENTITY_CONFLICT,
         AdmissionRefusal::EvidenceRefused => OUTCOME_ADMISSION_EVIDENCE_REFUSED,
@@ -2545,6 +2549,8 @@ pub const OUTCOME_ADMISSION_REFUSED: &str = "Sent, and the commons declined it";
 /// `admission_limit_reached`. Not a judgement on the work: the account's
 /// allowance for this window is spent, and the window rolls over.
 pub const OUTCOME_ADMISSION_LIMIT_REACHED: &str = "Sent, and over the account's allowance for now";
+pub const OUTCOME_ACCOUNT_LIMIT_REACHED: &str =
+    "Sent, and this account has reached its contribution allowance";
 
 /// `admission_in_progress`. **Not a refusal**, and it must not read as one.
 /// Another attempt at the same submission holds the lease, which the next
@@ -4190,7 +4196,7 @@ mod tests {
         }
     }
 
-    /// Every one of the five says its own thing, and a label that is not a
+    /// Every one of the seven says its own thing, and a label that is not a
     /// refusal is not claimed.
     #[test]
     fn each_refusal_says_its_own_thing_and_nothing_else_is_claimed() {

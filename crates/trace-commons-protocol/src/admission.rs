@@ -30,6 +30,10 @@ pub enum AdmissionRefusal {
     Refused,
     /// The account's admission budget for this window is spent.
     LimitReached,
+    /// Explicit account-authority allowance is exhausted.
+    AccountLimitReached,
+    /// Authenticated legacy identity requires verified account linkage.
+    AccountIdentityUnlinked,
     /// Another attempt at the same submission holds the lease.
     InProgress,
     /// This submission id is already bound to different bytes or a different
@@ -42,9 +46,11 @@ pub enum AdmissionRefusal {
 
 impl AdmissionRefusal {
     /// Every refusal, for tests and exhaustive mappings.
-    pub const ALL: [AdmissionRefusal; 5] = [
+    pub const ALL: [AdmissionRefusal; 7] = [
         AdmissionRefusal::Refused,
         AdmissionRefusal::LimitReached,
+        AdmissionRefusal::AccountLimitReached,
+        AdmissionRefusal::AccountIdentityUnlinked,
         AdmissionRefusal::InProgress,
         AdmissionRefusal::IdentityConflict,
         AdmissionRefusal::EvidenceRefused,
@@ -55,6 +61,8 @@ impl AdmissionRefusal {
         match self {
             AdmissionRefusal::Refused => "admission_refused",
             AdmissionRefusal::LimitReached => "admission_limit_reached",
+            AdmissionRefusal::AccountLimitReached => "account_limit_reached",
+            AdmissionRefusal::AccountIdentityUnlinked => "account_identity_unlinked",
             AdmissionRefusal::InProgress => "admission_in_progress",
             AdmissionRefusal::IdentityConflict => "admission_identity_conflict",
             AdmissionRefusal::EvidenceRefused => "admission_evidence_refused",
@@ -64,8 +72,10 @@ impl AdmissionRefusal {
     /// The status this refusal is sent with.
     pub const fn status(self) -> u16 {
         match self {
-            AdmissionRefusal::Refused | AdmissionRefusal::EvidenceRefused => 403,
-            AdmissionRefusal::LimitReached => 429,
+            AdmissionRefusal::Refused
+            | AdmissionRefusal::EvidenceRefused
+            | AdmissionRefusal::AccountIdentityUnlinked => 403,
+            AdmissionRefusal::LimitReached | AdmissionRefusal::AccountLimitReached => 429,
             AdmissionRefusal::InProgress | AdmissionRefusal::IdentityConflict => 409,
         }
     }
@@ -198,8 +208,14 @@ pub const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
 /// Whether `tenant_id` is in an anchored namespace: one of
 /// [`ANCHOR_NAMESPACES`] followed by a hash. Every other tenant, including a
 /// `nearai-` one with any other suffix, is on the invite-free path and never
-/// passes through admission. Shared so the server's check and the client's
-/// expectation of it are one rule.
+/// passes through legacy admission. Shared so the server's check and the
+/// client's expectation of it are one rule.
+///
+/// Caveat: when a server enables account admission
+/// (`TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`), a tenant outside these
+/// namespaces is refused with `account_identity_unlinked` instead of taking
+/// the invite-free path. That switch is global, default-off, and refuses to
+/// start while unlinked identities remain.
 pub fn is_anchored_tenant(tenant_id: &str) -> bool {
     ANCHOR_NAMESPACES
         .iter()
@@ -475,6 +491,8 @@ mod tests {
             [
                 ("admission_refused", 403),
                 ("admission_limit_reached", 429),
+                ("account_limit_reached", 429),
+                ("account_identity_unlinked", 403),
                 ("admission_in_progress", 409),
                 ("admission_identity_conflict", 409),
                 ("admission_evidence_refused", 403),

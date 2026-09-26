@@ -2330,6 +2330,19 @@ pub struct TraceGateCreditDecisionRow {
 /// degrade.
 pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceSourceSessionStatus {
+    Active,
+    Withdrawn,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceSourceSessionWithdrawal {
+    pub withdrawn_at: DateTime<Utc>,
+    pub affected_submission_ids: Vec<Uuid>,
+    pub requested_tombstone: TraceWithdrawalRecord,
+}
+
 /// The retained withdrawal tombstone (migration V43). Hash-only/label-only by
 /// construction: there is no content, no object path, and no contributor
 /// identity here, and there are no columns in the table to carry them.
@@ -2354,6 +2367,40 @@ pub struct TraceArtifactInvalidationCounts {
 
 #[async_trait]
 pub trait TraceCorpusStore: Send + Sync {
+    async fn claim_trace_source_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _session_digest: &[u8; 32],
+        _submission_id: Uuid,
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.into(),
+        ))
+    }
+
+    async fn get_trace_source_session_status(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _session_digest: &[u8; 32],
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.into(),
+        ))
+    }
+
+    async fn withdraw_trace_source_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _submission_id: Uuid,
+        _withdrawn_at: DateTime<Utc>,
+    ) -> Result<Option<TraceSourceSessionWithdrawal>, DatabaseError> {
+        // A legacy-only backend has no source mappings. New-account ingest
+        // still fails closed because `claim_trace_source_session` refuses.
+        Ok(None)
+    }
     fn supports_token_bundles(&self) -> bool {
         false
     }

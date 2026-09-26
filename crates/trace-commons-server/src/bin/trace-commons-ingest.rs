@@ -3,6 +3,8 @@
 
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/file_witness.rs"]
+mod file_witness;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
@@ -53,11 +55,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
-    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
-    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
-    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
+    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
+    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -79,6 +82,7 @@ use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
     VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
+use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -213,7 +217,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
-    TraceSubmissionKeysetCursor, TraceSubmissionRecord as StorageTraceSubmissionRecord,
+    TraceSourceSessionStatus as StorageTraceSourceSessionStatus, TraceSubmissionKeysetCursor,
+    TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
     TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
@@ -1709,6 +1714,7 @@ struct AppState {
     witness_bypass: Option<WitnessBypassConfig>,
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
+    account_admission: Option<admission::AccountAdmissionConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3905,6 +3911,35 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let account_admission = admission::account_config_from_env(
+            db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
+        )?;
+        if account_admission.is_some() {
+            let db = db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("account_admission_database_unavailable"))?;
+            if !db
+                .account_admission_runtime_ready()
+                .await
+                .map_err(|_| anyhow::anyhow!("account_admission_readiness_unavailable"))?
+            {
+                anyhow::bail!("account_admission_permissions_or_linkage_not_ready");
+            }
+            // Static contributor credentials are not necessarily represented
+            // by a device row. Validate the local replica's inventory as well.
+            for auth in tokens
+                .values()
+                .filter(|auth| auth.role == TokenRole::Contributor)
+            {
+                trace_commons_server::account_trust::resolve_contribution_account(
+                    db.as_ref(),
+                    &auth.tenant_id,
+                    &auth.principal_ref,
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("account_identity_unlinked"))?;
+            }
+        }
         if admission.is_some()
             && !db_mirror
                 .as_ref()
@@ -4215,8 +4250,9 @@ impl AppState {
             pii_backstop_driver,
             witness_bypass,
             witness_capture_pin,
-            near_provisioning_admission_ready: admission.is_some(),
+            near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
+            account_admission,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -4416,16 +4452,15 @@ fn enforce_db_mirror_write_result(
     operation: &str,
     result: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let required = state.require_db_mirror_writes || state.account_admission.is_some();
     match result {
         Ok(()) => {
-            if state.require_db_mirror_writes && state.db_mirror.is_none() {
-                anyhow::bail!(
-                    "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for {operation}"
-                );
+            if required && state.db_mirror.is_none() {
+                anyhow::bail!("required Trace Commons DB mirror unavailable for {operation}");
             }
             Ok(())
         }
-        Err(error) if state.require_db_mirror_writes => Err(error.context(format!(
+        Err(error) if required => Err(error.context(format!(
             "required Trace Commons DB mirror write failed: {operation}"
         ))),
         Err(_) => Ok(()),
@@ -7489,11 +7524,19 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reward_routes = rewards::account_routes(state.clone());
     Router::new()
         .route(
+            "/v1/account/contribution-status",
+            get(admission::account_status_handler),
+        )
+        .route(
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
         )
         .merge(inference_connection_routes::routes())
         .route("/v1/account/traces", get(account_traces_list_handler))
+        .route(
+            "/v1/account/source-sessions/status",
+            post(account_source_session_status_handler),
+        )
         .route(
             "/v1/account/credit-summary",
             get(account_credit_summary_handler),
@@ -13285,6 +13328,13 @@ async fn reject_conflicting_witness_retry(
     raw_body: &[u8],
 ) -> ApiResult<()> {
     let Some(db) = state.db_mirror.as_ref() else {
+        if let Some(record) =
+            read_submission_record(&state.root, tenant_id, submission_id).map_err(internal_error)?
+            && let Some(evidence) = record.witness_evidence.as_ref()
+            && !evidence.retry_matches(headers, raw_body)
+        {
+            return Err(api_error(StatusCode::CONFLICT, "witness evidence conflict"));
+        }
         return Ok(());
     };
     let result = db
@@ -13340,18 +13390,42 @@ async fn submit_trace_handler(
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
+    if state.account_admission.is_some() {
+        validate_envelope(&envelope)?;
+    }
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
         &headers,
         &raw_body,
-        envelope.submission_id,
+        &envelope,
     )
     .await?;
+    let source_claim = admission.as_ref().and_then(|attempt| attempt.source_claim);
     let tenant = if admission.is_some() {
         authenticated_tenant
     } else {
         authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?
+    };
+    // File-only ownership spans read, rescrub, artifact creation and durable
+    // metadata commit. DB admission keeps its existing transactional ownership.
+    let _file_submit_lock = if state.db_mirror.is_none() {
+        Some(
+            file_witness::lock(
+                &state.root,
+                tenant.tenant_id(),
+                envelope.submission_id,
+                "submission-locks",
+            )
+            .map_err(|_| {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "submission file ownership unavailable",
+                )
+            })?,
+        )
+    } else {
+        None
     };
     // A completed admission is an idempotent read, including quarantined
     // records. Re-running remediation here would bypass the processing ledger.
@@ -13387,7 +13461,9 @@ async fn submit_trace_handler(
         )));
     }
     let result = async {
-        validate_envelope(&envelope)?;
+        if state.account_admission.is_none() {
+            validate_envelope(&envelope)?;
+        }
 
         // Idempotency: same submission_id always addresses the same record.
         // Owned quarantined rows are the exception — a re-POST supersedes the
@@ -13405,6 +13481,12 @@ async fn submit_trace_handler(
                 ));
             }
             if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+                // Remediation may change the body, and a witnessing client
+                // re-signs what it re-posts. As in DB mode, the new headers are
+                // verified against the new body for this request only; the
+                // stored proof stays the first, historical one, and
+                // `file_witness::for_submission` never binds it to the
+                // changed object.
                 Some(existing)
             } else {
                 reject_conflicting_witness_retry(
@@ -13574,6 +13656,7 @@ async fn submit_trace_handler(
             .map(|prior| prior.auth_principal_ref.clone())
             .unwrap_or_else(|| tenant.principal_ref().to_string());
         let mut record = TraceCommonsSubmissionRecord {
+            witness_evidence: None,
             tenant_id: tenant.tenant_id().to_string(),
             tenant_storage_ref: tenant.tenant_storage_ref(),
             auth_principal_ref,
@@ -13607,6 +13690,17 @@ async fn submit_trace_handler(
             artifact_receipt: stored_envelope.artifact_receipt,
             artifact_object_store: stored_envelope.artifact_object_store,
         };
+        if state.db_mirror.is_none() {
+            record.witness_evidence = file_witness::for_submission(
+                &envelope,
+                &record,
+                remediating_prior.as_ref(),
+                witness.as_ref(),
+                &headers,
+                &raw_body,
+            )
+            .map_err(internal_error)?;
+        }
         // Remediating a quarantined row always clears any outstanding review lease;
         // the prior assessment is obsolete.
         clear_review_lease_metadata(&mut record);
@@ -13623,7 +13717,7 @@ async fn submit_trace_handler(
         } else {
             tenant.submitted_audit_event(&record)
         };
-        if state.require_db_mirror_writes {
+        if state.require_db_mirror_writes || state.account_admission.is_some() {
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
                 tenant.auth(),
@@ -13677,6 +13771,22 @@ async fn submit_trace_handler(
             }
             enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
                 .map_err(internal_error)?;
+        }
+
+        if let Some((account_id, digest)) = source_claim {
+            let db = state
+                .db_mirror
+                .as_ref()
+                .ok_or_else(|| internal_error("source_session_unavailable"))?;
+            let status = db
+                .get_trace_source_session_status(tenant.tenant_id(), account_id, &digest)
+                .await
+                .map_err(internal_error)?;
+            if status == StorageTraceSourceSessionStatus::Withdrawn {
+                cleanup_submission_file_side_writes(state.as_ref(), &record)
+                    .map_err(internal_error)?;
+                return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
+            }
         }
 
         // Best-effort cleanup of the pre-remediation artifact once the new
@@ -16687,6 +16797,46 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
 /// * Fail-closed: any deletion or eviction failure is a generic label-only
 ///   `500`. The withdrawal is not reported as complete while content or a
 ///   derived copy may survive.
+#[derive(Serialize)]
+struct AccountSourceSessionStatusResponse {
+    status: &'static str,
+}
+
+async fn account_source_session_status_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Json(source): Json<SourceSessionIdentity>,
+) -> ApiResult<impl IntoResponse> {
+    let source = match canonical_source_session(&source) {
+        Ok(source) => source,
+        Err(_) => {
+            return Ok((
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(AccountSourceSessionStatusResponse {
+                    status: "unsupported",
+                }),
+            ));
+        }
+    };
+    let status = account_db(state.as_ref())?
+        .get_trace_source_session_status(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &session_digest(&source),
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(AccountSourceSessionStatusResponse {
+            status: match status {
+                StorageTraceSourceSessionStatus::Active => "active",
+                StorageTraceSourceSessionStatus::Withdrawn => "withdrawn",
+            },
+        }),
+    ))
+}
+
 async fn account_trace_withdraw_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -16760,72 +16910,114 @@ async fn account_trace_withdraw_handler(
         read_credit_settlement_batches_for_admin(state.as_ref(), &credit_tenant)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
-    let credit_retained = withdrawal_retains_all_credit(
-        submission_id,
-        &credit_events,
-        &finalized_settlement_credit_event_ids(&settlement_batches),
-    );
+    let finalized_credit_event_ids = finalized_settlement_credit_event_ids(&settlement_batches);
 
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
     // that it was withdrawn.
-    let tombstone = db
-        .record_trace_withdrawal(
+    let mapped = db
+        .withdraw_trace_source_session(
             &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
             submission_id,
             Utc::now(),
-            &prior_status,
-            &distribution_reach,
         )
         .await
         .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (tombstone, affected_ids) = if let Some(mapped) = mapped {
+        (mapped.requested_tombstone, mapped.affected_submission_ids)
+    } else {
+        let tombstone = db
+            .record_trace_withdrawal(
+                &ctx.tenant_id,
+                submission_id,
+                Utc::now(),
+                &prior_status,
+                &distribution_reach,
+            )
+            .await
+            .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+        (tombstone, vec![submission_id])
+    };
 
-    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+    // Credit is retained only if it is retained for every withdrawn version.
+    let credit_retained = affected_ids.iter().all(|affected_id| {
+        withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+    });
+
+    // Retained mappings make this list stable across retries. Complete the
+    // external deletion for every content version before reporting success.
+    for affected_id in affected_ids.iter().copied() {
+        evict_withdrawn_trace_from_derived_surfaces(
+            state.as_ref(),
+            &db,
+            &ctx.tenant_id,
+            affected_id,
+        )
         .await
         .map_err(|error| withdrawal_failed(&error))?;
-    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
+        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+    }
 
-    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
-    // account-actor ref, never contributor identity.
+    // Hash-only audit, one event per withdrawn version. The reason is a fixed
+    // label; the actor is the synthetic account-actor ref, never contributor
+    // identity.
     let audit_tenant = account_audit_tenant(&ctx);
-    let audit_event =
-        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
-    if let Err(error) = append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &audit_tenant,
-        audit_event,
-        StorageTraceAuditAction::Revoke,
-        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
-    )
-    .await
-    {
-        // The content is already gone and the tombstone is durable; a failed
-        // audit append must not resurrect either. Log hash-only and continue.
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(&error),
-            %submission_id,
-            "Trace Commons withdrawal audit append failed"
-        );
+    for affected_id in affected_ids.iter().copied() {
+        let audit_event =
+            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
+        if let Err(error) = append_audit_event_with_db_mirror(
+            state.as_ref(),
+            &audit_tenant,
+            audit_event,
+            StorageTraceAuditAction::Revoke,
+            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+        )
+        .await
+        {
+            // The content is already gone and the tombstone is durable; a
+            // failed audit append must not resurrect either. Log hash-only
+            // and continue.
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                submission_id = %affected_id,
+                "Trace Commons withdrawal audit append failed"
+            );
+        }
     }
 
     let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
-        let pending = db
-            .pending_token_bundle_deletions(&ctx.tenant_id, Some(submission_id))
-            .await
-            .map_err(internal_error)?;
-        response.token_deletion_state = Some(if pending.is_empty() {
-            "completed"
-        } else if state
-            .legal_hold_retention_policy_ids
-            .contains(&record.retention_policy_id)
-        {
-            "held"
-        } else {
-            "pending"
-        });
+        // Report the least-finished state across every withdrawn version:
+        // any legal hold is "held", any other outstanding deletion "pending".
+        let mut state_label = "completed";
+        for affected_id in affected_ids.iter().copied() {
+            let pending = db
+                .pending_token_bundle_deletions(&ctx.tenant_id, Some(affected_id))
+                .await
+                .map_err(internal_error)?;
+            if pending.is_empty() {
+                continue;
+            }
+            let retention_policy_id = if affected_id == submission_id {
+                Some(record.retention_policy_id.clone())
+            } else {
+                db.get_trace_submission(&ctx.tenant_id, affected_id)
+                    .await
+                    .map_err(internal_error)?
+                    .map(|sibling| sibling.retention_policy_id)
+            };
+            if retention_policy_id
+                .is_some_and(|policy| state.legal_hold_retention_policy_ids.contains(&policy))
+            {
+                state_label = "held";
+            } else if state_label == "completed" {
+                state_label = "pending";
+            }
+        }
+        response.token_deletion_state = Some(state_label);
     }
     Ok(Json(response))
 }
@@ -38902,7 +39094,7 @@ async fn apply_review_decision(
         privileged_policy.as_ref(),
         "review decision",
     )?;
-    if state.require_db_mirror_writes {
+    if state.require_db_mirror_writes || state.account_admission.is_some() {
         enforce_db_mirror_write_result(state, "review decision", Ok(())).map_err(internal_error)?;
     }
     let mut envelope = read_envelope_for_review_decision(
@@ -38977,7 +39169,7 @@ async fn apply_review_decision(
     let audit_event =
         TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason));
 
-    if state.require_db_mirror_writes {
+    if state.require_db_mirror_writes || state.account_admission.is_some() {
         let mirror_result = mirror_review_decision_to_db(
             state,
             tenant,
@@ -39012,7 +39204,7 @@ async fn apply_review_decision(
     }
     append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
 
-    if !state.require_db_mirror_writes {
+    if !state.require_db_mirror_writes && state.account_admission.is_none() {
         let mirror_result =
             mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
                 .await;
@@ -40818,7 +41010,7 @@ fn all_attempts_failed_outcome(
 /// The message is never logged: `spawn_driver_loop` hashes the error, and
 /// only the hash and the class reach the log line.
 fn worker_route_error(driver: &'static str, error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    let (status, Json(ApiError { error })) = error;
+    let (status, Json(ApiError { error, .. })) = error;
     DriverTickError::WorkerRouteRejected {
         driver,
         status,
@@ -41566,62 +41758,98 @@ async fn process_one_pii_backstop(
     // held (`record.status == AwaitingPiiBackstop`). This is a no-op on the
     // status column (it already reads `awaiting_pii_backstop`) but refreshes the
     // redaction hash / counts / privacy risk / canonical summary pointers.
-    db.upsert_trace_submission(storage_submission_write_from_record(
-        &record,
-        &envelope,
-        envelope
-            .embedding_analysis
-            .as_ref()
-            .map(|analysis| analysis.canonical_summary_hash.clone()),
-    )?)
-    .await
-    .context("failed to mirror rescrubbed trace submission metadata")?;
-
-    // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
-    // release, so it is already active the instant the status becomes
-    // Accepted/Quarantined below.
-    let (object_ref, _) = trace_object_ref_write_from_record(
-        state,
-        "rescrubbed-envelope",
-        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
-        &record,
-        &envelope,
-    )?;
-    db.append_trace_object_ref(object_ref)
+    let mut staged_ref_target = None;
+    let release_result: anyhow::Result<()> = async {
+        db.upsert_trace_submission(storage_submission_write_from_record(
+            &record,
+            &envelope,
+            envelope
+                .embedding_analysis
+                .as_ref()
+                .map(|analysis| analysis.canonical_summary_hash.clone()),
+        )?)
         .await
-        .context("failed to mirror rescrubbed trace object ref")?;
+        .context("failed to mirror rescrubbed trace submission metadata")?;
 
-    // Step 3: now flip the on-disk record and release the DB hold. The file
-    // record's object_key was already repointed to the rescrubbed artifact
-    // above, so the file-record read path is safe regardless of ordering here;
-    // the DB release is the single authoritative status write to the target
-    // (the earlier upsert wrote the still-held status).
-    //
-    // The status flip and the invalidation of the pre-backstop
-    // `submitted_envelope` ref(s) happen ATOMICALLY via
-    // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
-    // commit without the other: envelope readers go through
-    // `get_latest_active_envelope_object_ref` (rescrubbed first, then
-    // submitted), and the object-primary read drill selects
-    // `SubmittedEnvelope` explicitly, so a status release with a still-active
-    // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
-    // on an ordinary transient DB failure with no re-enumeration path to heal
-    // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
-    // driver's own re-enumeration
-    // INNER JOINs an active `submitted_envelope` ref, so invalidating it
-    // without also releasing the status would strand the submission forever.
-    // Atomicity resolves both hazards: on any failure the transaction rolls
-    // back, the on-disk record write below is skipped, and the submission
-    // stays held and re-enumerable for the next tick to retry.
-    db.release_pii_backstop_hold(
-        &item.tenant_id,
-        item.submission_id,
-        storage_corpus_status(target_status),
-        PII_BACKSTOP_DRIVER_ACTOR_REF,
-        Some(PII_BACKSTOP_REDACTION_LABEL),
-    )
-    .await
-    .context("failed to atomically release PII backstop hold")?;
+        // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
+        // release, so it is already active the instant the status becomes
+        // Accepted/Quarantined below.
+        let (mut object_ref, _) = trace_object_ref_write_from_record(
+            state,
+            "rescrubbed-envelope",
+            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            &record,
+            &envelope,
+        )?;
+        // A failed release tombstones this attempt's ref. A retry must use a
+        // fresh ID rather than upserting into that tombstoned row.
+        object_ref.object_ref_id = Uuid::new_v4();
+        staged_ref_target = Some((
+            object_ref.object_store.clone(),
+            object_ref.object_key.clone(),
+        ));
+        db.append_trace_object_ref(object_ref)
+            .await
+            .context("failed to mirror rescrubbed trace object ref")?;
+
+        // Step 3: now flip the on-disk record and release the DB hold. The file
+        // record's object_key was already repointed to the rescrubbed artifact
+        // above, so the file-record read path is safe regardless of ordering here;
+        // the DB release is the single authoritative status write to the target
+        // (the earlier upsert wrote the still-held status).
+        //
+        // The status flip and the invalidation of the pre-backstop
+        // `submitted_envelope` ref(s) happen ATOMICALLY via
+        // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
+        // commit without the other: envelope readers go through
+        // `get_latest_active_envelope_object_ref` (rescrubbed first, then
+        // submitted), and the object-primary read drill selects
+        // `SubmittedEnvelope` explicitly, so a status release with a still-active
+        // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
+        // on an ordinary transient DB failure with no re-enumeration path to heal
+        // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
+        // driver's own re-enumeration
+        // INNER JOINs an active `submitted_envelope` ref, so invalidating it
+        // without also releasing the status would strand the submission forever.
+        // Atomicity resolves both hazards: on any failure the transaction rolls
+        // back, the on-disk record write below is skipped, and the submission
+        // stays held and re-enumerable for the next tick to retry.
+        db.release_pii_backstop_hold(
+            &item.tenant_id,
+            item.submission_id,
+            storage_corpus_status(target_status),
+            PII_BACKSTOP_DRIVER_ACTOR_REF,
+            Some(PII_BACKSTOP_REDACTION_LABEL),
+        )
+        .await
+        .context("failed to atomically release PII backstop hold")?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = release_result {
+        // A withdrawal can win between the staged write and any one of the
+        // three DB calls. Retire the newly staged ref and bytes; retain the
+        // original held submission/ref so an ordinary transient DB failure
+        // remains re-enumerable on the next tick.
+        let ref_cleanup = if let Some((object_store, object_key)) = staged_ref_target {
+            db.mark_trace_object_ref_deleted(
+                &item.tenant_id,
+                item.submission_id,
+                &object_store,
+                &object_key,
+            )
+            .await
+            .map(|_| ())
+            .context("failed to retire rejected rescrubbed object ref")
+        } else {
+            Ok(())
+        };
+        let object_cleanup = delete_trace_objects_for_record(state, &record)
+            .context("failed to remove rejected rescrubbed object");
+        ref_cleanup?;
+        object_cleanup?;
+        return Err(error);
+    }
 
     record.status = target_status;
     write_submission_record(&state.root, &record)?;
@@ -57367,6 +57595,7 @@ fn trace_commons_record_from_storage_submission(
     Some((|| {
         let object_key = trace_envelope_object_key(&record.tenant_id, status, record.submission_id);
         Ok(TraceCommonsSubmissionRecord {
+            witness_evidence: None,
             tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
             tenant_id: record.tenant_id,
             auth_principal_ref: record.auth_principal_ref,
@@ -61987,8 +62216,7 @@ fn write_submission_record(
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
     ensure_submission_record_tenant(record, &record.tenant_id)?;
-    let path = submission_metadata_path(root, &record.tenant_id, record.submission_id);
-    write_json_file(&path, record, "trace contribution metadata")
+    file_witness::write_record(root, record)
 }
 
 fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
@@ -70032,6 +70260,8 @@ type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<i64>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -70039,6 +70269,21 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         status,
         Json(ApiError {
             error: message.into(),
+            retry_after_seconds: None,
+        }),
+    )
+}
+
+fn api_error_with_retry(
+    status: StatusCode,
+    message: impl Into<String>,
+    retry_after_seconds: Option<i64>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: message.into(),
+            retry_after_seconds,
         }),
     )
 }
@@ -70161,6 +70406,9 @@ impl TraceCorpusStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCommonsSubmissionRecord {
+    /// Private original source proof, never part of an envelope or receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_evidence: Option<file_witness::Evidence>,
     tenant_id: String,
     tenant_storage_ref: String,
     #[serde(default = "legacy_principal_ref")]

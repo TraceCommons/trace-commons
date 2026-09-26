@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence inference_connection inference_connection_route walletv2; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -275,6 +275,12 @@ jobs:
         run: cargo test -p trace-commons-server --test witness_evidence_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_witness_evidence
+      # Source-session withdrawal: account-scoped tombstones, merge carry-over,
+      # terminal-status no-ops for retention, and a least-privilege claim role.
+      - name: trace_session_withdrawal_pg
+        run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
@@ -352,6 +358,7 @@ jobs:
         run: cargo test -p trace-commons-server --test admission_ledger_pg -- --ignored
         env:
           TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ledger
+          TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_ledger
       - name: the invite-free path, end to end
         run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
         env:
@@ -388,7 +395,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence inference_connection inference_connection_route walletv2; do
+          for db in onboarding ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"
