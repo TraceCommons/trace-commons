@@ -125,7 +125,13 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
         s.max_queue_entries
     };
     let source_roots = shared.source_roots_with_routing();
-    tick_over(shared, now, all_sources(&source_roots), max_queue_entries)
+    tick_over(
+        shared,
+        now,
+        all_sources(&source_roots),
+        source_roots.source_identities(),
+        max_queue_entries,
+    )
 }
 
 /// The pass itself, over an explicit source list.
@@ -134,12 +140,12 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
 /// counts its own `load` calls: "this poll did not re-read anything" is a
 /// claim about how often `TraceSource::load` runs, and nothing observable
 /// from the queue alone can prove it.
-/// The pass itself, over an explicit source list.
 ///
-/// Split out from `tick_blocking` only so tests can hand it a source that
-/// counts its own `load` calls: "this poll did not re-read anything" is a
-/// claim about how often `TraceSource::load` runs, and nothing observable
-/// from the queue alone can prove it.
+/// `source_identities` must come from the same `SourceRoots` as `sources`:
+/// the automatic grant records each source under its name and root, and a
+/// root read separately could name one a `set_settings` has since swapped
+/// in, so root A's listing would be recorded as root B's and B's history
+/// would read as new. See `PassContext::source_key`.
 ///
 /// This is the full-scan path: it asks every source what it has. The scoped
 /// path (`tick_over_paths`) visits a supplied set of sessions instead. Both
@@ -150,9 +156,10 @@ fn tick_over(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
+    source_identities: SourceIdentities,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
-    let ctx = PassContext::read(shared, now, max_queue_entries);
+    let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
     // voided is already ask-first when its sessions are looked at -- and
     // against the same config snapshot the pass uses, so a widening written
@@ -349,6 +356,7 @@ pub async fn tick_paths(
             shared,
             now,
             all_sources(&source_roots),
+            source_roots.source_identities(),
             max_queue_entries,
             paths,
             session_at,
@@ -371,11 +379,12 @@ fn tick_over_paths(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
+    source_identities: SourceIdentities,
     max_queue_entries: usize,
     paths: &[PathBuf],
     session_at: SessionAt<'_>,
 ) -> Result<TickReport> {
-    let ctx = PassContext::read(shared, now, max_queue_entries);
+    let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
     // voided is already ask-first when its sessions are looked at -- and
     // against the same config snapshot the pass uses, so a widening written
@@ -464,6 +473,10 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
     }
 }
 
+/// Each source's name and root, as `SourceRoots::source_identities` gives
+/// them.
+type SourceIdentities = std::collections::BTreeMap<&'static str, String>;
+
 /// What a pass reads once, up front, and hands to every session it visits.
 struct PassContext {
     now: DateTime<Utc>,
@@ -478,8 +491,9 @@ struct PassContext {
     /// reads. `None` without a config. See `sweep_grants`.
     grant_terms: Option<super::grant_terms::GrantTerms>,
     /// Each source's name and root, for the automatic grant's per-source
-    /// record. See `SourceRoots::source_identities`.
-    source_identities: std::collections::BTreeMap<&'static str, String>,
+    /// record: from the same `SourceRoots` the pass's sources were built
+    /// from, never a second read of the settings. See `tick_over`.
+    source_identities: SourceIdentities,
 }
 
 impl PassContext {
@@ -492,7 +506,12 @@ impl PassContext {
         }
     }
 
-    fn read(shared: &DaemonShared, now: DateTime<Utc>, max_queue_entries: usize) -> Self {
+    fn read(
+        shared: &DaemonShared,
+        now: DateTime<Utc>,
+        max_queue_entries: usize,
+        source_identities: SourceIdentities,
+    ) -> Self {
         // The terms an auto-approval would be given under: the consent scopes,
         // and a fingerprint of everything else outside the session file that
         // determines the envelope. See `QueueEntry::approved_scopes` /
@@ -535,7 +554,7 @@ impl PassContext {
             approval_inputs,
             admission_evidence,
             grant_terms,
-            source_identities: shared.source_roots_with_routing().source_identities(),
+            source_identities,
         }
     }
 }
@@ -1391,7 +1410,14 @@ mod tests {
                     }) as Box<dyn TraceSource>
                 })
                 .collect();
-            tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+            tick_over(
+                &self.shared,
+                now,
+                sources,
+                source_roots.source_identities(),
+                max_queue_entries,
+            )
+            .unwrap()
         }
 
         /// One *scoped* pass -- the same `tick_over_paths` `tick_paths` runs
@@ -1444,6 +1470,7 @@ mod tests {
                 &self.shared,
                 now,
                 sources,
+                source_roots.source_identities(),
                 max_queue_entries,
                 paths,
                 &session_at,
@@ -2008,6 +2035,64 @@ mod tests {
                 .any(|e| e.path != pre && e.state == QueueState::Approved),
             "the new session is approved"
         );
+    }
+
+    /// A pass records each source under the root it discovered, not under
+    /// whatever root the settings name by the time the pass reads them. A
+    /// harness re-rooted between the two reads must not have root A's listing
+    /// recorded as root B's: root B's history would then read as already
+    /// recorded, and its pre-grant sessions as new.
+    #[tokio::test]
+    async fn a_root_changed_mid_pass_is_not_recorded_under_the_new_root() {
+        let mut f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("a-old", "11111111-1111-1111-1111-111111111111", 0);
+        let root_a = f.claude_root.clone();
+        let root_b = f._dir.path().join("projects-b");
+        f.claude_root = root_b.clone();
+        let pre_b = f.write_session("b-old", "22222222-2222-2222-2222-222222222222", 0);
+        f.claude_root = root_a;
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        // The pass's sources come from one read of the settings; the harness
+        // is re-rooted before the pass reads them again.
+        let (max_queue_entries, roots_a) = {
+            let s = f.shared.settings.lock().unwrap();
+            (s.max_queue_entries, s.source_roots(&f.shared.store))
+        };
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: root_b.clone(),
+            });
+        tick_over(
+            &f.shared,
+            Utc::now() + chrono::Duration::hours(31),
+            all_sources(&roots_a),
+            roots_a.source_identities(),
+            max_queue_entries,
+        )
+        .unwrap();
+        for h in 32..36 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(
+            mode_of(&f, "b-old"),
+            (ProjectMode::NotifyOnly, false),
+            "root B's pre-grant project was armed"
+        );
+        let queue = f.shared.queue.lock().unwrap();
+        for e in queue.all().iter().filter(|e| e.path == pre_b) {
+            assert_ne!(
+                e.state,
+                QueueState::Approved,
+                "a session on disk at the grant under root B was approved unattended"
+            );
+        }
     }
 
     /// Only a full pass records what is on disk; before it, the grant arms
@@ -2908,7 +2993,14 @@ mod tests {
                 .into_iter()
                 .map(|inner| Box::new(RefusingSource { inner, err }) as Box<dyn TraceSource>)
                 .collect();
-            tick_over(&self.shared, now, sources, max_queue_entries).unwrap()
+            tick_over(
+                &self.shared,
+                now,
+                sources,
+                source_roots.source_identities(),
+                max_queue_entries,
+            )
+            .unwrap()
         }
 
         fn health_label(&self) -> Option<String> {
