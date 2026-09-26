@@ -41,16 +41,35 @@ use serde::{Deserialize, Serialize};
 use crate::config::ContributorConfig;
 use crate::envelope::NearAiSettings;
 
-/// Everything whose change could put a standing grant's sessions in front of
-/// someone new, or send more of them.
-/// The environment-attached privacy-filter backend, as a label.
+/// The environment-attached privacy filter, as `GrantTerms` records it: its
+/// kind and a hash of where it sends prose (see `env_filter_term`), or
+/// `"invalid"` for a backend named without its credentials.
 pub fn env_filter_backend() -> String {
-    match trace_commons_protocol::trace_contribution::privacy_filter_backend_from_env() {
-        Ok(tag) => tag.label().to_string(),
+    use trace_commons_protocol::trace_contribution as tc;
+    match tc::privacy_filter_backend_from_env() {
+        Ok(tag) => env_filter_term(
+            tag.label(),
+            tc::privacy_filter_backend_identity(|k| std::env::var(k).ok()).as_deref(),
+        ),
         Err(_) => "invalid".to_string(),
     }
 }
 
+/// `"none"` with no filter attached, otherwise the backend's label and a
+/// hash of its resolved identity -- the host and model, or the sidecar
+/// command -- so the same kind pointed at another operator is a different
+/// term. Hashed so the policy file holds no endpoint or local path.
+fn env_filter_term(label: &str, identity: Option<&str>) -> String {
+    if label == "none" {
+        return label.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(identity.unwrap_or_default().as_bytes());
+    format!("{label} sha256:{digest:x}")
+}
+
+/// Everything whose change could put a standing grant's sessions in front of
+/// someone new, or send more of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantTerms {
     pub ingest_url: String,
@@ -63,11 +82,13 @@ pub struct GrantTerms {
     pub device_key_id: String,
     pub consent_scopes: BTreeSet<String>,
     pub pii_filter: Option<String>,
-    /// The privacy-filter backend the environment attaches on its own
+    /// The privacy filter the environment attaches on its own
     /// (`TRACE_PRIVACY_FILTER_BACKEND`), resolved as the redactor resolves it:
     /// `DeterministicTraceRedactor::new` adds that filter whatever
-    /// `pii_filter` says, so the config field alone misses it. `"invalid"`
-    /// for a backend named without its credentials.
+    /// `pii_filter` says, so the config field alone misses it. Its kind plus
+    /// a hash of its host and model or sidecar command, so the same kind
+    /// pointed elsewhere voids as the config-side classifier does. See
+    /// `env_filter_backend`.
     pub env_filter_backend: String,
     pub classifier_base_url: Option<String>,
     pub classifier_model: Option<String>,
@@ -236,12 +257,12 @@ mod tests {
     /// so an entry approved under the old terms is re-offered rather than
     /// sent under the new ones. Driven from the inputs both are derived from,
     /// not from `GrantTerms`, so a term added to one and not the other fails
-    /// here. The environment's filter backend is left out: varying it means
-    /// mutating the process environment, and both read it from the same
-    /// `env_filter_backend`.
+    /// here. The environment's filter is passed to both explicitly, as
+    /// `env_filter_backend` would give it, so it is covered without mutating
+    /// the process environment.
     #[test]
     fn every_widening_also_changes_the_input_fingerprint() {
-        use crate::daemon::preview::input_fingerprint;
+        use crate::daemon::preview::input_fingerprint_with_env_filter;
         let cfg = ContributorConfig {
             inference_receipt_endpoint: None,
             inference_receipt_check_attestation: false,
@@ -272,7 +293,9 @@ mod tests {
             signing_address: "0x0000000000000000000000000000000000000001".to_string(),
             expected_measurements: Vec::new(),
         };
-        type Inputs = (ContributorConfig, Option<NearAiSettings>, bool);
+        type Inputs = (ContributorConfig, Option<NearAiSettings>, bool, String);
+        let host_a = env_filter_term("self_hosted", Some("self-hosted\nhttps://a.invalid"));
+        let host_b = env_filter_term("self_hosted", Some("self-hosted\nhttps://b.invalid"));
         let changes: Vec<(&str, Box<dyn Fn(&mut Inputs)>)> = vec![
             (
                 "destination",
@@ -300,10 +323,27 @@ mod tests {
                 Box::new(move |i| i.1 = Some(classifier.clone()))
             }),
             ("attested bodies", Box::new(|i| i.2 = true)),
+            ("environment filter attached", {
+                let host_a = host_a.clone();
+                Box::new(move |i| i.3 = host_a.clone())
+            }),
         ];
-        let terms = |i: &Inputs| GrantTerms::current(&i.0, i.1.as_ref(), i.2, "none");
-        let fingerprint = |i: &Inputs| input_fingerprint(&i.0, i.1.as_ref(), i.2);
-        let base: Inputs = (cfg, None, false);
+        let terms = |i: &Inputs| GrantTerms::current(&i.0, i.1.as_ref(), i.2, &i.3);
+        let fingerprint =
+            |i: &Inputs| input_fingerprint_with_env_filter(&i.0, i.1.as_ref(), i.2, &i.3);
+        let base: Inputs = (cfg, None, false, "none".to_string());
+        // The environment's filter pointed at another host, from a base that
+        // already has one.
+        let mut on_a = base.clone();
+        on_a.3 = host_a.clone();
+        let mut on_b = base.clone();
+        on_b.3 = host_b;
+        assert!(!terms(&on_b).widening_from(&terms(&on_a)).is_empty());
+        assert_ne!(
+            fingerprint(&on_b),
+            fingerprint(&on_a),
+            "environment filter repointed"
+        );
         for (name, change) in &changes {
             let mut now = base.clone();
             change(&mut now);
@@ -391,6 +431,89 @@ mod tests {
         let mut removed = granted.clone();
         removed.pii_filter = None;
         assert_eq!(removed.widening_from(&granted), [VOID_FILTER]);
+    }
+
+    /// Reviewed on #1024: the environment's filter is recorded by the party
+    /// it sends prose to, not only by its kind. The same backend pointed at
+    /// another host or model, or a sidecar running another program, voids.
+    #[test]
+    fn an_environment_filter_pointed_elsewhere_voids() {
+        let env = |pairs: &[(&str, &str)]| {
+            let map: std::collections::HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            env_filter_term(
+                "self_hosted",
+                trace_commons_protocol::trace_contribution::privacy_filter_backend_identity(|k| {
+                    map.get(k).cloned()
+                })
+                .as_deref(),
+            )
+        };
+        let host_a = env(&[
+            ("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted"),
+            (
+                "TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL",
+                "https://a.invalid",
+            ),
+        ]);
+        let host_b = env(&[
+            ("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted"),
+            (
+                "TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL",
+                "https://b.invalid",
+            ),
+        ]);
+        let model_b = env(&[
+            ("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted"),
+            (
+                "TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL",
+                "https://a.invalid",
+            ),
+            ("TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL", "other/model"),
+        ]);
+        assert_eq!(
+            host_a,
+            env(&[
+                ("TRACE_PRIVACY_FILTER_BACKEND", "self-hosted"),
+                (
+                    "TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL",
+                    " https://a.invalid "
+                ),
+            ]),
+            "the same resolved endpoint is the same term"
+        );
+        for other in [&host_b, &model_b] {
+            let mut granted = base();
+            granted.env_filter_backend = host_a.clone();
+            let mut now = base();
+            now.env_filter_backend = other.clone();
+            assert_eq!(now.widening_from(&granted), [VOID_FILTER]);
+        }
+        assert!(
+            !host_a.contains("a.invalid"),
+            "recorded as a hash, not the endpoint: {host_a}"
+        );
+
+        let sidecar = |command: &str| {
+            let map: std::collections::HashMap<String, String> = [
+                ("TRACE_PRIVACY_FILTER_BACKEND", "sidecar"),
+                ("TRACE_PRIVACY_FILTER_COMMAND", command),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            env_filter_term(
+                "sidecar",
+                trace_commons_protocol::trace_contribution::privacy_filter_backend_identity(|k| {
+                    map.get(k).cloned()
+                })
+                .as_deref(),
+            )
+        };
+        assert_ne!(sidecar("/opt/filter-a"), sidecar("/opt/filter-b"));
+        assert_eq!(env_filter_term("none", None), "none");
     }
 
     #[test]

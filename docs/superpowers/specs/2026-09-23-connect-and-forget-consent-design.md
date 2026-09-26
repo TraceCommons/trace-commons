@@ -241,6 +241,28 @@ next poll under the new inputs. So a changed witness — URL, pins, or
 **Required:** a void rule whose identity includes `signing_address`, and which
 holds re-approval until re-consent rather than letting the next poll resume.
 
+**The rule, as implemented (`daemon/grant_terms.rs`, #1024).** A grant is
+voided when the set of parties that see content grows or changes, or when more
+content leaves the machine:
+
+- **Voids:** a different destination (ingest, issuer, audience, host
+  allowlist) or identity (tenant, instance, subject, device); consent scopes
+  gaining any entry; any change to the privacy filter -- the config's
+  `pii_filter`, the classifier's presence, host or model, or the filter
+  `TRACE_PRIVACY_FILTER_BACKEND` attaches, including its host and model or
+  sidecar command -- in either direction; a receipt endpoint added or changed;
+  a different witness URL or `signing_address`, or a witness measurement
+  admitted; attested bodies turning on.
+- **Does not void, decided rather than incidental:** consent scopes
+  narrowing; attested bodies turning off; **a receipt endpoint removed**, since
+  it only shrinks who is told a session is being contributed; **a witness
+  measurement retired**, since it narrows what the client will accept from the
+  same witness. Each means fewer parties or less content, which the grant
+  already covered.
+- **Not part of the identity:** the NEAR AI API key (rotating a credential
+  changes nothing about what leaves the machine), the crate version and
+  `REDACTION_RULESET_VERSION` (so a release does not void every grant).
+
 ### R7. The data-use scope is chosen
 
 Flow 1 replaces today's consent screen, and that screen **is** the "How may

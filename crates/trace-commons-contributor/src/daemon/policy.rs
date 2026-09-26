@@ -572,6 +572,21 @@ impl ProjectPolicy {
         sweep
     }
 
+    /// Whether `mode` may be set on `project_key` at all, before anything is
+    /// recorded: the unknown bucket can never be armed. `set_mode` applies
+    /// it too; a caller that records an arming first asks here first, so a
+    /// refusal leaves no record of an arming that never happened.
+    pub fn check_mode(project_key: &str, mode: ProjectMode) -> Result<()> {
+        if project_key == UNKNOWN_PROJECT_KEY && mode == ProjectMode::AutoUpload {
+            bail!(
+                "unknown-project sessions cannot be set to auto_upload: \
+                 their working directory could not be resolved, so no \
+                 per-project opt-in can apply to them"
+            );
+        }
+        Ok(())
+    }
+
     /// Record a mode for `project_key`.
     ///
     /// The label is **derived here**, from the key, and is never a caller
@@ -593,13 +608,7 @@ impl ProjectPolicy {
         mode: ProjectMode,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        if project_key == UNKNOWN_PROJECT_KEY && mode == ProjectMode::AutoUpload {
-            bail!(
-                "unknown-project sessions cannot be set to auto_upload: \
-                 their working directory could not be resolved, so no \
-                 per-project opt-in can apply to them"
-            );
-        }
+        Self::check_mode(project_key, mode)?;
         // A mode set here is the contributor's own decision about the project,
         // not the grant's; `arm_by_grant` re-adds it after calling this.
         self.armed_by_grant.remove(project_key);

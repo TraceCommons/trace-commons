@@ -2645,6 +2645,20 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         (key, label)
     };
 
+    // Every refusal comes before the audit record below, so a refusal
+    // records nothing. The unknown bucket first, for its own reason: it can
+    // never be armed, terms or not.
+    if let Err(e) = ProjectPolicy::check_mode(&key, mode) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    // Fail closed: a grant needs terms to be a grant of. Arming with none --
+    // no config yet, or one that could not be read -- would leave the next
+    // watcher pass to adopt whatever config then exists as what was agreed,
+    // for example after enrolling with a different commons.
+    if mode == ProjectMode::AutoUpload && arming_terms.is_none() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    }
+
     // The audit entry goes down FIRST, before anything is armed,
     // the way `acknowledge_near_ai_notice` does it.
     //
@@ -2670,15 +2684,6 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // concurrent `set_project_mode` can only interleave two
     // record-then-arm sequences, never produce an armed policy with
     // no record.
-    // Fail closed: a grant needs terms to be a grant of. Arming with none --
-    // no config yet, or one that could not be read -- would leave the next
-    // watcher pass to adopt whatever config then exists as what was agreed,
-    // for example after enrolling with a different commons. Refused before
-    // the audit record, so a refusal records nothing.
-    // The unknown bucket is left to `set_mode`, whose refusal says why.
-    if mode == ProjectMode::AutoUpload && arming_terms.is_none() && key != UNKNOWN_PROJECT_KEY {
-        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
-    }
     if mode == ProjectMode::AutoUpload {
         drop(policy);
         if let Err(_e) = audit::append(
@@ -7475,6 +7480,41 @@ mod tests {
             ordinary_row["is_unresolved_bucket"],
             serde_json::json!(false),
             "an ordinary project must never be explained as unresolvable"
+        );
+    }
+
+    /// Reviewed on #1024: arming the unknown bucket is refused before the
+    /// arming is recorded, so the audit log never shows an arming that did
+    /// not happen.
+    #[test]
+    fn arming_the_unresolvable_bucket_is_refused_before_it_is_recorded() {
+        let s = enrolled_shared();
+        seed_entry(&s, UNKNOWN_PROJECT_KEY);
+        let resp = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": project_id_for(UNKNOWN_PROJECT_KEY),
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        let err = resp.error.expect("arming the bucket is refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert!(
+            !crate::daemon::audit::load(&s.store)
+                .unwrap()
+                .iter()
+                .any(|e| e.action == "armed-auto-upload"),
+            "a refused arming leaves no audit record"
+        );
+        assert!(
+            !s.policy
+                .lock()
+                .unwrap()
+                .projects
+                .contains_key(UNKNOWN_PROJECT_KEY)
         );
     }
 

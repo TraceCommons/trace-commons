@@ -221,7 +221,8 @@ What replaces the restriction is **visibility, not gatekeeping**:
   below). With no config to read them from -- not yet enrolled, or a config
   that cannot be read -- `set_project_mode: "auto_upload"` is refused with
   `arming-terms-unavailable` (`ERR_UNAVAILABLE`) before anything is recorded.
-  Arming the unknown-project bucket is refused for its own reason first.
+  Arming the unknown-project bucket is refused for its own reason first,
+  also before anything is recorded.
 - The durable log is capped and rotates oldest-first, so it cannot grow
   until appending to it starts failing. Capping `list_audit`'s output alone
   would not have bounded the file.
