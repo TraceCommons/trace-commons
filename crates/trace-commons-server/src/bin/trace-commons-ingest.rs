@@ -13712,11 +13712,15 @@ async fn submit_trace_handler(
         } else {
             SubmissionMirrorKind::Submission
         };
-        let audit_event = if remediating_prior.is_some() {
+        let mut audit_event = if remediating_prior.is_some() {
             tenant.quarantine_remediated_audit_event(&record)
         } else {
             tenant.submitted_audit_event(&record)
         };
+        audit_event.decision_inputs_hash = Some(derived_record.canonical_summary_hash.clone());
+        // The file audit log is canonical; the DB submit row mirrors this
+        // event (same id). The event is built once per request, so the DB-first
+        // branch below and the file append that follows it share its id.
         if state.require_db_mirror_writes || state.account_admission.is_some() {
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
@@ -13728,6 +13732,7 @@ async fn submit_trace_handler(
                     .as_ref()
                     .map(|verified| (verified, &headers, raw_body.as_ref())),
                 mirror_kind,
+                SubmitAuditRow::FileEvent(&audit_event),
             )
             .await;
             if let Err(error) = &mirror_result {
@@ -13748,7 +13753,9 @@ async fn submit_trace_handler(
         } else {
             write_submission_record(&state.root, &record).map_err(internal_error)?;
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
+            // File first: the mirror carries the appended event's hash-chain
+            // fields as well as its id.
+            let audit_event = append_audit_event(&state.root, tenant.tenant_id(), audit_event)
                 .map_err(internal_error)?;
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
@@ -13760,6 +13767,7 @@ async fn submit_trace_handler(
                     .as_ref()
                     .map(|verified| (verified, &headers, raw_body.as_ref())),
                 mirror_kind,
+                SubmitAuditRow::FileEvent(&audit_event),
             )
             .await;
             if let Err(error) = &mirror_result {
@@ -59279,15 +59287,38 @@ enum SubmissionMirrorKind {
     /// Quarantine remediation (#214) replaced the submitted body under the
     /// same submission id. Evidence stored for the prior body of a quarantined
     /// submission is replaced by the offered evidence, or removed when the
-    /// remediation is unwitnessed. The submit audit row gets an id of its own:
-    /// the first landing already holds the submission-derived one, and the
-    /// audit table is append-only.
+    /// remediation is unwitnessed.
     QuarantineRemediation,
     /// Replays an already-stored file submission into the database. It
-    /// appends no submit audit row: the submission was audited when it landed.
+    /// appends no submit audit row here: the backfill's audit pass mirrors the
+    /// file log's own `submitted` event, with its id and hash-chain fields.
     Backfill,
 }
 
+/// Which DB audit row a submission mirror appends for the write.
+#[derive(Debug, Clone, Copy)]
+enum SubmitAuditRow<'a> {
+    /// The file audit log's event for this write. The file log is canonical,
+    /// so the DB row is that event's row: its id, and its hash-chain fields
+    /// when the file append has already computed them. Each file event has an
+    /// id of its own, so a remediation's row never collides with the first
+    /// landing's in the append-only table (#1018).
+    FileEvent(&'a TraceCommonsAuditEvent),
+    /// The operator re-scrub's row, left as it was: an id derived from the
+    /// submission, a label-only reason, and no hash-chain fields. It is not the
+    /// re-scrub's file event, whose reason is the operator's free text and
+    /// must not reach the hash-only DB row, so the two logs still disagree
+    /// about re-scrubs. The derived id is also the one a first landing used
+    /// before `FileEvent`, so it collides with a submission mirrored under the
+    /// old scheme and with a second re-scrub of the same submission.
+    SubmissionDerived,
+    /// No submit audit row. Backfill: its audit pass mirrors the file log's
+    /// own `submitted` event, with that event's id and hash-chain fields.
+    None,
+}
+
+/// Operator re-scrub's submission mirror. Its audit row is
+/// [`SubmitAuditRow::SubmissionDerived`].
 async fn mirror_submission_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -59304,10 +59335,12 @@ async fn mirror_submission_to_db(
         envelope,
         witness_input,
         SubmissionMirrorKind::Submission,
+        SubmitAuditRow::SubmissionDerived,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn mirror_submission_to_db_with_options(
     state: &AppState,
     tenant: &TenantAuth,
@@ -59316,6 +59349,7 @@ async fn mirror_submission_to_db_with_options(
     envelope: &TraceContributionEnvelope,
     witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
     mirror_kind: SubmissionMirrorKind,
+    submit_audit_row: SubmitAuditRow<'_>,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -59328,20 +59362,6 @@ async fn mirror_submission_to_db_with_options(
         envelope,
     )?;
     let object_ref_id = object_ref.object_ref_id;
-    let submit_audit_event_id = match mirror_kind {
-        SubmissionMirrorKind::Backfill => None,
-        SubmissionMirrorKind::Submission => Some(deterministic_trace_uuid("submit-audit", record)),
-        // Keyed on the freshly stored object, so each remediation of the same
-        // submission records its own row.
-        SubmissionMirrorKind::QuarantineRemediation => {
-            Some(deterministic_trace_uuid_for_external_ref(
-                "submit-audit-remediation",
-                &record.tenant_id,
-                record.submission_id,
-                &content_sha256,
-            ))
-        }
-    };
     let derived_id = deterministic_trace_uuid("derived-precheck", record);
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
@@ -59422,29 +59442,49 @@ async fn mirror_submission_to_db_with_options(
     .await
     .context("failed to mirror trace derived metadata")?;
 
-    if let Some(submit_audit_event_id) = submit_audit_event_id {
-        db.append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: submit_audit_event_id,
-            tenant_id: record.tenant_id.clone(),
-            actor_principal_ref: record.auth_principal_ref.clone(),
-            actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
-            action: StorageTraceAuditAction::Submit,
-            reason: Some(format!("auth_method={}", tenant.auth_method.storage_name())),
-            request_id: None,
-            submission_id: Some(record.submission_id),
-            object_ref_id: Some(object_ref_id),
-            export_manifest_id: None,
-            decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Submission {
-                status: storage_corpus_status(record.status),
-                privacy_risk: privacy_risk.clone(),
-            },
-        })
-        .await
-        .context("failed to mirror trace audit event")?;
+    let submission_metadata = StorageTraceAuditSafeMetadata::Submission {
+        status: storage_corpus_status(record.status),
+        privacy_risk: privacy_risk.clone(),
+    };
+    match submit_audit_row {
+        SubmitAuditRow::FileEvent(submit_audit_event) => {
+            anyhow::ensure!(
+                submit_audit_event.submission_id == record.submission_id
+                    && submit_audit_event.tenant_id == record.tenant_id,
+                "submit audit event does not describe the mirrored submission"
+            );
+            mirror_audit_event_to_db_with_object_ref(
+                state,
+                tenant,
+                submit_audit_event,
+                StorageTraceAuditAction::Submit,
+                submission_metadata,
+                Some(object_ref_id),
+            )
+            .await?;
+        }
+        SubmitAuditRow::SubmissionDerived => {
+            db.append_trace_audit_event(StorageTraceAuditEventWrite {
+                audit_event_id: deterministic_trace_uuid("submit-audit", record),
+                tenant_id: record.tenant_id.clone(),
+                actor_principal_ref: record.auth_principal_ref.clone(),
+                actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
+                action: StorageTraceAuditAction::Submit,
+                reason: Some(format!("auth_method={}", tenant.auth_method.storage_name())),
+                request_id: None,
+                submission_id: Some(record.submission_id),
+                object_ref_id: Some(object_ref_id),
+                export_manifest_id: None,
+                decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
+                previous_event_hash: None,
+                event_hash: None,
+                canonical_event_json: None,
+                metadata: submission_metadata,
+            })
+            .await
+            .context("failed to mirror trace audit event")?;
+        }
+        SubmitAuditRow::None => {}
     }
 
     if record.status == TraceCorpusStatus::Accepted && record.credit_points_pending > 0.0 {
@@ -66905,7 +66945,14 @@ fn verify_db_audit_projection(
             "db row {row_number} event {event_ref}: canonical submission_id mismatch"
         ));
     }
-    if canonical_event.kind != storage_audit_canonical_kind(event) {
+    let projected_kind = storage_audit_canonical_kind(event);
+    // A quarantine remediation re-POST is mirrored as a `Submit` row with
+    // submission metadata, the same row shape as a first landing; its file
+    // event, the canonical payload, keeps its own kind.
+    let remediation_submit_row = event.action == StorageTraceAuditAction::Submit
+        && projected_kind == "submitted"
+        && canonical_event.kind == "quarantine_remediated";
+    if canonical_event.kind != projected_kind && !remediation_submit_row {
         report.failures.push(format!(
             "db row {row_number} event {event_ref}: canonical kind/action mismatch"
         ));
@@ -67272,6 +67319,7 @@ async fn backfill_db_mirror_from_files(
             &envelope,
             None,
             SubmissionMirrorKind::Backfill,
+            SubmitAuditRow::None,
         )
         .await
         {
@@ -69157,6 +69205,11 @@ async fn reconcile_db_mirror(
         .filter(|event| event.canonical_event_json.is_some())
         .map(|event| event.audit_event_id)
         .collect::<BTreeSet<_>>();
+    // Submit rows mirrored before the DB row took the file event's id carry an
+    // id derived from the submission and no canonical payload. The table is
+    // insert-only, so they stay: each such submission's file `submitted`
+    // event is reported here as missing, and the row itself is not reported
+    // below, because only rows with a canonical payload are file projections.
     let missing_audit_event_ids_in_db = file_audit_event_ids
         .difference(&db_audit_event_ids)
         .copied()

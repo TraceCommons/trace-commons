@@ -27676,6 +27676,152 @@ async fn db_reconciliation_drill_without_db_mirror_returns_operator_error() {
     );
 }
 
+/// The file audit log is canonical and the DB audit table mirrors it: the DB
+/// row for a submission, and for a quarantine remediation re-POST, is the file
+/// event's row -- same id, same hash-chain fields -- not a second row with an
+/// id of its own. File-first dual-write (`require_db_mirror_writes` off)
+/// mirrors after the file append, so the chain fields are the file's. With
+/// `require_db_mirror_writes` on, the DB row is written before the file append
+/// has computed the chain, so -- as for every other audit event mirrored in
+/// that mode -- the row carries the file event's id and no chain fields.
+#[tokio::test]
+async fn db_submit_audit_row_mirrors_the_file_audit_event() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for require_db_mirror_writes in [false, true] {
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.require_db_mirror_writes = require_db_mirror_writes;
+            state_mut.accept_medium_risk_submissions = false;
+        }
+
+        // Lands quarantined, so the second POST below is a remediation.
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(first.clone()),
+        )
+        .await
+        .expect("first submission mirrors to DB");
+        let mut corrected = first.clone();
+        corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(corrected),
+        )
+        .await
+        .expect("remediation mirrors to DB");
+
+        // A second, accepted submission, so the file chain is longer than one
+        // submission's events.
+        let mut second = sample_envelope().await;
+        make_metadata_only_low_risk(&mut second);
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(second.clone()),
+        )
+        .await
+        .expect("second submission mirrors to DB");
+
+        let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
+        let file_submit_events = file_events
+            .iter()
+            .filter(|event| matches!(event.kind.as_str(), "submitted" | "quarantine_remediated"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            file_submit_events
+                .iter()
+                .map(|event| (event.kind.as_str(), event.submission_id))
+                .collect::<Vec<_>>(),
+            vec![
+                ("submitted", first.submission_id),
+                ("quarantine_remediated", first.submission_id),
+                ("submitted", second.submission_id),
+            ],
+            "require_db_mirror_writes={require_db_mirror_writes}"
+        );
+        let db_events = backend
+            .list_trace_audit_events("tenant-a")
+            .await
+            .expect("DB audit rows");
+        let db_submit_rows = db_events
+            .iter()
+            .filter(|event| event.action == StorageTraceAuditAction::Submit)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            db_submit_rows.len(),
+            file_submit_events.len(),
+            "one DB submit row per file submit event \
+             (require_db_mirror_writes={require_db_mirror_writes})"
+        );
+        for (file_event, db_row) in file_submit_events.iter().zip(&db_submit_rows) {
+            assert_eq!(
+                db_row.audit_event_id, file_event.event_id,
+                "DB submit row carries the file event id ({} , \
+                 require_db_mirror_writes={require_db_mirror_writes})",
+                file_event.kind
+            );
+            assert_eq!(db_row.submission_id, Some(file_event.submission_id));
+            let (expected_previous, expected_hash) = if require_db_mirror_writes {
+                (None, None)
+            } else {
+                (
+                    file_event.previous_event_hash.clone(),
+                    file_event.event_hash.clone(),
+                )
+            };
+            assert!(
+                require_db_mirror_writes || expected_hash.is_some(),
+                "the file event is hash-chained"
+            );
+            assert_eq!(
+                db_row.previous_event_hash, expected_previous,
+                "{} previous_event_hash (require_db_mirror_writes={require_db_mirror_writes})",
+                file_event.kind
+            );
+            assert_eq!(
+                db_row.event_hash, expected_hash,
+                "{} event_hash (require_db_mirror_writes={require_db_mirror_writes})",
+                file_event.kind
+            );
+        }
+        // The mirrored rows carry the file event as their canonical payload,
+        // including the remediation's `quarantine_remediated` kind, and the
+        // projection check accepts them.
+        let projection_failures = collect_db_audit_canonical_projection_failures(&db_events)
+            .into_iter()
+            .map(|failure| failure.first_failure)
+            .collect::<Vec<_>>();
+        assert!(
+            projection_failures.is_empty(),
+            "require_db_mirror_writes={require_db_mirror_writes}: {projection_failures:?}"
+        );
+        assert!(
+            collect_db_audit_hash_chain_failures(&db_events).is_empty(),
+            "require_db_mirror_writes={require_db_mirror_writes}"
+        );
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     use axum::body::Body;
@@ -35072,7 +35218,8 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
         vec![first_trace_id.to_string()]
     );
     assert_eq!(second_entry.duplicate_score, Some(0.92));
-    assert_eq!(second_entry.novelty_score, Some(0.08000004));
+    // f32 arithmetic, as the worker computes it: 1.0 - 0.92 is 0.07999998.
+    assert_eq!(second_entry.novelty_score, Some(1.0_f32 - 0.92));
     assert!(
         second_entry
             .cluster_id
