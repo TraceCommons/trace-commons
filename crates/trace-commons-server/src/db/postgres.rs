@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
+#[path = "postgres_account_trust.rs"]
+mod account_trust;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
 #[path = "postgres_public_run.rs"]
@@ -204,6 +206,9 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "device_keys",
     "onboarding_invites",
     "trace_accounts",
+    "trace_account_trust",
+    "trace_account_invite_grants",
+    "trace_account_trust_events",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",
@@ -1381,10 +1386,25 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "public_run_function_acl",
         include_str!("../../../../migrations/V74__public_run_function_acl.sql"),
     ),
+    (
+        75,
+        "account_trust",
+        include_str!("../../../../migrations/V75__account_trust.sql"),
+    ),
 ];
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn redeem_account_invite(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        invite_hash: &str,
+        idempotency_key: Uuid,
+    ) -> Result<crate::db::AccountInviteRedemption, DatabaseError> {
+        self.redeem_account_invite_in_tx(tenant, account, invite_hash, idempotency_key)
+            .await
+    }
     async fn get_reward_offer(
         &self,
         program: Uuid,
@@ -3317,6 +3337,14 @@ impl Database for PgBackend {
         principal: &str,
     ) -> Result<Option<String>, DatabaseError> {
         self.near_anchor_for_principal(tenant, principal).await
+    }
+
+    async fn get_near_provisioned_account(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        self.near_account_for_principal(tenant, principal).await
     }
 
     async fn resolve_near_public_key_tenant(
@@ -7101,6 +7129,7 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V75__account_trust.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7123,6 +7152,7 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V75__account_trust.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

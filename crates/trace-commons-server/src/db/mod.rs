@@ -21,6 +21,15 @@ mod trace_corpus_pg;
 
 pub use postgres::InviteRedemption;
 
+/// Result of redeeming a durable invite into an authenticated account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountInviteRedemption {
+    Invited { trust_version: i64 },
+    InvalidInvite,
+    AccountIneligible,
+    IdempotencyConflict,
+}
+
 /// Insert payload for an invite grant. Mirrors `InviteEntry` minus
 /// `revoked_at`, which is only ever set by `revoke_invite_grant`.
 #[derive(Debug, Clone)]
@@ -184,6 +193,15 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    async fn redeem_account_invite(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _invite_hash: &str,
+        _idempotency_key: uuid::Uuid,
+    ) -> Result<AccountInviteRedemption, DatabaseError> {
+        Err(DatabaseError::Pool("account_invite_unavailable".into()))
+    }
     async fn get_reward_offer(
         &self,
         _program: uuid::Uuid,
@@ -249,6 +267,13 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _tenant_id: &str,
         _principal_ref: &str,
     ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+    async fn get_near_provisioned_account(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
