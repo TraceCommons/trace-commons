@@ -189,7 +189,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         ),
         ("quit_confirmation_copy", "platform::quit_confirmation_copy"),
         ("grant_void_notice", "consent::grant_void_notice"),
-        ("acknowledge_grant_voids", "consent::acknowledge_grant_voids"),
+        (
+            "acknowledge_grant_voids",
+            "consent::acknowledge_grant_voids",
+        ),
     ] {
         assert!(
             build.contains(&format!("\"{name}\"")),
@@ -226,7 +229,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         api.contains("invokeTauri(\"grant_void_notice\""),
         "frontend copy adapter no longer invokes `grant_void_notice`"
     );
-    let void_notices = read(&root, "tauri-desktop/frontend/src/app/grant-void-notices.tsx");
+    let void_notices = read(
+        &root,
+        "tauri-desktop/frontend/src/app/grant-void-notices.tsx",
+    );
     for rendered_copy in [
         "useGrantVoidNotice",
         "copy.data.title",
@@ -237,6 +243,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         "copy.data.acknowledge",
         "!copy.data",
         "acknowledgeGrantVoids([grantVoid.id])",
+        "copy.data.rearm_action",
+        "copy.data.rearm_failed",
+        "rearmTarget(grantVoid, copy.data)",
+        "changeProjectMode(id, \"auto_upload\")",
     ] {
         assert!(
             void_notices.contains(rendered_copy),

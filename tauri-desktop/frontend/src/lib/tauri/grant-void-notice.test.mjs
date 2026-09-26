@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   parseGrantVoidNotice,
   parseGrantVoids,
+  rearmTarget,
 } from "./grant-void-notice.ts";
 
 const projectVoid = {
@@ -59,14 +60,42 @@ const notice = {
   reasons: ["r1", "r2"],
   rearm: "re",
   acknowledge: "Got it",
+  rearm_action: "Turn back on",
+  rearm_failed: "It could not be turned back on.",
 };
+
+const noButton = { ...notice, rearm_action: null, rearm_failed: null };
 
 test("the core's notice is taken whole", () => {
   assert.deepEqual(parseGrantVoidNotice(notice), notice);
 });
 
+test("a notice without a re-arm button is taken whole too", () => {
+  assert.deepEqual(parseGrantVoidNotice(noButton), noButton);
+});
+
+// The button and its refusal line travel together: a button with nothing to
+// say on refusal, or a refusal line with no button, is a payload out of step.
+test("the re-arm button and its refusal line come as a pair", () => {
+  assert.throws(() => parseGrantVoidNotice({ ...notice, rearm_failed: null }));
+  assert.throws(() => parseGrantVoidNotice({ ...notice, rearm_action: null }));
+  assert.throws(() => parseGrantVoidNotice({ ...notice, rearm_action: "" }));
+});
+
+// The button acts on the wire element's project_id, and only when the core
+// offered it -- never on the grant's notice or an unplaced one.
+test("the re-arm target is the element's project, only when offered", () => {
+  const [projectVoidParsed, grantVoidParsed] = parseGrantVoids([
+    projectVoid,
+    grantVoid,
+  ]);
+  assert.equal(rearmTarget(projectVoidParsed, notice), "3f1c");
+  assert.equal(rearmTarget(projectVoidParsed, noButton), null);
+  assert.equal(rearmTarget(grantVoidParsed, notice), null);
+});
+
 test("a notice missing a sentence is refused rather than shown in part", () => {
-  for (const key of Object.keys(notice)) {
+  for (const key of Object.keys(noButton)) {
     const partial = { ...notice };
     delete partial[key];
     assert.throws(() => parseGrantVoidNotice(partial), key);
