@@ -460,6 +460,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
             _ = ticker.tick() => {
+                let tick_started = std::time::Instant::now();
                 let now = Utc::now();
                 // Ahead of `watcher::tick` so the sources it builds via
                 // `source_roots_with_routing` see this pass's snapshot
@@ -488,7 +489,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
                 if !dry_run {
-                    if let Err(e) = drain_approved(shared, now).await {
+                    if let Err(e) = drain_approved(shared, now, tick_started).await {
                         // The one detail that is safe and load-bearing: a
                         // fail-closed precondition is a fixed label by
                         // construction (`SubmitPreconditionFailure`), and
@@ -525,7 +526,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
 /// One `SubmitContext` covers the whole pass, so the claim is minted once and
 /// the privacy-filter canary runs once, exactly as an interactive `submit`
 /// batch does.
-async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) -> Result<()> {
+async fn drain_approved(
+    shared: &Arc<ipc::DaemonShared>,
+    now: chrono::DateTime<Utc>,
+    tick_started: std::time::Instant,
+) -> Result<()> {
     // Pause used to be checked only inside `watcher::tick`, so a pause
     // stopped *discovery* and nothing else: everything already `Approved`
     // -- including everything an armed project had auto-approved before the
@@ -558,9 +563,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         let q = shared.queue.lock().expect("queue lock");
         q.all()
             .iter()
-            .filter(|e| {
-                e.state == queue::QueueState::Approved && !e.hold_active(now, approval_hold_secs)
-            })
+            .filter(|e| e.ready_for_upload(now) && !e.hold_active(now, approval_hold_secs))
             .cloned()
             .collect()
     };
@@ -582,29 +585,50 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     // A contributor-made approval is deliberately not re-checked. That is a
     // decision they took about these bytes, and `refuse_pending_for_project`
     // does not retract those either.
-    let ignored_ids: Vec<uuid::Uuid> = {
+    //
+    // Any mode other than automatic stops an unattended send, not only
+    // `Ignore`: turning automatic off to ask-first is the same "stop sending
+    // without asking", and the same race applies to it. An ignored project's
+    // entries are refused; an ask-first project's go back to waiting. A key
+    // policy cannot resolve falls back to ask-first, so a lookup miss now
+    // asks rather than sends -- the safe direction.
+    let (ignored_ids, returned_ids): (Vec<uuid::Uuid>, Vec<uuid::Uuid>) = {
         let policy = shared.policy.lock().expect("policy lock");
-        candidates
-            .iter()
-            .filter(|e| {
-                e.approved_unattended
-                    && policy.resolve(&e.project_key) == policy::ProjectMode::Ignore
-            })
-            .map(|e| e.entry_id)
-            .collect()
+        let mut ignored = Vec::new();
+        let mut returned = Vec::new();
+        for e in candidates.iter().filter(|e| e.approved_unattended) {
+            match policy.resolve(&e.project_key) {
+                policy::ProjectMode::AutoUpload => {}
+                policy::ProjectMode::Ignore => ignored.push(e.entry_id),
+                policy::ProjectMode::NotifyOnly => returned.push(e.entry_id),
+            }
+        }
+        (ignored, returned)
     };
-    if !ignored_ids.is_empty() {
+    if !ignored_ids.is_empty() || !returned_ids.is_empty() {
         {
             let mut q = shared.queue.lock().expect("queue lock");
+            // Re-checked under the lock. These were chosen before it was
+            // taken, and meanwhile the contributor may have dismissed one or
+            // approved it themselves; acting on the stale choice would revive
+            // a dismissal or erase their approval.
             for id in &ignored_ids {
-                q.set_state(
-                    *id,
-                    queue::QueueState::Refused,
-                    Some(queue::REASON_PROJECT_IGNORED.to_string()),
-                );
+                if q.is_unattended_approval(*id) {
+                    q.set_state(
+                        *id,
+                        queue::QueueState::Refused,
+                        Some(queue::REASON_PROJECT_IGNORED.to_string()),
+                    );
+                }
             }
-            if let Err(e) = q.save(&shared.store) {
-                tracing::warn!(error = %e, "could not persist project-ignored refusals");
+            for id in &returned_ids {
+                if q.is_unattended_approval(*id) {
+                    q.return_to_waiting(*id, now);
+                }
+            }
+            if q.save(&shared.store).is_err() {
+                // A fixed label, not the error: its context can carry a path.
+                tracing::warn!("could not persist send-time refusals");
             }
             // Swept and published here rather than at the end of the pass.
             //
@@ -626,7 +650,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
     }
     let approved: Vec<queue::QueueEntry> = candidates
         .into_iter()
-        .filter(|e| !ignored_ids.contains(&e.entry_id))
+        .filter(|e| !ignored_ids.contains(&e.entry_id) && !returned_ids.contains(&e.entry_id))
         .collect();
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
@@ -717,7 +741,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
             let Some(current) = q.get(entry.entry_id).cloned() else {
                 continue;
             };
-            if current.state != queue::QueueState::Approved {
+            if !current.ready_for_upload(now) {
                 continue;
             }
             // The approval covers the scopes that were in force when it was
@@ -731,7 +755,7 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 changed = true;
                 continue;
             }
-            if !q.claim_for_upload(entry.entry_id) {
+            if !q.claim_for_upload(entry.entry_id, now) {
                 continue;
             }
         }
@@ -910,12 +934,36 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
                 if let Some(mark) = attestation_mark::writeback_for(&reason_label) {
                     q.record_attestation(entry.entry_id, mark.state, mark.reason);
                 }
-                q.record_attempt(entry.entry_id, None);
-                q.set_state(
-                    entry.entry_id,
-                    queue::QueueState::Failed,
-                    Some(reason_label),
-                );
+                if reason_label == crate::submit::REASON_TRANSIENT_REDACTION {
+                    let attempt = q
+                        .get(entry.entry_id)
+                        .map(|e| e.attempts.saturating_add(1))
+                        .unwrap_or(1);
+                    // `now` was sampled at tick start. Classifier retries may
+                    // take longer than our backoff, so include monotonic time
+                    // spent in this pass before scheduling the next attempt.
+                    let observed_at = now
+                        + chrono::Duration::from_std(tick_started.elapsed())
+                            .expect("daemon pass elapsed time fits chrono duration");
+                    q.record_attempt(
+                        entry.entry_id,
+                        Some(observed_at + transient_redaction_retry_delay(attempt)),
+                    );
+                    // Keep this approval live so its cancel, pin, consent,
+                    // project-policy, and source guards still apply at retry.
+                    q.set_state(
+                        entry.entry_id,
+                        queue::QueueState::Approved,
+                        Some(reason_label),
+                    );
+                } else {
+                    q.record_attempt(entry.entry_id, None);
+                    q.set_state(
+                        entry.entry_id,
+                        queue::QueueState::Failed,
+                        Some(reason_label),
+                    );
+                }
             }
             uploader::UploadDecision::CapReached => {
                 // Leave it approved: the cap lifts when the day rolls over.
@@ -972,6 +1020,13 @@ async fn drain_approved(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<U
         return Err(e);
     }
     Ok(())
+}
+
+/// One minute, doubling per failed attempt and capped at one hour. There is
+/// no per-session attempt limit: an upstream outage must not consume a trace.
+fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
+    let exponent = attempts.saturating_sub(1).min(6);
+    chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
 }
 
 /// Record what a pass that actually uploaded now knows, without calling the
@@ -1040,7 +1095,7 @@ pub async fn drain_approved_for_test(
     shared: &Arc<ipc::DaemonShared>,
     now: chrono::DateTime<Utc>,
 ) -> Result<()> {
-    drain_approved(shared, now).await
+    drain_approved(shared, now, std::time::Instant::now()).await
 }
 
 /// Find the adapter and session reference matching a queue entry's path.
@@ -1400,6 +1455,205 @@ mod tests {
     use super::*;
 
     use crate::daemon::test_support::at;
+    use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize};
+
+    use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+
+    struct TransientRetryHarness {
+        _dir: tempfile::TempDir,
+        shared: Arc<ipc::DaemonShared>,
+        session_path: std::path::PathBuf,
+        project_cwd: String,
+        classifier_status: Arc<AtomicU16>,
+        classifier_delay_ms: Arc<AtomicU64>,
+        uploads: Arc<AtomicUsize>,
+    }
+
+    impl TransientRetryHarness {
+        async fn spawn(router: Router) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            format!("http://{addr}")
+        }
+
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+            cloud_credential_test_support::install(&store);
+            let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+            let classifier_status = Arc::new(AtomicU16::new(0));
+            let classifier_delay_ms = Arc::new(AtomicU64::new(0));
+            let uploads = Arc::new(AtomicUsize::new(0));
+            let classifier = Self::spawn(Router::new().route(
+                "/privacy/classify",
+                post({
+                    let classifier_status = classifier_status.clone();
+                    let classifier_delay_ms = classifier_delay_ms.clone();
+                    move |Json(body): Json<serde_json::Value>| {
+                        let classifier_status = classifier_status.clone();
+                        let classifier_delay_ms = classifier_delay_ms.clone();
+                        async move {
+                            let input = body["input"].as_str().unwrap_or_default();
+                            let status = classifier_status.load(Ordering::SeqCst);
+                            if input.contains("fix the parser please") && status != 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    classifier_delay_ms.load(Ordering::SeqCst),
+                                ))
+                                .await;
+                                return StatusCode::from_u16(status).unwrap().into_response();
+                            }
+                            let mut spans = Vec::new();
+                            for value in [
+                                "trace-canary.person@example.invalid",
+                                "tc_canary_secret_0123456789abcdef",
+                                "/tmp/trace_canary_private/path.txt",
+                            ] {
+                                if let Some(byte_start) = input.find(value) {
+                                    let start = input[..byte_start].chars().count();
+                                    spans.push(serde_json::json!({
+                                        "category": "private_name",
+                                        "start": start,
+                                        "end": start + value.chars().count(),
+                                        "score": 0.99,
+                                    }));
+                                }
+                            }
+                            Json(serde_json::json!({"data": [{"spans": spans}]})).into_response()
+                        }
+                    }
+                }),
+            ))
+            .await;
+            let issuer = Self::spawn(Router::new().route(
+                "/v1/trace-upload-claim",
+                post(|| async {
+                    Json(serde_json::json!({
+                        "access_token": "stub-claim-jwt",
+                        "token_type": "Bearer",
+                        "expires_at": Utc::now() + chrono::Duration::seconds(300),
+                        "expires_in": 300,
+                        "consent_scopes": ["debugging_evaluation"],
+                        "allowed_uses": ["debugging", "evaluation"],
+                    }))
+                }),
+            ))
+            .await;
+            let ingest = Self::spawn(Router::new().route(
+                "/v1/traces",
+                post({
+                    let uploads = uploads.clone();
+                    move |Json(_): Json<serde_json::Value>| {
+                        let uploads = uploads.clone();
+                        async move {
+                            uploads.fetch_add(1, Ordering::SeqCst);
+                            Json(serde_json::json!({
+                                "status": "accepted",
+                                "credit_points_pending": 1.0,
+                                "explanation": []
+                            }))
+                        }
+                    }
+                }),
+            ))
+            .await;
+            store
+                .save_config(&crate::config::ContributorConfig {
+                    inference_receipt_endpoint: None,
+                    inference_receipt_check_attestation: false,
+                    schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+                    issuer_url: issuer,
+                    ingest_url: ingest,
+                    audience: "trace-commons-upload".into(),
+                    tenant_id: "tenant-abc".into(),
+                    instance_id: "instance-1".into(),
+                    user_subject: "alice".into(),
+                    device_key_id: device.device_key_id,
+                    consent_scopes: vec!["debugging_evaluation".into()],
+                    pii_filter: Some("near-ai".into()),
+                    allowed_hosts: Some("127.0.0.1".into()),
+                    display_handle: None,
+                    public_bio: None,
+                    public_since: None,
+                    witness: None,
+                })
+                .unwrap();
+            let claude_root = dir.path().join("projects");
+            let project_dir = claude_root.join("-Users-testuser-code-myproj");
+            std::fs::create_dir_all(&project_dir).unwrap();
+            let cwd = dir.path().join("myproj");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let project_cwd = cwd.to_string_lossy().into_owned();
+            let session_path = project_dir.join("7c7c7c7c-7c7c-7c7c-7c7c-7c7c7c7c7c7c.jsonl");
+            std::fs::write(
+                &session_path,
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "user",
+                        "message": {"role": "user", "content": "fix the parser please"},
+                        "cwd": project_cwd,
+                        "timestamp": "2026-08-08T10:00:00Z",
+                        "version": "2.0.1",
+                        "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c-7c7c7c7c7c7c",
+                        "uuid": "a1"
+                    })
+                ),
+            )
+            .unwrap();
+            let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+            {
+                let mut settings = shared.settings.lock().unwrap();
+                settings.claude_source =
+                    Some(settings::SourceDeclaration::Watch { path: claude_root });
+                settings.codex_source = Some(settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex"),
+                });
+                settings.near_ai = Some(crate::envelope::NearAiSettings {
+                    api_key: "test-key".into(),
+                    base_url: Some(classifier),
+                    model: None,
+                });
+            }
+            shared.store.ensure_near_ai_notice_shown().unwrap();
+            let project_key = policy::project_key_for(Some(&project_cwd));
+            assert_ne!(project_key, policy::UNKNOWN_PROJECT_KEY);
+            shared
+                .policy
+                .lock()
+                .unwrap()
+                .set_mode(&project_key, policy::ProjectMode::AutoUpload, Self::now())
+                .unwrap();
+            for _ in 0..2 {
+                watcher::tick(&shared, Self::now()).await.unwrap();
+            }
+            assert_eq!(
+                shared.queue.lock().unwrap().all()[0].state,
+                queue::QueueState::Approved
+            );
+            Self {
+                _dir: dir,
+                shared,
+                session_path,
+                project_cwd,
+                classifier_status,
+                classifier_delay_ms,
+                uploads,
+            }
+        }
+
+        fn now() -> chrono::DateTime<Utc> {
+            at("2030-01-01T00:00:00Z")
+        }
+
+        fn entry(&self) -> queue::QueueEntry {
+            self.shared.queue.lock().unwrap().all()[0].clone()
+        }
+
+        async fn pass(&self, now: chrono::DateTime<Utc>) {
+            drain_approved_for_test(&self.shared, now).await.unwrap();
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn private_inference_dropped_embedded_daemon_stops_owned_proxy() {
@@ -1537,6 +1791,57 @@ mod tests {
         );
     }
 
+    /// The send-time check covers turning automatic off, not only `Ignore`.
+    ///
+    /// An unattended approval whose project is now ask-first -- set so after
+    /// the approval, or claimed and released around the change -- goes back to
+    /// waiting instead of uploading, and the apps are told.
+    #[tokio::test]
+    async fn an_unattended_approval_is_not_sent_once_its_project_is_ask_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let entry_id = {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let e = queue::QueueEntry {
+                entry_id: uuid::Uuid::new_v4(),
+                session_hash: "sha256:askfirst".to_string(),
+                project_key: "/w/alpha".to_string(),
+                ..Default::default()
+            };
+            let id = e.entry_id;
+            q.upsert(e, 100).unwrap();
+            assert!(q.approve_unattended(id, &[], None));
+            id
+        };
+        shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .set_mode(
+                "/w/alpha",
+                policy::ProjectMode::NotifyOnly,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut events = shared.events.subscribe();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(e.entry_id, entry_id);
+        assert_eq!(
+            e.state,
+            queue::QueueState::Pending,
+            "automatic is off, so it waits for the contributor"
+        );
+        assert_eq!(e.reason_label, None);
+        let published = events.try_recv().expect("a queue-changed event");
+        assert_eq!(published.event, ipc::EVENT_QUEUE_CHANGED);
+    }
+
     #[tokio::test]
     async fn an_entry_released_from_upload_is_not_sent_after_its_project_is_excluded() {
         // The race reviewed on #997. `retract_unattended_for_project` runs
@@ -1651,6 +1956,159 @@ mod tests {
                 .clone()
         };
         assert_eq!(label.as_deref(), Some(health::LABEL_INGEST_UNREACHABLE));
+    }
+
+    #[tokio::test]
+    async fn transient_classifier_outage_retries_unchanged_approved_session() {
+        let h = TransientRetryHarness::new().await;
+        let original = h.entry();
+        let original_bytes = std::fs::read(&h.session_path).unwrap();
+        h.classifier_status.store(500, Ordering::SeqCst);
+
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        assert_eq!(failed.state, queue::QueueState::Approved, "{failed:?}");
+        assert_eq!(
+            failed.reason_label.as_deref(),
+            Some("privacy-filter-transient")
+        );
+        assert_eq!(failed.attempts, 1);
+        assert!(
+            failed.retry_after.unwrap()
+                >= TransientRetryHarness::now() + chrono::Duration::seconds(60)
+        );
+        assert_eq!(
+            h.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_PII_FILTER_UNAVAILABLE)
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.classifier_status.store(0, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now() + chrono::Duration::seconds(59))
+            .await;
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.pass(failed.retry_after.unwrap()).await;
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+        assert_eq!(h.entry().session_hash, original.session_hash);
+        assert_eq!(std::fs::read(&h.session_path).unwrap(), original_bytes);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_retry_delay_starts_after_slow_classifier_failure() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.classifier_delay_ms.store(250, Ordering::SeqCst);
+
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        assert_eq!(failed.state, queue::QueueState::Approved);
+        assert!(
+            failed.retry_after.unwrap()
+                >= TransientRetryHarness::now()
+                    + chrono::Duration::seconds(60)
+                    + chrono::Duration::milliseconds(200),
+            "slow classification must not consume the retry backoff"
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.classifier_status.store(0, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now() + chrono::Duration::seconds(60))
+            .await;
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn transient_redaction_retry_backoff_doubles_then_caps_at_one_hour() {
+        for (attempts, seconds) in [(1, 60), (2, 120), (3, 240), (7, 3_600), (100, 3_600)] {
+            assert_eq!(
+                transient_redaction_retry_delay(attempts),
+                chrono::Duration::seconds(seconds),
+                "attempt {attempts}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_retry_reoffers_when_approval_inputs_change() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        let mut changed = h.shared.store.load_config().unwrap().unwrap();
+        changed.tenant_id = "another-tenant".into();
+        h.shared.store.save_config(&changed).unwrap();
+        h.classifier_status.store(0, Ordering::SeqCst);
+
+        h.pass(failed.retry_after.unwrap()).await;
+
+        assert_eq!(h.entry().state, queue::QueueState::Pending);
+        assert_eq!(
+            h.entry().reason_label.as_deref(),
+            Some(preview::REASON_INPUTS_CHANGED)
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn transient_retry_does_not_transfer_approval_to_changed_source() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&h.session_path)
+            .unwrap();
+        file.write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "message": {"role": "user", "content": "new work"},
+                    "cwd": h.project_cwd,
+                    "timestamp": "2026-08-08T11:00:00Z",
+                    "version": "2.0.1",
+                    "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c7c7c7c7c",
+                    "uuid": "a2"
+                })
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        h.classifier_status.store(0, Ordering::SeqCst);
+
+        h.pass(failed.retry_after.unwrap()).await;
+
+        let q = h.shared.queue.lock().unwrap();
+        assert_eq!(
+            q.get(failed.entry_id).unwrap().state,
+            queue::QueueState::Superseded
+        );
+        assert!(q.all().iter().any(|e| {
+            e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
+        }));
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn permanent_classifier_rejection_stays_refused_after_backend_recovers() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(400, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(h.entry().state, queue::QueueState::Refused);
+        assert_eq!(h.entry().reason_label.as_deref(), Some("redaction-failed"));
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+
+        h.classifier_status.store(0, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now() + chrono::Duration::days(1))
+            .await;
+        assert_eq!(h.entry().state, queue::QueueState::Refused);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

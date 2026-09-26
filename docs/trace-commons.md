@@ -374,8 +374,8 @@ span labels are mapped to `unknown` so a malformed sidecar cannot smuggle
 emails, paths, or tokens through label names.
 
 The sidecar runs as an untrusted local subprocess with a cleared environment
-except `PATH`, `LANG`, and `LC_ALL`. Sidecar failures are non-fatal: the client
-falls back to deterministic local redaction rather than uploading raw content.
+except `PATH`, `LANG`, and `LC_ALL`. Sidecar failures refuse redaction: no deterministic-only fallback is
+returned for contribution or witness certification.
 
 | Variable | Effect |
 |----------|--------|
@@ -1229,8 +1229,8 @@ unapproved/missing-replayability sources.
 **Privacy Filter sidecar operations.** Run sidecars as untrusted local
 subprocesses/containers with timeouts, output-size limits, and no access to
 Trace Commons credentials. Pass only the minimum text needed. Accept only the
-safe projection. Treat failures as non-fatal warnings with deterministic
-fallback. Add canary-secret tests.
+safe projection. Treat classifier failures as refusals, with no deterministic-only
+fallback. Run canary-secret tests.
 
 ## Implementation status
 
@@ -1242,7 +1242,7 @@ but with production hardening still open.
 | Local opt-in policy / opt-out | MVP | CLI + scoped web/runtime policy files; submit tokens and issuer workload creds stay in env; hosted tenants can use a guarded HTTPS upload-claim issuer. |
 | Local preview / queue / flush / credit | MVP | Local redacted envelopes, atomic queue writes, malformed-envelope quarantine, scoped `queue-status`, and acknowledgeable/snoozable periodic credit notices via a local retry outbox. |
 | Deterministic local redaction | MVP | Generic secret/path scrubbing, stable placeholders, tool-aware payload handling, Privacy Filter safe projection. |
-| Privacy Filter sidecar | MVP | Command/stdin/stdout path with safe projection, non-fatal fallback, minimal env, stderr hashing, IO limits, canary tests. Container sandboxing still open. |
+| Privacy Filter sidecar | MVP | Command/stdin/stdout path with safe projection, fail-closed classifier errors, minimal env, stderr hashing, IO limits, canary tests. Container sandboxing still open. |
 | Autonomous post-turn / periodic contribution | MVP | Runtime queues/flushes scoped envelopes only under an enabled policy with an endpoint and an eligible envelope; periodic agent-loop worker with typed retry backoff, in-memory EdDSA claim refresh, compaction, and credit-notice drain. |
 | Web settings + preview endpoints | MVP | Authenticated gateway endpoints and UI controls; server-side tenant/user checks are the trust boundary; queue/submit preflight scoped opt-in. |
 | Private ingestion service | MVP | Validates schema/consent, re-runs redaction, computes hashes/credit, optional hourly quotas, stores accepted/quarantined records, serves review/status/export routes; can dark-launch DB dual-write + encrypted artifacts. |
@@ -1258,7 +1258,7 @@ but with production hardening still open.
 | Vector duplicate/novelty index | Partial | DB schema + dedicated worker + metadata indexer + object-ref gating + per-source content-read audits; exact-hash + deterministic-similarity scoring with optional private embedder/search adapters; stale/cross-profile neighbor diagnostics. Deployed vector-store ops + canary evidence open. |
 | Ranking/model utility pipeline | Partial | Offline utility-credit worker; immutable model manifests, calibration runs, holdout registry, server-owned floors, backtest/risk/readiness reports, prediction-credit, worker-run ledger, credit-cycle automation. Deployed evaluator ops + gold/holdout stewardship open. |
 | Benchmark conversion pipeline | Partial | Tenant-scoped candidate artifacts with lifecycle metadata, source-hash revalidation, audits, provenance, idempotent utility credit, evaluator/registry worker routes + outbox, readiness drill. Deployed external evaluator/registry adapter ops open. |
-| Production sidecar operations | Partial | Timeout/IO limits, minimal env, stderr hashing, fallback, safe projection, canary coverage. Container sandboxing + deployment-specific isolation open. |
+| Production sidecar operations | Partial | Timeout/IO limits, minimal env, stderr hashing, fail-closed errors, safe projection, canary coverage. Container sandboxing + deployment-specific isolation open. |
 
 ## Research hooks
 
@@ -1278,3 +1278,20 @@ whole central pipeline:
   hard).
 - `canonical_summary_for_embedding` — redacted-only summaries for embedding and
   duplicate detection.
+
+### Full-pipeline certificate version contract (#991 Z1)
+
+The protocol crate publishes `FULL_REDACTION_PIPELINE_VERSIONS` and
+`is_full_redaction_pipeline_version` for exact membership checks by clients
+and servers. This is a pipeline capability list, not a replacement for
+certificate signature, artifact digest, signer/measurement pinning, consent,
+or the operator's configured witness bypass policy.
+
+Sidecar classifier errors now refuse the operation, just like NEAR AI and
+self-hosted classifier errors. The sidecar suffix is `privacy-filter-sidecar-v2`;
+v1 certificates cannot prove a completed classifier pass and are excluded.
+Deterministic-only, unknown, and extended version strings are also excluded.
+Operators using sidecar witnesses must update the witness and explicitly add
+its new exact version to their operator allowlist before accepting it; no
+operator allowlist is broadened automatically. Existing v1 signatures remain
+historically verifiable but do not satisfy this full-pipeline contract.
