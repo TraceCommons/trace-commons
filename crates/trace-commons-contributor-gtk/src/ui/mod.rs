@@ -1004,16 +1004,14 @@ impl App {
         if let Some(column) = self.void_notices.parent() {
             column.set_visible(!notices.is_empty());
         }
-        for (id, notice) in notices {
-            self.void_notices.append(&self.grant_void_card(id, &notice));
+        for card in notices {
+            self.void_notices.append(&self.grant_void_card(&card));
         }
     }
 
-    fn grant_void_card(
-        self: &Rc<Self>,
-        id: Option<u64>,
-        notice: &copy::VoidNoticeCopy,
-    ) -> gtk::Box {
+    fn grant_void_card(self: &Rc<Self>, card_data: &crate::model::GrantVoidCard) -> gtk::Box {
+        let id = card_data.id;
+        let notice = &card_data.notice;
         let text = |value: &str, class: &str| {
             let label = gtk::Label::builder()
                 .label(value)
@@ -1048,14 +1046,47 @@ impl App {
         card.add_css_class("tc-banner");
         card.append(&glyph);
         card.append(&column);
-        // The button records that this notice was shown, and nothing else:
-        // turning automatic contributing back on is its own act, with its
-        // own disclosure. Only the id on this card is acknowledged, so a
-        // void raised after this window drew is never cleared unseen.
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        // "Turn back on", beside the sentence saying that doing so agrees to
+        // the new settings. It is Settings' arming call, unchanged:
+        // `set_project_mode` with this project's id and `auto_upload`, so the
+        // daemon applies the same refusals, writes the same
+        // `armed-auto-upload` row, and clears this notice. A refusal changes
+        // nothing; the core's refusal line says so.
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.rearm_project_id.clone(),
+            notice.rearm_action,
+            notice.rearm_failed,
+        ) {
+            let button = gtk::Button::with_label(action);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "set_project_mode",
+                    serde_json::json!({ "project_id": project_id, "mode": "auto_upload" }),
+                    move |app, result| {
+                        if result.is_err() {
+                            app.toast(failed);
+                        }
+                        app.refresh();
+                    },
+                );
+            });
+            buttons.append(&button);
+        }
+        // This button records that this notice was shown, and nothing else.
+        // Only the id on this card is acknowledged, so a void raised after
+        // this window drew is never cleared unseen.
         if let Some(id) = id {
             let button = gtk::Button::with_label(notice.acknowledge);
             button.add_css_class("tc-quiet");
-            button.set_valign(gtk::Align::Center);
             let app = Rc::clone(self);
             button.connect_clicked(move |button| {
                 button.set_sensitive(false);
@@ -1065,7 +1096,7 @@ impl App {
                     |app, _result| app.refresh(),
                 );
             });
-            card.append(&button);
+            buttons.append(&button);
         }
         card
     }

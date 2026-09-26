@@ -52,24 +52,37 @@ pub struct Status {
     pub grant_voids: Vec<serde_json::Value>,
 }
 
+/// One void notice as the window draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantVoidCard {
+    /// For `acknowledge_grant_voids`. An element without one is still shown;
+    /// it just cannot be acknowledged.
+    pub id: Option<u64>,
+    /// The core's words, from `consent_copy::void_notice_for_wire`.
+    pub notice: trace_commons_contributor::consent_copy::VoidNoticeCopy,
+    /// The project "Turn back on" arms, present only when the core offered
+    /// the button -- never on the grant's notice or an unplaced one.
+    pub rearm_project_id: Option<String>,
+}
+
 impl Status {
-    /// Each void's id, for `acknowledge_grant_voids`, and the notice the
-    /// core words for it. An element without an id is still shown; it just
-    /// cannot be acknowledged.
-    pub fn grant_void_notices(
-        &self,
-    ) -> Vec<(
-        Option<u64>,
-        trace_commons_contributor::consent_copy::VoidNoticeCopy,
-    )> {
+    /// Every void, as the cards the window draws.
+    pub fn grant_void_notices(&self) -> Vec<GrantVoidCard> {
         self.grant_voids
             .iter()
             .filter_map(|element| {
                 let notice = crate::copy::void_notice_for_wire(element)?;
-                Some((
-                    element.get("id").and_then(serde_json::Value::as_u64),
+                let rearm_project_id = notice
+                    .rearm_action
+                    .and_then(|_| element.get("project_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                Some(GrantVoidCard {
+                    id: element.get("id").and_then(serde_json::Value::as_u64),
                     notice,
-                ))
+                    rearm_project_id,
+                })
             })
             .collect()
     }
@@ -1072,16 +1085,21 @@ mod tests {
         let status = status_with_voids(serde_json::json!([project.clone(), grant.clone()]));
         let notices = status.grant_void_notices();
         assert_eq!(notices.len(), 2);
-        assert_eq!(notices[0].0, Some(4));
+        assert_eq!(notices[0].id, Some(4));
         assert_eq!(
-            notices[0].1,
+            notices[0].notice,
             trace_commons_contributor::consent_copy::void_notice_for_wire(&project).unwrap()
         );
-        assert_eq!(notices[1].0, Some(5));
+        assert_eq!(notices[1].id, Some(5));
         assert_eq!(
-            notices[1].1,
+            notices[1].notice,
             trace_commons_contributor::consent_copy::void_notice_for_wire(&grant).unwrap()
         );
+        // "Turn back on" arms the project's own id, and only there: the
+        // grant's notice has no project to arm.
+        assert_eq!(notices[0].rearm_project_id.as_deref(), Some("p"));
+        assert!(notices[0].notice.rearm_action.is_some());
+        assert_eq!(notices[1].rearm_project_id, None);
     }
 
     /// A daemon older than the field has nothing to report; an element the
@@ -1095,8 +1113,9 @@ mod tests {
         let odd = status_with_voids(serde_json::json!([{ "id": 7, "kind": "folder" }]));
         let notices = odd.grant_void_notices();
         assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].0, Some(7));
-        assert!(!notices[0].1.title.is_empty());
+        assert_eq!(notices[0].id, Some(7));
+        assert!(!notices[0].notice.title.is_empty());
+        assert_eq!(notices[0].rearm_project_id, None, "nothing to arm");
     }
 
     /// The defect this fixes: `ui::preview` used to call `App::offer_undo`
