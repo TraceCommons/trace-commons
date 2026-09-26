@@ -1503,6 +1503,25 @@ mod tests {
         );
     }
 
+    /// What the grant's notice says about projects (`VOID_GRANT_PROJECTS`)
+    /// is what the sweep does: a project armed under terms that still cover
+    /// what is in force stays armed and gets no notice, while the grant
+    /// armed under older terms is voided.
+    #[test]
+    fn voiding_the_grant_leaves_a_project_whose_terms_still_cover_it() {
+        let mut p = granted_with_disk(&[], &[]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.set_mode("/w/new", ProjectMode::AutoUpload, now).unwrap();
+        p.record_grant_terms("/w/new", grant_terms_with("https://elsewhere.invalid"));
+
+        let sweep = p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
+        assert!(sweep.automatic_grant_voided.is_some());
+        assert!(sweep.voided.is_empty());
+        assert_eq!(p.resolve("/w/new"), ProjectMode::AutoUpload);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(p.grant_voids[0].project_key.is_none());
+    }
+
     /// A shell acknowledges exactly the notices it showed. An id it did not
     /// name stays, and a stale or unknown id is not an error.
     #[test]

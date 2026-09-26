@@ -3041,7 +3041,9 @@ pub extern "C" fn tc_consent_gate_help(pinned: i32) -> *mut c_char {
 ///
 /// Returns an owned JSON object whose keys are `VoidNoticeCopy`'s fields --
 /// `title`, `body`, `reasons_heading`, `reasons` (a list of sentences),
-/// `rearm`, `acknowledge` -- free it with [`tc_string_free`].
+/// `rearm`, `acknowledge`, and `rearm_action` / `rearm_failed`, which are
+/// `null` except on a project void carrying a `project_id` -- free it with
+/// [`tc_string_free`].
 ///
 /// THE BRANCH CROSSES, NOT ONLY THE WORDS. The choice between the project
 /// and the automatic-grant wording, and each reason label's sentence, are

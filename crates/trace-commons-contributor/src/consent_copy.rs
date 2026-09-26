@@ -182,7 +182,7 @@ pub const VOID_REASONS_HEADING: &str = "What changed";
 /// The button that records a void notice as shown.
 ///
 /// It acknowledges and does nothing else. Turning automatic contributing
-/// back on is a separate act with its own disclosure, never a side effect of
+/// back on is the other button, [`VOID_REARM_ACTION`], never a side effect of
 /// dismissing the sentence that says it stopped.
 pub const VOID_ACKNOWLEDGE: &str = "Got it";
 
@@ -192,11 +192,39 @@ pub const VOID_PROJECT_BODY: &str = "It was turned on under settings that have s
 /// What the Flow 1 grant's void notice says happened.
 pub const VOID_GRANT_BODY: &str = "It was turned on under settings that have since changed, so new projects now ask before contributing. Nothing is sent from a new project on its own.";
 
-/// How a project is armed again, and what that means.
+/// How a project is armed again, and what that means. Shown beside
+/// [`VOID_REARM_ACTION`]: pressing that button is the fresh consent R6 asks
+/// for, and this is the sentence that says so.
 pub const VOID_PROJECT_REARM: &str = "You can turn automatic contributing back on for this project. Doing so agrees to the new settings.";
 
-/// How the Flow 1 grant is given again, and what that means.
-pub const VOID_GRANT_REARM: &str = "You can turn automatic contributing back on for new projects. Doing so agrees to the new settings.";
+/// The button on a project's void notice that arms the project again, under
+/// the terms now in force. A shell sends it as `set_project_mode` with the
+/// element's `project_id` and `auto_upload` -- the same call, and the same
+/// `armed-auto-upload` audit row, as arming the project by hand. Arming
+/// clears the notice.
+pub const VOID_REARM_ACTION: &str = "Turn back on";
+
+/// Shown when the daemon refuses the re-arm (no config to record terms from,
+/// a project it no longer knows, the unknown bucket). The notice stays, and
+/// the project is exactly as it was.
+pub const VOID_REARM_FAILED: &str =
+    "It could not be turned back on, so it still asks first. Nothing was changed.";
+
+/// What the Flow 1 grant's void notice says about projects, in place of a
+/// re-grant line.
+///
+/// Worded to match `ProjectPolicy::sweep_grants`: the sweep that voids the
+/// grant also voids every armed project whose own recorded terms widened --
+/// usually all of them, since they are compared against the same terms --
+/// and each of those gets its own notice. A project whose terms still cover
+/// what is in force stays armed. So "unaffected" would be false.
+///
+/// K10: no shell can give the grant yet (`grant_automatic` has no caller
+/// outside the daemon until the onboarding screen exists), so this notice
+/// offers no action and promises none. When K10 lands, restore a re-grant
+/// sentence here, in the spirit of `VOID_PROJECT_REARM`, and give the notice
+/// a `rearm_action` that calls `grant_automatic`.
+pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
 /// The title of a void this build cannot place: a `kind` it does not know,
 /// or a project void without a label. It says what is certain -- automatic
@@ -274,8 +302,18 @@ pub struct VoidNoticeCopy {
     /// removed. Never empty: a void with no label still says something
     /// changed.
     pub reasons: Vec<&'static str>,
+    /// The line after the reasons: how to turn it back on, or, for the Flow
+    /// 1 grant, what happens to projects (see [`VOID_GRANT_PROJECTS`]).
     pub rearm: &'static str,
     pub acknowledge: &'static str,
+    /// The re-arm button, for a project void that names the `project_id` it
+    /// acts on, and `null` otherwise -- the grant and an unplaced void have
+    /// no project to arm. A shell draws the button exactly when this is
+    /// present.
+    pub rearm_action: Option<&'static str>,
+    /// What to say when the re-arm is refused; present exactly when
+    /// `rearm_action` is.
+    pub rearm_failed: Option<&'static str>,
 }
 
 /// The notice for one void. See [`VoidNoticeCopy`].
@@ -291,9 +329,9 @@ pub fn void_notice(project_label: Option<&str>, reasons: &[String]) -> VoidNotic
     if lines.is_empty() {
         lines.push(VOID_REASON_UNKNOWN);
     }
-    let (body, rearm) = match project_label {
-        Some(_) => (VOID_PROJECT_BODY, VOID_PROJECT_REARM),
-        None => (VOID_GRANT_BODY, VOID_GRANT_REARM),
+    let (body, rearm, action) = match project_label {
+        Some(_) => (VOID_PROJECT_BODY, VOID_PROJECT_REARM, true),
+        None => (VOID_GRANT_BODY, VOID_GRANT_PROJECTS, false),
     };
     VoidNoticeCopy {
         title: void_notice_title(project_label),
@@ -302,6 +340,8 @@ pub fn void_notice(project_label: Option<&str>, reasons: &[String]) -> VoidNotic
         reasons: lines,
         rearm,
         acknowledge: VOID_ACKNOWLEDGE,
+        rearm_action: action.then_some(VOID_REARM_ACTION),
+        rearm_failed: action.then_some(VOID_REARM_FAILED),
     }
 }
 
@@ -338,13 +378,32 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
         label,
     ) {
         (Some("automatic_grant"), _) => Some(void_notice(None, &reasons)),
-        (Some("project"), Some(label)) => Some(void_notice(Some(label), &reasons)),
+        (Some("project"), Some(label)) => {
+            let notice = void_notice(Some(label), &reasons);
+            // The button acts on the element's `project_id`; without one
+            // there is nothing for it to arm.
+            let has_id = object
+                .get("project_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty());
+            Some(if has_id {
+                notice
+            } else {
+                VoidNoticeCopy {
+                    rearm_action: None,
+                    rearm_failed: None,
+                    ..notice
+                }
+            })
+        }
         _ => {
             let placed = void_notice(None, &reasons);
             Some(VoidNoticeCopy {
                 title: VOID_UNPLACED_TITLE.to_string(),
                 body: VOID_UNPLACED_BODY,
                 rearm: VOID_UNPLACED_REARM,
+                rearm_action: None,
+                rearm_failed: None,
                 ..placed
             })
         }
@@ -526,6 +585,20 @@ mod tests {
         assert!(notice.rearm.contains("turn automatic contributing back on"));
         assert!(notice.rearm.contains("agrees to the new settings"));
         assert_eq!(notice.acknowledge, VOID_ACKNOWLEDGE);
+        // The one-click re-arm: the button, and what to say if the daemon
+        // refuses it. The sentence beside it (`rearm`) says pressing it
+        // agrees to the new settings.
+        assert_eq!(notice.rearm_action, Some(VOID_REARM_ACTION));
+        assert_eq!(notice.rearm_failed, Some(VOID_REARM_FAILED));
+    }
+
+    /// The re-arm button is the fresh consent R6 asks for, so its words are
+    /// an action on this project, and the refusal line says nothing changed.
+    #[test]
+    fn the_rearm_button_turns_it_back_on_and_a_refusal_changes_nothing() {
+        assert_eq!(VOID_REARM_ACTION, "Turn back on");
+        assert!(VOID_REARM_FAILED.contains("still asks first"));
+        assert!(VOID_PROJECT_REARM.contains("agrees to the new settings"));
     }
 
     /// The Flow 1 grant's notice is about new projects, not one project.
@@ -537,7 +610,23 @@ mod tests {
             "Automatic contributing stopped for new projects"
         );
         assert_eq!(notice.body, VOID_GRANT_BODY);
-        assert_eq!(notice.rearm, VOID_GRANT_REARM);
+        assert_eq!(notice.rearm, VOID_GRANT_PROJECTS);
+        // No shell can give the grant again yet (K10 is unbuilt), so the
+        // notice neither offers it nor promises it.
+        assert_eq!(notice.rearm_action, None);
+        assert_eq!(notice.rearm_failed, None);
+        assert!(!notice.rearm.contains("back on"), "{}", notice.rearm);
+    }
+
+    /// What the grant's notice says about projects must match the sweep: a
+    /// project whose own terms widened is voided with its own notice, and
+    /// one still armed carries on. It must not say every project is
+    /// unaffected, because the same widening usually voids them too.
+    #[test]
+    fn the_grant_notice_says_what_happens_to_projects_as_the_sweep_does() {
+        assert!(VOID_GRANT_PROJECTS.contains("still set to contribute automatically"));
+        assert!(VOID_GRANT_PROJECTS.contains("its own notice"));
+        assert!(!VOID_GRANT_PROJECTS.to_lowercase().contains("unaffected"));
     }
 
     /// A label this build does not know still produces a notice, and an
@@ -604,12 +693,39 @@ mod tests {
             assert_eq!(notice.body, VOID_UNPLACED_BODY);
             assert_eq!(notice.rearm, VOID_UNPLACED_REARM);
             assert!(!notice.reasons.is_empty());
+            // No project to arm, so no button.
+            assert_eq!(notice.rearm_action, None, "{value}");
+            assert_eq!(notice.rearm_failed, None, "{value}");
         }
         let placed = void_notice_for_wire(&serde_json::json!({
             "kind": "folder", "reasons": ["scopes-widened"],
         }))
         .unwrap();
         assert_eq!(placed.reasons, vec![void_reason_line("scopes-widened")]);
+    }
+
+    /// A project void offers the button only when it carries the
+    /// `project_id` the button acts on; without one there is nothing to arm.
+    #[test]
+    fn a_project_void_without_an_id_gets_no_button() {
+        let with_id = void_notice_for_wire(&serde_json::json!({
+            "kind": "project", "project_id": "p", "project_label": "api", "reasons": [],
+        }))
+        .unwrap();
+        assert_eq!(with_id.rearm_action, Some(VOID_REARM_ACTION));
+        for id in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(3),
+        ] {
+            let without = void_notice_for_wire(&serde_json::json!({
+                "kind": "project", "project_id": id, "project_label": "api", "reasons": [],
+            }))
+            .unwrap();
+            assert_eq!(without.title, "Automatic contributing stopped for api");
+            assert_eq!(without.rearm_action, None, "{id}");
+            assert_eq!(without.rearm_failed, None, "{id}");
+        }
     }
 
     /// Only a value that is not an object at all is refused: that is not a
