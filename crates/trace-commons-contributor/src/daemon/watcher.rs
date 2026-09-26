@@ -501,7 +501,7 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
     let now = ctx.now;
     let sweep = {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let sweep = policy.sweep_grants(current);
+        let sweep = policy.sweep_grants(current, now);
         // Fixed labels, never the error: its context can carry a path.
         if sweep.changed() && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist the grant sweep");
@@ -2225,6 +2225,16 @@ mod tests {
             .find(|e| e.action == "auto-upload-voided")
             .expect("the void is recorded");
         assert_eq!(voided.detail.as_deref(), Some("scopes-widened"));
+
+        // And the contributor is told, not only the audit: the notice is on
+        // `status` for every shell, and survives a restart.
+        let status = f.shared.status_value();
+        let voids = status["grant_voids"].as_array().expect("grant_voids");
+        assert_eq!(voids.len(), 1, "{voids:?}");
+        assert_eq!(voids[0]["kind"], "project");
+        assert_eq!(voids[0]["reasons"], serde_json::json!(["scopes-widened"]));
+        let persisted = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
+        assert_eq!(persisted.grant_voids.len(), 1, "saved with the void");
     }
 
     /// Arm and baseline a project under `cfg`, apply `widen`, run a pass,

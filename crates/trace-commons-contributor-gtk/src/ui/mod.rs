@@ -161,6 +161,10 @@ pub struct App {
     health_banner: adw::Clamp,
     health_label: gtk::Label,
     health_button: gtk::Button,
+    /// Grants the daemon voided and no shell has shown yet (R6). Beside the
+    /// health banner rather than in it: the health slot carries one label,
+    /// and a void must neither hide an outage nor be hidden by one.
+    void_notices: gtk::Box,
     /// The count on the switcher's Queue item. Hidden at zero rather than
     /// drawn as a "0": an empty badge is a decoration, and the queue's own
     /// empty state already says the true thing.
@@ -364,11 +368,29 @@ impl App {
             .margin_end(style::space::XL)
             .build();
 
+        // Every void notice, in the same column as the health banner and for
+        // the same reason: a void changes what the contributor agreed to,
+        // and they learn it on whichever screen they are reading.
+        let void_notices = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::M)
+            .build();
+        let void_column = adw::Clamp::builder()
+            .maximum_size(COLUMN_MAX)
+            .tightening_threshold(COLUMN_TIGHTEN)
+            .child(&void_notices)
+            .visible(false)
+            .margin_top(style::space::L)
+            .margin_start(style::space::XL)
+            .margin_end(style::space::XL)
+            .build();
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("tc-root");
         content.append(&header);
         content.append(&update.root);
         content.append(&banner_column);
+        content.append(&void_column);
         content.append(&stack);
         stack.set_vexpand(true);
 
@@ -391,6 +413,7 @@ impl App {
             health_banner: banner_column,
             health_label,
             health_button,
+            void_notices,
             queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
@@ -667,6 +690,7 @@ impl App {
         self.call("status", serde_json::json!({}), |app, result| {
             if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
                 app.render_health(&status);
+                app.render_grant_voids(&status);
                 settings::render_status(app, &status);
                 // The witness lives in the contributor's config rather than
                 // in daemon settings, so nothing in the settings answer
@@ -964,6 +988,117 @@ impl App {
         };
         let viewport_height = self.queue.scroller.height() as f32;
         overlaps_viewport(bounds.y(), bounds.height(), viewport_height)
+    }
+
+    /// One card per void, in the core's words (`Status::grant_void_notices`).
+    ///
+    /// Rebuilt on every status read rather than diffed: there are at most a
+    /// handful, and a card left over from a notice another shell already
+    /// acknowledged would say something stopped that this window has no
+    /// record of anymore.
+    fn render_grant_voids(self: &Rc<Self>, status: &Status) {
+        while let Some(child) = self.void_notices.first_child() {
+            self.void_notices.remove(&child);
+        }
+        let notices = status.grant_void_notices();
+        if let Some(column) = self.void_notices.parent() {
+            column.set_visible(!notices.is_empty());
+        }
+        for card in notices {
+            self.void_notices.append(&self.grant_void_card(&card));
+        }
+    }
+
+    fn grant_void_card(self: &Rc<Self>, card_data: &crate::model::GrantVoidCard) -> gtk::Box {
+        let id = card_data.id;
+        let notice = &card_data.notice;
+        let text = |value: &str, class: &str| {
+            let label = gtk::Label::builder()
+                .label(value)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class(class);
+            label
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        column.append(&text(&notice.title, "tc-card-title"));
+        column.append(&text(notice.body, "tc-body"));
+        column.append(&text(notice.reasons_heading, "tc-card-title"));
+        for reason in &notice.reasons {
+            column.append(&text(&format!("\u{2022} {reason}"), "tc-body"));
+        }
+        column.append(&text(notice.rearm, "tc-body"));
+
+        let glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        glyph.add_css_class("tc-attention");
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&glyph);
+        card.append(&column);
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        // "Turn back on", beside the sentence saying that doing so agrees to
+        // the new settings. It is Settings' arming call, unchanged:
+        // `set_project_mode` with this project's id and `auto_upload`, so the
+        // daemon applies the same refusals, writes the same
+        // `armed-auto-upload` row, and clears this notice. A refusal changes
+        // nothing; the core's refusal line says so.
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.rearm_project_id.clone(),
+            notice.rearm_action,
+            notice.rearm_failed,
+        ) {
+            let button = gtk::Button::with_label(action);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "set_project_mode",
+                    serde_json::json!({ "project_id": project_id, "mode": "auto_upload" }),
+                    move |app, result| {
+                        if result.is_err() {
+                            app.toast(failed);
+                        }
+                        app.refresh();
+                    },
+                );
+            });
+            buttons.append(&button);
+        }
+        // This button records that this notice was shown, and nothing else.
+        // Only the id on this card is acknowledged, so a void raised after
+        // this window drew is never cleared unseen.
+        if let Some(id) = id {
+            let button = gtk::Button::with_label(notice.acknowledge);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "acknowledge_grant_voids",
+                    serde_json::json!({ "ids": [id] }),
+                    |app, _result| app.refresh(),
+                );
+            });
+            buttons.append(&button);
+        }
+        card
     }
 
     fn render_health(self: &Rc<Self>, status: &Status) {
