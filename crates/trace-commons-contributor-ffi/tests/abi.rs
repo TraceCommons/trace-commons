@@ -27,23 +27,23 @@ use trace_commons_contributor_ffi::{
     tc_contribution_attestation_tone, tc_contribution_eligibility_control,
     tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
     tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle,
-    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
-    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
-    tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
-    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
-    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
-    tc_skill_draft_validate, tc_skill_learning_copy, tc_skill_learning_error_line,
-    tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear,
-    tc_witness_configure, tc_witness_copy, tc_witness_last_result_json,
-    tc_witness_last_result_line, tc_witness_last_result_tone, tc_witness_state_line,
-    tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
+    tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
+    tc_near_ai_credential_action, tc_near_ai_credential_state_line,
+    tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
+    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
+    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
+    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
+    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
+    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
+    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
+    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -4862,5 +4862,34 @@ fn queue_outcome_abi_preserves_known_and_unknown_send_state() {
             "Status unavailable"
         );
         trace_commons_contributor_ffi::tc_string_free(output);
+    }
+}
+
+#[test]
+fn a_void_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 3, "kind": "project", "project_id": "abc", "project_label": "api",
+        "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T00:00:00Z",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe { tc_grant_void_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::void_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+#[test]
+fn an_unreadable_void_gets_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_grant_void_notice(std::ptr::null()) }.is_null());
+    for text in ["not json", "\"project\"", "[]"] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_grant_void_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
     }
 }

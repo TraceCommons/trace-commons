@@ -39,6 +39,8 @@ permissions = [
   "allow-enroll-with-invite",
   "allow-set-consent-scopes",
   "allow-acknowledge-near-ai-notice",
+  "allow-grant-void-notice",
+  "allow-acknowledge-grant-voids",
   "allow-set-private-inference",
   "allow-set-inference-evidence",
   "allow-set-token-contribution",

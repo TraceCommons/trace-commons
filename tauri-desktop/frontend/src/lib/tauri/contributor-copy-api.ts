@@ -1,5 +1,9 @@
 import { invokeTauri } from "./core-api";
 import {
+  type GrantVoidNotice,
+  parseGrantVoidNotice,
+} from "./grant-void-notice";
+import {
   parseQuitConfirmationCopy,
   type QuitConfirmationCopy,
 } from "./quit-confirmation-copy";
@@ -572,6 +576,13 @@ export async function getEligibilityGroupCopy(
 }
 
 /** The quit prompt that is true for this process right now. */
+/** The core's notice for one `status.grant_voids` element, passed through. */
+export async function getGrantVoidNotice(
+  wire: Record<string, unknown>,
+): Promise<GrantVoidNotice> {
+  return parseGrantVoidNotice(await invokeTauri("grant_void_notice", { void: wire }));
+}
+
 export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy> {
   return parseQuitConfirmationCopy(await invokeTauri("quit_confirmation_copy"));
 }

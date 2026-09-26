@@ -1502,6 +1502,32 @@ char*       tc_consent_copy(void);
  */
 char*       tc_consent_gate_help(int32_t pinned);
 
+/* The notice for one grant R6 voided (the connect-and-forget design): that
+ * automatic contributing stopped, for which project or for new projects, why,
+ * and that it can be turned back on.
+ *
+ * void_json is ONE element of status's grant_voids list, passed through as
+ * the JSON object the daemon sent. Returns an owned JSON object with title,
+ * body, reasons_heading, reasons (a list of sentences), rearm, acknowledge,
+ * rearm_action and rearm_failed; free it with tc_string_free.
+ *
+ * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read kind or reasons to
+ * choose words natively. Once shown, call acknowledge_grant_voids with the
+ * element's id; acknowledging is all that button does.
+ *
+ * rearm_action and rearm_failed are null except on a project void that
+ * carries a project_id. When rearm_action is present, draw a second button
+ * with it that calls set_project_mode with the element's project_id and
+ * mode auto_upload -- the same call as arming by hand -- and show
+ * rearm_failed if the daemon refuses it. No other notice gets that button.
+ *
+ * An unknown kind, or a project void without a label, gets a notice that
+ * says automatic contributing stopped without saying for what: do not write
+ * a fallback natively. NULL only for a NULL, non-UTF-8 or unparseable
+ * argument, one that is not a JSON object, and on a caught panic.
+ */
+char*       tc_grant_void_notice(const char* void_json);
+
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
  * the opencode-export-version-unsupported health label. No daemon handle needed. */
