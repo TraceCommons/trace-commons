@@ -2209,7 +2209,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // and says so rather than queueing an unbounded number of asks.
             let mut state = shared.state.lock().expect("state lock");
             let now = chrono::Utc::now();
-            if !state.history_refresh_due_at.is_some_and(|due| due <= now) {
+            if state.history_refresh_due_at.is_none_or(|due| due > now) {
                 state.history_refresh_due_at = Some(now);
                 if state.save(&shared.store).is_err() {
                     return Response::err(
@@ -5517,6 +5517,21 @@ mod tests {
             shared.state.lock().unwrap().history_refresh_due_at,
             Some(first_due)
         );
+    }
+
+    /// A deadline still in the future (set by `note_uploads`) is pulled in
+    /// to now: an explicit ask must not wait behind a later scheduled poll.
+    #[test]
+    fn refresh_history_request_pulls_in_a_later_scheduled_poll() {
+        let shared = shared();
+        let later = chrono::Utc::now() + chrono::Duration::hours(1);
+        shared.state.lock().unwrap().history_refresh_due_at = Some(later);
+
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        let due = shared.state.lock().unwrap().history_refresh_due_at.unwrap();
+        assert!(due < later, "a later deadline must be pulled in, got {due}");
+        assert!(due <= chrono::Utc::now());
     }
 
     /// A queue entry whose session file holds `body`, so
