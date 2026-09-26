@@ -264,12 +264,13 @@ use trace_commons_protocol::trace_contribution::{
     RawTraceContribution, RawTraceContributionEvent, TraceContributionEnvelope,
     TraceContributionEventType,
 };
+use trace_commons_protocol::witness_provenance::{AttestationClass, FinalCallAttestation};
 
 use std::collections::BTreeMap;
 
 use crate::near_attestation::receipt::{
-    ReceiptAlgo, ReceiptPayload, normalize_ed25519_key, signer_is_attested_for_model,
-    verify_receipt,
+    ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind, normalize_ed25519_key,
+    signer_is_attested_for_model, verify_receipt,
 };
 use crate::near_attestation::signer_resolver::{
     AttestedSignerResolver, OperatorKeyPins, StaticPinResolver,
@@ -664,12 +665,15 @@ impl InferenceAttestationPolicy {
 /// An operator surface renders this `n_of_m`. It may not render it
 /// "attested" or "genuine": one verified receipt over a trace declaring nine
 /// calls is `1_of_9`, and the other eight are unexamined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceAttestationOutcome {
     /// 1 when the last declared call carried a verified receipt, else 0.
     pub verified: usize,
     /// How many inference exchanges the trace declares.
     pub declared_calls: usize,
+    /// Present only when the exact final exchange has a verified receipt and
+    /// its Ed25519 signer belongs to the nonempty pin set for its kind.
+    pub final_call: Option<FinalCallAttestation>,
 }
 
 /// The session as the witness received it, **before** redaction.
@@ -755,6 +759,7 @@ pub fn check_inference_attestation_with(
             return Ok(InferenceAttestationOutcome {
                 verified: 0,
                 declared_calls: 0,
+                final_call: None,
             });
         }
     };
@@ -772,6 +777,7 @@ pub fn check_inference_attestation_with(
         return Ok(InferenceAttestationOutcome {
             verified: 0,
             declared_calls,
+            final_call: None,
         });
     };
 
@@ -865,7 +871,7 @@ pub fn check_inference_attestation_with(
     // rest of this module logs nothing -- the keys and the signer are
     // deployment configuration on one side and caller-visible data on the
     // other, and neither belongs on a per-request surface.
-    if resolver.is_enforcing() {
+    let final_call = if resolver.is_enforcing() {
         // Which pin set applies is decided by the receipt's own
         // `signature_kind`, because NEAR AI signs with a different attested
         // key depending on the protocol the call used -- for the same hosted
@@ -896,11 +902,33 @@ pub fn check_inference_attestation_with(
         if !signed_by_a_pinned_key {
             return Err(WitnessError::InferenceReceiptUnverified);
         }
-    }
+        let class = match verdict.signature_kind {
+            ReceiptSignatureKind::ProviderTee => AttestationClass::ProviderTeeFinalCall,
+            ReceiptSignatureKind::Gateway => AttestationClass::GatewayFinalCall,
+            ReceiptSignatureKind::Unrecognised => {
+                return Err(WitnessError::InferenceReceiptUnverified);
+            }
+        };
+        // Only gateway receipts permit an empty signed model. Normalize after
+        // signature, exact-body, projection and class-specific pin verification.
+        // Nonempty models remain byte-for-byte as signed; never infer one.
+        let model = if class == AttestationClass::GatewayFinalCall {
+            verdict.model.filter(|model| !model.is_empty())
+        } else {
+            verdict.model
+        };
+        Some(
+            FinalCallAttestation::new(class, model, verdict.signing_address)
+                .map_err(|_| WitnessError::InferenceReceiptUnverified)?,
+        )
+    } else {
+        None
+    };
 
     Ok(InferenceAttestationOutcome {
         verified: 1,
         declared_calls,
+        final_call,
     })
 }
 
@@ -1091,7 +1119,7 @@ mod tests {
     use super::*;
     use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptSignatureKind};
     use k256::ecdsa::SigningKey;
-    use sha2::{Digest as _, Sha256};
+    use sha2::{Digest, Sha256};
     use sha3::Keccak256;
     use trace_commons_protocol::trace_contribution::{
         RawTraceCaptureTurn, RecordedTraceContributionOptions,
@@ -1268,7 +1296,8 @@ mod tests {
             outcome,
             InferenceAttestationOutcome {
                 verified: 1,
-                declared_calls: 1
+                declared_calls: 1,
+                final_call: None
             }
         );
     }
@@ -1558,7 +1587,8 @@ mod tests {
             outcome,
             InferenceAttestationOutcome {
                 verified: 1,
-                declared_calls: 3
+                declared_calls: 3,
+                final_call: None
             },
             "one verified receipt over a trace declaring three calls is 1_of_3"
         );
@@ -1680,24 +1710,17 @@ mod tests {
         let raw = contribution(&[(request.clone(), response.clone())]);
         let policy = pinned(required(), &[(MODEL, &ed25519_key_hex(MODEL_A_SEED_HEX))]);
 
-        let outcome = check(
-            &policy,
-            Some(&ed25519_receipt(
-                MODEL_A_SEED_HEX,
-                MODEL,
-                &request,
-                &response,
-            )),
-            &raw,
-        )
-        .expect("a receipt from this model's pinned key");
-        assert_eq!(
-            outcome,
-            InferenceAttestationOutcome {
-                verified: 1,
-                declared_calls: 1
-            }
-        );
+        let signed_receipt = ed25519_receipt(MODEL_A_SEED_HEX, MODEL, &request, &response);
+        let outcome = check(&policy, Some(&signed_receipt), &raw)
+            .expect("a receipt from this model's pinned key");
+        assert_eq!(outcome.verified, 1);
+        assert_eq!(outcome.declared_calls, 1);
+        let call = outcome
+            .final_call
+            .expect("pinned final call has provenance");
+        assert_eq!(call.class(), AttestationClass::ProviderTeeFinalCall);
+        assert_eq!(call.model(), Some(MODEL));
+        assert_eq!(call.receipt_signer(), signed_receipt.signing_address);
     }
 
     /// The defect, as a witness-level assertion. The shipped code compared
@@ -2248,6 +2271,61 @@ mod tests {
             .expect("well formed gateway pins")
     }
 
+    #[test]
+    fn empty_signed_gateway_model_remains_valid_after_verification() {
+        let request = r#"{"messages":[{"role":"user","content":"hello"}]}"#.to_string();
+        let response = response_body("hi there");
+        let raw = contribution(&[(request.clone(), response.clone())]);
+        let mut receipt = ed25519_receipt(MODEL_A_SEED_HEX, "", &request, &response);
+        receipt.signature_kind = ReceiptSignatureKind::Gateway;
+        for policy in [required(), InferenceAttestationPolicy::not_required()] {
+            let policy = gateway_pinned(policy, &[&ed25519_key_hex(MODEL_A_SEED_HEX)]);
+            let outcome =
+                check(&policy, Some(&receipt), &raw).expect("empty gateway model is absent");
+            assert_eq!(outcome.final_call.unwrap().model(), None);
+            let mut corrupt = receipt.clone();
+            corrupt.signature = "00".repeat(64);
+            assert_eq!(
+                check(&policy, Some(&corrupt), &raw),
+                Err(WitnessError::InferenceReceiptUnverified)
+            );
+            let changed = contribution(&[(request.clone(), response_body("changed"))]);
+            assert_eq!(
+                check(&policy, Some(&receipt), &changed),
+                Err(WitnessError::InferenceReceiptUnverified)
+            );
+        }
+        let wrong_pin = gateway_pinned(required(), &[&ed25519_key_hex(IMPOSTOR_SEED_HEX)]);
+        assert_eq!(
+            check(&wrong_pin, Some(&receipt), &raw),
+            Err(WitnessError::InferenceReceiptUnverified)
+        );
+    }
+
+    #[test]
+    fn nonempty_signed_gateway_model_is_preserved_exactly() {
+        let model = " model with spaces ";
+        let request = request_body(model, "hello");
+        let response = response_body("hi there");
+        let raw = contribution(&[(request.clone(), response.clone())]);
+        let mut receipt = ed25519_receipt(MODEL_A_SEED_HEX, model, &request, &response);
+        receipt.signature_kind = ReceiptSignatureKind::Gateway;
+        let policy = gateway_pinned(required(), &[&ed25519_key_hex(MODEL_A_SEED_HEX)]);
+        assert_eq!(
+            check(&policy, Some(&receipt), &raw)
+                .unwrap()
+                .final_call
+                .unwrap()
+                .model(),
+            Some(model)
+        );
+        let wrong_pin = gateway_pinned(required(), &[&ed25519_key_hex(IMPOSTOR_SEED_HEX)]);
+        assert_eq!(
+            check(&wrong_pin, Some(&receipt), &raw),
+            Err(WitnessError::InferenceReceiptUnverified)
+        );
+    }
+
     /// The case that was refused in production: a Codex-shaped receipt,
     /// signed by the attested gateway key, admitted by the gateway pin.
     #[test]
@@ -2257,19 +2335,17 @@ mod tests {
         let raw = contribution(&[(request.clone(), response.clone())]);
         let policy = gateway_pinned(required(), &[&ed25519_key_hex(MODEL_A_SEED_HEX)]);
 
-        let outcome = check(
-            &policy,
-            Some(&gateway_receipt(MODEL_A_SEED_HEX, &request, &response)),
-            &raw,
-        )
-        .expect("a gateway receipt from the pinned gateway key");
-        assert_eq!(
-            outcome,
-            InferenceAttestationOutcome {
-                verified: 1,
-                declared_calls: 1
-            }
-        );
+        let signed_receipt = gateway_receipt(MODEL_A_SEED_HEX, &request, &response);
+        let outcome = check(&policy, Some(&signed_receipt), &raw)
+            .expect("a gateway receipt from the pinned gateway key");
+        assert_eq!(outcome.verified, 1);
+        assert_eq!(outcome.declared_calls, 1);
+        let call = outcome
+            .final_call
+            .expect("pinned final call has provenance");
+        assert_eq!(call.class(), AttestationClass::GatewayFinalCall);
+        assert_eq!(call.model(), None);
+        assert_eq!(call.receipt_signer(), signed_receipt.signing_address);
     }
 
     /// The defect, at the witness: a witness pinning only model keys refuses

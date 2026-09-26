@@ -419,8 +419,8 @@ pub struct VerifiedWitnessCertificate {
 impl std::fmt::Debug for VerifiedWitnessCertificate {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Delegates to the certificate's own hand-written Debug. No field
-        // on a certificate identifies a contributor or an upstream
-        // conversation any more -- see that type's Logging note.
+        // in provenance Debug exposes a model, signer or raw inference
+        // correlator -- see that type's Logging note.
         formatter
             .debug_struct("VerifiedWitnessCertificate")
             .field("certificate", &self.certificate)
@@ -429,6 +429,22 @@ impl std::fmt::Debug for VerifiedWitnessCertificate {
 }
 
 impl VerifiedWitnessCertificate {
+    /// The signed provenance claim. V1 is unknown, not a signed negative claim.
+    pub fn inference_provenance(
+        &self,
+    ) -> Option<trace_commons_protocol::witness_provenance::InferenceProvenance> {
+        match self.certificate.version() {
+            super::certificate::CertificateVersion::V1 => None,
+            super::certificate::CertificateVersion::V2(provenance) => Some(provenance.clone()),
+        }
+    }
+
+    pub fn certificate_version(&self) -> i16 {
+        match self.certificate.version() {
+            super::certificate::CertificateVersion::V1 => 1,
+            super::certificate::CertificateVersion::V2(_) => 2,
+        }
+    }
     /// Lowercase hex SHA-256 of the artifact this certificate covers, which
     /// verification has proven is the artifact the caller passed.
     pub fn redacted_sha256(&self) -> &str {

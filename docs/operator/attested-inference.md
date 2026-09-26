@@ -36,6 +36,40 @@ Related runbooks, all of which this one assumes rather than repeats:
 
 ---
 
+## Certificate profile rollout: verifiers first
+
+The witness defaults to the original V1 certificate on the text, structured
+contribution, and token-bundle routes, including the contribution certificate
+inside a token bundle. V1 preserves its five-field JSON shape and signing
+bytes. It carries **unknown inference provenance**, not a signed claim that
+inference was unattested. Offered receipts are still verified even when V1 is
+issued.
+
+V2 adds the witness's signed final-call verification statement: explicitly
+unattested, or attested with class, optional receipt-bound model, and verified
+signer. It omits raw inference request/response hashes and receipt identities.
+Those values could confirm guessed raw content or correlate a redacted
+contribution with provider-side conversation records. Exact body hashes,
+receipt signatures, final-call projection, and class-specific pins are still
+checked inside the witness before raw bodies are removed. Downstream parties
+verify the witness's statement; they cannot independently verify the provider
+receipt from this certificate. Model, signer, class and timing remain visible
+metadata. The base `redacted_sha256` binds the exact redacted ingest submission
+bytes; it is not a digest of a raw inference request or response.
+
+1. Deploy ingest verifiers accepting corrected V2 while the witness remains V1.
+2. Ship contributor clients that accept both profiles, including nested bundle
+   certificates, and verify supported deployed clients have upgraded.
+3. Explicitly configure `TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION=v2` (or
+   `--certificate-version v2`) and restart the witness. Only `v1` and `v2` are
+   accepted; malformed or empty configuration fails startup. The profile is
+   parsed once and remains fixed for that service instance.
+
+This is a deployment-wide switch, without client negotiation. Older clients
+still fail after V2 activation; the flag alone does not make a mixed-client
+rollout safe. Roll back by configuring `v1` and restarting. Keep both-profile
+verifiers deployed so previously issued V2 certificates remain verifiable.
+
 ## The three switches, and who owns each
 
 Attested inference is off unless **three independent parties** each turn
