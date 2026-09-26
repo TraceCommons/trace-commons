@@ -215,6 +215,9 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_trust_facts",
     "trace_source_sessions",
     "trace_submission_sessions",
+    "trace_account_inference_connections",
+    "trace_account_inference_connection_requests",
+    "trace_account_inference_connection_events",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",
@@ -1412,10 +1415,48 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_source_sessions",
         include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
     ),
+    (
+        79,
+        "inference_connection",
+        include_str!("../../../../migrations/V79__inference_connection.sql"),
+    ),
 ];
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn select_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
+        catalog: &crate::inference_connection::OperatorInferenceConnection,
+    ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
+    {
+        PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
+    }
+
+    async fn current_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        catalog: &[crate::inference_connection::OperatorInferenceConnection],
+    ) -> Result<
+        Option<crate::db::postgres_inference_connection::InferenceConnectionStatus>,
+        DatabaseError,
+    > {
+        PgBackend::current_inference_connection(self, tenant, account, catalog).await
+    }
+
+    async fn disconnect_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        connection_id: Uuid,
+    ) -> Result<crate::db::postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError>
+    {
+        PgBackend::disconnect_inference_connection(self, tenant, account, connection_id).await
+    }
+
     async fn record_account_trust_fact(
         &self,
         account: &crate::account_trust::TrustAccount,
@@ -7251,6 +7292,7 @@ mod tests {
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
             include_str!("../../../../migrations/V77__account_admission.sql"),
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+            include_str!("../../../../migrations/V79__inference_connection.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7277,6 +7319,7 @@ mod tests {
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
             include_str!("../../../../migrations/V77__account_admission.sql"),
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+            include_str!("../../../../migrations/V79__inference_connection.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

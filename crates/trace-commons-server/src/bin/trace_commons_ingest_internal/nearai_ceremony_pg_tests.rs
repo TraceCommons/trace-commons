@@ -397,6 +397,194 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
     );
 }
 
+/// A new client can complete account enrollment without publishing the old
+/// enrollment witness. Only a later account-session selection may return its
+/// operator-reviewed connection configuration.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    // SAFETY: this ignored suite serializes its process-global test controls.
+    unsafe { std::env::remove_var("TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON") };
+    let catalog = trace_commons_server::inference_connection::OperatorInferenceConnection::new(
+        "pilot".into(),
+        "near-ai".into(),
+        trace_commons_protocol::inference_connection::DISCLOSURE_VERSION,
+        trace_commons_protocol::inference_connection::ConnectionWitnessConfig {
+            url: "https://selected-witness.example/v1".into(),
+            signing_address: format!("0x{}", "ab".repeat(20)),
+            expected_measurements: vec![format!("mrtd={}", "cd".repeat(48))],
+        },
+        None,
+    )
+    .unwrap();
+    let mut state = state;
+    let settings = Arc::make_mut(&mut state);
+    settings.inference_connection_catalog = Arc::new(vec![catalog]);
+    settings.near_provisioning_public_origin = Some("https://commons.example".into());
+    settings.account_near_config = Some(Arc::new(trace_commons_server::config::NearConfig {
+        rpc_url: "http://near-rpc.invalid".into(),
+        network: "testnet".into(),
+        recipient: NEAR_TEST_RECIPIENT.into(),
+    }));
+
+    let legacy = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/near/provision/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let legacy: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(legacy.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy["ready"], false);
+    assert_eq!(legacy["near_ai_login_ready"], false);
+    assert!(legacy.get("witness").is_none());
+
+    let v2 = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/near/provision/capabilities/v2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v2: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(v2.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v2["near_ai_login_ready"], true);
+    assert_eq!(v2["ready"], true);
+    assert_eq!(v2["offers_available"], true);
+    assert!(v2.get("witness").is_none());
+    assert!(v2.get("issuer_url").is_none());
+    assert_eq!(
+        v2["near_ai_start_path"],
+        "/v1/account/near-ai/provision/start/v2"
+    );
+    assert_eq!(
+        v2["near_ai_finish_path"],
+        "/v1/account/near-ai/provision/finish/v2"
+    );
+
+    let pkcs8 =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let device = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    use ring::signature::KeyPair as _;
+    let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let (verifier, challenge) = challenge_pair();
+    let wallet_start = serde_json::json!({
+        "account_id": "alice.testnet",
+        "device_public_key": public_key,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    });
+    let (legacy_wallet_status, _) = post_json(
+        &state,
+        "/v1/account/near/provision/start",
+        wallet_start.clone(),
+    )
+    .await;
+    assert_ne!(legacy_wallet_status, StatusCode::OK);
+    let (wallet_status, wallet_body) = post_json(
+        &state,
+        v2["wallet_start_path"].as_str().unwrap(),
+        wallet_start,
+    )
+    .await;
+    assert_eq!(
+        wallet_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&wallet_body)
+    );
+    assert!(
+        !wallet_body
+            .windows(b"witness".len())
+            .any(|w| w == b"witness")
+    );
+    let (legacy_status, _) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        start_payload(&challenge, &public_key),
+    )
+    .await;
+    assert_ne!(legacy_status, StatusCode::OK);
+    let before = anchor_rows(&db).await;
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let before_selection: i64 = client
+        .query_one(
+            "SELECT count(*)::bigint FROM trace_account_inference_connections",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    drop(client);
+
+    let (status, body) = post_json(
+        &state,
+        v2["near_ai_start_path"].as_str().unwrap(),
+        start_payload(&challenge, &public_key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(started["nonce"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let device_public_key: [u8; 32] = device.public_key().as_ref().try_into().unwrap();
+    let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
+        &nonce,
+        started["ceremony_id"].as_str().unwrap(),
+        &device_public_key,
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+    );
+    let device_signature =
+        base64::engine::general_purpose::STANDARD.encode(device.sign(&signing_bytes).as_ref());
+    let (status, body) = post_json(
+        &state,
+        v2["near_ai_finish_path"].as_str().unwrap(),
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": public_key,
+            "device_signature": device_signature,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let finished: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(finished.get("witness").is_none());
+    assert!(finished.get("inference_receipt_endpoint").is_none());
+    assert_eq!(anchor_rows(&db).await, before + 1);
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let after_selection: i64 = client
+        .query_one(
+            "SELECT count(*)::bigint FROM trace_account_inference_connections",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(after_selection, before_selection);
+}
+
 /// A refused finish leaves nothing behind.
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]

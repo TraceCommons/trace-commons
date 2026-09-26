@@ -2256,6 +2256,535 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
 }
 
 #[tokio::test]
+async fn versioned_inference_capability_preserves_legacy_shape_without_installable_material() {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    let legacy = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/near/provision/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let legacy_body = to_bytes(legacy.into_body(), usize::MAX).await.unwrap();
+    let legacy_value: serde_json::Value = serde_json::from_slice(&legacy_body).unwrap();
+    assert!(legacy_value.get("contract_version").is_none());
+    assert!(
+        legacy_value
+            .get("inference_connection_selection_required")
+            .is_none()
+    );
+    let versioned = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/near/provision/capabilities/v2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(versioned.status(), StatusCode::OK);
+    assert_eq!(
+        versioned
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let versioned_body = to_bytes(versioned.into_body(), usize::MAX).await.unwrap();
+    let versioned_value: serde_json::Value = serde_json::from_slice(&versioned_body).unwrap();
+    assert_eq!(
+        versioned_value["inference_connection_selection_required"],
+        true
+    );
+    assert_eq!(
+        versioned_value["contract_version"],
+        "near-provision-capabilities-v2"
+    );
+    assert_eq!(
+        versioned_value["near_ai_login_ready"],
+        legacy_value["near_ai_login_ready"]
+    );
+    assert!(versioned_value.get("witness").is_none());
+    assert!(versioned_value.get("issuer_url").is_none());
+    assert!(versioned_value.get("inference_receipt_endpoint").is_none());
+}
+
+#[tokio::test]
+async fn inference_connection_requires_explicit_account_session_selection() {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let admin = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "DELETE FROM trace_near_account_anchors WHERE tenant_id = $1",
+            &[&"tenant-a"],
+        )
+        .await
+        .unwrap();
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    admin
+        .batch_execute(
+            "ALTER ROLE trace_login_resolver LOGIN; GRANT USAGE ON SCHEMA public TO trace_login_resolver",
+        )
+        .await
+        .unwrap();
+    let db_url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap();
+    let mut resolver_url = reqwest::Url::parse(&db_url).unwrap();
+    resolver_url.set_username("trace_login_resolver").unwrap();
+    let account_backend: Arc<dyn Database> = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(db_url),
+            pool_size: 4,
+            ssl_mode: trace_commons_server::config::SslMode::Prefer,
+            login_resolver_url: Some(SecretString::from(resolver_url.to_string())),
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .unwrap(),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(account_backend.clone()),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let witness = trace_commons_protocol::inference_connection::ConnectionWitnessConfig {
+        url: "https://private-witness.example/v1".into(),
+        signing_address: format!("0x{}", "ab".repeat(20)),
+        expected_measurements: vec![format!("mrtd={}", "ab".repeat(48))],
+    };
+    let catalog = trace_commons_server::inference_connection::OperatorInferenceConnection::new(
+        "pilot".into(),
+        "near-ai".into(),
+        trace_commons_protocol::inference_connection::DISCLOSURE_VERSION,
+        witness.clone(),
+        Some("https://private-receipt.example/v1".into()),
+    )
+    .unwrap();
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .inference_connection_catalog = Arc::new(vec![catalog.clone()]);
+    let anonymous = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/inference-connection/offers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        anonymous
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let ctx = resolve_account_ctx(
+        state.as_ref(),
+        &cookie_request_headers("tc_account_session", &cookie),
+    )
+    .await
+    .unwrap();
+    let anchor_hash = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    admin.execute("INSERT INTO trace_near_account_anchors
+        (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref, account_name_key_ref)
+        VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key')",
+        &[&"tenant-a", &ctx.account_id.as_uuid(), &anchor_hash, &serde_json::json!({"fixture":true})]
+    ).await.unwrap();
+
+    let offers = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/inference-connection/offers")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(offers.status(), StatusCode::OK);
+    assert_eq!(
+        offers
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let offers_body = to_bytes(offers.into_body(), usize::MAX).await.unwrap();
+    let offers_json: serde_json::Value = serde_json::from_slice(&offers_body).unwrap();
+    assert_eq!(offers_json["offers"].as_array().unwrap().len(), 1);
+    assert!(!String::from_utf8_lossy(&offers_body).contains("private-witness"));
+    let before = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), StatusCode::OK);
+    let before_body = to_bytes(before.into_body(), usize::MAX).await.unwrap();
+    let before_json: serde_json::Value = serde_json::from_slice(&before_body).unwrap();
+    assert!(
+        before_json["selection"].is_null(),
+        "login and GET cannot select"
+    );
+
+    let offered = catalog.offer();
+    let request = trace_commons_protocol::inference_connection::SelectInferenceConnection {
+        offer_id: offered.offer_id,
+        revision: offered.revision,
+        config_digest: offered.config_digest,
+        disclosure_version: offered.disclosure_version,
+        idempotency_key: Uuid::new_v4(),
+        expected_current_version: None,
+    };
+    let mut unknown = request.clone();
+    unknown.offer_id = "never-published".into();
+    let unknown_response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&unknown).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_response.status(), StatusCode::BAD_REQUEST);
+    let unknown_body = to_bytes(unknown_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&unknown_body).contains("invalid inference selection"));
+    let mut device_ctx = ctx.clone();
+    device_ctx.auth_method = AccountAuthMethod::DeviceBearer;
+    let direct_denial = inference_connection_routes::select_handler(
+        State(state.clone()),
+        Extension(device_ctx),
+        HeaderMap::new(),
+        Json(request.clone()),
+    )
+    .await;
+    assert_eq!(direct_denial.unwrap_err().0, StatusCode::FORBIDDEN);
+    let payload = serde_json::to_string(&request).unwrap();
+    let device = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            device.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ),
+        "a device bearer cannot select a connection"
+    );
+    let cross_site = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "cross-site")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        cross_site
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let mut forged = serde_json::to_value(&request).unwrap();
+    forged["account_id"] = serde_json::json!(Uuid::new_v4());
+    let forged_account = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(forged.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forged_account.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let selected = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected.status(), StatusCode::OK);
+    assert_eq!(
+        selected
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let selected_body = to_bytes(selected.into_body(), usize::MAX).await.unwrap();
+    let selected_json: serde_json::Value = serde_json::from_slice(&selected_body).unwrap();
+    assert_eq!(selected_json["witness"]["url"], witness.url);
+    assert_eq!(selected_json["state_version"], 1);
+    let connection_id: Uuid = selected_json["connection_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let retired_state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(account_backend),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let retired_response = app(retired_state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retired_response.status(), StatusCode::CONFLICT);
+    let retired_body = to_bytes(retired_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&retired_body).contains("connection_reselection_required"));
+    let replay = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = to_bytes(replay.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&replay_body).unwrap()["connection_id"],
+        selected_json["connection_id"]
+    );
+    let mut stale = request.clone();
+    stale.idempotency_key = Uuid::new_v4();
+    stale.expected_current_version = Some(1);
+    stale.revision = format!("sha256:{}", "0".repeat(64));
+    let stale_response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&stale).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        stale_response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let current = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current.status(), StatusCode::OK);
+    let current_body = to_bytes(current.into_body(), usize::MAX).await.unwrap();
+    let current_json: serde_json::Value = serde_json::from_slice(&current_body).unwrap();
+    assert_eq!(
+        current_json["selection"]["connection_id"],
+        selected_json["connection_id"]
+    );
+    assert_eq!(current_json["install_on_this_device"], false);
+    assert!(!String::from_utf8_lossy(&current_body).contains("private-witness"));
+
+    let path = format!("/v1/account/inference-connection/{connection_id}");
+    let cross_site_delete = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_site_delete.status(), StatusCode::FORBIDDEN);
+    for _ in 0..2 {
+        let deleted = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(&path)
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("tc_account_session={cookie}"),
+                    )
+                    .header("sec-fetch-site", "same-origin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::OK);
+    }
+    let (_, token_hash) = account_session_cookie_parts(&cookie).unwrap();
+    rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &token_hash,
+        "token_issued_at = now() - interval '13 hours'",
+    )
+    .await;
+    let rotated = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/account/inference-connection")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated.status(), StatusCode::OK);
+    assert!(rotation_test_set_cookie_value(&rotated).is_some());
+    admin
+        .execute(
+            "DELETE FROM trace_near_account_anchors WHERE tenant_id = $1",
+            &[&"tenant-a"],
+        )
+        .await
+        .unwrap();
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let remaining: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_accounts WHERE tenant_id = $1",
+            &[&"tenant-a"],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        remaining, 0,
+        "fixture must leave no selected account behind"
+    );
+}
+
+#[tokio::test]
 async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
@@ -5507,6 +6036,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     insert_token(&mut tokens, "tenant-b", "admin-token-b", TokenRole::Admin);
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
+        inference_connection_catalog: Arc::new(Vec::new()),
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -26694,6 +27224,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         TokenRole::Admin,
     );
     let state = Arc::new(AppState {
+        inference_connection_catalog: Arc::new(Vec::new()),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -95588,6 +96119,11 @@ mod admission_pg_tests;
 /// is the failure mode that step exists to prevent.
 #[path = "nearai_ceremony_pg_tests.rs"]
 mod nearai_ceremony_pg_tests;
+
+/// Full wallet v2 completion through the router, real signatures and PostgreSQL.
+/// CI selects this ignored module explicitly with a fresh database.
+#[path = "wallet_v2_pg_tests.rs"]
+mod wallet_v2_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

@@ -15,6 +15,7 @@ use crate::trace_corpus_storage::{
 use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
+pub mod postgres_inference_connection;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
@@ -193,6 +194,41 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    async fn select_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
+        _catalog: &crate::inference_connection::OperatorInferenceConnection,
+    ) -> Result<postgres_inference_connection::InferenceSelectionOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn current_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _catalog: &[crate::inference_connection::OperatorInferenceConnection],
+    ) -> Result<Option<postgres_inference_connection::InferenceConnectionStatus>, DatabaseError>
+    {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn disconnect_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _connection_id: uuid::Uuid,
+    ) -> Result<postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
     async fn redeem_account_invite(
         &self,
         _tenant: &str,

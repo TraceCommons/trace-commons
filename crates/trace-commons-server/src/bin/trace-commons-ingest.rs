@@ -5,6 +5,8 @@
 mod admission;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
 mod file_witness;
+#[path = "trace_commons_ingest_internal/inference_connection.rs"]
+mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -1536,6 +1538,8 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    inference_connection_catalog:
+        Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
     near_provisioning_admission_ready: bool,
     near_provisioning_public_origin: Option<String>,
@@ -4288,6 +4292,7 @@ impl AppState {
             account_native_requests,
             account_native_codes,
             account_near_config,
+            inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             attestation_signing,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index: build_dedup_vector_index_from_env(),
@@ -7526,6 +7531,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
         )
+        .merge(inference_connection_routes::routes())
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
             "/v1/account/source-sessions/status",
@@ -7744,8 +7750,16 @@ fn app(state: Arc<AppState>) -> Router {
             get(near_provisioning::capabilities),
         )
         .route(
+            "/v1/account/near/provision/capabilities/v2",
+            get(near_provisioning::capabilities_v2),
+        )
+        .route(
             "/v1/account/near/provision/start",
             post(near_provision_start_handler),
+        )
+        .route(
+            "/v1/account/near/provision/start/v2",
+            post(near_provisioning::near_provision_start_v2_handler),
         )
         .route(
             "/account/near/provision/wallet",
@@ -7754,6 +7768,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/account/near/provision/finish",
             post(near_provision_finish_handler),
+        )
+        .route(
+            "/v1/account/near/provision/finish/v2",
+            post(near_provisioning::near_provision_finish_v2_handler),
         )
         // The NEAR AI login ceremony (#836). A sibling of the wallet pair
         // above, not a mode of it: it proves possession of a NEAR AI session
@@ -7764,8 +7782,16 @@ fn app(state: Arc<AppState>) -> Router {
             post(near_ai_provision_start_handler),
         )
         .route(
+            "/v1/account/near-ai/provision/start/v2",
+            post(near_provisioning::near_ai_provision_start_v2_handler),
+        )
+        .route(
             "/v1/account/near-ai/provision/finish",
             post(near_ai_provision_finish_handler),
+        )
+        .route(
+            "/v1/account/near-ai/provision/finish/v2",
+            post(near_provisioning::near_ai_provision_finish_v2_handler),
         )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
@@ -15638,7 +15664,14 @@ async fn account_auth_middleware(
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
-            Err(err) => return err.into_response(),
+            Err(err) => {
+                let mut response = err.into_response();
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+                return response;
+            }
         };
 
     // A native token rotates exactly like a cookie session, but a native client
