@@ -16,10 +16,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use super::audit::{self, AuditEntry};
-use super::health::LABEL_NEAR_AI_NOTICE_PENDING;
-use super::ipc::{
-    DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, EVENT_QUEUE_CHANGED, Request, Response,
-};
+use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use crate::commands::{EnrollOutcome, enroll_core};
 use crate::consent::{VALID_SCOPES, validate_scopes};
 
@@ -231,33 +228,14 @@ pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Req
     }
     match shared.store.ensure_near_ai_notice_shown() {
         Ok(_created) => {
-            shared
-                .health
-                .lock()
-                .expect("health lock")
-                .resolve(LABEL_NEAR_AI_NOTICE_PENDING);
             // Every session refused while the notice was outstanding was
             // refused for timing, not for anything about the session, and
-            // nothing else will ever move it again -- so re-offer them. The
-            // acknowledgment is the event the refusal was waiting for.
-            let reoffered = {
-                let mut queue = shared.queue.lock().expect("queue lock");
-                let moved =
-                    queue.reoffer_refused_for_reason(LABEL_NEAR_AI_NOTICE_PENDING, Utc::now());
-                if moved > 0 {
-                    if queue.save(&shared.store).is_err() {
-                        // The acknowledgment itself stands; it is already
-                        // audited and on disk. The re-offer is held in memory
-                        // and persists with the next save. A fixed label, not
-                        // the error: its context can carry a filesystem path.
-                        tracing::warn!("could not persist re-offered entries");
-                    }
-                }
-                moved
-            };
-            if reoffered > 0 {
-                shared.publish(EVENT_QUEUE_CHANGED, json!({}));
-            }
+            // nothing else will ever move it again -- so re-offer them, and
+            // clear the gate's label. The acknowledgment is the event the
+            // refusal was waiting for. The same step runs on every daemon
+            // tick, so a CLI acknowledgement gets it too.
+            let outcome = super::settle_near_ai_notice(shared, Utc::now());
+            let reoffered = outcome.reoffered;
             Response::ok(
                 req.id,
                 json!({ "acknowledged": true, "reoffered": reoffered }),
@@ -270,6 +248,8 @@ pub(super) fn handle_acknowledge_near_ai_notice(shared: &DaemonShared, req: &Req
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING;
+    use crate::daemon::ipc::EVENT_QUEUE_CHANGED;
 
     #[test]
     fn consent_options_lists_every_valid_scope_with_a_description() {

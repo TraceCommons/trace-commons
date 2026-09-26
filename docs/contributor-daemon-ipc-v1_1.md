@@ -2735,6 +2735,15 @@ disclosure it depended on: an `auto_upload` folder re-approves them on the
 next poll, and any other folder asks again. A `queue_changed` event is
 published when any move.
 
+A refused entry whose file already has a live entry (the session grew while
+it sat refused, and the watcher offered the new content) is not revived: it
+is marked `superseded` with `session-changed-after-offer`, and is not counted
+in `reoffered`. The same step -- clear the label, re-offer, supersede -- also
+runs on every daemon tick once the notice marker exists, so a notice
+acknowledged through the CLI, which writes the marker without calling this
+method, gets the same result. It runs whether or not the daemon is paused,
+quiesced for an update, or in dry-run, since it sends nothing.
+
 ### `near_ai_balance`
 
 What the contributor's NEAR AI account has left, read with the session the
