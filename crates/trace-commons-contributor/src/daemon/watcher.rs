@@ -177,6 +177,7 @@ fn tick_over(
     source_identities: SourceIdentities,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
+    release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
     // voided is already ask-first when its sessions are looked at -- and
@@ -404,6 +405,7 @@ fn tick_over_paths(
     paths: &[PathBuf],
     session_at: SessionAt<'_>,
 ) -> Result<TickReport> {
+    release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
     // voided is already ask-first when its sessions are looked at -- and
@@ -429,6 +431,34 @@ fn tick_over_paths(
     let report = finish_pass(shared, out, false)?;
     report_gate(shared, &ctx.gate, &report);
     Ok(report)
+}
+
+/// Release holds whose cause has gone, before any session is visited.
+///
+/// Today the only hold is for token-distribution review, which exists only
+/// while `token_distributions_contribution` is on. Checked every pass rather
+/// than when the setting changes, so no route to turning it off -- the
+/// socket, a config edit, a restart -- can leave the holds behind.
+fn release_stale_holds(shared: &DaemonShared, now: DateTime<Utc>) {
+    let token_review_on = {
+        let s = shared.settings.lock().expect("settings lock");
+        s.token_distributions_contribution
+    };
+    if token_review_on {
+        return;
+    }
+    let released = {
+        let mut queue = shared.queue.lock().expect("queue lock");
+        let released = queue
+            .release_holds_for_reason(super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED, now);
+        if released > 0 && queue.save(&shared.store).is_err() {
+            tracing::warn!("could not persist released holds");
+        }
+        released
+    };
+    if released > 0 {
+        shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
 }
 
 // Lets a test exercise the enforced gate while it ships unenforced.
@@ -719,7 +749,14 @@ fn visit_session(
             queue.dismissed_at_path(&obs.path),
             queue
                 .unchanged_offer_at_path(&obs.path, obs.size_bytes, obs.modified_at)
-                .map(|e| (e.entry_id, e.project_key.clone(), e.state)),
+                .map(|e| {
+                    (
+                        e.entry_id,
+                        e.project_key.clone(),
+                        e.state,
+                        e.held_for_review(),
+                    )
+                }),
             queue.load_can_land(&obs.path, ctx.max_queue_entries),
         )
     };
@@ -730,7 +767,7 @@ fn visit_session(
         out.report.dismissed += 1;
         return;
     }
-    if let Some((entry_id, project_key, state)) = already_offered {
+    if let Some((entry_id, project_key, state, held_for_review)) = already_offered {
         // The project key is taken from the entry rather than
         // re-derived, which also skips `resolve_cwd`: the entry's
         // key came from this same unchanged content, and resolving
@@ -766,9 +803,10 @@ fn visit_session(
         // Through the automatic-contribution gate, like every other approval
         // made on the contributor's behalf. See `automatic_gate`. A session
         // the grant holds back would not be approved either way, so it is
-        // not counted as one the gate holds.
+        // not counted as one the gate holds; nor is one held for a person.
         let would_approve = mode == ProjectMode::AutoUpload
             && state == QueueState::Pending
+            && !held_for_review
             && !held_back_from_the_grant(shared, &project_key, &obs.path);
         if would_approve && ctx.gate.blocks() {
             out.gate_blocked += 1;
@@ -1081,8 +1119,9 @@ fn visit_session(
                 } else if gate_held
                     && queue
                         .get(entry_id)
-                        .is_some_and(|e| e.state == QueueState::Pending)
+                        .is_some_and(|e| e.state == QueueState::Pending && !e.held_for_review())
                 {
+                    // Held for a person, it waits on them, not on the gate.
                     out.gate_blocked += 1;
                 }
                 // This path returns Ok without checking capacity, so
@@ -1866,6 +1905,103 @@ mod tests {
         );
     }
 
+    /// The loop this closes, driven through the watcher.
+    ///
+    /// With token distributions on, the uploader revokes an unattended
+    /// approval with `token-distribution-review-required`, which only a
+    /// person's review of that session can satisfy. The watcher used to
+    /// re-approve it on the next poll without asking why it was revoked, the
+    /// uploader revoked it again, and the session never uploaded.
+    #[tokio::test]
+    async fn a_session_held_for_a_person_is_not_re_approved_on_their_behalf() {
+        let f = WatcherFixture::new();
+        // The hold only exists while token distributions are on; with the
+        // setting off it is released at the start of the next pass.
+        f.shared
+            .settings
+            .lock()
+            .unwrap()
+            .token_distributions_contribution = true;
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+
+        // What `drain_approved` does with the uploader's ApprovalStale.
+        assert!(f.shared.queue.lock().unwrap().revoke_approval(
+            id,
+            crate::daemon::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED
+        ));
+
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Pending, "held, not re-approved");
+        assert!(e.held_for_review());
+    }
+
+    /// Reviewed on #1010: a hold outlived its cause. Turning token
+    /// distributions off now releases it on the next pass, and the standing
+    /// opt-in applies again.
+    #[tokio::test]
+    async fn turning_token_distributions_off_releases_the_hold() {
+        let f = WatcherFixture::new();
+        f.shared
+            .settings
+            .lock()
+            .unwrap()
+            .token_distributions_contribution = true;
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+        assert!(f.shared.queue.lock().unwrap().revoke_approval(
+            id,
+            crate::daemon::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED
+        ));
+        assert!(f.shared.queue.lock().unwrap().all()[0].held_for_review());
+
+        f.shared
+            .settings
+            .lock()
+            .unwrap()
+            .token_distributions_contribution = false;
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert!(!e.held_for_review(), "the hold's cause is gone");
+        assert_eq!(
+            e.state,
+            QueueState::Approved,
+            "the standing opt-in applies again"
+        );
+    }
+
+    /// The hold is narrow. A revocation the standing opt-in can satisfy is
+    /// still re-applied: re-approving under changed scopes is what arming
+    /// means.
+    #[tokio::test]
+    async fn a_scopes_changed_revocation_is_still_re_approved() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+        assert!(
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .revoke_approval(id, crate::daemon::queue::REASON_SCOPES_CHANGED)
+        );
+
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Approved);
+        assert!(!e.held_for_review());
+    }
+
     /// Report-only, which is how the gate ships: the approval goes ahead as
     /// before, and is counted as one the gate would have refused.
     #[tokio::test]
@@ -1905,6 +2041,40 @@ mod tests {
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Pending, "waits for the contributor");
         assert!(!e.approved_unattended);
+    }
+
+    /// A session held for a person is not one the gate is holding. With the
+    /// gate enforced, a session in an armed project is counted as held by
+    /// it; once that session is held for review instead (#1010), no gate
+    /// verdict would approve it on the contributor's behalf, so counting it
+    /// would put a session in the gate's "holding" line that only a person
+    /// can release. The same rule `held_back_from_the_grant` already follows.
+    #[tokio::test]
+    async fn a_session_held_for_a_person_is_not_counted_as_held_by_the_gate() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        // The hold exists only while token distributions are on.
+        f.shared
+            .settings
+            .lock()
+            .unwrap()
+            .token_distributions_contribution = true;
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let gated = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+        f.shared.queue.lock().unwrap().set_state(
+            id,
+            QueueState::Pending,
+            Some(crate::daemon::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string()),
+        );
+        let held = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+
+        assert_eq!(gated.gate_blocked, Some(1), "{gated:?}");
+        assert_eq!(held.gate_blocked, Some(0), "{held:?}");
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert!(e.held_for_review(), "still waiting on a person");
     }
 
     /// What the gate holds is a level only a full pass can measure. A scoped

@@ -491,7 +491,7 @@ impl Uploader<'_, '_> {
         } else {
             if self.settings.token_distributions_contribution {
                 return Ok(UploadDecision::ApprovalStale {
-                    reason_label: "token-distribution-review-required".into(),
+                    reason_label: super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.into(),
                 });
             }
             match self.approved_envelope_for(entry) {
