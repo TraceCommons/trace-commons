@@ -76,8 +76,7 @@ impl TraceWitnessCertificateEvidenceWrite {
         // A v1 certificate carries no provenance claim (`None`); it is stored
         // as unattested and `certificate_version = 1` keeps it distinguishable
         // from a signed v2 unattested statement.
-        let (inference_class, bound_model, receipt_signer) = match verified.inference_provenance()
-        {
+        let (inference_class, bound_model, receipt_signer) = match verified.inference_provenance() {
             None | Some(InferenceProvenance::Unattested) => {
                 (AttestationClass::Unattested, None, None)
             }

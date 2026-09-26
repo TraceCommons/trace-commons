@@ -93,12 +93,7 @@ fn signed_evidence_at(
         InferenceProvenance::Unattested
     } else {
         InferenceProvenance::Attested(
-            FinalCallAttestation::new(
-                class,
-                Some("model".into()),
-                "b".repeat(64),
-            )
-            .unwrap(),
+            FinalCallAttestation::new(class, Some("model".into()), "b".repeat(64)).unwrap(),
         )
     };
     let body_digest = hex::encode(Sha256::digest(BODY));
