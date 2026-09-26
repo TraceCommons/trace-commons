@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use trace_commons_server::account_onboarding::{
     NativeProvisioningPending, PendingNearProvisioning, ProvisioningAssertion,
 };
+use trace_commons_server::account_trust::resolve_contribution_account;
 use trace_commons_server::config::{DatabaseConfig, NearConfig, SslMode};
 use trace_commons_server::db::{Database, NewSession, postgres::PgBackend};
 use trace_commons_server::near_account_identity::NearAccountIdentity;
@@ -253,6 +254,27 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
             .unwrap(),
         Some(result.anchor_hash.clone())
     );
+    let trust_account = resolve_contribution_account(&db, &result.tenant_id, &principal)
+        .await
+        .expect("live authenticated principal resolves");
+    assert_eq!(trust_account.account_id(), result.account_id);
+    assert_eq!(trust_account.tenant_id(), result.tenant_id);
+    assert_eq!(
+        db.get_near_provisioned_account(&result.tenant_id, &principal)
+            .await
+            .unwrap(),
+        Some(result.account_id)
+    );
+    assert!(
+        resolve_contribution_account(&db, "other-tenant", &principal)
+            .await
+            .is_err()
+    );
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &hash("spoofed-principal"))
+            .await
+            .is_err()
+    );
     assert!(
         db.get_near_provisioned_anchor("other-tenant", &principal)
             .await
@@ -335,6 +357,117 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
     );
     assert_eq!(one.unwrap().account_id, result.account_id);
     assert_eq!(two.unwrap().account_id, result.account_id);
+    let second_device = Ed25519KeyPair::from_pkcs8(
+        Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap()
+            .as_ref(),
+    )
+    .unwrap();
+    let second_bytes: [u8; 32] = second_device.public_key().as_ref().try_into().unwrap();
+    let second_pending = PendingNearProvisioning::issue(
+        &cfg,
+        &account,
+        second_bytes,
+        [8; 32],
+        Utc::now().timestamp(),
+    )
+    .unwrap();
+    let second_wallet_sig = signature(&second_pending, &wallet);
+    let second_device_sig = base64::engine::general_purpose::STANDARD.encode(
+        second_device
+            .sign(&second_pending.device_signing_bytes())
+            .as_ref(),
+    );
+    let second_proof = second_pending
+        .verify(
+            &cfg,
+            ProvisioningAssertion {
+                wallet_public_key: &key,
+                wallet_signature: &second_wallet_sig,
+                device_signature: &second_device_sig,
+            },
+            &[8; 32],
+            Utc::now().timestamp(),
+        )
+        .await
+        .unwrap();
+    let second = db
+        .provision_verified_near_account(
+            second_proof,
+            NewSession {
+                token_hash: &hash(&uuid::Uuid::new_v4().to_string()),
+                client_kind: "native",
+                expires_at: Utc::now() + Duration::hours(12),
+            },
+            &identity(),
+        )
+        .await
+        .unwrap();
+    let second_principal = format!(
+        "principal_sha256:{}",
+        hex::encode(Sha256::digest(format!(
+            "device:{}:{}",
+            second.tenant_id, second.device_key_id
+        )))
+    );
+    assert_eq!(second.account_id, trust_account.account_id());
+    assert_ne!(
+        identity().index_label("testnet", &account),
+        identity().login_index_label(&account),
+        "equal wallet and login identifiers must occupy distinct domains"
+    );
+    assert_eq!(
+        resolve_contribution_account(&db, &second.tenant_id, &second_principal)
+            .await
+            .unwrap()
+            .account_id(),
+        trust_account.account_id()
+    );
+    assert_eq!(
+        resolve_contribution_account(&db2, &result.tenant_id, &principal)
+            .await
+            .unwrap()
+            .account_id(),
+        trust_account.account_id()
+    );
+    admin_client
+        .execute(
+            "UPDATE trace_accounts SET closed_at=now() WHERE tenant_id=$1 AND account_id=$2",
+            &[&result.tenant_id, &result.account_id],
+        )
+        .await
+        .unwrap();
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &principal)
+            .await
+            .is_err()
+    );
+    admin_client
+        .execute(
+            "UPDATE trace_accounts SET closed_at=NULL WHERE tenant_id=$1 AND account_id=$2",
+            &[&result.tenant_id, &result.account_id],
+        )
+        .await
+        .unwrap();
+    admin_client
+        .execute(
+            "UPDATE trace_account_principals SET unlinked_at=now() WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&result.tenant_id, &principal],
+        )
+        .await
+        .unwrap();
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &principal)
+            .await
+            .is_err()
+    );
+    admin_client
+        .execute(
+            "UPDATE trace_account_principals SET unlinked_at=NULL WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&result.tenant_id, &principal],
+        )
+        .await
+        .unwrap();
     admin_client
         .execute(
             "UPDATE device_keys SET revoked_at=now() WHERE device_key_id=$1",
@@ -359,6 +492,11 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
             .await
             .unwrap()
             .is_none()
+    );
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &principal)
+            .await
+            .is_err()
     );
     let sessions: i64 = admin_client
         .query_one(

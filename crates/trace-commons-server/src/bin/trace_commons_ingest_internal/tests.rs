@@ -1987,6 +1987,275 @@ async fn account_ctx_refuses_a_device_bearer_without_a_database() {
 }
 
 #[tokio::test]
+async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let payload = serde_json::json!({
+        "invite_code": " TESTCODE23456789\n",
+        "idempotency_key": Uuid::new_v4(),
+    });
+    let device = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/invites/redeem")
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(device.status(), StatusCode::UNAUTHORIZED);
+
+    // Unlike the generic fixture helper, a configured suite must fail when
+    // PostgreSQL or migrations fail; a green skip would hide this evidence.
+    if std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").is_err() {
+        return;
+    }
+    let backend = postgres_backend_for_ingest_test()
+        .await
+        .expect("configured account trust PG fixture");
+    let admin = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("admin connection");
+    admin
+        .batch_execute("ALTER ROLE trace_login_resolver LOGIN; GRANT USAGE ON SCHEMA public TO trace_login_resolver")
+        .await
+        .expect("test resolver role");
+    let db_url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("PG URL");
+    let mut resolver_url = reqwest::Url::parse(&db_url).expect("PG URL parsed");
+    resolver_url
+        .set_username("trace_login_resolver")
+        .expect("resolver username");
+    let account_backend = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(db_url),
+            pool_size: 4,
+            ssl_mode: trace_commons_server::config::SslMode::Prefer,
+            login_resolver_url: Some(SecretString::from(resolver_url.to_string())),
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .expect("account backend with resolver"),
+    );
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(account_backend),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    let mut ctx = resolve_account_ctx(
+        state.as_ref(),
+        &cookie_request_headers("tc_account_session", &cookie),
+    )
+    .await
+    .unwrap();
+    let anchor_hash = format!("sha256:{}", "a".repeat(64));
+    admin.execute("INSERT INTO trace_near_account_anchors
+        (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref, account_name_key_ref)
+        VALUES ($1,$2,$3,$4,'test-pepper','test-key')",
+        &[&ctx.tenant_id, &ctx.account_id.as_uuid(), &anchor_hash, &serde_json::json!({"test_fixture": true})]).await.unwrap();
+    let invite_hash =
+        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code("TESTCODE23456789");
+    admin.execute("INSERT INTO onboarding_invite_grants
+        (invite_subject_hash,policy_label,tenant_mode,tenant_template_id,policy_version,max_uses,issuance_source)
+        VALUES ($1,'pilot','derived','pilot','v1',1,'test')", &[&invite_hash]).await.unwrap();
+    // Real HTTP rejects device credentials in the resolver with 401. Inject a
+    // context to independently prove the handler's defensive 403 still works.
+    ctx.auth_method = AccountAuthMethod::DeviceBearer;
+    let device_handler_error = account_invite_redeem_handler(
+        State(state.clone()),
+        Extension(ctx),
+        HeaderMap::new(),
+        Json(AccountInviteRedeemRequest {
+            invite_code: "TESTCODE23456789".into(),
+            idempotency_key: Uuid::new_v4(),
+        }),
+    )
+    .await
+    .err()
+    .expect("device context refused");
+    assert_eq!(device_handler_error.0, StatusCode::FORBIDDEN);
+    assert_eq!(device_handler_error.1.0.error, "account session required");
+    let cross_site = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/invites/redeem")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "cross-site")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+    let cross_body = axum::body::to_bytes(cross_site.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cross_body: serde_json::Value = serde_json::from_slice(&cross_body).unwrap();
+    assert_eq!(cross_body["error"], "cross-origin account mutation");
+
+    let forged_account = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/invites/redeem")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "invite_code": "TESTCODE23456789",
+                        "idempotency_key": Uuid::new_v4(),
+                        "account_id": Uuid::new_v4(),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forged_account.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let oversized = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/invites/redeem")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "invite_code": "A".repeat(129),
+                        "idempotency_key": Uuid::new_v4(),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+
+    for malformed_code in [
+        "testcode23456789",
+        "TESTCODE2345678!",
+        "TESTCODE2345678",
+        "",
+    ] {
+        let rejected = app(state.clone()).oneshot(
+            axum::http::Request::builder().method("POST").uri("/v1/account/invites/redeem")
+                .header(axum::http::header::COOKIE, format!("tc_account_session={cookie}"))
+                .header("sec-fetch-site", "same-origin").header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"invite_code": malformed_code, "idempotency_key": Uuid::new_v4()}).to_string())).unwrap()
+        ).await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let (_tenant, token_hash) = account_session_cookie_parts(&cookie).unwrap();
+    rotation_test_update_session(
+        backend.as_ref(),
+        "tenant-a",
+        &token_hash,
+        "token_issued_at = now() - interval '13 hours'",
+    )
+    .await;
+    let same_site = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/account/invites/redeem")
+                .header(
+                    axum::http::header::COOKIE,
+                    format!("tc_account_session={cookie}"),
+                )
+                .header("sec-fetch-site", "same-origin")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(same_site.status(), StatusCode::OK);
+    assert_eq!(
+        same_site.headers()[axum::http::header::CACHE_CONTROL],
+        "no-store"
+    );
+    assert!(rotation_test_set_cookie_value(&same_site).is_some());
+    let same_body = axum::body::to_bytes(same_site.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let same_body: serde_json::Value = serde_json::from_slice(&same_body).unwrap();
+    assert_eq!(
+        same_body,
+        serde_json::json!({"authority": "invited", "trust_version": 1})
+    );
+    let uses: i32 = admin
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash=$1",
+            &[&invite_hash],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        uses, 1,
+        "the normalized code redeems through the real session route"
+    );
+    // The trust foundation intentionally retains grants. Clear this fixture's
+    // dependent rows before the generic account/tenant cascade cleanup.
+    for table in [
+        "trace_account_trust_events",
+        "trace_account_invite_grants",
+        "trace_account_trust",
+        "trace_near_account_anchors",
+    ] {
+        admin
+            .execute(
+                &format!("DELETE FROM {table} WHERE tenant_id='tenant-a'"),
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+    admin
+        .execute(
+            "DELETE FROM onboarding_invite_grants WHERE invite_subject_hash=$1",
+            &[&invite_hash],
+        )
+        .await
+        .unwrap();
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
 async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
