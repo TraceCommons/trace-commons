@@ -197,6 +197,31 @@ pub fn is_hash(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// The tenant prefixes that carry a provisioned admission anchor.
+///
+/// Deliberately a list rather than a `starts_with("near")`: `nearai-` is not a
+/// sub-namespace of `near-`, and a prefix test that treated it as one would
+/// make the two identity systems substitutable at the only place that decides
+/// which of them a request is on.
+pub const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
+
+/// Whether `tenant_id` is in an anchored namespace: one of
+/// [`ANCHOR_NAMESPACES`] followed by a hash. Every other tenant, including a
+/// `nearai-` one with any other suffix, is on the invite-free path and never
+/// passes through legacy admission. Shared so the server's check and the
+/// client's expectation of it are one rule.
+///
+/// Caveat: when a server enables account admission
+/// (`TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`), a tenant outside these
+/// namespaces is refused with `account_identity_unlinked` instead of taking
+/// the invite-free path. That switch is global, default-off, and refuses to
+/// start while unlinked identities remain.
+pub fn is_anchored_tenant(tenant_id: &str) -> bool {
+    ANCHOR_NAMESPACES
+        .iter()
+        .any(|prefix| tenant_id.strip_prefix(prefix).is_some_and(is_hash))
+}
+
 impl AdmissionEvidence {
     pub fn signing_bytes(&self) -> Result<Vec<u8>, EvidenceMalformed> {
         if self.profile != EVIDENCE_DOMAIN
@@ -318,6 +343,23 @@ pub fn receipt_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tenant_is_anchored_only_with_a_hash_after_its_namespace() {
+        let hash = "a".repeat(64);
+        assert!(is_anchored_tenant(&format!("near-{hash}")));
+        assert!(is_anchored_tenant(&format!("nearai-{hash}")));
+        for tenant in [
+            "nearai-abc".to_string(),
+            "near-abc".to_string(),
+            format!("near-{}", "A".repeat(64)),
+            format!("nearish-{hash}"),
+            format!("tenant-{hash}"),
+            hash.clone(),
+        ] {
+            assert!(!is_anchored_tenant(&tenant), "{tenant}");
+        }
+    }
     #[test]
     fn evidence_v2_signs_admission_policy_inputs_and_refuses_v1() {
         let evidence = AdmissionEvidence {
