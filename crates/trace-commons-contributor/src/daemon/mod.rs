@@ -977,6 +977,16 @@ async fn drain_approved(
                 // at all.
                 q.revoke_approval(entry.entry_id, &reason_label);
             }
+            uploader::UploadDecision::HeldForReview {
+                reason_label,
+                pin,
+                attested_inference,
+            } => {
+                // Held with the witness's certified bytes pinned. Nothing
+                // re-approves it: the reason is one of
+                // `REASONS_NEEDING_A_PERSON`.
+                q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
+            }
             uploader::UploadDecision::Failed { reason_label } => {
                 // Same rule on the failure side: `submit_one` can report an
                 // admission refusal either way round depending on where in
