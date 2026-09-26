@@ -902,6 +902,28 @@ public sealed partial class MainWindow : Window
         await ViewModel.RefreshAsync().ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// The button on a void notice. Tag first, DataContext second, as for a
+    /// queue row: which notice a click acknowledges must never be ambiguous.
+    /// </summary>
+    private async void OnAcknowledgeGrantVoid(object sender, RoutedEventArgs e)
+    {
+        GrantVoidCard? card = sender is FrameworkElement element
+            ? element.Tag as GrantVoidCard ?? element.DataContext as GrantVoidCard
+            : null;
+        if (card is null)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AcknowledgeGrantVoidAsync(card);
+    }
+
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
         var target = ViewModel.HealthDestination;
