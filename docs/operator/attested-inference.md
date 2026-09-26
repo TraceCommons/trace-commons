@@ -607,16 +607,35 @@ revoked, missing-object or mismatched-object evidence. The raw proof is never in
 an exported envelope, public receipt, audit event or Debug output. Old metadata
 without evidence remains unknown.
 
-A same-ID file-only retry must preserve the original received body and either
-supply the exact original headers or omit both. Changed or partial supplied
-proof conflicts, including stale replacement certificates. Headerless quarantine
-remediation can change content, but retains the first proof only as history;
-only identical source bytes can refresh its transformed-object association.
-File locks give same-ID submissions cross-process ownership through commit;
-concurrent attempts receive a conflict and may retry. A separate metadata lock
-preserves immutable proof against stale metadata writers. Locks are released on
-process exit, and empty lock files are retained to avoid inode races. Other
-existing mutation paths retain their existing synchronization; a stale status
-write cannot override a durable revocation tombstone in this reader. File-only
-mode does not supply database account admission or session-wide withdrawal, and
-this change activates no scoring, credit or export policy.
+A same-ID file-only retry of a non-quarantined submission must preserve the
+original received body and either supply the exact original headers or omit
+both. Changed or partial supplied proof conflicts, including stale replacement
+certificates. Quarantine remediation can change content, with or without fresh
+witness headers. As in database mode, fresh headers are verified against the
+new body for that request only, and the first proof stays as history. Only
+identical source bytes can refresh the proof's transformed-object association.
+
+Server-side re-stores intentionally drop current attestation. Review approval
+or rejection writes a reviewed envelope under a new key. Process evaluation,
+rescrub, the PII backstop and stale-prior clearing also rewrite the object.
+None of them re-binds the source proof, so afterwards `current_claim` reports
+`artifact_mismatch`. The proof is kept, but as history, not as current
+coverage. No server transform is currently defined as preserving the
+association.
+
+File locks give same-ID submissions cross-process ownership through commit, and
+a concurrent submit receives a conflict and may retry. A separate metadata lock
+covers every metadata write in every mode. Its critical section is only read,
+merge, write and fsync, so concurrent writers wait for it rather than failing.
+It preserves immutable proof against stale metadata writers. Locks are released
+on process exit. Each lock file is empty, and there is one per submission ID per
+namespace (`submission-locks`, `metadata-locks`). They are retained after purge
+so that later writers for the same ID contend on the same inode. Their names
+are submission IDs, which tombstones and the audit log already hold. Deleting
+the tenant directory removes them. Proof bytes are stored as standard base64
+strings.
+
+Other existing mutation paths keep their existing synchronization, and a stale
+status write cannot override a durable revocation tombstone in this reader.
+File-only mode does not supply database account admission or session-wide
+withdrawal, and this change activates no scoring, credit or export policy.

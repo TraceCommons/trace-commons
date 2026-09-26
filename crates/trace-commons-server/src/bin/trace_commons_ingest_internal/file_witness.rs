@@ -13,7 +13,11 @@ use trace_commons_server::trace_corpus_storage::{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Evidence {
+    /// Exact header bytes, stored as standard base64 rather than a JSON array
+    /// of numbers (which was 3-4x the certificate's own size).
+    #[serde(with = "base64_bytes")]
     certificate_json: Vec<u8>,
+    #[serde(with = "base64_bytes")]
     signature_header: Vec<u8>,
     raw_body_sha256: String,
     certificate_version: i16,
@@ -21,6 +25,25 @@ pub(super) struct Evidence {
     receipt_sha256: Option<String>,
     object_key: String,
     artifact_sha256: String,
+}
+
+mod base64_bytes {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(encoded)
+            .map_err(|_| serde::de::Error::custom("witness_evidence_bytes_invalid"))
+    }
 }
 
 impl std::fmt::Debug for Evidence {
@@ -58,7 +81,44 @@ impl Evidence {
 /// Ownership is cross-process and crash-released. Keep the lock file permanently:
 /// unlinking it would let different processes lock different inodes for one ID.
 /// Distinct namespaces avoid recursively taking the submit lock at metadata commit.
+///
+/// Lock files are empty and there is one per submission ID per namespace
+/// (`submission-locks`, `metadata-locks`). They are never reclaimed while the
+/// tenant directory exists, including after the submission is purged, because
+/// a later writer for the same ID must contend on the same inode. They carry
+/// no content; the file name is the submission ID, which the tenant's
+/// tombstones and audit log already hold. Removing the tenant directory
+/// removes them.
+///
+/// This is the non-blocking form, for the long-held submission-ownership
+/// lock: a second submit of the same ID gets a quick refusal, not a wait.
 pub(super) fn lock(
+    root: &Path,
+    tenant_id: &str,
+    id: Uuid,
+    namespace: &str,
+) -> anyhow::Result<std::fs::File> {
+    let file = open_lock_file(root, tenant_id, id, namespace)?;
+    file.try_lock()
+        .map_err(|_| anyhow::anyhow!("submission_file_lock_unavailable"))?;
+    Ok(file)
+}
+
+/// The blocking form, for the metadata namespace. Its critical section is
+/// only read, merge, write and fsync, so a concurrent writer (review,
+/// backstop, maintenance, revocation) waits for it rather than failing.
+fn lock_blocking(
+    root: &Path,
+    tenant_id: &str,
+    id: Uuid,
+    namespace: &str,
+) -> anyhow::Result<std::fs::File> {
+    let file = open_lock_file(root, tenant_id, id, namespace)?;
+    file.lock()?;
+    Ok(file)
+}
+
+fn open_lock_file(
     root: &Path,
     tenant_id: &str,
     id: Uuid,
@@ -69,15 +129,12 @@ pub(super) fn lock(
         .join(tenant_storage_key(tenant_id))
         .join(namespace);
     std::fs::create_dir_all(&directory)?;
-    let file = std::fs::OpenOptions::new()
+    Ok(std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(directory.join(format!("{id}.lock")))?;
-    file.try_lock()
-        .map_err(|_| anyhow::anyhow!("submission_file_lock_unavailable"))?;
-    Ok(file)
+        .open(directory.join(format!("{id}.lock")))?)
 }
 
 /// Preserve the first proof through remediation. A headerless changed-body
@@ -180,7 +237,7 @@ pub(super) fn write_record(
     root: &Path,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
-    let _lock = lock(
+    let _lock = lock_blocking(
         root,
         &record.tenant_id,
         record.submission_id,

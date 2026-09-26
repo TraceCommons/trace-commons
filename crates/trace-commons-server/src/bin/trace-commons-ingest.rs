@@ -13455,24 +13455,12 @@ async fn submit_trace_handler(
                 ));
             }
             if principal_can_remediate_quarantined(tenant.auth(), &existing) {
-                // Changed-body headerless remediation retains historical proof.
-                // Supplied proof must still be the immutable original identity.
-                if state.db_mirror.is_none()
-                    && (headers.contains_key(
-                        trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
-                    ) || headers.contains_key(
-                        trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
-                    ))
-                {
-                    reject_conflicting_witness_retry(
-                        state.as_ref(),
-                        tenant.tenant_id(),
-                        envelope.submission_id,
-                        &headers,
-                        &raw_body,
-                    )
-                    .await?;
-                }
+                // Remediation may change the body, and a witnessing client
+                // re-signs what it re-posts. As in DB mode, the new headers are
+                // verified against the new body for this request only; the
+                // stored proof stays the first, historical one, and
+                // `file_witness::for_submission` never binds it to the
+                // changed object.
                 Some(existing)
             } else {
                 reject_conflicting_witness_retry(

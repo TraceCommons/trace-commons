@@ -93946,11 +93946,15 @@ mod witness_receipt {
         .unwrap();
         assert_eq!(
             persisted["witness_evidence"]["certificate_json"],
-            serde_json::json!(certificate.as_bytes())
+            serde_json::json!(
+                base64::engine::general_purpose::STANDARD.encode(certificate.as_bytes())
+            )
         );
         assert_eq!(
             persisted["witness_evidence"]["signature_header"],
-            serde_json::json!(signature.as_bytes())
+            serde_json::json!(
+                base64::engine::general_purpose::STANDARD.encode(signature.as_bytes())
+            )
         );
         assert_eq!(
             persisted["witness_evidence"]["raw_body_sha256"],
@@ -94217,7 +94221,9 @@ mod witness_receipt {
         );
         assert_eq!(
             evidence["certificate_json"],
-            serde_json::json!(certificate.as_bytes())
+            serde_json::json!(
+                base64::engine::general_purpose::STANDARD.encode(certificate.as_bytes())
+            )
         );
         // Even a subsequent approval cannot promote the old proof to changed content.
         remediated.status = TraceCorpusStatus::Accepted;
@@ -94236,6 +94242,139 @@ mod witness_receipt {
             serde_json::to_value(persisted).unwrap()["witness_evidence"],
             evidence
         );
+    }
+
+    #[tokio::test]
+    async fn file_witness_changed_remediation_with_a_fresh_certificate_matches_db_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let mut envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                body.clone(),
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let mut prior = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        prior.status = TraceCorpusStatus::Quarantined;
+        write_submission_record(temp.path(), &prior).unwrap();
+        // The contributor fixes the content and re-signs what it re-posts.
+        set_metadata_only_user_message(&mut envelope, "a corrected trace with fresh proof");
+        let changed_body = serde_json::to_vec(&envelope).unwrap();
+        let (fresh_certificate, fresh_signature) = certificate_v2_over(&changed_body);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                changed_body,
+                Some((&fresh_certificate, &fresh_signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK,
+            "a valid certificate over the corrected body is not a witness conflict"
+        );
+        // As in DB mode, the stored proof stays the first, historical one.
+        let remediated = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let evidence = serde_json::to_value(&remediated).unwrap()["witness_evidence"].clone();
+        assert_eq!(
+            evidence["raw_body_sha256"],
+            hex::encode(Sha256::digest(&body))
+        );
+        let first = serde_json::to_value(&prior).unwrap()["witness_evidence"].clone();
+        assert_eq!(evidence["certificate_json"], first["certificate_json"]);
+    }
+
+    #[tokio::test]
+    async fn file_witness_proof_is_not_current_after_the_real_review_approval() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut held = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        held.status = TraceCorpusStatus::Quarantined;
+        write_submission_record(temp.path(), &held).unwrap();
+        review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(envelope.submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("reviewed".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect("the reviewer approves the held submission");
+        let approved = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(approved.status, TraceCorpusStatus::Accepted);
+        assert!(approved.witness_evidence.is_some(), "the proof is kept");
+        // The approval re-stores a reviewed envelope. No server transform
+        // re-binds the source proof, so it is history, never current coverage.
+        assert_eq!(
+            file_claim(&state, envelope.submission_id).coverage,
+            Coverage::ArtifactMismatch
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_witness_metadata_writers_wait_for_each_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state, body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        let (locked, wait_for_lock) = std::sync::mpsc::channel();
+        let root = temp.path().to_path_buf();
+        let id = envelope.submission_id;
+        let holder = std::thread::spawn(move || {
+            let held = file_witness::lock(&root, "tenant-a", id, "metadata-locks").unwrap();
+            locked.send(()).unwrap();
+            std::thread::sleep(StdDuration::from_millis(200));
+            drop(held);
+        });
+        wait_for_lock.recv().unwrap();
+        // Another writer holding the metadata lock is a short critical
+        // section; a concurrent writer waits for it instead of failing.
+        record.status = TraceCorpusStatus::Quarantined;
+        write_submission_record(temp.path(), &record)
+            .expect("a concurrent metadata writer waits for the lock");
+        holder.join().unwrap();
+        let persisted = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, TraceCorpusStatus::Quarantined);
+        assert!(persisted.witness_evidence.is_some());
     }
 
     #[tokio::test]
@@ -94268,52 +94407,38 @@ mod witness_receipt {
                 .is_none()
         );
         drop(held);
-        // A failed durable commit cannot produce an OK response or partial proof.
-        let held = file_witness::lock(
-            temp.path(),
-            "tenant-a",
-            envelope.submission_id,
-            "metadata-locks",
-        )
-        .unwrap();
-        assert_eq!(
-            post_through_the_real_router(
+        // A failed durable commit cannot produce an OK response or partial
+        // proof. The metadata lock now waits instead of failing, so inject the
+        // failure at the metadata directory itself.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = submission_metadata_path(temp.path(), "tenant-a", envelope.submission_id);
+            let parent = path.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&parent).unwrap();
+            let permissions = std::fs::metadata(&parent).unwrap().permissions();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let status = post_through_the_real_router(
                 state.clone(),
                 body.clone(),
-                Some((&certificate, &signature))
+                Some((&certificate, &signature)),
             )
             .await
-            .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        assert!(
-            read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
-                .unwrap()
-                .is_none()
-        );
-        drop(held);
+            .status();
+            std::fs::set_permissions(&parent, permissions).unwrap();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(
+                read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
+                    .unwrap()
+                    .is_none()
+            );
+        }
         assert_eq!(
             post_through_the_real_router(state, body, Some((&certificate, &signature)))
                 .await
                 .status(),
             StatusCode::OK
         );
-        let mut record = read_submission_record(temp.path(), "tenant-a", envelope.submission_id)
-            .unwrap()
-            .unwrap();
-        let path = submission_metadata_path(temp.path(), "tenant-a", envelope.submission_id);
-        let original = std::fs::read(&path).unwrap();
-        let held = file_witness::lock(
-            temp.path(),
-            "tenant-a",
-            envelope.submission_id,
-            "metadata-locks",
-        )
-        .unwrap();
-        record.status = TraceCorpusStatus::Purged;
-        assert!(write_submission_record(temp.path(), &record).is_err());
-        assert_eq!(std::fs::read(path).unwrap(), original);
-        drop(held);
     }
 
     #[tokio::test]
