@@ -986,6 +986,16 @@ pub(crate) fn signed_fixture(bytes: Vec<u8>) -> (WitnessedEnvelope, String) {
     tests::signed_fixture(bytes)
 }
 
+/// [`signed_fixture`] with the certificate's `residual_risk_verdict` set to
+/// `verdict`, signed by the same test-only key.
+#[cfg(test)]
+pub(crate) fn signed_fixture_with_verdict(
+    bytes: Vec<u8>,
+    verdict: &str,
+) -> (WitnessedEnvelope, String) {
+    tests::signed_fixture_with_verdict(bytes, verdict)
+}
+
 #[cfg(test)]
 pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> WitnessedEnvelope {
     tests::signed_admission_fixture(bytes, account)
@@ -1514,6 +1524,27 @@ mod tests {
                 admission: None,
                 certificate_json,
                 signature_hex,
+            },
+            address_of(&key),
+        )
+    }
+
+    pub(crate) fn signed_fixture_with_verdict(
+        bytes: Vec<u8>,
+        verdict: &str,
+    ) -> (WitnessedEnvelope, String) {
+        let key = test_signer("witness-review-test-only");
+        let mut certificate: serde_json::Value =
+            serde_json::from_str(&certificate_json_for(&bytes)).unwrap();
+        certificate["residual_risk_verdict"] = serde_json::json!(verdict);
+        let signing_bytes = certificate_signing_bytes(&certificate)
+            .expect("the fixture certificate is well formed");
+        (
+            WitnessedEnvelope {
+                envelope_bytes: bytes,
+                admission: None,
+                certificate_json: certificate.to_string(),
+                signature_hex: sign_eip191(&key, &signing_bytes),
             },
             address_of(&key),
         )

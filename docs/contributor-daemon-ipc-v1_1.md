@@ -1332,9 +1332,20 @@ contributor, or a single `entry_id`. Absent, never zero: zero would read as
 
 **A group `approve` also leaves out sessions held for a person's review**, and
 `excluded_held` is how many. An entry is held when it was revoked for a
-reason no unattended approval can satisfy -- today only
-`token-distribution-review-required`, which clears through a witness review
-of that one session. A group control is by definition not a review of one
+reason no unattended approval can satisfy:
+
+- `token-distribution-review-required`, which clears through a witness review
+  of that one session;
+- `witness-risk-review-required`: a session approved on the contributor's
+  behalf that the witness certified with a residual-risk verdict other than
+  `low`. The witness has already seen it, and nothing went to the commons.
+  Its certified review is kept pinned to the entry, so `preview` shows the
+  witness's bytes without running the witness again, and a person's
+  `approve` uploads exactly those bytes. Like any pinned `Pending` preview,
+  the pin is released after the preview age limit, and opening it then runs
+  the witness again.
+
+A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,
 and are not in `skipped`. The watcher does not re-approve them under an
 `auto_upload` opt-in either; before it stopped, it re-approved one on the
