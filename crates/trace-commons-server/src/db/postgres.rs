@@ -4732,6 +4732,41 @@ impl Database for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)? as i64;
 
+        // Source-session withdrawal is account-scoped. Carry B's sessions onto
+        // A so a withdrawal made by either identity reaches every mapped
+        // version, and a session B already withdrew stays withdrawn for
+        // resumed uploads under A. When both accounts hold the same session,
+        // withdrawal wins. The mappings then follow; V78's immutability
+        // trigger admits exactly this re-key because the proposal above is
+        // consumed in this transaction. B's session rows are left in place,
+        // unreferenced, on the closed account.
+        let source_sessions_moved = tx
+            .execute(
+                "INSERT INTO trace_source_sessions
+                    (tenant_id, account_id, session_digest, created_at, withdrawn_at)
+                 SELECT tenant_id, $1, session_digest, created_at, withdrawn_at
+                   FROM trace_source_sessions
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $2
+                 ON CONFLICT (tenant_id, account_id, session_digest) DO UPDATE
+                   SET withdrawn_at = COALESCE(
+                       trace_source_sessions.withdrawn_at,
+                       EXCLUDED.withdrawn_at
+                   )",
+                &[&surviving_account_id, &absorbed_account_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)? as i64;
+        tx.execute(
+            "UPDATE trace_submission_sessions
+                SET account_id = $1
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $2",
+            &[&surviving_account_id, &absorbed_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.
         tx.execute(
@@ -4765,6 +4800,7 @@ impl Database for PgBackend {
             "principals_moved": principals_moved,
             "authenticators_moved": authenticators_moved,
             "public_runs_moved": public_runs_moved,
+            "source_sessions_moved": source_sessions_moved,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (

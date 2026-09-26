@@ -27,10 +27,26 @@ CREATE INDEX idx_trace_submission_sessions_source
     ON trace_submission_sessions (tenant_id, account_id, session_digest);
 
 -- A submission can be claimed once. No future writer may retarget it to
--- another session or account, even when the content row is gone.
+-- another session or account, even when the content row is gone. The single
+-- exception is an executed account merge: the mapping follows the absorbed
+-- account into the surviving one, keeping its submission and session, so a
+-- withdrawal made by either identity still reaches every mapped version.
 CREATE FUNCTION trace_submission_session_immutable() RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN
+    IF NEW.tenant_id = OLD.tenant_id
+       AND NEW.submission_id = OLD.submission_id
+       AND NEW.session_digest = OLD.session_digest
+       AND NEW.account_id <> OLD.account_id
+       AND EXISTS (
+           SELECT 1 FROM trace_account_merge_proposals p
+            WHERE p.tenant_id = OLD.tenant_id
+              AND p.absorbed_account_id = OLD.account_id
+              AND p.surviving_account_id = NEW.account_id
+              AND p.consumed_at IS NOT NULL
+       ) THEN
+        RETURN NEW;
+    END IF;
     RAISE EXCEPTION 'trace submission session mapping is immutable';
 END;
 $$;
@@ -57,3 +73,7 @@ CREATE POLICY trace_corpus_tenant_isolation ON trace_submission_sessions
 -- This hash-only column is the sole additional account-runtime privilege.
 GRANT SELECT (anchor_hash) ON trace_near_account_anchors
     TO trace_account_admission_runtime;
+-- Ownership also follows executed account merges: a submission bound to an
+-- absorbed account belongs to the survivor. Only the merge edge is readable.
+GRANT SELECT (tenant_id, absorbed_account_id, surviving_account_id, consumed_at)
+    ON trace_account_merge_proposals TO trace_account_admission_runtime;

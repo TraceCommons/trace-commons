@@ -1590,24 +1590,42 @@ async fn source_submission_owned_by_account(
     submission: Uuid,
     account: Uuid,
 ) -> Result<bool, DatabaseError> {
-    Ok(tx.query_one(
-        "SELECT NOT EXISTS (
+    // `owned` is the account plus every account an executed merge folded into
+    // it, transitively: a submission made before a merge still belongs to the
+    // survivor, while its admission, anchor, and unlinked-principal rows keep
+    // naming the absorbed account.
+    Ok(tx
+        .query_one(
+            "WITH RECURSIVE owned(account_id) AS (
+            SELECT $3::uuid
+            UNION
+            SELECT p.absorbed_account_id FROM trace_account_merge_proposals p
+              JOIN owned o ON p.surviving_account_id = o.account_id
+             WHERE p.tenant_id=$1 AND p.consumed_at IS NOT NULL
+         )
+         SELECT NOT EXISTS (
             SELECT 1 FROM trace_submissions s
             WHERE s.tenant_id=$1 AND s.submission_id=$2 AND NOT EXISTS (
                 SELECT 1 FROM trace_account_principals p
-                WHERE p.tenant_id=s.tenant_id AND p.principal_ref=s.auth_principal_ref AND p.account_id=$3
+                WHERE p.tenant_id=s.tenant_id AND p.principal_ref=s.auth_principal_ref
+                  AND p.account_id IN (SELECT account_id FROM owned)
             )
          ) AND NOT EXISTS (
             SELECT 1 FROM trace_admission_submissions l
             WHERE l.tenant_id=$1 AND l.submission_id=$2 AND NOT EXISTS (
                 SELECT 1 FROM trace_near_account_anchors a
-                WHERE a.tenant_id=l.tenant_id AND a.account_id=$3 AND a.anchor_hash='sha256:' || l.anchor_hash
+                WHERE a.tenant_id=l.tenant_id AND a.account_id IN (SELECT account_id FROM owned)
+                  AND a.anchor_hash='sha256:' || l.anchor_hash
             )
          ) AND NOT EXISTS (
             SELECT 1 FROM trace_account_admission_submissions a
-            WHERE a.tenant_id=$1 AND a.submission_id=$2 AND a.account_id<>$3
-         )", &[&tenant,&submission,&account]
-    ).await?.get(0))
+            WHERE a.tenant_id=$1 AND a.submission_id=$2
+              AND a.account_id NOT IN (SELECT account_id FROM owned)
+         )",
+            &[&tenant, &submission, &account],
+        )
+        .await?
+        .get(0))
 }
 
 /// Lock the source-session row before any content-row status write. The mapping
@@ -1618,6 +1636,19 @@ async fn lock_active_source_session_for_submission(
     tenant_id: &str,
     submission_id: Uuid,
 ) -> Result<(), DatabaseError> {
+    if lock_source_session_for_submission(tx, tenant_id, submission_id).await? {
+        return Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()));
+    }
+    Ok(())
+}
+
+/// Take the same source-session row lock and report whether the session is
+/// withdrawn, without refusing. Used by writers of terminal statuses.
+async fn lock_source_session_for_submission(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<bool, DatabaseError> {
     let row = tx
         .query_opt(
             "SELECT s.withdrawn_at
@@ -1632,10 +1663,7 @@ async fn lock_active_source_session_for_submission(
         )
         .await
         .map_err(DatabaseError::Postgres)?;
-    if row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()) {
-        return Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()));
-    }
-    Ok(())
+    Ok(row.is_some_and(|row| row.get::<_, Option<DateTime<Utc>>>(0).is_some()))
 }
 
 #[async_trait]
@@ -2718,7 +2746,28 @@ impl TraceCorpusStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        lock_active_source_session_for_submission(&tx, tenant_id, submission_id).await?;
+        if lock_source_session_for_submission(&tx, tenant_id, submission_id).await? {
+            // A withdrawn session already revoked this row. Retention and
+            // legacy revocation still mirror terminal statuses from file
+            // records that never saw the account withdrawal; those are
+            // idempotent no-ops here, so one withdrawn sibling cannot abort a
+            // maintenance run. Every consumer-visible status stays refused.
+            return match status {
+                TraceCorpusStatus::Revoked
+                | TraceCorpusStatus::Expired
+                | TraceCorpusStatus::Purged
+                | TraceCorpusStatus::Rejected => {
+                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    Ok(())
+                }
+                TraceCorpusStatus::Received
+                | TraceCorpusStatus::Accepted
+                | TraceCorpusStatus::Quarantined
+                | TraceCorpusStatus::AwaitingPiiBackstop => {
+                    Err(DatabaseError::Query("TraceSourceSessionWithdrawn".into()))
+                }
+            };
+        }
         let status_value = enum_to_storage(status)?;
         // Allowlisted label only -- never the caller's text. See
         // `safe_status_reason_label`.
