@@ -1570,6 +1570,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");
             }
+            // Only the daemon asks for a hold; listed so a CLI run that ever
+            // got one says so rather than failing to compile it away.
+            SubmitOutcome::HeldForReview { reason_label, .. } => {
+                println!("{preview_prefix}held ({reason_label})");
+            }
         }
     }
 

@@ -175,6 +175,55 @@ pub enum SubmitOutcome {
     Failed {
         reason_label: String,
     }, // network/auth or transient classifier failure after retries
+    /// The witness certified this session, and its verdict is one a person
+    /// has to see before it goes to the commons. Nothing was uploaded. Only
+    /// returned when the caller asked for it with
+    /// [`SubmitContext::hold_witnessed_unless_low_risk`]; the certified
+    /// response travels with it so the caller can keep it.
+    HeldForReview {
+        reason_label: String,
+        witnessed: Box<WitnessedEnvelope>,
+        attested_inference: Box<InferenceAttestationRecord>,
+    },
+}
+
+/// The label an unattended witnessed session is held under when its
+/// certificate's residual-risk verdict is not `low`.
+pub const REASON_WITNESS_RISK_REVIEW_REQUIRED: &str = "witness-risk-review-required";
+
+/// The R5 hold, decided: `Some` when the caller asked for it, this call ran
+/// the witness itself (`record` is set only then), and the verdict is not
+/// `low`.
+fn held_for_review(
+    hold: bool,
+    witnessed: Option<&WitnessedEnvelope>,
+    record: Option<InferenceAttestationRecord>,
+) -> Option<SubmitOutcome> {
+    let (response, record) = (witnessed?, record?);
+    if !hold || verdict_is_low(response) {
+        return None;
+    }
+    Some(SubmitOutcome::HeldForReview {
+        reason_label: REASON_WITNESS_RISK_REVIEW_REQUIRED.to_string(),
+        witnessed: Box::new(response.clone()),
+        attested_inference: Box::new(record),
+    })
+}
+
+/// Whether a certificate's verdict lets an unattended session go without a
+/// person. Only `low`: `medium` is quarantined unless an operator opted in
+/// and `high` always is, so sending either unattended trades a person's look
+/// for a server-side quarantine. A certificate with no readable verdict is
+/// not `low`.
+pub(crate) fn verdict_is_low(response: &WitnessedEnvelope) -> bool {
+    serde_json::from_str::<serde_json::Value>(&response.certificate_json)
+        .ok()
+        .and_then(|c| {
+            c.get("residual_risk_verdict")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "low")
+        })
+        .unwrap_or(false)
 }
 
 /// What the inference-receipt fetch produced for a shipped submission.
@@ -374,7 +423,8 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
             }),
             SubmitOutcome::SkippedParseFailure { .. }
             | SubmitOutcome::Refused { .. }
-            | SubmitOutcome::Failed { .. } => None,
+            | SubmitOutcome::Failed { .. }
+            | SubmitOutcome::HeldForReview { .. } => None,
         })
         .collect()
 }
@@ -431,6 +481,11 @@ pub struct SubmitContext<'a> {
     approved_envelope: Option<TraceContributionEnvelope>,
     approved_witness: Option<WitnessedEnvelope>,
     approved_token_bundle: Option<crate::token_bundle::TokenBundleReview>,
+    /// Set by the daemon for a session approved on the contributor's behalf:
+    /// a witnessed envelope whose verdict is not `low` is returned as
+    /// `HeldForReview` instead of uploaded. One-shot, like the approvals
+    /// above. See the spec's R5.
+    hold_unless_low_risk: bool,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -446,6 +501,17 @@ pub struct SubmitContext<'a> {
     /// Compiled out of every shipped build.
     #[cfg(test)]
     receipt_override: Option<trace_commons_attestation::receipt::ReceiptPayload>,
+    /// Stands in for a witness run, tests only.
+    ///
+    /// `witness_session` verifies a DCAP quote before it sends anything, and
+    /// no test holds an Intel-signed one, so without this the fresh-witness
+    /// path through `submit_loaded` -- including the unattended R5 hold that
+    /// only that path reaches -- is unreachable in-process. Everything after
+    /// the witness answers (grant check, residual sweep, size, the hold, the
+    /// upload) runs as it does for a real answer. Compiled out of every
+    /// shipped build.
+    #[cfg(test)]
+    witness_override: Option<(WitnessedEnvelope, InferenceAttestationRecord)>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -488,9 +554,12 @@ impl<'a> SubmitContext<'a> {
             approved_envelope: None,
             approved_witness: None,
             approved_token_bundle: None,
+            hold_unless_low_risk: false,
             last_receipt_shipped: ReceiptShipped::NoCall,
             #[cfg(test)]
             receipt_override: None,
+            #[cfg(test)]
+            witness_override: None,
         })
     }
 
@@ -553,6 +622,14 @@ impl<'a> SubmitContext<'a> {
         self.approved_witness = Some(response);
         self.invalidate_claim();
         Ok(())
+    }
+
+    /// Hold, rather than upload, the next witnessed session whose
+    /// certificate's verdict is not `low`. For sessions nobody reviewed:
+    /// the witness is the first point at which their risk is known, so this
+    /// hold stops the upload to the commons but not the send to the witness.
+    pub(crate) fn hold_witnessed_unless_low_risk(&mut self) {
+        self.hold_unless_low_risk = true;
     }
 
     pub(crate) fn use_approved_token_bundle(
@@ -1004,6 +1081,12 @@ impl<'a> SubmitContext<'a> {
             .trust()
             .map_err(|_| "witness_expected_measurement_malformed")?;
 
+        #[cfg(test)]
+        if let Some((response, record)) = self.witness_override.clone() {
+            let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
+            return Ok((parsed, response, record, ReceiptShipped::NoCall));
+        }
+
         let admission_profile = admission_profile_for_request(
             settings.admission_evidence,
             attested.map(|call| call.request_body()),
@@ -1110,6 +1193,7 @@ impl<'a> SubmitContext<'a> {
         // behind would apply to whatever session came next.
         let approved_envelope = self.approved_envelope.take();
         let approved_witness = self.approved_witness.take();
+        let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1180,6 +1264,7 @@ impl<'a> SubmitContext<'a> {
         // risk while the contributor believed it carried a certificate.
         let witness_settings = self.cfg.witness.clone();
         let mut witnessed: Option<WitnessedEnvelope> = None;
+        let mut witnessed_record: Option<InferenceAttestationRecord> = None;
 
         let mut envelope = match approved_envelope {
             Some(approved) => {
@@ -1312,7 +1397,7 @@ impl<'a> SubmitContext<'a> {
                             // The record is dropped on this path: the CLI keeps
                             // no per-entry store to write it to. The daemon's
                             // review path is where it is kept.
-                            Ok((parsed, response, _attested_inference, shipped)) => {
+                            Ok((parsed, response, attested_inference, shipped)) => {
                                 // `parse_witnessed_envelope` inside
                                 // `witness_envelope` is what verified this
                                 // certificate against the bytes that came
@@ -1323,6 +1408,7 @@ impl<'a> SubmitContext<'a> {
                                 });
                                 self.last_receipt_shipped = shipped;
                                 witnessed = Some(response);
+                                witnessed_record = Some(attested_inference);
                                 parsed
                             }
                             Err(label) => {
@@ -1420,6 +1506,18 @@ impl<'a> SubmitContext<'a> {
         if envelope_size_ok(&envelope).is_err() {
             let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
             return Ok(refused_for_size(&transcript.session_hash, size));
+        }
+
+        // R5: the last check before anything reaches the commons, after every
+        // refusal above, so a session that would be refused is refused rather
+        // than held. `witnessed_record` is set only when this call ran the
+        // witness itself, never for a certificate a person already reviewed.
+        if let Some(held) = held_for_review(
+            hold_unless_low_risk,
+            witnessed.as_ref(),
+            witnessed_record.take(),
+        ) {
+            return Ok(held);
         }
 
         if let Some(bundle) = self.approved_token_bundle.take() {
@@ -5471,6 +5569,334 @@ mod tests {
         }
     }
 
+    fn witnessed_with_verdict(verdict: Option<&str>) -> WitnessedEnvelope {
+        let mut w = witnessed_over(UNCANONICAL_ENVELOPE);
+        let mut c: serde_json::Value = serde_json::from_str(&w.certificate_json).unwrap();
+        match verdict {
+            Some(v) => c["residual_risk_verdict"] = serde_json::json!(v),
+            None => {
+                c.as_object_mut().unwrap().remove("residual_risk_verdict");
+            }
+        }
+        w.certificate_json = c.to_string();
+        w
+    }
+
+    /// R5: an unattended session is held on any verdict but `low`, and a
+    /// certificate with no readable verdict counts as not `low`.
+    #[test]
+    fn only_a_low_verdict_lets_an_unattended_session_through() {
+        let record =
+            || InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD);
+        for (verdict, held) in [
+            (Some("low"), false),
+            (Some("medium"), true),
+            (Some("high"), true),
+            (Some("LOW"), true),
+            (None, true),
+        ] {
+            let w = witnessed_with_verdict(verdict);
+            let outcome = held_for_review(true, Some(&w), Some(record()));
+            assert_eq!(
+                matches!(
+                    &outcome,
+                    Some(SubmitOutcome::HeldForReview { reason_label, .. })
+                        if reason_label == REASON_WITNESS_RISK_REVIEW_REQUIRED
+                ),
+                held,
+                "{verdict:?}"
+            );
+        }
+        let mut garbled = witnessed_with_verdict(Some("low"));
+        garbled.certificate_json = "not json".into();
+        assert!(held_for_review(true, Some(&garbled), Some(record())).is_some());
+    }
+
+    /// Only when asked, and only for a certificate this call obtained: a
+    /// person's review (no record) and a CLI run (not asked) are never held.
+    #[test]
+    fn the_hold_applies_only_when_asked_and_only_to_a_fresh_certificate() {
+        let record =
+            || InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD);
+        let medium = witnessed_with_verdict(Some("medium"));
+        assert!(held_for_review(false, Some(&medium), Some(record())).is_none());
+        assert!(held_for_review(true, Some(&medium), None).is_none());
+        assert!(held_for_review(true, None, Some(record())).is_none());
+    }
+
+    /// What both R5 wiring tests start from: an enrolled store whose config
+    /// pins the fixture witness signer, a stub issuer, a byte-capturing
+    /// ingest, and the witness's answer for the fixture session certified
+    /// with `verdict`.
+    async fn r5_setup(
+        verdict: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::config::ConfigStore,
+        ContributorConfig,
+        Arc<Mutex<CapturedUpload>>,
+        WitnessedEnvelope,
+    ) {
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        // The grants the stub issuer mints, inside the certified bytes, as
+        // the witness would have put them there.
+        let mut envelope = baseline_envelope(&cfg).await;
+        let token = ClaimToken {
+            access_token: "review-only-not-stored".into(),
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            consent_scopes: cfg.consent_scopes.clone(),
+            allowed_uses: vec![
+                "debugging".into(),
+                "evaluation".into(),
+                "model_training".into(),
+                "aggregate_analytics".into(),
+            ],
+        };
+        stamp_granted_scopes(&mut envelope, &cfg, &token);
+        let (witnessed, signer) = crate::witness::transport::signed_fixture_with_verdict(
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+            verdict,
+        );
+        cfg.witness = Some(WitnessSettings {
+            admission_evidence: false,
+            url: "https://no-repeat-witness.invalid".into(),
+            signing_address: signer,
+            expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+        });
+        store.save_config(&cfg).unwrap();
+        (dir, store, cfg, capture, witnessed)
+    }
+
+    const R5_PROJECT_KEY: &str = "/Users/testuser/code/r5";
+
+    /// The fixture session, approved on the contributor's behalf under the
+    /// terms `cfg` sets.
+    fn r5_unattended_entry(
+        cfg: &ContributorConfig,
+        reference: &crate::source::SessionRef,
+    ) -> crate::daemon::queue::QueueEntry {
+        let (source, _) = fixture_selection().remove(0);
+        let transcript = source.load(reference).unwrap();
+        crate::daemon::queue::QueueEntry {
+            entry_id: crate::daemon::queue::entry_id_for(&transcript.session_hash),
+            session_hash: transcript.session_hash,
+            source: "claude-code".into(),
+            project_key: R5_PROJECT_KEY.into(),
+            project_label: "r5".into(),
+            path: reference.path.clone(),
+            size_bytes: std::fs::metadata(&reference.path).unwrap().len(),
+            discovered_at: Utc::now(),
+            state: crate::daemon::queue::QueueState::Approved,
+            approved_unattended: true,
+            approved_scopes: Some(cfg.consent_scopes.clone()),
+            approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None, false)),
+            ..Default::default()
+        }
+    }
+
+    /// Reviewed on #1029: the R5 wiring, through the uploader rather than
+    /// around it. Removing `hold_witnessed_unless_low_risk()` from the
+    /// uploader left every earlier test green. An unattended session the
+    /// witness rates `medium` must come back held with its certified review
+    /// saved and nothing sent; and a person's approve of that entry must send
+    /// exactly those certified bytes, without running the witness again.
+    #[tokio::test]
+    async fn an_unattended_medium_verdict_is_held_and_a_persons_approve_sends_the_pinned_bytes() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let (_dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = r5_unattended_entry(&cfg, &reference);
+        let settings = crate::daemon::settings::DaemonSettings::default();
+        let opts = review_options();
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.witness_override = Some((
+            witnessed.clone(),
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
+        ));
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
+        .await
+        .unwrap();
+        let UploadDecision::HeldForReview {
+            reason_label,
+            pin,
+            attested_inference,
+        } = decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(reason_label, REASON_WITNESS_RISK_REVIEW_REQUIRED);
+        assert!(
+            capture.lock().unwrap().bodies.is_empty(),
+            "nothing reached the commons"
+        );
+
+        // What `drain_approved` does with that decision, then a person.
+        let mut q = crate::daemon::queue::Queue::default();
+        q.upsert(entry.clone(), 10).unwrap();
+        assert!(q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference));
+        assert!(q.get(entry.entry_id).unwrap().held_for_review());
+        assert!(q.approve(
+            entry.entry_id,
+            &cfg.consent_scopes,
+            entry.approved_inputs.as_deref(),
+            None,
+            None,
+            None
+        ));
+        let approved = q.get(entry.entry_id).unwrap().clone();
+        assert_eq!(
+            approved.previewed_envelope_digest.as_deref(),
+            Some(pin.as_str())
+        );
+
+        // No stand-in this time: had the upload not used the pinned review,
+        // it would have tried a witness that does not exist and refused.
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &approved, Utc::now())
+        .await
+        .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+        let captured = capture.lock().unwrap();
+        assert_eq!(
+            captured.bodies,
+            vec![witnessed.envelope_bytes.clone()],
+            "exactly the certified bytes the entry was held with"
+        );
+    }
+
+    /// Reviewed on #1029: the hold applied only when the uploader ran the
+    /// witness itself. A contributor who opened a witness review on a
+    /// waiting session in an automatic project, saw a verdict that was not
+    /// `low`, and closed it without approving left the entry pinned; the
+    /// watcher then approved it on their behalf, and the upload pass sent the
+    /// certified bytes with no hold and nobody's approve.
+    ///
+    /// Driven through `drain_approved`, so it also pins that pass's handling
+    /// of the hold: the entry must end waiting, held, and still pinned.
+    #[tokio::test]
+    async fn an_unattended_approval_of_a_pinned_medium_review_is_held_by_the_upload_pass() {
+        use crate::daemon::queue::QueueState;
+        let (_dir, store, cfg, capture, witnessed) = r5_setup("medium").await;
+        let (_, reference) = fixture_selection().remove(0);
+        let mut entry = r5_unattended_entry(&cfg, &reference);
+        let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
+            witnessed.clone(),
+            entry.session_hash.clone(),
+            entry.approved_inputs.clone().unwrap(),
+            None,
+            None,
+            None,
+        );
+        let pin = artifact.digest().unwrap();
+        entry.previewed_envelope_digest = Some(pin.clone());
+        let id = entry.entry_id;
+
+        let shared =
+            std::sync::Arc::new(crate::daemon::ipc::DaemonShared::load(store.clone()).unwrap());
+        {
+            let mut s = shared.settings.lock().unwrap();
+            s.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/claude-code"),
+            });
+            s.codex_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: _dir.path().join("no-codex"),
+            });
+        }
+        shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_mode(
+                R5_PROJECT_KEY,
+                crate::daemon::policy::ProjectMode::AutoUpload,
+                Utc::now(),
+            )
+            .unwrap();
+        shared
+            .queue
+            .lock()
+            .unwrap()
+            .upsert(entry.clone(), 10)
+            .unwrap();
+        // After `DaemonShared::load`, whose sweep drops review bytes that no
+        // queued entry is pinned to.
+        crate::daemon::approved_envelope::save_witnessed(&store, id, &artifact).unwrap();
+
+        crate::daemon::drain_approved_for_test(&shared, Utc::now())
+            .await
+            .unwrap();
+
+        let held = shared.queue.lock().unwrap().get(id).unwrap().clone();
+        assert!(
+            capture.lock().unwrap().bodies.is_empty(),
+            "nothing reached the commons"
+        );
+        assert_eq!(held.state, QueueState::Pending);
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(REASON_WITNESS_RISK_REVIEW_REQUIRED)
+        );
+        assert!(held.held_for_review());
+        assert_eq!(
+            held.previewed_envelope_digest.as_deref(),
+            Some(pin.as_str()),
+            "the review it was held with stays pinned"
+        );
+        assert!(
+            crate::daemon::approved_envelope::load_witnessed(&store, id)
+                .unwrap()
+                .is_some(),
+            "and survives the pass's sweep"
+        );
+
+        // A person approves, and the next pass sends exactly those bytes.
+        assert!(shared.queue.lock().unwrap().approve(
+            id,
+            &cfg.consent_scopes,
+            entry.approved_inputs.as_deref(),
+            None,
+            None,
+            None
+        ));
+        crate::daemon::drain_approved_for_test(&shared, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            shared.queue.lock().unwrap().get(id).unwrap().state,
+            QueueState::Uploaded
+        );
+        assert_eq!(
+            capture.lock().unwrap().bodies,
+            vec![witnessed.envelope_bytes.clone()]
+        );
+    }
+
     /// Envelope bytes whose compact re-serialisation is a DIFFERENT string, so
     /// a `call_json` on this path would be caught rather than passing because
     /// the fixture was already canonical.
@@ -5749,6 +6175,10 @@ pub fn outcomes_to_json(
                     "session_ref": session_ref,
                     "size_bytes": size_bytes,
                     "limit_bytes": limit_bytes,
+                }),
+                SubmitOutcome::HeldForReview { reason_label, .. } => serde_json::json!({
+                    "outcome": "held",
+                    "reason": reason_label,
                 }),
                 SubmitOutcome::Failed { reason_label } => serde_json::json!({
                     "outcome": "failed",
