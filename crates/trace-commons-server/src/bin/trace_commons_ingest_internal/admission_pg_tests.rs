@@ -1371,6 +1371,21 @@ async fn invalid_or_withdrawn_source_session_refuses_before_budget_and_staging()
             .unwrap(),
         TraceSourceSessionStatus::Active
     );
+    // A second version of the same session. Withdrawing `original` must
+    // account for it too: its own audit event, not only its deletion.
+    let sibling = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        &principal_for(token),
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+    )
+    .await;
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, account_id, &digest, sibling)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
     let mut withdraw = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/v1/account/traces/{original}/withdraw"))
@@ -1384,6 +1399,56 @@ async fn invalid_or_withdrawn_source_session_refuses_before_budget_and_staging()
         StatusCode::OK
     );
     assert!(!staged_original.exists());
+    for id in [original, sibling] {
+        let revoke_events: i64 = client
+            .query_one(
+                "SELECT count(*) FROM trace_audit_events
+                  WHERE submission_id = $1 AND action = 'revoke'",
+                &[&id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            revoke_events, 1,
+            "every withdrawn version records its own hash-only revoke event"
+        );
+    }
+
+    // A plain submission-level tombstone with no source session is refused
+    // with its own label, not the source-session one.
+    let mut tombstoned = sample_envelope().await;
+    make_metadata_only_low_risk(&mut tombstoned);
+    tombstoned.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("ses_{}", Uuid::new_v4().simple()),
+        },
+    );
+    db.record_trace_withdrawal(
+        &tenant,
+        tombstoned.submission_id,
+        Utc::now(),
+        "received",
+        "not_distributed",
+    )
+    .await
+    .unwrap();
+    let tombstone_response = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&tombstoned).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(tombstone_response.status(), StatusCode::CONFLICT);
+    let tombstone_body = axum::body::to_bytes(tombstone_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&tombstone_body).unwrap()["error"],
+        "submission_withdrawn"
+    );
 
     // Recreate both service state and PostgreSQL handles, then authenticate a
     // new browser session. The digest must survive every one of those changes.

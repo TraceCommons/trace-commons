@@ -502,7 +502,8 @@ async fn reserve_account(
         .map_err(|_| denied())?
         .is_some()
     {
-        return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
+        // A submission-level tombstone, with or without a source session.
+        return Err(api_error(StatusCode::CONFLICT, "submission_withdrawn"));
     }
     // The shared guard serializes both admission modes. Read *after* taking
     // it: a legacy worker may have completed while this request waited.
