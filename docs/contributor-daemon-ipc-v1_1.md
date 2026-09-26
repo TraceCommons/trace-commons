@@ -1541,11 +1541,63 @@ terms. Narrowing voids nothing. Unlike arming, the void is written **after**
 the mode change and a failed write does not undo it, because voiding is the
 safe direction.
 
+Four entries belong to the automatic grant (`grant_automatic`, below):
+`automatic-granted` and `automatic-grant-withdrawn` record it being given and
+withdrawn; `armed-by-default` records a project it armed, with that project's
+`project_label`; `automatic-grant-voided` records the grant itself voided by
+widened terms, with the same `detail` labels as `auto-upload-voided`.
+
 `limit` is optional, defaults to 50, and is capped at 1000 even if a larger
 value is requested. Entries are returned newest first, matching
 `list_history`'s convention. `action` and `detail` are always fixed labels --
 never free text, a path, or a token. See "Authorization" above for what this
 log is (and is not) for.
+
+### `grant_automatic`, `withdraw_automatic_grant`, `automatic_grant`
+
+The Flow 1 grant (the connect-and-forget design, K3 and K4): contribute
+automatically from projects discovered from now on.
+
+```json
+{ "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
+```
+
+`grant_automatic` takes no params and returns the grant as `automatic_grant`
+reports it. It is refused with `arming-terms-unavailable` (`ERR_UNAVAILABLE`)
+when there is no config to record terms from, and with `audit-write-failed`
+when its `automatic-granted` entry cannot be written, in which case nothing is
+granted. A second call replaces the first, and records what is on disk again.
+
+**It arms nothing already on disk**, recorded per source. Each source's first
+successful discovery in a full watcher pass under the grant records every
+session in it and the project each belongs to, and arms nothing from them. So
+a harness connected after the grant, one pointed at another root, and one whose
+discovery failed on an earlier pass are all recorded before they can arm
+anything; until a source is recorded, none of its sessions arms a project.
+`on_disk_recorded` is true once any source has been recorded. A grant given
+while a pass is listing the disk is recorded by a later pass.
+
+After a source is recorded, a session from it in a project that no recorded
+source had on disk, with no policy entry of its own, and not the
+unknown-project bucket, arms its project: an explicit `auto_upload` entry, the
+terms it is granted under, and an `armed-by-default` audit row written first.
+A project with any session on disk at the grant keeps asking, for its new
+sessions too. And a session that was on disk at the grant is **never approved
+unattended in a project the grant armed**, whichever project it reads as now;
+it waits for the contributor. That holds after the grant is withdrawn or
+voided, and stops holding for a project once the contributor sets its mode
+themselves.
+
+That is what makes a re-grant after logout safe. Logout wipes the policy,
+including a project set to `ignore`; a re-grant records the disk again, so that
+project asks rather than being armed as new.
+
+Widened terms void the grant itself as well as the projects it armed, with an
+`automatic-grant-voided` entry. `withdraw_automatic_grant` returns
+`{"withdrawn": bool}` and leaves the projects the grant armed as they are;
+each is withdrawn with `set_project_mode`. `automatic_grant` returns
+`{"granted": false}` when none is in force. None of the three returns a path
+or a count of them.
 
 ### `queue_outcome_counts`
 

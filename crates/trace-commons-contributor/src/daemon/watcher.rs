@@ -160,17 +160,156 @@ fn tick_over(
     sweep_grants(shared, &ctx);
     let mut out = PassOutcome::default();
 
-    for source in &sources {
-        let refs = match source.discover() {
-            Ok(refs) => refs,
-            Err(_) => continue,
-        };
+    // Read before anything is listed: a grant given while discovery walks the
+    // disk is recorded by a later pass, from a listing taken after it.
+    let grant = shared.policy.lock().expect("policy lock").grant_id();
+    let discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = sources
+        .iter()
+        .filter_map(|source| source.discover().ok().map(|refs| (source.as_ref(), refs)))
+        .collect();
+    // Before any session is visited, so nothing on disk in a source recorded
+    // now can be armed by the grant. A source whose discovery failed is not
+    // recorded, and arms nothing until a pass records it.
+    if let Some(grant) = grant {
+        record_sources_for_grant(shared, &ctx, grant, &discovered);
+    }
+    for (source, refs) in &discovered {
         for session_ref in refs {
-            visit_session(shared, &ctx, source.as_ref(), &session_ref, &mut out);
+            visit_session(shared, &ctx, *source, session_ref, &mut out);
         }
     }
 
     finish_pass(shared, out, true)
+}
+
+/// Record what is on disk for the Flow 1 grant `grant`, per source: each
+/// source this full pass discovered that the grant has not recorded yet --
+/// the first pass after the grant, a harness connected or re-rooted since,
+/// or one whose discovery failed before -- has every session and the project
+/// each belongs to recorded, eligible or not. Only a full pass may do this; a
+/// scoped pass sees only what changed. See `policy::AutomaticGrant`.
+fn record_sources_for_grant(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    grant: DateTime<Utc>,
+    discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+) {
+    for (source, refs) in discovered {
+        let key = ctx.source_key(source.name());
+        if !shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .needs_source_record(grant, &key)
+        {
+            continue;
+        }
+        let mut sessions = std::collections::BTreeSet::new();
+        let mut projects = std::collections::BTreeSet::new();
+        for session_ref in refs {
+            sessions.insert(session_ref.path.to_string_lossy().to_string());
+            projects.insert(project_key_of(shared, *source, session_ref));
+        }
+        let mut policy = shared.policy.lock().expect("policy lock");
+        if policy.record_source(grant, &key, sessions, projects)
+            && policy.save(&shared.store).is_err()
+        {
+            tracing::warn!("could not persist what was on disk for the automatic grant");
+        }
+    }
+}
+
+/// The project a session belongs to, through the same cwd cache the pass
+/// uses.
+fn project_key_of(
+    shared: &DaemonShared,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+) -> String {
+    let modified_at = session_ref.group_modified_at.or_else(|| {
+        std::fs::metadata(&session_ref.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(DateTime::<Utc>::from)
+    });
+    let cwd = match modified_at {
+        Some(modified_at) => {
+            let obs = Observation {
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                modified_at,
+            };
+            resolve_cwd(shared, source, session_ref, &obs)
+        }
+        None => session_ref.cwd.clone(),
+    };
+    super::policy::project_for(cwd.as_deref()).0
+}
+
+/// Arm `project_key` under the Flow 1 grant when this session is the first
+/// sign of a project discovered after it (K3). The arming writes an explicit
+/// policy entry, the terms it is granted under, and an audit row -- recorded
+/// first, as `set_project_mode` does, so there is never an armed project
+/// with no record of how it was armed. Returns the mode now in force.
+fn arm_by_default(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    source: &dyn TraceSource,
+    project_key: &str,
+    session_path: &Path,
+) -> ProjectMode {
+    let path = session_path.to_string_lossy();
+    let source_key = ctx.source_key(source.name());
+    let Some(terms) = ctx.grant_terms.clone() else {
+        return ProjectMode::NotifyOnly;
+    };
+    let label = {
+        let policy = shared.policy.lock().expect("policy lock");
+        if !policy.arms_by_default(project_key, &path, &source_key) {
+            return ProjectMode::NotifyOnly;
+        }
+        super::policy::project_label_for(
+            super::policy::display_path_for_key(project_key)
+                .as_deref()
+                .unwrap_or(project_key),
+        )
+    };
+    let entry = super::audit::AuditEntry {
+        at: ctx.now,
+        action: "armed-by-default".to_string(),
+        project_label: Some(label),
+        detail: None,
+    };
+    if super::audit::append(&shared.store, &entry).is_err() {
+        tracing::warn!("could not record arming a new project; it asks first");
+        return ProjectMode::NotifyOnly;
+    }
+    let mut policy = shared.policy.lock().expect("policy lock");
+    // Re-checked: the grant or the project may have changed while the audit
+    // row was written.
+    if !policy.arms_by_default(project_key, &path, &source_key)
+        || policy.arm_by_grant(project_key, ctx.now, terms).is_err()
+    {
+        return ProjectMode::NotifyOnly;
+    }
+    if policy.save(&shared.store).is_err() {
+        tracing::warn!("could not persist arming a new project");
+    }
+    ProjectMode::AutoUpload
+}
+
+/// Whether a session waits for the contributor even though its project is
+/// armed: the automatic grant armed the project and the session was on disk
+/// at a grant. Arming nothing already on disk has to cover approval, not only
+/// arming -- a pre-grant session can come to read as a project the grant
+/// armed later (its recorded cwd changed, or it gained one after sitting in
+/// the unknown bucket). Both unattended approval sites ask this.
+fn held_back_from_the_grant(shared: &DaemonShared, project_key: &str, session_path: &Path) -> bool {
+    shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .holds_back_unattended(project_key, &session_path.to_string_lossy())
 }
 
 /// Maps a path something happened at to the session that owns it, without
@@ -305,7 +444,22 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
             "an automatic-contribution grant was voided; the project now asks first"
         );
     }
-    if !sweep.voided.is_empty() {
+    if let Some(reasons) = &sweep.automatic_grant_voided {
+        let entry = super::audit::AuditEntry {
+            at: now,
+            action: "automatic-grant-voided".to_string(),
+            project_label: None,
+            detail: Some(reasons.join(",")),
+        };
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record a voided automatic grant");
+        }
+        tracing::info!(
+            reasons = ?reasons,
+            "the automatic-contribution grant was voided; new projects ask first"
+        );
+    }
+    if !sweep.voided.is_empty() || sweep.automatic_grant_voided.is_some() {
         shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
 }
@@ -323,9 +477,21 @@ struct PassContext {
     /// The grant terms in force, from the same config and settings this pass
     /// reads. `None` without a config. See `sweep_grants`.
     grant_terms: Option<super::grant_terms::GrantTerms>,
+    /// Each source's name and root, for the automatic grant's per-source
+    /// record. See `SourceRoots::source_identities`.
+    source_identities: std::collections::BTreeMap<&'static str, String>,
 }
 
 impl PassContext {
+    /// A source as the automatic grant records it: its name and its root, so
+    /// a harness pointed at another root is recorded afresh.
+    fn source_key(&self, name: &str) -> String {
+        match self.source_identities.get(name) {
+            Some(root) => format!("{name} {root}"),
+            None => name.to_string(),
+        }
+    }
+
     fn read(shared: &DaemonShared, now: DateTime<Utc>, max_queue_entries: usize) -> Self {
         // The terms an auto-approval would be given under: the consent scopes,
         // and a fingerprint of everything else outside the session file that
@@ -369,6 +535,7 @@ impl PassContext {
             approval_inputs,
             admission_evidence,
             grant_terms,
+            source_identities: shared.source_roots_with_routing().source_identities(),
         }
     }
 }
@@ -527,7 +694,10 @@ fn visit_session(
         // it can never resurrect a dismissed, expired or uploaded
         // entry. Preserved here so skipping the load costs nothing
         // but the load.
-        if mode == ProjectMode::AutoUpload && state == QueueState::Pending {
+        if mode == ProjectMode::AutoUpload
+            && state == QueueState::Pending
+            && !held_back_from_the_grant(shared, &project_key, &obs.path)
+        {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
                 entry_id,
@@ -559,6 +729,11 @@ fn visit_session(
     let mode = {
         let policy = shared.policy.lock().expect("policy lock");
         policy.resolve(&project_key)
+    };
+    let mode = if mode == ProjectMode::NotifyOnly {
+        arm_by_default(shared, ctx, source, &project_key, &obs.path)
+    } else {
+        mode
     };
     if mode == ProjectMode::Ignore {
         out.report.ignored += 1;
@@ -659,7 +834,8 @@ fn visit_session(
     // upload would cost one of three re-uploads and a duplicate penalty.
     let armed = mode == ProjectMode::AutoUpload
         && !from_staging
-        && armed_settle_elapsed(obs.modified_at, ctx.now);
+        && armed_settle_elapsed(obs.modified_at, ctx.now)
+        && !held_back_from_the_grant(shared, &project_key, &obs.path);
 
     // Two questions off one transcript load. The mark is answered for every
     // contributor; the eligibility verdict is a derivation from it that stays
@@ -1669,6 +1845,216 @@ mod tests {
 
         assert_eq!(second.auto_ready, 1, "{second:?}");
         assert_eq!(the_only_project(&f).mode, ProjectMode::AutoUpload);
+    }
+
+    fn grant_automatic(f: &WatcherFixture) {
+        let req = super::super::ipc::Request {
+            id: 1,
+            method: "grant_automatic".to_string(),
+            params: serde_json::json!({}),
+        };
+        let resp = super::super::ipc::handle_request(&f.shared, &req);
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+    }
+
+    fn mode_of(f: &WatcherFixture, project: &str) -> (ProjectMode, bool) {
+        let key = project_key_for(Some(&abs(&format!("Users/testuser/code/{project}"))));
+        let policy = f.shared.policy.lock().unwrap();
+        (policy.resolve(&key), policy.projects.contains_key(&key))
+    }
+
+    /// K3: under the Flow 1 grant a project first seen after it is armed,
+    /// with an explicit policy entry, the terms it is granted under, and an
+    /// audit row. A project already on disk at the grant keeps asking, and
+    /// so does its new session.
+    #[tokio::test]
+    async fn the_grant_arms_projects_discovered_after_it_and_nothing_already_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic(&f);
+
+        // The first full pass records what is on disk and arms nothing.
+        let first = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(first.auto_ready, 0, "{first:?}");
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::NotifyOnly, false));
+
+        f.write_session("old", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
+        let second = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+        assert_eq!(
+            mode_of(&f, "old"),
+            (ProjectMode::NotifyOnly, false),
+            "a project on disk at the grant asks, for its new sessions too"
+        );
+        assert_eq!(second.auto_ready, 1, "{second:?}");
+        let key = project_key_for(Some(&abs("Users/testuser/code/new")));
+        assert!(
+            f.shared.policy.lock().unwrap().projects[&key]
+                .armed_under
+                .is_some(),
+            "armed under recorded terms"
+        );
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        assert!(audit.iter().any(|e| e.action == "automatic-granted"));
+        let armed: Vec<_> = audit
+            .iter()
+            .filter(|e| e.action == "armed-by-default")
+            .collect();
+        assert_eq!(armed.len(), 1);
+        assert_eq!(armed[0].project_label.as_deref(), Some("new"));
+    }
+
+    /// K4: a re-grant after logout arms nothing already on disk. Logout
+    /// wipes the policy, so a folder set to Never loses that decision; the
+    /// re-grant must still count it as on disk and ask, for its new
+    /// sessions as well, rather than treat it as newly discovered.
+    #[tokio::test]
+    async fn a_re_grant_after_logout_arms_nothing_already_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("never", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("never", ProjectMode::Ignore);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        // What logout leaves of the policy: nothing.
+        *f.shared.policy.lock().unwrap() = crate::daemon::policy::ProjectPolicy::new();
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        f.write_session("never", "22222222-2222-2222-2222-222222222222", 0);
+        let after = f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+
+        assert_eq!(after.auto_ready, 0, "{after:?}");
+        assert_eq!(mode_of(&f, "never"), (ProjectMode::NotifyOnly, false));
+    }
+
+    /// A harness connected after the grant -- the normal onboarding order --
+    /// is recorded on its first discovery, so its history is on disk rather
+    /// than new: nothing in it is armed or sent. (Zaki's reproduction on
+    /// #1031.)
+    #[tokio::test]
+    async fn a_harness_connected_after_the_grant_arms_nothing_already_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        let watch = f.shared.settings.lock().unwrap().claude_source.clone();
+        f.shared.settings.lock().unwrap().claude_source =
+            Some(crate::daemon::settings::SourceDeclaration::Off);
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        f.shared.settings.lock().unwrap().claude_source = watch; // connect the harness
+        let after = f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(
+            (after.auto_ready, mode_of(&f, "old")),
+            (0, (ProjectMode::NotifyOnly, false)),
+            "{after:?}"
+        );
+
+        // And a project genuinely new since then is still armed.
+        f.write_session("new", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+    }
+
+    /// A session on disk at the grant is not approved unattended when it
+    /// comes to read as a project the grant armed later. (Zaki's second
+    /// reproduction on #1031: the session's first cwd changes.)
+    #[tokio::test]
+    async fn a_pre_grant_session_is_not_sent_under_a_project_the_grant_armed() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let pre = f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        f.write_session_with_cwd(
+            "-Users-testuser-code-old",
+            &abs("Users/testuser/code/new"),
+            "11111111-1111-1111-1111-111111111111",
+        );
+        f.write_session("new", "33333333-3333-3333-3333-333333333333", 0);
+        for h in 31..35 {
+            f.settle(Utc::now() + chrono::Duration::hours(h)).await;
+        }
+
+        assert_eq!(mode_of(&f, "new"), (ProjectMode::AutoUpload, true));
+        let queue = f.shared.queue.lock().unwrap();
+        for e in queue.all().iter().filter(|e| e.path == pre) {
+            assert_ne!(
+                e.state,
+                QueueState::Approved,
+                "a session on disk at the grant was approved unattended under {}",
+                e.project_key
+            );
+        }
+        assert!(
+            queue
+                .all()
+                .iter()
+                .any(|e| e.path != pre && e.state == QueueState::Approved),
+            "the new session is approved"
+        );
+    }
+
+    /// Only a full pass records what is on disk; before it, the grant arms
+    /// nothing, however the session arrives.
+    #[tokio::test]
+    async fn the_grant_arms_nothing_before_a_full_pass_has_recorded_the_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic(&f);
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .automatic_grant
+                .as_ref()
+                .unwrap()
+                .recorded_sources
+                .is_empty(),
+            "a scoped pass records nothing"
+        );
+        let path = f.write_session("fresh", "11111111-1111-1111-1111-111111111111", 0);
+        let session_at: SessionAt<'_> =
+            &|source, p| source.discover().ok()?.into_iter().find(|r| r.path == p);
+        let now = Utc::now() + chrono::Duration::hours(30);
+        tick_paths(&f.shared, now, std::slice::from_ref(&path), session_at)
+            .await
+            .unwrap();
+        tick_paths(&f.shared, now, &[path], session_at)
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&f, "fresh"), (ProjectMode::NotifyOnly, false));
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .automatic_grant
+                .as_ref()
+                .unwrap()
+                .recorded_sources
+                .is_empty(),
+            "a scoped pass records nothing"
+        );
     }
 
     #[tokio::test]
