@@ -2473,6 +2473,24 @@ pub trait TraceCorpusStore: Send + Sync {
         self.upsert_trace_submission(submission).await
     }
 
+    /// Quarantine remediation: a re-POST replaces a quarantined submission's
+    /// body under the same id, so any evidence for the prior body no longer
+    /// describes the submission. In the same transaction as the submission
+    /// update, a store removes the prior evidence of a submission whose stored
+    /// status is `quarantined` and records `evidence` (if any) for the new
+    /// body. Evidence of a submission in any other state is never removed, so
+    /// offering different evidence for it conflicts exactly as
+    /// [`Self::upsert_trace_submission_with_witness`] does.
+    async fn remediate_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        // Stores without evidence storage hold no prior evidence to replace.
+        self.upsert_trace_submission_with_witness(submission, evidence)
+            .await
+    }
+
     /// Low-level diagnostic lookup. Its caller-provided digest is not an
     /// authorization boundary; policy consumers use the current-object read
     /// below, which obtains the object reference from the database itself.

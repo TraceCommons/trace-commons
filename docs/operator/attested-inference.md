@@ -587,17 +587,25 @@ was stale stays held. Both are submit-path decisions.
 
 ## Z2 provenance capture and rollout
 
-Deploy a witness that issues v2 certificates, then clients that preserve and
-forward the original certificate header, signature header, and response body
-bytes. Deploy ingest with the signing address and measurement set pinned before
-enabling provenance-dependent policy. The pin controls verification even when
+Follow the verifiers-first order above: ingest and clients that accept both
+profiles first, and only then a witness configured to issue v2. Clients must
+forward the original certificate header, signature header, and ingest request
+body bytes unchanged. Deploy ingest with the signing address and measurement
+set pinned before enabling provenance-dependent policy. The pin controls verification even when
 `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false`; the bypass also requires its
 own explicit policy-version allowlist. A half-configured pin refuses ingest
 startup. Apply V76 and grant the ingest database login membership in
 `trace_witness_evidence_runtime` when it is not the migration owner. The table
-uses forced tenant RLS. The runtime role may update only the derived
-`artifact_sha256` link after an exact signed-source retry; it cannot rewrite
-the original certificate, signature, or received-body identity.
+uses forced tenant RLS. Only the derived `artifact_sha256` link may change
+after insert, on an exact signed-source retry. The runtime role's column
+grants allow nothing else, and a `BEFORE UPDATE` trigger
+(`trace_witness_evidence_signed_source_immutable`) refuses any change to the
+certificate, signature, received-body digest, provenance fields, or times for
+every role, including a table owner that ingest connects as in a single-login
+deployment. A row is removed only with its submission, or when a quarantined
+submission is remediated with a new body: the prior body's evidence is then
+replaced by the new body's evidence, or dropped when the re-POST carries no
+certificate, in the same transaction as the submission update.
 
 For each verified submission, ingest persists the original certificate and
 signature header bytes, raw submitted body SHA-256, certificate issue time,

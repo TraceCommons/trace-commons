@@ -1304,7 +1304,8 @@ An attested class means the witness verified a pinned receipt for the **last
 declared inference call** and bound the receipt to that call's original request
 and response body bytes. The model is recorded only when the verified receipt
 bound one. The certificate signs the provenance fields and the SHA-256 of the
-exact redacted response body that the contributor submitted. It does not prove
+exact redacted request body the contributor submits to ingest (the
+`POST /v1/traces` body), not of any inference request or response. It does not prove
 whole-session authenticity, that earlier calls were included, receipt
 uniqueness or replay prevention, or the correctness of a model's output.
 

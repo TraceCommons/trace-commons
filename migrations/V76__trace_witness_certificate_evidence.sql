@@ -50,3 +50,42 @@ GRANT SELECT, INSERT ON trace_witness_certificate_evidence
 -- exact signed source. Certificate/signature/body identity stays immutable.
 GRANT UPDATE (artifact_sha256) ON trace_witness_certificate_evidence
     TO trace_witness_evidence_runtime;
+
+-- The column grants above bind only sessions that run as the runtime role. A
+-- deployment whose ingest login owns the table (or is the migrator) holds full
+-- UPDATE on it, so the grants alone do not make the signed source immutable.
+-- This trigger does, for every role: an UPDATE may move only the derived
+-- artifact_sha256 link. Removal is a separate operation: evidence goes with its
+-- submission (ON DELETE CASCADE), or is replaced when a quarantined submission
+-- is remediated with a new body.
+CREATE OR REPLACE FUNCTION trace_witness_evidence_signed_source_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF (NEW.tenant_id, NEW.submission_id, NEW.certificate_json, NEW.signature_header,
+        NEW.raw_body_sha256, NEW.certificate_version, NEW.inference_class,
+        NEW.bound_model, NEW.receipt_signer, NEW.issued_at, NEW.received_at)
+       IS DISTINCT FROM
+       (OLD.tenant_id, OLD.submission_id, OLD.certificate_json, OLD.signature_header,
+        OLD.raw_body_sha256, OLD.certificate_version, OLD.inference_class,
+        OLD.bound_model, OLD.receipt_signer, OLD.issued_at, OLD.received_at)
+    THEN
+        RAISE EXCEPTION 'witness evidence signed source is immutable'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION trace_witness_evidence_signed_source_immutable() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trace_witness_evidence_signed_source_immutable
+    ON trace_witness_certificate_evidence;
+CREATE TRIGGER trace_witness_evidence_signed_source_immutable
+    BEFORE UPDATE ON trace_witness_certificate_evidence
+    FOR EACH ROW EXECUTE FUNCTION trace_witness_evidence_signed_source_immutable();
+
+-- Quarantine remediation replaces a quarantined submission's evidence in the
+-- submission's own transaction. The runtime code restricts the DELETE to a row
+-- whose submission is stored as quarantined.
+GRANT DELETE ON trace_witness_certificate_evidence
+    TO trace_witness_evidence_runtime;
