@@ -3048,9 +3048,11 @@ pub extern "C" fn tc_consent_gate_help(pinned: i32) -> *mut c_char {
 /// made in `consent_copy`; a shell passes the wire object through and does
 /// not read `kind` or `reasons` to pick words itself.
 ///
-/// Returns NULL for a NULL, non-UTF-8 or unparseable argument, for a `kind`
-/// this build does not know, for a project void without a label, and on a
-/// caught panic.
+/// A `kind` this build does not know, or a project void without a label,
+/// gets a notice that says automatic contributing stopped without saying for
+/// what, so no shell writes its own fallback. Returns NULL only for a NULL,
+/// non-UTF-8 or unparseable argument, one that is not a JSON object, and on
+/// a caught panic.
 ///
 /// # Safety
 /// `void_json`, if non-null, must point to a valid, NUL-terminated C string.

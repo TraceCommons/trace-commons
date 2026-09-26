@@ -198,6 +198,17 @@ pub const VOID_PROJECT_REARM: &str = "You can turn automatic contributing back o
 /// How the Flow 1 grant is given again, and what that means.
 pub const VOID_GRANT_REARM: &str = "You can turn automatic contributing back on for new projects. Doing so agrees to the new settings.";
 
+/// The title of a void this build cannot place: a `kind` it does not know,
+/// or a project void without a label. It says what is certain -- automatic
+/// contributing stopped -- and does not guess for what.
+pub const VOID_UNPLACED_TITLE: &str = "Automatic contributing stopped";
+
+/// What an unplaced void's notice says happened.
+pub const VOID_UNPLACED_BODY: &str = "Settings it was turned on under have since changed, so it now asks before contributing. Check your projects to see which now ask first.";
+
+/// How an unplaced void is turned back on.
+pub const VOID_UNPLACED_REARM: &str = "You can turn automatic contributing back on wherever you want it. Doing so agrees to the new settings.";
+
 /// The sentence for a reason label this build does not know.
 ///
 /// A newer daemon may void for a reason an older shell has no sentence for.
@@ -300,10 +311,12 @@ pub fn void_notice(project_label: Option<&str>, reasons: &[String]) -> VoidNotic
 /// The `kind` branch lives here with the rest, so no shell decides between
 /// the project and the grant wording: `automatic_grant` gets the grant's
 /// notice, and `project` the project's, titled with its `project_label`.
-/// `None` for anything else -- a value that is not an object, a kind this
-/// build does not know, or a project void without a label -- which is a
-/// daemon and shell out of step, not something to paper over with a guess
-/// at which grant stopped.
+/// Any other object -- a kind this build does not know, or a project void
+/// without a label -- gets the unplaced notice, which says automatic
+/// contributing stopped without guessing for what. It is still a void, and
+/// a shell left to word the fallback itself would be one more copy of it.
+/// `None` only for a value that is not an object, which is not a void
+/// element at all.
 #[must_use]
 pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> {
     let object = void.as_object()?;
@@ -316,16 +329,25 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
                 .collect()
         })
         .unwrap_or_default();
-    match object.get("kind").and_then(serde_json::Value::as_str)? {
-        "automatic_grant" => Some(void_notice(None, &reasons)),
-        "project" => {
-            let label = object
-                .get("project_label")
-                .and_then(serde_json::Value::as_str)
-                .filter(|l| !l.is_empty())?;
-            Some(void_notice(Some(label), &reasons))
+    let label = object
+        .get("project_label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|l| !l.is_empty());
+    match (
+        object.get("kind").and_then(serde_json::Value::as_str),
+        label,
+    ) {
+        (Some("automatic_grant"), _) => Some(void_notice(None, &reasons)),
+        (Some("project"), Some(label)) => Some(void_notice(Some(label), &reasons)),
+        _ => {
+            let placed = void_notice(None, &reasons);
+            Some(VoidNoticeCopy {
+                title: VOID_UNPLACED_TITLE.to_string(),
+                body: VOID_UNPLACED_BODY,
+                rearm: VOID_UNPLACED_REARM,
+                ..placed
+            })
         }
-        _ => None,
     }
 }
 
@@ -564,15 +586,40 @@ mod tests {
         assert_eq!(grant, void_notice(None, &["scopes-widened".to_string()]));
     }
 
-    /// A shape this build cannot read is refused rather than guessed at.
+    /// A void this build cannot place still gets a notice, from here: it
+    /// says automatic contributing stopped without guessing whether it was a
+    /// project or the grant for new projects. Without this, each shell would
+    /// write its own fallback sentence, which is the drift this module
+    /// exists to prevent -- the macOS wording guard refuses one.
     #[test]
-    fn an_unreadable_wire_void_is_refused_not_guessed() {
+    fn a_void_that_cannot_be_placed_gets_a_notice_that_does_not_guess() {
         for value in [
-            serde_json::json!("project"),
-            serde_json::json!({ "kind": "folder", "reasons": [] }),
-            serde_json::json!({ "kind": "project", "reasons": [] }),
+            serde_json::json!({ "kind": "folder", "reasons": ["scopes-widened"] }),
+            serde_json::json!({ "kind": "project", "reasons": ["scopes-widened"] }),
             serde_json::json!({ "kind": "project", "project_label": "", "reasons": [] }),
             serde_json::json!({ "reasons": [] }),
+        ] {
+            let notice = void_notice_for_wire(&value).unwrap_or_else(|| panic!("{value}"));
+            assert_eq!(notice.title, VOID_UNPLACED_TITLE, "{value}");
+            assert_eq!(notice.body, VOID_UNPLACED_BODY);
+            assert_eq!(notice.rearm, VOID_UNPLACED_REARM);
+            assert!(!notice.reasons.is_empty());
+        }
+        let placed = void_notice_for_wire(&serde_json::json!({
+            "kind": "folder", "reasons": ["scopes-widened"],
+        }))
+        .unwrap();
+        assert_eq!(placed.reasons, vec![void_reason_line("scopes-widened")]);
+    }
+
+    /// Only a value that is not an object at all is refused: that is not a
+    /// void element, and there is nothing to say about it.
+    #[test]
+    fn a_value_that_is_not_an_element_is_refused() {
+        for value in [
+            serde_json::json!("project"),
+            serde_json::json!(null),
+            serde_json::json!([]),
         ] {
             assert!(void_notice_for_wire(&value).is_none(), "{value}");
         }

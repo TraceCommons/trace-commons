@@ -1515,8 +1515,10 @@ char*       tc_consent_gate_help(int32_t pinned);
  * choose words natively. Once shown, call acknowledge_grant_voids with the
  * element's id; acknowledging is all the button does.
  *
- * NULL for a NULL, non-UTF-8 or unparseable argument, an unknown kind, a
- * project void without a label, and on a caught panic.
+ * An unknown kind, or a project void without a label, gets a notice that
+ * says automatic contributing stopped without saying for what: do not write
+ * a fallback natively. NULL only for a NULL, non-UTF-8 or unparseable
+ * argument, one that is not a JSON object, and on a caught panic.
  */
 char*       tc_grant_void_notice(const char* void_json);
 
