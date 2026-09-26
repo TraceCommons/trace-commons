@@ -6862,57 +6862,6 @@ impl TraceCorpusStore for PgBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The shadow-mode guarantee, at the only place it can actually be
-    /// violated: the write. A correction's value must not be able to move
-    /// what a contributor is credited, so the statement that stores it may
-    /// set correction_* columns and nothing else — not credit_quality, not
-    /// dedup, not the contributor cap, not the gate status.
-    #[test]
-    fn update_correction_value_sql_touches_only_correction_columns() {
-        let sql = UPDATE_CORRECTION_VALUE_SQL;
-        let set_clause = sql
-            .split_once("SET ")
-            .expect("statement has a SET clause")
-            .1
-            .split_once("WHERE")
-            .expect("statement has a WHERE clause")
-            .0;
-        for assignment in set_clause.split(',') {
-            let column = assignment
-                .split('=')
-                .next()
-                .expect("assignment has a left-hand side")
-                .trim();
-            assert!(
-                column.starts_with("correction_"),
-                "the correction-value write set a non-correction column: {column}"
-            );
-        }
-        // And it is scoped to exactly one decision row of one tenant (forced
-        // RLS still applies, but an unscoped UPDATE would be a bug regardless).
-        assert!(sql.contains("WHERE tenant_id = $1 AND decision_id = $2"));
-
-        // Named so a reader can see what is deliberately absent.
-        for credited in [
-            "credit_quality_micros",
-            "dedup_cluster_size",
-            "contributor_factor_micros",
-            "credit_withheld_reason",
-            "perplexity_passed",
-            "novelty_passed",
-        ] {
-            assert!(
-                !sql.contains(credited),
-                "the correction-value write must not touch {credited}"
-            );
-        }
-    }
-}
-
 impl PgBackend {
     /// One transaction for the submission row and its witness evidence.
     /// `replace_quarantined_evidence` is quarantine remediation: the prior
@@ -7120,5 +7069,56 @@ impl PgBackend {
         }
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(record)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shadow-mode guarantee, at the only place it can actually be
+    /// violated: the write. A correction's value must not be able to move
+    /// what a contributor is credited, so the statement that stores it may
+    /// set correction_* columns and nothing else — not credit_quality, not
+    /// dedup, not the contributor cap, not the gate status.
+    #[test]
+    fn update_correction_value_sql_touches_only_correction_columns() {
+        let sql = UPDATE_CORRECTION_VALUE_SQL;
+        let set_clause = sql
+            .split_once("SET ")
+            .expect("statement has a SET clause")
+            .1
+            .split_once("WHERE")
+            .expect("statement has a WHERE clause")
+            .0;
+        for assignment in set_clause.split(',') {
+            let column = assignment
+                .split('=')
+                .next()
+                .expect("assignment has a left-hand side")
+                .trim();
+            assert!(
+                column.starts_with("correction_"),
+                "the correction-value write set a non-correction column: {column}"
+            );
+        }
+        // And it is scoped to exactly one decision row of one tenant (forced
+        // RLS still applies, but an unscoped UPDATE would be a bug regardless).
+        assert!(sql.contains("WHERE tenant_id = $1 AND decision_id = $2"));
+
+        // Named so a reader can see what is deliberately absent.
+        for credited in [
+            "credit_quality_micros",
+            "dedup_cluster_size",
+            "contributor_factor_micros",
+            "credit_withheld_reason",
+            "perplexity_passed",
+            "novelty_passed",
+        ] {
+            assert!(
+                !sql.contains(credited),
+                "the correction-value write must not touch {credited}"
+            );
+        }
     }
 }
