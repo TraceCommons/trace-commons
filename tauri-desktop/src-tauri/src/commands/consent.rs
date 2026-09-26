@@ -62,8 +62,8 @@ pub(crate) async fn acknowledge_near_ai_notice(
 
 /// The notice for one element of `status.grant_voids`: the words, and the
 /// choice between the project and the automatic-grant wording, both from the
-/// contributor core. `null` when the element is not one this build can read,
-/// which the frontend reports rather than guessing at.
+/// contributor core, which also words an element it cannot place. `null`
+/// only for a value that is not an element at all.
 #[tauri::command]
 pub(crate) fn grant_void_notice(void: serde_json::Value) -> serde_json::Value {
     trace_commons_contributor::consent_copy::void_notice_for_wire(&void)
@@ -104,8 +104,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_void_gets_null() {
-        assert!(grant_void_notice(serde_json::json!({ "kind": "folder" })).is_null());
+    fn only_a_value_that_is_not_an_element_gets_null() {
+        assert!(grant_void_notice(serde_json::json!("project")).is_null());
+        // An element the core cannot place still gets the core's words.
+        assert!(grant_void_notice(serde_json::json!({ "kind": "folder" }))["title"].is_string());
     }
 
     #[test]
