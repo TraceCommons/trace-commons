@@ -210,14 +210,16 @@ impl PgBackend {
                 // grant inserts if the clock crossed expiry during this call.
                 return Ok(AccountInviteRedemption::InvalidInvite);
             }
-            let actor_hash = format!("sha256:{}", hex::encode(Sha256::digest(account.as_bytes())));
+            let actor_ref = crate::account_session::account_actor_ref(
+                &crate::account_session::AccountId::from_uuid(account),
+            );
             tx.execute(
                 "INSERT INTO trace_account_audit
                     (tenant_id, action, actor_ref, outcome, safe_metadata)
                  VALUES ($1, 'account_invite_redeemed', $2, 'invited', $3)",
                 &[
                     &tenant,
-                    &actor_hash,
+                    &actor_ref,
                     &serde_json::json!({
                         "invite_subject_hash": invite_hash,
                         "trust_version": next_version,
