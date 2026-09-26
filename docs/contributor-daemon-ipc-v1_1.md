@@ -1630,7 +1630,7 @@ yet, oldest first:
 - A shell does not write the notice. It passes one element to
   `consent_copy::void_notice_for_wire` (across the C ABI,
   `tc_grant_void_notice`), which returns the title, body, one sentence per
-  reason, how to turn it back on, and the button's label. An element it
+  reason, the line after them, and the buttons' labels. An element it
   cannot place (an unknown `kind`, or a project without a label) still gets
   a notice, saying automatic contributing stopped without saying for what,
   so no shell writes a fallback of its own.
@@ -1646,6 +1646,16 @@ another shell may have acknowledged it first. It is audited
 `audit-write-failed` when that entry cannot be written; it publishes
 `status_changed` when it clears anything. Acknowledging only records that
 the notice was seen: it re-arms nothing.
+
+A project's notice carries a second button, `rearm_action` ("Turn back on"),
+present only when the element has a `project_id`. It is `set_project_mode`
+with that `project_id` and `auto_upload`, nothing more: the same refusals
+(`arming-terms-unavailable`, the unknown bucket, an unrecognised id), the
+same `armed-auto-upload` audit row, and arming under the terms now in
+force. Pressing it is the fresh consent R6 asks for, which the sentence
+beside it says. A refusal changes nothing and leaves the notice; a shell
+shows `rearm_failed`. The automatic grant's notice has no such button: no
+shell can give the grant yet, so it says what happened to projects instead.
 
 A notice also goes when the contributor acts on what it is about: setting
 that project's mode (`set_project_mode`, including re-arming it) clears the
