@@ -65,26 +65,7 @@ impl Running {
         let session_path = TraceSource::discover(&src).unwrap().remove(0).path;
 
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = trace_commons_contributor::config::ContributorConfig {
-            inference_receipt_endpoint: None,
-            inference_receipt_check_attestation: false,
-            schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
-                .into(),
-            issuer_url: "http://issuer.invalid".into(),
-            ingest_url: "http://ingest.invalid".into(),
-            audience: "trace-commons-upload".into(),
-            tenant_id: "tenant-abc".into(),
-            instance_id: "instance-1".into(),
-            user_subject: "alice".into(),
-            device_key_id: device.device_key_id.clone(),
-            consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
-            allowed_hosts: None,
-            display_handle: None,
-            public_bio: None,
-            public_since: None,
-            witness: None,
-        };
+        let cfg = test_config(device.device_key_id.clone());
         store.save_config(&cfg).unwrap();
         let mut settings = DaemonSettings::load(&store).unwrap();
         settings.claude_source = Some(SourceDeclaration::Watch {
@@ -296,6 +277,28 @@ async fn daemon_status_reports_the_running_daemons_real_health() {
     );
 }
 
+fn test_config(device_key_id: String) -> trace_commons_contributor::config::ContributorConfig {
+    trace_commons_contributor::config::ContributorConfig {
+        inference_receipt_endpoint: None,
+        inference_receipt_check_attestation: false,
+        schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+        issuer_url: "http://issuer.invalid".into(),
+        ingest_url: "http://ingest.invalid".into(),
+        audience: "trace-commons-upload".into(),
+        tenant_id: "tenant-abc".into(),
+        instance_id: "instance-1".into(),
+        user_subject: "alice".into(),
+        device_key_id,
+        consent_scopes: vec!["debugging_evaluation".into()],
+        pii_filter: None,
+        allowed_hosts: None,
+        display_handle: None,
+        public_bio: None,
+        public_since: None,
+        witness: None,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn with_no_daemon_running_commands_still_work_against_the_files() {
     // The fallback must stay: a one-shot command against a stopped daemon
@@ -309,6 +312,8 @@ async fn with_no_daemon_running_commands_still_work_against_the_files() {
         .to_string_lossy()
         .to_string();
 
+    // Arming records the terms in force, so it needs a config.
+    store.save_config(&test_config("sha256:aa".into())).unwrap();
     commands::daemon_set_project(&store, project.path(), "auto", true).unwrap();
 
     let policy = trace_commons_contributor::daemon::policy::ProjectPolicy::load(&store).unwrap();

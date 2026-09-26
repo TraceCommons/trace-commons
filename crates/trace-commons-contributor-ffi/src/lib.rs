@@ -2424,10 +2424,11 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 /// Returns an owned JSON object whose keys are `ConsentCopy`'s fields; free
 /// it with [`tc_string_free`].
 ///
-/// ONE CALL, NOT ONE PER SENTENCE. Three sentences is not three exports: a
-/// per-sentence export would let a shell take two of them and hand-write the
-/// third, and one of the three is the claim about what leaves this machine
-/// that a contributor reads immediately above an irreversible button.
+/// ONE CALL, NOT ONE PER SENTENCE. Six sentences is not six exports: a
+/// per-sentence export would let a shell take some of them and hand-write the
+/// rest, and `gate_statement` and the `auto_*` three are claims about what
+/// leaves this machine that a contributor reads immediately above an
+/// irreversible button.
 ///
 /// Returns NULL only on a caught panic.
 #[unsafe(no_mangle)]
