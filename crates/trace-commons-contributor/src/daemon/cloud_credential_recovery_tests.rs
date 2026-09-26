@@ -16,8 +16,15 @@ use crate::daemon::private_inference::PrivateInference;
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 
 const DEADLINE: Duration = Duration::from_secs(10);
+/// Converts a deadlock into a failure. Only a broken build ever reaches it;
+/// see `pending_os_read_cannot_delay_forget_withdrawing_proxy_authority`.
+const HANG_GUARD: Duration = Duration::from_secs(120);
 const JOURNAL: &str = "cloud-credential-cleanup.json";
 
+/// Parks one OS read until the test says so. There is deliberately no timeout
+/// on the release: the read stays pending until the test sends on, or drops,
+/// the sender, so "the read was still pending" is a fact the test controls
+/// rather than a race it measures.
 struct ReadBarrier {
     entered: tokio::sync::oneshot::Sender<()>,
     release: mpsc::Receiver<()>,
@@ -28,6 +35,8 @@ struct FaultBackend {
     fail_delete: AtomicBool,
     reads: AtomicUsize,
     pause_read: Mutex<Option<ReadBarrier>>,
+    /// Paused reads that have come back out of their barrier.
+    paused_reads_returned: AtomicUsize,
 }
 
 impl SecretBackend for FaultBackend {
@@ -37,10 +46,11 @@ impl SecretBackend for FaultBackend {
         let pause = self.pause_read.lock().unwrap().take();
         if let Some(pause) = pause {
             let _ = pause.entered.send(());
-            pause
-                .release
-                .recv_timeout(DEADLINE)
-                .map_err(|_| CredentialError::Unavailable)?;
+            // A dropped sender (a panicking test) also releases the read, so
+            // a failure cannot leave this thread parked.
+            let released = pause.release.recv();
+            self.paused_reads_returned.fetch_add(1, Ordering::SeqCst);
+            released.map_err(|_| CredentialError::Unavailable)?;
         }
         Ok(bytes)
     }
@@ -64,6 +74,7 @@ fn fault_backend(store: &ConfigStore) -> Arc<FaultBackend> {
         fail_delete: AtomicBool::new(false),
         reads: AtomicUsize::new(0),
         pause_read: Mutex::new(None),
+        paused_reads_returned: AtomicUsize::new(0),
     });
     install_backend(store, backend.clone());
     backend
@@ -346,29 +357,43 @@ async fn pending_os_read_cannot_delay_forget_withdrawing_proxy_authority() {
         .await
         .unwrap()
         .unwrap();
+    // The read is now parked and stays parked until `release` is sent, so
+    // everything below happens while it is pending. No step races a clock.
+    //
+    // The mechanism: an OS read that may sit behind an unlock prompt must not
+    // hold proxy ownership, which Forget needs to withdraw the live key.
+    assert!(
+        shared.private_inference.try_lock().is_ok(),
+        "the pending OS read holds proxy ownership, so Forget would wait for it"
+    );
+    // The behaviour: Forget runs to completion while the read is pending.
+    // Nothing releases the read until Forget returns, so if Forget depended
+    // on it, it would never return. HANG_GUARD only turns that deadlock into a
+    // failure rather than a hung test. It is not a speed claim, and a correct
+    // Forget under any load stays far inside it.
     let forgetting = shared.clone();
-    let mut forget =
+    let forget =
         tokio::spawn(async move { handle_request_async(&forgetting, &forget_request()).await });
-    let early = tokio::time::timeout(Duration::from_secs(3), &mut forget).await;
-    let completed_before_release = early.is_ok();
-    // Always release before assertions, including in the failing-before run.
+    let response = tokio::time::timeout(HANG_GUARD, forget)
+        .await
+        .expect("Forget waited for the unrelated OS read prompt")
+        .unwrap();
+    assert_eq!(
+        backend.paused_reads_returned.load(Ordering::SeqCst),
+        0,
+        "the OS read must still be pending when Forget completes"
+    );
+    assert!(!reconcile.is_finished());
+    assert!(response.error.is_none());
+    assert_withdrawn(&shared).await;
+    // Now let the stale reconciliation finish: it must not restore the key
+    // that Forget withdrew while it was parked.
     release.send(()).unwrap();
-    let response = match early {
-        Ok(response) => response.unwrap(),
-        Err(_) => tokio::time::timeout(DEADLINE, forget)
-            .await
-            .unwrap()
-            .unwrap(),
-    };
     tokio::time::timeout(DEADLINE, reconcile)
         .await
         .unwrap()
         .unwrap();
-    assert!(response.error.is_none());
+    assert_eq!(backend.paused_reads_returned.load(Ordering::SeqCst), 1);
     assert_withdrawn(&shared).await;
     shared.stop_private_inference().await;
-    assert!(
-        completed_before_release,
-        "Forget waited for the unrelated OS read prompt"
-    );
 }

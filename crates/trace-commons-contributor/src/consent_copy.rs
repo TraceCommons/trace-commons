@@ -109,11 +109,30 @@ pub const GATE_NOT_PINNED_HELP: &str = "This device isn't connected yet, so this
 /// reliable, and an unconditional promise here would contradict it two lines
 /// down. "Employers" is deliberately absent: the classifier has no
 /// organisation label, so an employer named in prose is never looked for.
-pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it.";
+///
+/// The bearer-token sentence describes the cue-gated contextual-entropy
+/// pass in `trace_commons_protocol::trace_contribution`
+/// (`contextual_entropy_secret_ranges`), which is the only thing that
+/// catches a bearer token outside the named formats in text: the cue regex
+/// must match right before the value, the value must clear
+/// `ENTROPY_BITS_MIN` (3.2 bits/char, which no value under 10 characters
+/// can reach), and UUIDs and known ID prefixes are allowlisted. A value glued
+/// onto "Bearer" with no separator is one token with no cue before it.
+/// Pinned against the redactor by
+/// `the_scrub_sentences_match_what_the_redactor_does`.
+pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it.";
 
 /// The limit of both halves, and the descendant of [`GATE_STATEMENT`]'s
 /// second clause.
-pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover and blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
+///
+/// "In text" is deliberate. On a string of text, the deterministic passes
+/// are the named formats (secrets, PEM blocks, emails, paths) plus the
+/// cue-gated contextual-entropy pass, and nothing else. Structured tool
+/// payloads also get field-name rules (`redaction::redact_sensitive_json`)
+/// and per-tool field rules, which remove whole values by where they sit
+/// rather than by what they look like; this sentence makes no claim about
+/// those.
+pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover. Beyond those, in text they catch only a long, random-looking value right after a word like \"password\" or \"token\", and are blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
 
 /// The one fact automatic contribution adds, and the one the old gate never
 /// had to state.
@@ -504,16 +523,67 @@ mod tests {
     fn the_automatic_contribution_sentences_are_exactly_what_was_agreed() {
         assert_eq!(
             AUTO_SCRUB_SCOPE,
-            "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it."
+            "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it."
         );
         assert_eq!(
             AUTO_SCRUB_LIMIT,
-            "The patterns are reliable for the formats they cover and blind to everything else. The model is not reliable. Nothing here checks whether either of them was right."
+            "The patterns are reliable for the formats they cover. Beyond those, in text they catch only a long, random-looking value right after a word like \"password\" or \"token\", and are blind to everything else. The model is not reliable. Nothing here checks whether either of them was right."
         );
         assert_eq!(
             AUTO_NO_REVIEW,
             "No one looks at a session before it is sent, including you."
         );
+    }
+
+    /// The two sentences make claims about the deterministic redactor, and
+    /// each claim is held to it here, with no model configured.
+    ///
+    /// `AUTO_SCRUB_LIMIT` says that beyond the named formats, text is caught
+    /// only when a long, random-looking value sits right after a cue word.
+    /// `AUTO_SCRUB_SCOPE` says which bearer tokens are removed and which can
+    /// get through. If the redactor changes so that one of these flips, the
+    /// sentence has stopped being true and has to be decided again.
+    #[test]
+    fn the_scrub_sentences_match_what_the_redactor_does() {
+        use trace_commons_protocol::trace_contribution::DeterministicTraceRedactor;
+
+        let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new());
+        let removed = |text: &str, value: &str| {
+            let (out, _) = redactor.redact_text(text);
+            !out.contains(value)
+        };
+        let random = "q7Vx2LpZ9kWm4Rt8Ns3Hb6Yd";
+        let random_long = "q7Vx2LpZ9kWm4Rt8Ns3Hb6YdJc5Gf1Ke";
+
+        // AUTO_SCRUB_LIMIT: a random-looking value right after a cue word is
+        // caught without a model...
+        assert!(removed(&format!("password: {random}"), random));
+        assert!(removed(&format!("token={random}"), random));
+        // ...but not one that is not right after it, nor one that does not
+        // look random.
+        assert!(!removed(&format!("my password is {random} ok"), random));
+        let plain = "aaaaaaaaaaaaaaaaaaaa";
+        assert!(!removed(&format!("password: {plain}"), plain));
+
+        // AUTO_SCRUB_SCOPE: a long, random bearer token after a space or
+        // colon is removed.
+        assert!(removed(
+            &format!("Authorization: Bearer {random_long}"),
+            random_long
+        ));
+        assert!(removed(&format!("Bearer:{random_long}"), random_long));
+        // A bearer token in a known format is removed by its own pattern.
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        assert!(removed(&format!("Bearer {jwt}"), jwt));
+        // UUID-shaped, a known kind of ID, short, or run onto the word: each
+        // can get through.
+        let uuid = "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d";
+        assert!(!removed(&format!("Bearer {uuid}"), uuid));
+        let id_shaped = format!("resp_{random}");
+        assert!(!removed(&format!("Bearer {id_shaped}"), &id_shaped));
+        let short = "a8Fk2Lq9z";
+        assert!(!removed(&format!("Bearer {short}"), short));
+        assert!(!removed(&format!("Bearer{random_long}"), random_long));
     }
 
     /// The scope sentence may not promise more than the scrubber does.
