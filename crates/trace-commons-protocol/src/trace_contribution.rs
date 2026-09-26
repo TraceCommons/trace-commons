@@ -37,12 +37,32 @@ pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 /// carry this string, so a v2 stamp means the glued-assignment shape was not
 /// covered when that envelope was redacted.
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
-pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v1";
+/// v2 refuses classifier errors; v1 could return deterministic-only output.
+/// Never treat a historical v1 certificate as proof of a complete pipeline.
+pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v2";
 pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
 /// Distinct from the near-ai suffix even though both serve the same weights:
 /// the hosted endpoint wraps a 512-context model in an internal splitter, so
 /// a stored summary must record which one actually produced the redaction.
 pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v1";
+
+/// Exact known fail-closed classifier pipelines, shared by client and server.
+///
+/// Use only with a verified certificate bound to the artifact and an approved
+/// witness signer/measurement. A self-reported version is not evidence, and
+/// membership does not replace consent, risk holds or operator trust policy.
+/// Historical sidecar v1 is deliberately excluded: it could silently fall back.
+/// New versions require explicit review; do not accept prefixes or normalize.
+pub const FULL_REDACTION_PIPELINE_VERSIONS: &[&str] = &[
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
+];
+
+/// Whether a verified certificate names an exact known full pipeline.
+pub fn is_full_redaction_pipeline_version(version: &str) -> bool {
+    FULL_REDACTION_PIPELINE_VERSIONS.contains(&version)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivacyFilterBackendTag {
@@ -3989,46 +4009,11 @@ impl DeterministicTraceRedactor {
         let Some(adapter) = self.privacy_filter.as_ref() else {
             return Ok(text);
         };
-        let redaction = match adapter.redact_text(&text).await {
-            Ok(Some(redaction)) => redaction,
-            Ok(None) => return Ok(text),
-            Err(error) => {
-                match self.privacy_filter_backend {
-                    PrivacyFilterBackendTag::NearAi | PrivacyFilterBackendTag::SelfHosted => {
-                        // Spec fail-closed: surface as RedactionFailed.
-                        //
-                        // The self-hosted backend joins near-ai rather than
-                        // the sidecar arm deliberately. Being on loopback
-                        // makes it more reliable, not less required: it is a
-                        // configured prose-PII control, and degrading to
-                        // deterministic-only redaction on failure is exactly
-                        // the silent downgrade the fail-closed convention
-                        // exists to prevent. A local process that is down
-                        // should stop the path, not quietly narrow it.
-                        return Err(error);
-                    }
-                    PrivacyFilterBackendTag::Sidecar => {
-                        let error_text = error.to_string();
-                        let backend_label =
-                            privacy_filter_backend_label(self.privacy_filter_backend);
-                        report.increment(format!("privacy_filter:{backend_label}_failure"));
-                        // The configured filter did not examine this text, so
-                        // this pass cannot claim coverage of it. Fail closed.
-                        report.coverage_incomplete = true;
-                        report.add_warning(format!(
-                            "Privacy Filter {backend_label} backend failed; deterministic redaction fallback was used. error_hash={}",
-                            canonical_hash(&error_text)
-                        ));
-                        return Ok(text);
-                    }
-                    PrivacyFilterBackendTag::None => {
-                        // Unreachable: when backend tag is None, no adapter is
-                        // installed and we returned early above. Be defensive
-                        // and surface the error rather than silently swallow.
-                        return Err(error);
-                    }
-                }
-            }
+        // A configured prose classifier is a required control. Preserve its
+        // error category; never certify deterministic-only fallback as full.
+        let redaction = match adapter.redact_text(&text).await? {
+            Some(redaction) => redaction,
+            None => return Ok(text),
         };
 
         if map.is_some() {
@@ -4086,10 +4071,9 @@ impl DeterministicTraceRedactor {
     /// function, it is not cheap, and it is cancellation-visible -- do not
     /// call it in a loop over a large corpus without a budget.
     ///
-    /// A configured `near-ai` or `self-hosted` backend that fails returns
-    /// `Err` (fail-closed); a `sidecar` failure degrades to the deterministic
-    /// result with `report.coverage_incomplete` set. Both behaviours come from
-    /// [`Self::apply_privacy_filter_to_text`] and are unchanged here.
+    /// Any configured classifier that fails returns `Err` (fail-closed),
+    /// including `sidecar`. A caller never receives deterministic-only
+    /// fallback stamped as a completed classifier pipeline.
     ///
     /// # Ordering, and why it is this one
     ///
@@ -8715,6 +8699,53 @@ mod tests {
     }
 
     #[test]
+    fn full_pipeline_allowlist_requires_exact_known_versions() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
+        ] {
+            assert!(
+                super::is_full_redaction_pipeline_version(version),
+                "{version}"
+            );
+            for changed in [
+                format!("{version}+server-rescrub-v2"),
+                format!(" {version}"),
+                format!("{version} "),
+                version.to_uppercase(),
+            ] {
+                assert!(
+                    !super::is_full_redaction_pipeline_version(&changed),
+                    "{changed}"
+                );
+            }
+        }
+        for version in [
+            "",
+            "full-pipeline",
+            "ironclaw-deterministic-secret-path-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-unknown-v1",
+            "ironclaw-deterministic-secret-path-v2+privacy-filter-near-ai-v1",
+        ] {
+            assert!(
+                !super::is_full_redaction_pipeline_version(version),
+                "{version}"
+            );
+        }
+        for backend in [
+            super::PrivacyFilterBackendTag::NearAi,
+            super::PrivacyFilterBackendTag::SelfHosted,
+            super::PrivacyFilterBackendTag::Sidecar,
+        ] {
+            assert!(super::is_full_redaction_pipeline_version(
+                &super::redaction_pipeline_version(backend)
+            ));
+        }
+    }
+
+    #[test]
     fn redaction_pipeline_version_emits_per_backend_suffix() {
         use super::{
             DETERMINISTIC_REDACTION_PIPELINE_VERSION, PrivacyFilterBackendTag,
@@ -8726,7 +8757,7 @@ mod tests {
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::Sidecar),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v1")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v2")
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
@@ -9092,7 +9123,7 @@ mod tests {
     }
 
     /// Fail-closed is preserved through the new entry point: a configured
-    /// self-hosted or NEAR AI backend that errors must refuse, never hand
+    /// configured classifier backend that errors must refuse, never hand
     /// back a deterministic-only result that a caller would attest as full.
     #[tokio::test]
     async fn full_pipeline_entry_point_fails_closed_on_backend_error() {
@@ -9100,6 +9131,7 @@ mod tests {
         for backend in [
             super::PrivacyFilterBackendTag::NearAi,
             super::PrivacyFilterBackendTag::SelfHosted,
+            super::PrivacyFilterBackendTag::Sidecar,
         ] {
             let redactor = super::DeterministicTraceRedactor::bare()
                 .with_privacy_filter(Arc::new(AlwaysFailingPrivacyFilterAdapter), backend);
@@ -9113,30 +9145,21 @@ mod tests {
         }
     }
 
-    /// A sidecar failure degrades rather than refusing -- but it must set
-    /// `coverage_incomplete`, which is the flag that forces High and the
-    /// reason the report has to be returned at all.
+    /// A failed sidecar must not produce a full envelope for certification.
     #[tokio::test]
-    async fn full_pipeline_entry_point_marks_coverage_incomplete_on_sidecar_failure() {
-        use std::sync::Arc;
+    async fn sidecar_failure_refuses_whole_envelope() {
+        use super::TraceRedactor;
         let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
-            Arc::new(AlwaysFailingPrivacyFilterAdapter),
+            std::sync::Arc::new(AlwaysFailingPrivacyFilterAdapter),
             super::PrivacyFilterBackendTag::Sidecar,
         );
         let result = redactor
-            .redact_text_through_prose_filter(BOTH_STAGES_INPUT)
-            .await
-            .expect("sidecar failure degrades rather than refusing");
-        assert!(
-            result.report.coverage_incomplete,
-            "a sidecar failure must leave the pass unable to claim coverage: {:?}",
-            result.report
-        );
-        assert!(
-            !result.redacted.contains(BOTH_STAGES_SECRET),
-            "the deterministic stage still applies: {}",
-            result.redacted
-        );
+            .redact_trace(raw_contribution_with_content(BOTH_STAGES_INPUT))
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::TraceContributionError::RedactionFailed { .. })
+        ));
     }
 
     #[derive(Debug)]
@@ -9194,54 +9217,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sidecar_runtime_error_falls_back_with_backend_label() {
-        use super::{DeterministicTraceRedactor, PrivacyFilterBackendTag, RedactionReport};
-        use std::sync::Arc;
-        let adapter = Arc::new(AlwaysFailingPrivacyFilterAdapter);
-        let redactor = DeterministicTraceRedactor::bare()
-            .with_privacy_filter(adapter, PrivacyFilterBackendTag::Sidecar);
-        let mut report = RedactionReport::default();
-        let mut summary = None;
-        let text = redactor
-            .apply_privacy_filter_to_text(
-                "alice@example.com".to_string(),
-                &mut report,
-                &mut summary,
-            )
+    async fn sidecar_preserves_transient_failure_category() {
+        struct TransientFilter;
+        #[async_trait::async_trait]
+        impl super::PrivacyFilterAdapter for TransientFilter {
+            async fn redact_text(
+                &self,
+                _text: &str,
+            ) -> Result<Option<super::SafePrivacyFilterRedaction>, super::TraceContributionError>
+            {
+                Err(super::TraceContributionError::TransientRedactionFailed {
+                    reason: "synthetic temporary unavailability".to_string(),
+                })
+            }
+        }
+        let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            std::sync::Arc::new(TransientFilter),
+            super::PrivacyFilterBackendTag::Sidecar,
+        );
+        let error = redactor
+            .redact_text_through_prose_filter("Alice Brannigan")
             .await
-            .expect("sidecar must swallow runtime errors");
-        // Original text is returned to the caller (sidecar legacy
-        // contract).
-        assert_eq!(text, "alice@example.com");
-        let dump = format!("{:?}", report);
+            .err()
+            .expect("temporary failure must refuse too");
         assert!(
-            dump.contains("privacy_filter:sidecar_failure"),
-            "expected sidecar_failure counter to be incremented; got {dump}"
+            error.is_transient(),
+            "retry classification must survive: {error:?}"
         );
-        assert!(
-            dump.contains("sidecar backend failed"),
-            "expected backend-aware warning; got {dump}"
+    }
+
+    #[tokio::test]
+    async fn sidecar_runtime_error_propagates_fail_closed() {
+        let redactor = super::DeterministicTraceRedactor::bare().with_privacy_filter(
+            std::sync::Arc::new(AlwaysFailingPrivacyFilterAdapter),
+            super::PrivacyFilterBackendTag::Sidecar,
         );
-        // Case 4 (issue #373): the configured filter did not examine this
-        // text, so the pass must not be able to speak for it.
-        assert!(
-            report.coverage_incomplete,
-            "a filter fallback must mark the pass as not covering the text"
-        );
-        let consent = super::ConsentMetadata {
-            policy_version: super::TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
-            scopes: vec![super::ConsentScope::DebuggingEvaluation],
-            message_text_included: false,
-            tool_payloads_included: false,
-            correction_included: false,
-            routing_metadata_included: false,
-            revocable: true,
-        };
-        assert_eq!(
-            super::residual_risk(&consent, &report),
-            super::ResidualPiiRisk::High,
-            "a coverage gap must fail closed to High"
-        );
+        let mut report = super::RedactionReport::default();
+        let mut summary = None;
+        let result = redactor
+            .apply_privacy_filter_to_text("Alice Brannigan".to_string(), &mut report, &mut summary)
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::TraceContributionError::RedactionFailed { .. })
+        ));
+        assert!(summary.is_none());
     }
 
     #[test]

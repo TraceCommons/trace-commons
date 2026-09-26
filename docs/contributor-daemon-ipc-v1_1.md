@@ -948,6 +948,15 @@ A client comparing the result with the number of waiting cards it showed
 MUST compare against `purged` only; `retracted` entries were never on screen
 as waiting. Both fields are always present and may be `0`.
 
+**Turning automatic off retracts too.** Setting a project to `notify_only`
+moves the same unattended `approved` entries back to `pending`, with their
+old approval's terms cleared, and counts them in `retracted`; `purged` is
+`0`, since no waiting card is removed. They become ordinary waiting cards
+for the contributor to decide, rather than refusals: turning automatic off
+means "ask me", not "never offer this". Before this, only `ignore`
+retracted, so turning automatic off left every session it had already
+approved uploading.
+
 An `approved` entry the **contributor** approved is deliberately untouched,
 and so is an `uploading` entry. A contributor's approval is a decision
 already made about specific bytes under specific consent scopes, and a
@@ -959,8 +968,11 @@ An unattended approval that was `uploading` at the moment of the change and
 did not complete -- the daily cap, a fail-closed precondition, a restart --
 returns to `approved`. It is not sent: the upload pass re-checks the
 project's mode before sending any unattended approval, refuses it as
-`"project-ignored"` if the project is now `ignore`, and emits
-`queue_changed`. That refusal arrives on a later pass, not in this response.
+`"project-ignored"` if the project is now `ignore`, returns it to `pending`
+if the project is now `notify_only`, and emits `queue_changed`. That arrives
+on a later pass, not in this response. A project key the policy cannot
+resolve falls back to `notify_only`, so a lookup miss now waits for the
+contributor rather than sending.
 
 `"project-ignored"` is not `"dismissed-by-contributor"`. A dismissal is
 permanent and suppresses that conversation at its path forever; this is a
