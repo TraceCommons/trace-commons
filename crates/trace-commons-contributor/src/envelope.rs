@@ -236,6 +236,13 @@ pub const REASON_METADATA_CREDENTIAL: &str = "secret-leak-detected";
 /// The privacy filter collapsed two metadata keys into one.
 pub const REASON_METADATA_KEY_COLLISION: &str = "metadata-key-collision";
 
+/// Typed, data-free signal for an upstream classifier outage. The protocol
+/// error's reason may contain an endpoint or transport detail, so only this
+/// fixed marker crosses the contributor boundary.
+#[derive(Debug, thiserror::Error)]
+#[error("trace-redaction-failed")]
+pub(crate) struct TransientRedactionFailure;
+
 /// Run `raw` through `redactor`, mapping any failure to a label-only error
 /// (never trace content).
 pub async fn redact_to_envelope(
@@ -247,6 +254,7 @@ pub async fn redact_to_envelope(
         // reason but this exact one still collapses to the generic label
         // that every caller has always seen.
         match &error {
+            e if e.is_transient() => anyhow::Error::new(TransientRedactionFailure),
             TraceContributionError::RedactionFailed { reason }
                 if reason == REASON_CORRECTION_CREDENTIAL =>
             {

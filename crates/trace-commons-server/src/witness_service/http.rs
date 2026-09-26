@@ -65,6 +65,10 @@ use tokio::sync::Semaphore;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
 };
+use trace_commons_protocol::witness_pacing::{
+    WITNESS_BACKGROUND_WORKLOAD, WITNESS_SATURATED_ERROR, WITNESS_SATURATED_RETRY_AFTER_SECS,
+    WITNESS_WORKLOAD_HEADER,
+};
 
 use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
 use crate::redaction_witness::certificate::WitnessCertificate;
@@ -149,6 +153,7 @@ pub struct WitnessLoadBound {
     /// budget. A per-clone semaphore would be a per-connection bound, which
     /// bounds nothing an attacker cannot multiply by opening connections.
     permits: Arc<Semaphore>,
+    background_permits: Arc<Semaphore>,
     request_timeout: Duration,
 }
 
@@ -156,10 +161,35 @@ impl WitnessLoadBound {
     /// `max_concurrent_requests` slots, each held for at most
     /// `request_timeout`.
     pub fn new(max_concurrent_requests: usize, request_timeout: Duration) -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(max_concurrent_requests)),
+        Self::with_reservation(
+            max_concurrent_requests,
+            usize::from(max_concurrent_requests > 1),
             request_timeout,
+        )
+        .expect("witness concurrency limit must be positive")
+    }
+
+    /// Limits all requests globally and background requests to the unreserved
+    /// part of that same limit. The header is caller-declared, not priority
+    /// authentication.
+    pub fn with_reservation(
+        max_concurrent_requests: usize,
+        reserved_interactive_slots: usize,
+        request_timeout: Duration,
+    ) -> Result<Self, &'static str> {
+        if max_concurrent_requests == 0 {
+            return Err("witness concurrency limit must be positive");
         }
+        if reserved_interactive_slots >= max_concurrent_requests {
+            return Err("reserved interactive slots must be below the concurrency limit");
+        }
+        Ok(Self {
+            permits: Arc::new(Semaphore::new(max_concurrent_requests)),
+            background_permits: Arc::new(Semaphore::new(
+                max_concurrent_requests - reserved_interactive_slots,
+            )),
+            request_timeout,
+        })
     }
 }
 
@@ -168,7 +198,13 @@ impl WitnessLoadBound {
 /// A constant rather than a value derived from the timeout: `Retry-After` is a
 /// hint to a client, and deriving it from the request timeout would publish
 /// the deployment's occupancy ceiling to anyone who reads a 503.
-const SATURATED_RETRY_AFTER_SECS: u32 = 30;
+const SATURATED_RETRY_AFTER_SECS: u32 = WITNESS_SATURATED_RETRY_AFTER_SECS;
+
+fn saturated_refusal() -> Response {
+    Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_SATURATED_ERROR)
+        .retry_after(SATURATED_RETRY_AFTER_SECS)
+        .into_response()
+}
 
 /// The bound itself: acquire or refuse, then run under a deadline.
 async fn bound_witness_load(
@@ -176,16 +212,36 @@ async fn bound_witness_load(
     request: Request,
     next: Next,
 ) -> Response {
+    let background = match request
+        .headers()
+        .get_all(WITNESS_WORKLOAD_HEADER)
+        .iter()
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] => false,
+        [value] if value.as_bytes() == WITNESS_BACKGROUND_WORKLOAD.as_bytes() => true,
+        _ => {
+            return Refusal::new(StatusCode::BAD_REQUEST, "witness_workload_malformed")
+                .into_response();
+        }
+    };
     // `try_acquire_owned`, not `acquire_owned`. Waiting for a permit is a
     // queue, an unbounded queue in front of a bounded worker turns a load
     // problem into a memory problem, and it does it while telling the caller
     // nothing -- a contributor cannot distinguish "queued behind four hundred
     // others" from "working". Refusing immediately is the honest answer and
     // the cheap one.
-    let Ok(_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
-        return Refusal::new(StatusCode::SERVICE_UNAVAILABLE, "witness_saturated")
-            .retry_after(SATURATED_RETRY_AFTER_SECS)
-            .into_response();
+    let _background_permit = if background {
+        match Arc::clone(&load.background_permits).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => return saturated_refusal(),
+        }
+    } else {
+        None
+    };
+    let Ok(_global_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
+        return saturated_refusal();
     };
 
     match tokio::time::timeout(load.request_timeout, next.run(request)).await {
@@ -1650,8 +1706,11 @@ mod tests {
     #[async_trait]
     impl TranscriptRedactor for ParkingRedactor {
         async fn redact(&self, raw: &str) -> Result<RedactedTranscript, SeamUnavailable> {
+            let released = self.release.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
             self.entered.notify_one();
-            self.release.notified().await;
+            released.await;
             DeterministicRedaction::new(Vec::new()).redact(raw).await
         }
     }
@@ -1687,6 +1746,162 @@ mod tests {
             Arc::new(RecordingEnclave::default()),
             TEST_LIMIT,
         )
+    }
+
+    fn background_request(raw: &str) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/witness")
+            .header("content-type", "application/json")
+            .header("x-trace-witness-workload", "background")
+            .body(Body::from(witness_body(raw)))
+            .expect("a well formed background request")
+    }
+
+    #[tokio::test]
+    async fn background_budget_reserves_one_slot_for_ordinary_requests() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let load = WitnessLoadBound::with_reservation(2, 1, Duration::from_secs(30)).unwrap();
+        let first = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, background_request("first")).await }
+        });
+        entered.notified().await;
+        let (status, headers, body) =
+            send_bounded_full(service.clone(), load.clone(), background_request("second")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "{\"error\":\"witness_saturated\"}"
+        );
+        assert_eq!(headers.get(header::RETRY_AFTER).unwrap(), "30");
+        assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+        assert!(headers.get(WITNESS_SIGNATURE_HEADER).is_none());
+        let ordinary = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, post_witness(witness_body("ordinary"))).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("ordinary request reached the redactor");
+        release.notify_waiters();
+        assert_eq!(first.await.unwrap().0, StatusCode::OK);
+        assert_eq!(ordinary.await.unwrap().0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn every_witness_post_path_refuses_when_global_pool_is_full() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = WitnessLoadBound::with_reservation(2, 1, Duration::from_secs(30)).unwrap();
+        let _first = load.permits.clone().try_acquire_owned().unwrap();
+        let _second = load.permits.clone().try_acquire_owned().unwrap();
+        for path in [
+            "/v1/witness",
+            "/v1/witness/token-bundle",
+            "/v1/witness/admission",
+        ] {
+            let request = HttpRequest::builder()
+                .method(Method::POST)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let (status, headers, body) =
+                send_bounded_full(service.clone(), load.clone(), request).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                "{\"error\":\"witness_saturated\"}"
+            );
+            assert_eq!(headers.get(header::RETRY_AFTER).unwrap(), "30");
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(headers.get(WITNESS_SIGNATURE_HEADER).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_workload_headers_are_refused_before_certification() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = WitnessLoadBound::new(2, Duration::from_secs(30));
+        let values = [
+            vec![HeaderValue::from_static("interactive")],
+            vec![
+                HeaderValue::from_static("background"),
+                HeaderValue::from_static("background"),
+            ],
+            vec![HeaderValue::from_bytes(b"back\xFFground").unwrap()],
+        ];
+        for values in values {
+            let mut request = post_witness(witness_body("content"));
+            for value in values {
+                request
+                    .headers_mut()
+                    .append("x-trace-witness-workload", value);
+            }
+            let (status, headers, body) =
+                send_bounded_full(service.clone(), load.clone(), request).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                "{\"error\":\"witness_workload_malformed\"}"
+            );
+            assert!(headers.get(WITNESS_CERTIFICATE_HEADER).is_none());
+            assert!(headers.get(WITNESS_SIGNATURE_HEADER).is_none());
+        }
+        assert_eq!(
+            send_bounded(service, load, post_witness(witness_body("legacy")))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn background_timeout_releases_both_permits() {
+        let service = service_with_redactor(Arc::new(HangsOnceRedactor {
+            hung: Mutex::new(false),
+        }));
+        let load = WitnessLoadBound::with_reservation(2, 1, Duration::from_millis(50)).unwrap();
+        assert_eq!(
+            send_bounded(service.clone(), load.clone(), background_request("hang"))
+                .await
+                .0,
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            send_bounded(service, load, background_request("next"))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_background_request_releases_both_permits() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered: entered.clone(),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }));
+        let load = WitnessLoadBound::with_reservation(2, 1, Duration::from_secs(30)).unwrap();
+        let held = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, background_request("cancel")).await }
+        });
+        entered.notified().await;
+        held.abort();
+        held.await.expect_err("request was cancelled");
+        let (healthy, _) = healthy_service(TEST_LIMIT);
+        assert_eq!(
+            send_bounded(healthy, load, background_request("next"))
+                .await
+                .0,
+            StatusCode::OK
+        );
     }
 
     /// A witness at its concurrency bound REFUSES the next request. It does
