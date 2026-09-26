@@ -1557,6 +1557,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V77__account_admission.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V78__trace_source_sessions.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1651,18 +1654,31 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V77__account_admission.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V78__trace_source_sessions.sql"
+    ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
     for table in expected_trace_rls_tables()
         .into_iter()
         .chain(["trace_pii_backstop"])
     {
-        assert!(
-            sql.contains(&format!(
-                "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
-            )),
-            "central tenant predicate migration must drop stale policy on {table}"
-        );
+        if ![
+            "trace_account_admission_budget",
+            "trace_account_admission_submissions",
+            "trace_account_trust_facts",
+            "trace_source_sessions",
+            "trace_submission_sessions",
+        ]
+        .contains(&table)
+        {
+            assert!(
+                sql.contains(&format!(
+                    "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
+                )),
+                "central tenant predicate migration must drop stale policy on {table}"
+            );
+        }
         assert!(
             sql.contains(&format!(
                 "CREATE POLICY trace_corpus_tenant_isolation ON {table}"

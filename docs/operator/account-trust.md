@@ -34,7 +34,10 @@ The role cannot mint or revoke invite codes and has no `BYPASSRLS` privilege.
 Only an active server-validated invite grant removes cumulative volume caps.
 The account still uses an idempotency row, processing lease, authenticated
 device, request size bounds, and transient worker capacity controls. An
-invited grant does not certify a witness or alter the privacy gate.
+invited grant does not certify a witness or alter the privacy gate. Redeeming a
+new valid grant atomically changes existing bounded authority to invited and
+increments its trust version; repeating the same redemption consumes no extra
+use or version. Revoking the grant still removes invited admission authority.
 
 `GET /v1/account/contribution-status` is an authenticated, `no-store` advisory
 read. Its safe fields are `authority`, `policy_version`, `ready`, optional
@@ -53,7 +56,13 @@ its prior charge when it reserves another attempt. No account-ledger row is
 created for that UUID. A recovery may omit expired first-use evidence; if it
 offers admission evidence, its signature and stored binding must match.
 Partial or altered offered evidence is refused. Recovery never treats a new
-proof as a new authority.
+proof as a new authority. Historical bodies without `source_session` must be
+replayed unchanged; adding the field changes their identity and is refused.
+These legacy rows retain submission-level withdrawal protection only. They do
+not acquire a guarantee against a resumed session using a new submission UUID.
+Existing withdrawal tombstones still refuse replay and recovery. All new
+account-ledger submissions require valid `source_session` metadata before any
+budget reservation or content staging.
 
 Before enabling, record read-only counts of legacy invite tenants, wallet
 accounts, NEAR AI accounts, ambiguous links, and unlinked devices. Those counts

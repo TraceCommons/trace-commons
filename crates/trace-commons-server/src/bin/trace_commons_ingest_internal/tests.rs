@@ -3977,6 +3977,112 @@ async fn account_trace_content_read_failure_fails_closed_with_generic_500() {
 // Trace withdrawal (`POST /v1/account/traces/{submission_id}/withdraw`)
 // ---------------------------------------------------------------------------
 
+#[tokio::test]
+async fn source_session_status_requires_account_auth_and_hides_other_accounts() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone()),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let source = SourceSessionIdentity {
+        adapter: "codex".into(),
+        native_id: Uuid::new_v4().to_string(),
+    };
+    let digest = session_digest(&canonical_source_session(&source).unwrap());
+    let body = serde_json::to_vec(&source).unwrap();
+    let route = "/v1/account/source-sessions/status";
+    let unauthenticated = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(route)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let headers_a = account_session_headers(&state, "token-a").await;
+    let headers_b = account_session_headers(&state, "token-a-2").await;
+    let account_a = account_ctx_ext(&state, &headers_a)
+        .await
+        .0
+        .account_id
+        .as_uuid();
+    let account_b = account_ctx_ext(&state, &headers_b)
+        .await
+        .0
+        .account_id
+        .as_uuid();
+    assert_ne!(account_a, account_b);
+    let id = Uuid::new_v4();
+    backend
+        .claim_trace_source_session("tenant-a", account_a, &digest, id)
+        .await
+        .unwrap();
+    backend
+        .withdraw_trace_source_session("tenant-a", account_a, id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut unsupported = axum::http::Request::builder()
+        .method("POST")
+        .uri(route)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"adapter":"trajectory","native_id":"fallback"}"#,
+        ))
+        .unwrap();
+    unsupported.headers_mut().extend(headers_a.clone());
+    let unsupported_response = app(state.clone()).oneshot(unsupported).await.unwrap();
+    assert_eq!(unsupported_response.status(), StatusCode::OK);
+    let unsupported_body = axum::body::to_bytes(unsupported_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&unsupported_body).unwrap()["status"],
+        "unsupported"
+    );
+
+    for (headers, expected) in [(headers_a, "withdrawn"), (headers_b, "active")] {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(route)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        request.headers_mut().extend(headers);
+        let response = app(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["status"], expected);
+    }
+}
+
 /// Stage a stub trace object at the production object-key layout for
 /// `(tenant, status, submission)` so withdrawal has real bytes to delete.
 fn stage_trace_object_file(
@@ -7895,6 +8001,61 @@ async fn review_decision_requires_db_mirror_before_file_side_effects_when_requir
         event.kind.as_str(),
         "review_decision" | "trace_content_read"
     )));
+}
+
+#[tokio::test]
+async fn account_mode_review_never_publishes_file_acceptance_on_db_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let envelope = sample_envelope().await;
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .unwrap();
+    let original = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.status, TraceCorpusStatus::Quarantined);
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"z4-review","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["z4-review"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    assert!(!state.require_db_mirror_writes);
+    let result = review_decision_handler(
+        State(state.clone()),
+        auth_headers("review-token-a"),
+        AxumPath(submission_id),
+        Json(TraceReviewDecisionRequest {
+            decision: TraceReviewDecision::Approve,
+            reason: Some("source session DB refusal".into()),
+            credit_points_pending: Some(1.0),
+        }),
+    )
+    .await;
+    assert!(result.is_err(), "account mode requires DB-first approval");
+    let after = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status, TraceCorpusStatus::Quarantined);
+    assert!(
+        !state
+            .root
+            .join(trace_envelope_object_key(
+                "tenant-a",
+                TraceCorpusStatus::Accepted,
+                submission_id,
+            ))
+            .exists(),
+        "rejected approval must remove staged accepted bytes"
+    );
 }
 
 #[tokio::test]
@@ -85372,6 +85533,7 @@ struct PiiBackstopDriverTestDb {
     /// Object refs the driver appended on release (expected: a
     /// `RescrubbedEnvelope`).
     appended_refs: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
+    appended_ref_ids: std::sync::RwLock<Vec<Uuid>>,
     /// Kinds the driver invalidated after release (expected: the pre-backstop
     /// `SubmittedEnvelope`).
     invalidated_kinds: std::sync::RwLock<Vec<(String, Uuid, StorageTraceObjectArtifactKind)>>,
@@ -85424,6 +85586,7 @@ impl PiiBackstopDriverTestDb {
             gate_evaluation_attempts: std::sync::RwLock::new(std::collections::HashMap::new()),
             statuses: std::sync::RwLock::new(std::collections::HashMap::new()),
             appended_refs: std::sync::RwLock::new(Vec::new()),
+            appended_ref_ids: std::sync::RwLock::new(Vec::new()),
             invalidated_kinds: std::sync::RwLock::new(Vec::new()),
             seeded_refs: std::sync::RwLock::new(Vec::new()),
             awaiting_pii_backstop: std::sync::RwLock::new(Vec::new()),
@@ -86086,6 +86249,21 @@ async fn pii_backstop_process_one_atomic_release_stays_held_on_invalidation_fail
         TraceCorpusStatus::AwaitingPiiBackstop,
         "the on-disk record must stay held when the DB release fails"
     );
+    assert!(
+        !state
+            .root
+            .join(trace_envelope_object_key(
+                "tenant-a",
+                TraceCorpusStatus::Accepted,
+                submission_id,
+            ))
+            .exists(),
+        "failed release must remove the newly staged accepted object",
+    );
+    assert!(
+        db.appended_kinds("tenant-a", submission_id).is_empty(),
+        "failed release must retire the newly staged rescrubbed ref",
+    );
 
     // The submission must still satisfy the driver's own re-enumeration
     // invariant: still `awaiting_pii_backstop` with the `SubmittedEnvelope`
@@ -86109,6 +86287,9 @@ async fn pii_backstop_process_one_atomic_release_stays_held_on_invalidation_fail
         Some(StorageTraceCorpusStatus::Accepted),
         "the retried release must succeed and clear the hold"
     );
+    let attempt_ids = db.appended_ref_ids.read().unwrap();
+    assert_eq!(attempt_ids.len(), 2);
+    assert_ne!(attempt_ids[0], attempt_ids[1], "retry needs a fresh ref ID");
 }
 
 // --- (b) process-one fail leaves the hold in place ----------------------
@@ -87094,6 +87275,10 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
         write: StorageTraceObjectRefWrite,
     ) -> Result<(), DatabaseError> {
         // Record the rescrubbed-envelope ref the backstop mirrors on release.
+        self.appended_ref_ids
+            .write()
+            .unwrap()
+            .push(write.object_ref_id);
         self.appended_refs.write().unwrap().push((
             write.tenant_id.clone(),
             write.submission_id,
@@ -87634,12 +87819,19 @@ impl trace_commons_server::trace_corpus_storage::TraceCorpusStore for PiiBacksto
     }
     async fn mark_trace_object_ref_deleted(
         &self,
-        _: &str,
-        _: Uuid,
+        tenant_id: &str,
+        submission_id: Uuid,
         _: &str,
         _: &str,
     ) -> Result<u64, DatabaseError> {
-        todo!("stub")
+        let mut refs = self.appended_refs.write().unwrap();
+        let before = refs.len();
+        refs.retain(|(tenant, submission, kind)| {
+            tenant != tenant_id
+                || *submission != submission_id
+                || *kind != StorageTraceObjectArtifactKind::RescrubbedEnvelope
+        });
+        Ok((before - refs.len()) as u64)
     }
     async fn insert_trace_gate_decision(
         &self,

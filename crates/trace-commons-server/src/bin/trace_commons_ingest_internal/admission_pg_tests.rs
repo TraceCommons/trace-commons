@@ -454,6 +454,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         trace_commons_protocol::admission::SIGNATURE_HEADER,
         signature.parse().unwrap(),
     );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&response.envelope_bytes)
+            .unwrap()
+            .get("source_session")
+            .is_none(),
+        "legacy bytes omit the new field entirely"
+    );
     // Each missing binding fails before any submission is admitted.
     for missing in [
         trace_commons_protocol::admission::EVIDENCE_HEADER,
@@ -579,6 +586,19 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     // marked its lease completed. The old charge stays; retrying with the
     // original signed headers acquires a new V59 lease, never account debt.
     client.execute("UPDATE trace_admission_submissions SET status='processing',lease_expires_at=now()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&admitted.submission_id]).await.unwrap();
+    let mut altered_expired = response.envelope_bytes.clone();
+    altered_expired.push(b' ');
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            altered_expired,
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
     let mut changed_signature = headers.clone();
     changed_signature.insert(
         trace_commons_protocol::admission::SIGNATURE_HEADER,
@@ -625,6 +645,10 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
 
     let mut released = sample_envelope().await;
     make_metadata_only_low_risk(&mut released);
+    assert!(
+        released.source_session.is_none(),
+        "historical bodies lack session metadata"
+    );
     let released_body = serde_json::to_vec(&released).unwrap();
     let released_hash = hash_hex(&released_body);
     client.execute("INSERT INTO trace_admission_submissions(tenant_id,submission_id,anchor_hash,body_hash,kind,status,lease_id,lease_expires_at,last_cost_bound,attempt_held,ever_processed) VALUES($1,$2,$3,$4,'window','reserved',$5,now()+interval '60 seconds',10,FALSE,FALSE)", &[&tenant,&released.submission_id,&anchor,&released_hash,&Uuid::new_v4()]).await.unwrap();
@@ -641,6 +665,19 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         "a live legacy lease remains busy after cutover"
     );
     client.execute("UPDATE trace_admission_submissions SET status='released' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&released.submission_id]).await.unwrap();
+    let mut altered_released = released_body.clone();
+    altered_released.push(b' ');
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            altered_released,
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(
         post(
             state.clone(),
@@ -681,6 +718,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     // independent provider policy, with no legacy environment lookup.
     raw.submission_id = Uuid::new_v4();
     raw.trace_id = Uuid::new_v4();
+    // Account admission requires a source-session identity on every new use.
+    raw.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     let (fresh, mut fresh_evidence, _) = witness
         .witness_admission_contribution(witness_service::WitnessContributionRequest {
             raw_contribution: raw,
@@ -779,7 +823,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         &authenticated,
         &offered,
         &fresh.envelope_bytes,
-        fresh_envelope.submission_id,
+        &fresh_envelope,
     )
     .await
     .unwrap()
@@ -991,7 +1035,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             &authenticated,
             &offered,
             &fresh.envelope_bytes,
-            fresh_envelope.submission_id
+            &fresh_envelope
         )
         .await
         .is_err(),
@@ -1006,6 +1050,12 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         .max_per_tenant_per_hour = 1;
     let mut quota_envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut quota_envelope);
+    quota_envelope.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     let quota_response = post(
         state.clone(),
         "/v1/traces",
@@ -1254,6 +1304,219 @@ fn principal_for(token: &str) -> String {
     tokens.get(token).unwrap().principal_ref.clone()
 }
 
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn invalid_or_withdrawn_source_session_refuses_before_budget_and_staging() {
+    use trace_commons_server::trace_corpus_storage::{TraceCorpusStore, TraceSourceSessionStatus};
+
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"z4-source-refusal","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["z4-source-refusal"],
+        ).unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    });
+    let mut missing = sample_envelope().await;
+    make_metadata_only_low_risk(&mut missing);
+    missing.source_session = None;
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&missing).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    assert!(!submission_metadata_path(&state.root, &tenant, missing.submission_id).exists());
+
+    let native = trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+        adapter: "opencode".into(),
+        native_id: format!("ses_{}", Uuid::new_v4().simple()),
+    };
+    let digest = session_digest(&canonical_source_session(&native).unwrap());
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let original = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        &principal_for(token),
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let staged_original = stage_trace_object_file(
+        state.as_ref(),
+        &tenant,
+        TraceCorpusStatus::Quarantined,
+        original,
+    );
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, account_id, &digest, original)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    // A second version of the same session. Withdrawing `original` must
+    // account for it too: its own audit event, not only its deletion.
+    let sibling = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        &principal_for(token),
+        trace_commons_server::trace_corpus_storage::TraceCorpusStatus::Accepted,
+    )
+    .await;
+    assert_eq!(
+        db.claim_trace_source_session(&tenant, account_id, &digest, sibling)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+    let mut withdraw = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/v1/account/traces/{original}/withdraw"))
+        .body(Body::empty())
+        .unwrap();
+    withdraw
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    assert_eq!(
+        app(state.clone()).oneshot(withdraw).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(!staged_original.exists());
+    for id in [original, sibling] {
+        let revoke_events: i64 = client
+            .query_one(
+                "SELECT count(*) FROM trace_audit_events
+                  WHERE submission_id = $1 AND action = 'revoke'",
+                &[&id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            revoke_events, 1,
+            "every withdrawn version records its own hash-only revoke event"
+        );
+    }
+
+    // A plain submission-level tombstone with no source session is refused
+    // with its own label, not the source-session one.
+    let mut tombstoned = sample_envelope().await;
+    make_metadata_only_low_risk(&mut tombstoned);
+    tombstoned.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("ses_{}", Uuid::new_v4().simple()),
+        },
+    );
+    db.record_trace_withdrawal(
+        &tenant,
+        tombstoned.submission_id,
+        Utc::now(),
+        "received",
+        "not_distributed",
+    )
+    .await
+    .unwrap();
+    let tombstone_response = post(
+        state.clone(),
+        "/v1/traces",
+        serde_json::to_vec(&tombstoned).unwrap(),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(tombstone_response.status(), StatusCode::CONFLICT);
+    let tombstone_body = axum::body::to_bytes(tombstone_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&tombstone_body).unwrap()["error"],
+        "submission_withdrawn"
+    );
+
+    // Recreate both service state and PostgreSQL handles, then authenticate a
+    // new browser session. The digest must survive every one of those changes.
+    let reconnected = admission_pg_admin().await;
+    let (_restart_temp, mut restarted, _) = anchor_state(reconnected, &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut restarted).root = state.root.clone();
+    Arc::make_mut(&mut restarted).require_db_mirror_writes = true;
+    Arc::make_mut(&mut restarted).account_admission = state.account_admission.clone();
+    let mut status = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/account/source-sessions/status")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&native).unwrap()))
+        .unwrap();
+    status
+        .headers_mut()
+        .extend(account_session_headers(&restarted, token).await);
+    let status_response = app(restarted.clone()).oneshot(status).await.unwrap();
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = axum::body::to_bytes(status_response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&status_body).unwrap()["status"],
+        "withdrawn"
+    );
+
+    let mut resumed = sample_envelope_with_user_input("changed content after reconnect").await;
+    make_metadata_only_low_risk(&mut resumed);
+    set_metadata_only_tool_name(&mut resumed, "changed-resumed-content");
+    resumed.source_session = Some(native);
+    assert_ne!(resumed.submission_id, original);
+    assert_eq!(
+        post(
+            restarted.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&resumed).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+    );
+    assert!(!submission_metadata_path(&restarted.root, &tenant, resumed.submission_id).exists());
+    assert!(
+        !restarted
+            .root
+            .join(trace_envelope_object_key(
+                &tenant,
+                TraceCorpusStatus::Accepted,
+                resumed.submission_id
+            ))
+            .exists()
+    );
+    let reserved: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        reserved, 0,
+        "source refusal must not reserve account budget"
+    );
+}
+
 /// #783. V58 made `tenant_id` a function of `anchor_hash` and `admission::anchor`
 /// asserted the two were equal. V61 deliberately destroyed that relationship --
 /// the tenant id is now random and the anchor a blind index -- which left the
@@ -1359,6 +1622,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
+    envelope.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     let body = serde_json::to_vec(&envelope).unwrap();
     assert_eq!(
         post(state.clone(), "/v1/traces", body.clone(), HeaderMap::new())
@@ -1417,6 +1686,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     });
     let mut fixed_first = sample_envelope().await;
     make_metadata_only_low_risk(&mut fixed_first);
+    fixed_first.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     assert_eq!(
         post(
             state.clone(),
@@ -1430,6 +1705,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     );
     let mut fixed_second = sample_envelope().await;
     make_metadata_only_low_risk(&mut fixed_second);
+    fixed_second.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     let fixed_refusal = post(
         state.clone(),
         "/v1/traces",
@@ -1517,6 +1798,12 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
     assert_eq!(status_json["ready"], true);
     let mut invited = sample_envelope().await;
     make_metadata_only_low_risk(&mut invited);
+    invited.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("test-{}", Uuid::new_v4().simple()),
+        },
+    );
     assert_eq!(
         post(
             state.clone(),
@@ -1543,4 +1830,101 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         .unwrap()
         .get(0);
     assert_eq!(consumed, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn rejected_foreign_session_claim_preserves_victim_bytes_after_sibling_withdrawal() {
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    Arc::make_mut(&mut state).account_admission = Some(admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            r#"{"version":"ownership-fixture","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+            &["ownership-fixture"],
+        ).unwrap(), lease_seconds: 60, providers: None,
+    });
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let victim_account = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &victim_account],
+        )
+        .await
+        .unwrap();
+    client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,'principal:victim')", &[&tenant,&victim_account]).await.unwrap();
+    let victim = insert_account_test_submission_with_status(
+        db.as_ref(),
+        &tenant,
+        "principal:victim",
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let victim_object =
+        stage_trace_object_file(&state, &tenant, TraceCorpusStatus::Quarantined, victim);
+    let victim_bytes = std::fs::read(&victim_object).unwrap();
+    let before = db
+        .get_trace_submission(&tenant, victim)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut own = sample_envelope().await;
+    make_metadata_only_low_risk(&mut own);
+    own.source_session = Some(
+        trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: format!("ownership-{}", Uuid::new_v4().simple()),
+        },
+    );
+    require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&own).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
+    )
+    .await;
+    let mut attack = own.clone();
+    attack.submission_id = victim;
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&attack).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let count: i64 = client.query_one("SELECT count(*) FROM trace_submission_sessions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&victim]).await.unwrap().get(0);
+    assert_eq!(count, 0, "rejected request leaves no victim mapping");
+    let mut withdraw = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/v1/account/traces/{}/withdraw", own.submission_id))
+        .body(Body::empty())
+        .unwrap();
+    withdraw
+        .headers_mut()
+        .extend(account_session_headers(&state, token).await);
+    require_ok(app(state.clone()).oneshot(withdraw).await.unwrap()).await;
+    assert_eq!(std::fs::read(victim_object).unwrap(), victim_bytes);
+    assert_eq!(
+        db.get_trace_submission(&tenant, victim)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert!(
+        db.get_trace_withdrawal(&tenant, victim)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

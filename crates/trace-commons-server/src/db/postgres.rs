@@ -213,6 +213,8 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
+    "trace_source_sessions",
+    "trace_submission_sessions",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",
@@ -1404,6 +1406,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         77,
         "account_admission",
         include_str!("../../../../migrations/V77__account_admission.sql"),
+    ),
+    (
+        78,
+        "trace_source_sessions",
+        include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
     ),
 ];
 
@@ -4725,6 +4732,28 @@ impl Database for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)? as i64;
 
+        // Source-session withdrawal is account-scoped. Carry B's sessions onto
+        // A so a withdrawal made by either identity reaches every mapped
+        // version, and a session B already withdrew stays withdrawn for
+        // resumed uploads under A (withdrawal wins on overlap); the mappings
+        // follow. This runs through V78's SECURITY DEFINER function, so the
+        // merge-executing login needs no privilege on the session tables. The
+        // function accepts only a proposal consumed by this transaction, like
+        // the reward hook above, so the consume must stay outside a SAVEPOINT.
+        let source_sessions_moved: i64 = tx
+            .query_one(
+                "SELECT public.trace_source_sessions_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.
         tx.execute(
@@ -4758,6 +4787,7 @@ impl Database for PgBackend {
             "principals_moved": principals_moved,
             "authenticators_moved": authenticators_moved,
             "public_runs_moved": public_runs_moved,
+            "source_sessions_moved": source_sessions_moved,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (
@@ -7220,6 +7250,7 @@ mod tests {
             include_str!("../../../../migrations/V75__account_trust.sql"),
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
             include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7245,6 +7276,7 @@ mod tests {
             include_str!("../../../../migrations/V75__account_trust.sql"),
             include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
             include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
