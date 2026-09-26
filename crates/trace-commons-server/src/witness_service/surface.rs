@@ -37,8 +37,9 @@ use super::enclave::WITNESS_NONCE_LEN;
 use super::inference::InferenceAttestationPolicy;
 use super::{
     ContributionRedactor, Enclave, SeamUnavailable, Signer, TranscriptRedactor,
-    WitnessContributionRequest, WitnessContributionResponse, WitnessError, WitnessRequest,
-    WitnessResponse, witness, witness_contribution,
+    WitnessCertificateIssuance, WitnessContributionRequest, WitnessContributionResponse,
+    WitnessError, WitnessRequest, WitnessResponse, witness_contribution_with_issuance,
+    witness_with_issuance,
 };
 
 /// A contributor's attestation nonce: exactly [`WITNESS_NONCE_LEN`] bytes,
@@ -166,6 +167,7 @@ pub struct WitnessService {
     /// could not have chosen, and one assembled per request would be one the
     /// environment could change under a running witness.
     inference_policy: InferenceAttestationPolicy,
+    certificate_issuance: WitnessCertificateIssuance,
     admission_provider_trust: Option<crate::admission_evidence::AdmissionProviderTrust>,
 }
 
@@ -191,8 +193,16 @@ impl WitnessService {
             enclave,
             max_request_bytes,
             inference_policy: InferenceAttestationPolicy::not_required(),
+            certificate_issuance: WitnessCertificateIssuance::V1,
             admission_provider_trust: None,
         }
+    }
+
+    /// Opt into a certificate profile for this service's lifetime. V1 is the
+    /// default; enable V2 only after ingest and supported clients accept it.
+    pub fn with_certificate_issuance(mut self, issuance: WitnessCertificateIssuance) -> Self {
+        self.certificate_issuance = issuance;
+        self
     }
 
     /// Refuse anything this policy does not admit.
@@ -231,9 +241,10 @@ impl WitnessService {
 
     /// Redact, judge and certify. Thin over [`super::witness`].
     pub async fn witness(&self, request: WitnessRequest) -> Result<WitnessResponse, WitnessError> {
-        witness(
+        witness_with_issuance(
             request,
             &self.inference_policy,
+            self.certificate_issuance,
             self.redactor.as_ref(),
             self.signer.as_ref(),
             self.enclave.as_ref(),
@@ -258,9 +269,10 @@ impl WitnessService {
         let Some(redactor) = self.contribution_redactor.as_ref() else {
             return Err(ContributionPathUnavailable);
         };
-        Ok(witness_contribution(
+        Ok(witness_contribution_with_issuance(
             request,
             &self.inference_policy,
+            self.certificate_issuance,
             redactor.as_ref(),
             self.signer.as_ref(),
             self.enclave.as_ref(),
@@ -296,10 +308,10 @@ impl WitnessService {
             .contribution_redactor
             .as_ref()
             .ok_or(WitnessError::RedactionFailed)?;
-        let mut response = super::token_bundle::witness_token_bundle(
+        let mut response = super::token_bundle::witness_token_bundle_with_issuance(
             request,
             options,
-            &self.inference_policy,
+            (&self.inference_policy, self.certificate_issuance),
             redactor.as_ref(),
             self.redactor.as_ref(),
             self.signer.as_ref(),

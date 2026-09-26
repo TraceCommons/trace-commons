@@ -82,6 +82,18 @@ fn signed_evidence_at(
     legacy: bool,
     issued: i64,
 ) -> (TraceWitnessCertificateEvidenceWrite, Vec<u8>, Vec<u8>) {
+    signed_evidence_over(tenant, submission, class, artifact, legacy, issued, BODY)
+}
+
+fn signed_evidence_over(
+    tenant: &str,
+    submission: Uuid,
+    class: AttestationClass,
+    artifact: &str,
+    legacy: bool,
+    issued: i64,
+    body: &[u8],
+) -> (TraceWitnessCertificateEvidenceWrite, Vec<u8>, Vec<u8>) {
     let key = SigningKey::from_slice(&Keccak256::digest(b"z2 evidence test key")).unwrap();
     let point = key.verifying_key().to_encoded_point(false);
     let signer = format!(
@@ -93,18 +105,10 @@ fn signed_evidence_at(
         InferenceProvenance::Unattested
     } else {
         InferenceProvenance::Attested(
-            FinalCallAttestation::new(
-                class,
-                "a".repeat(64),
-                Some("model".into()),
-                "b".repeat(64),
-                "c".repeat(64),
-                "d".repeat(64),
-            )
-            .unwrap(),
+            FinalCallAttestation::new(class, Some("model".into()), "b".repeat(64)).unwrap(),
         )
     };
-    let body_digest = hex::encode(Sha256::digest(BODY));
+    let body_digest = hex::encode(Sha256::digest(body));
     let details = CertificateDetails {
         residual_risk_verdict: ResidualPiiRisk::Low,
         redaction_policy_version: "full-pipeline".into(),
@@ -139,9 +143,9 @@ fn signed_evidence_at(
     let mut headers = HeaderMap::new();
     headers.insert(CERTIFICATE_HEADER, cert_json.parse().unwrap());
     headers.insert(SIGNATURE_HEADER, signature.parse().unwrap());
-    let verified = verify_witness_certificate(certificate, &signature, Some(&pin), BODY).unwrap();
+    let verified = verify_witness_certificate(certificate, &signature, Some(&pin), body).unwrap();
     let evidence = TraceWitnessCertificateEvidenceWrite::from_verified(
-        tenant, submission, &verified, &headers, BODY, artifact,
+        tenant, submission, &verified, &headers, body, artifact,
     )
     .unwrap();
     (evidence, cert_json.into_bytes(), signature.into_bytes())
@@ -541,8 +545,8 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
             "INSERT INTO trace_witness_certificate_evidence (
             tenant_id, submission_id, certificate_json, signature_header, raw_body_sha256,
             artifact_sha256, certificate_version, inference_class, receipt_signer,
-            receipt_sha256, issued_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,2,'provider_tee_final_call',$7,$8,NOW())",
+            issued_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,2,'provider_tee_final_call',$7,NOW())",
             &[
                 &tenant_a,
                 &insert_target,
@@ -551,7 +555,6 @@ async fn pg_verified_evidence_is_immutable_tenant_scoped_and_active_artifact_bou
                 &hex::encode(Sha256::digest(BODY)),
                 &artifact,
                 &"b".repeat(64),
-                &"c".repeat(64),
             ],
         )
         .await;
@@ -571,6 +574,232 @@ fn witness_evidence_schema_is_forced_tenant_scoped_and_body_free() {
     assert!(sql.contains("ENABLE ROW LEVEL SECURITY"));
     assert!(sql.contains("FORCE ROW LEVEL SECURITY"));
     assert!(sql.contains("trace_current_tenant_id()"));
+    assert!(sql.contains("BEFORE UPDATE ON trace_witness_certificate_evidence"));
+    assert!(!sql.contains("receipt_sha256"));
     assert!(!sql.contains("transcript_json"));
     assert!(!sql.contains("raw_body BYTEA"));
+}
+
+const REMEDIATED_BODY: &[u8] = b"{\"witnessed\":true,\"remediated\":true}";
+
+fn quarantined_submission(tenant_id: &str, submission_id: Uuid) -> TraceSubmissionWrite {
+    let mut submission = sample_submission(tenant_id, submission_id);
+    submission.status = TraceCorpusStatus::Quarantined;
+    submission
+}
+
+/// Quarantine remediation replaces a submission's body under the same id, so
+/// the prior body's evidence no longer describes the submission. It is
+/// replaced by the new body's evidence, or removed when the remediation is
+/// unwitnessed, in the same transaction as the submission update.
+#[tokio::test]
+async fn pg_quarantine_remediation_replaces_witness_evidence() {
+    let Some(db) = backend().await else {
+        eprintln!("skipping PostgreSQL: no test URL");
+        return;
+    };
+    db.run_migrations().await.expect("migrate");
+    let tenant = format!("z2-remediate-{}", Uuid::new_v4());
+    let artifact = "e".repeat(64);
+
+    // Witnessed quarantined submission, remediated with a new certificate.
+    let witnessed = Uuid::new_v4();
+    let (original, _, _) = signed_evidence(
+        &tenant,
+        witnessed,
+        AttestationClass::ProviderTeeFinalCall,
+        &artifact,
+        false,
+    );
+    db.upsert_trace_submission_with_witness(
+        quarantined_submission(&tenant, witnessed),
+        Some(original),
+    )
+    .await
+    .expect("quarantined witnessed insert");
+    let (replacement, replacement_cert, replacement_sig) = signed_evidence_over(
+        &tenant,
+        witnessed,
+        AttestationClass::GatewayFinalCall,
+        &"d".repeat(64),
+        false,
+        chrono::Utc::now().timestamp(),
+        REMEDIATED_BODY,
+    );
+    db.remediate_trace_submission_with_witness(
+        sample_submission(&tenant, witnessed),
+        Some(replacement),
+    )
+    .await
+    .expect("remediation with a new certificate replaces the evidence");
+    assert_eq!(
+        db.witness_retry_identity_matches(
+            &tenant,
+            witnessed,
+            Some(&replacement_cert),
+            Some(&replacement_sig),
+            REMEDIATED_BODY,
+        )
+        .await
+        .unwrap(),
+        Some(true),
+        "a retry of the remediated body matches the replacement evidence",
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(&tenant, witnessed, None, None, REMEDIATED_BODY)
+            .await
+            .unwrap(),
+        Some(true),
+    );
+    assert_eq!(
+        db.witness_retry_identity_matches(&tenant, witnessed, None, None, BODY)
+            .await
+            .unwrap(),
+        Some(false),
+        "the pre-remediation body no longer matches",
+    );
+    assert_eq!(
+        db.get_verified_witness_evidence(&tenant, witnessed, &"d".repeat(64))
+            .await
+            .unwrap()
+            .class,
+        AttestationClass::GatewayFinalCall,
+    );
+
+    // Witnessed quarantined submission, remediated without witness headers.
+    let unwitnessed = Uuid::new_v4();
+    let (original, _, _) = signed_evidence(
+        &tenant,
+        unwitnessed,
+        AttestationClass::ProviderTeeFinalCall,
+        &artifact,
+        false,
+    );
+    db.upsert_trace_submission_with_witness(
+        quarantined_submission(&tenant, unwitnessed),
+        Some(original),
+    )
+    .await
+    .expect("quarantined witnessed insert");
+    db.remediate_trace_submission_with_witness(sample_submission(&tenant, unwitnessed), None)
+        .await
+        .expect("unwitnessed remediation succeeds");
+    assert_eq!(
+        db.witness_retry_identity_matches(&tenant, unwitnessed, None, None, REMEDIATED_BODY)
+            .await
+            .unwrap(),
+        None,
+        "evidence for the replaced body must not survive an unwitnessed remediation",
+    );
+    assert_eq!(
+        db.get_current_verified_witness_evidence(&tenant, unwitnessed)
+            .await
+            .unwrap()
+            .coverage,
+        TraceWitnessEvidenceCoverage::Missing,
+    );
+
+    // Only a quarantined row may have its evidence replaced.
+    let accepted = Uuid::new_v4();
+    let (original, original_cert, original_sig) = signed_evidence(
+        &tenant,
+        accepted,
+        AttestationClass::ProviderTeeFinalCall,
+        &artifact,
+        false,
+    );
+    db.upsert_trace_submission_with_witness(sample_submission(&tenant, accepted), Some(original))
+        .await
+        .expect("accepted witnessed insert");
+    let (other, _, _) = signed_evidence_over(
+        &tenant,
+        accepted,
+        AttestationClass::GatewayFinalCall,
+        &artifact,
+        false,
+        chrono::Utc::now().timestamp(),
+        REMEDIATED_BODY,
+    );
+    assert!(
+        db.remediate_trace_submission_with_witness(
+            sample_submission(&tenant, accepted),
+            Some(other)
+        )
+        .await
+        .is_err(),
+        "evidence of a non-quarantined submission is never replaced",
+    );
+    db.remediate_trace_submission_with_witness(sample_submission(&tenant, accepted), None)
+        .await
+        .expect("an unwitnessed write to a non-quarantined row leaves evidence alone");
+    assert_eq!(
+        db.witness_retry_identity_matches(
+            &tenant,
+            accepted,
+            Some(&original_cert),
+            Some(&original_sig),
+            BODY,
+        )
+        .await
+        .unwrap(),
+        Some(true),
+    );
+}
+
+/// The immutability of the signed source must hold for every role, including
+/// the table owner a single-login deployment connects as. Only the derived
+/// `artifact_sha256` link may move.
+#[tokio::test]
+async fn pg_witness_evidence_signed_source_is_immutable_even_for_the_owner() {
+    let Some(db) = backend().await else {
+        eprintln!("skipping PostgreSQL: no test URL");
+        return;
+    };
+    db.run_migrations().await.expect("migrate");
+    let tenant = format!("z2-immutable-{}", Uuid::new_v4());
+    let submission = Uuid::new_v4();
+    let (evidence, _, _) = signed_evidence(
+        &tenant,
+        submission,
+        AttestationClass::ProviderTeeFinalCall,
+        &"e".repeat(64),
+        false,
+    );
+    db.upsert_trace_submission_with_witness(sample_submission(&tenant, submission), Some(evidence))
+        .await
+        .expect("insert");
+    let pool = db.raw_pool_for_tests_and_diagnostics();
+    let client = pool.get().await.unwrap();
+    for assignment in [
+        "certificate_json = '\\x00'::bytea",
+        "signature_header = '\\x00'::bytea",
+        "raw_body_sha256 = repeat('0', 64)",
+        "certificate_version = 1, inference_class = 'unattested', bound_model = NULL, receipt_signer = NULL",
+        "bound_model = 'other-model'",
+        "issued_at = issued_at - interval '1 day'",
+        "received_at = received_at - interval '1 day'",
+    ] {
+        let result = client
+            .execute(
+                &format!(
+                    "UPDATE trace_witness_certificate_evidence SET {assignment}
+                     WHERE tenant_id = $1 AND submission_id = $2"
+                ),
+                &[&tenant, &submission],
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "owner update must be refused: {assignment}"
+        );
+    }
+    let rebound = client
+        .execute(
+            "UPDATE trace_witness_certificate_evidence SET artifact_sha256 = $3
+             WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission, &"f".repeat(64)],
+        )
+        .await
+        .expect("the derived artifact link may move");
+    assert_eq!(rebound, 1);
 }
