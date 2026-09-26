@@ -32,13 +32,13 @@ public enum ProjectArmingCopy {
     /// this is reversible, and a sheet that does not say so reads as a door
     /// that only opens one way.
     public static let confirmationBody = """
-        Every future session in this project will be scrubbed and contributed \
-        without asking you. You won't review them first.
+        Sessions from this project will be scrubbed and contributed without asking \
+        you, including any already waiting. You won't review them first.
 
-        A session is sent a day after you last work on it, so there is time to \
-        change your mind.
+        No session is sent until it has been quiet for a day.
 
-        You can turn this off at any time.
+        You can turn this off at any time. Anything it hasn't sent yet goes back to \
+        waiting for you, and anything already sent stays sent.
         """
 
     /// The confirm button carries the action rather than agreeing in the
