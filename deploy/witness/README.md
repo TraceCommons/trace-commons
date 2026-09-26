@@ -138,7 +138,17 @@ is:
 | Variable | Ships as | What it bounds |
 |---|---|---|
 | `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `4` | How many witness requests run at once. Over it, the witness answers `503` with `witness_saturated` and a `Retry-After`, immediately. It does not queue. |
+| `TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS` | `1` when max is greater than 1; otherwise `0` | Keeps this many of the global slots available when cooperating automatic clients mark witness POSTs with `x-trace-witness-workload: background`. The background budget is max minus reserved. An explicit `0` restores the shared pool; a value at or above max is refused at startup. |
 | `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `300` | How long one request may take. Over it, `504` with `witness_request_timed_out`, and the slot is released. |
+
+The saturation response is exactly `503 {"error":"witness_saturated"}` with
+`Retry-After: 30` seconds and no certificate or signature. The witness does
+not keep an internal queue. A missing workload header retains the ordinary
+behavior; an unknown, duplicate, or malformed header receives
+`400 {"error":"witness_workload_malformed"}`. The header is caller-declared,
+so the reservation protects capacity only when automatic clients cooperate;
+it grants no authentication or priority against an adversarial anonymous
+caller. The global limit still bounds all requests.
 
 Neither refusal certifies anything. Together they bound what an anonymous
 caller can spend: cores, and — because `full-pipeline` sends prose to a metered

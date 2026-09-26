@@ -1292,6 +1292,7 @@ mod tests {
         for backend in [
             PrivacyFilterBackendTag::SelfHosted,
             PrivacyFilterBackendTag::NearAi,
+            PrivacyFilterBackendTag::Sidecar,
         ] {
             let redactor =
                 FullPipelineRedaction::new(Vec::new(), Arc::new(UnavailableFilter), backend);
@@ -1301,6 +1302,15 @@ mod tests {
                 "{backend:?}: a down classifier must refuse, not degrade to \
                  the deterministic pass"
             );
+            let error = witness(
+                request("Alice Brannigan deployed the build", false),
+                &redactor,
+                &TestSigner::new("classifier-refusal"),
+                &TestEnclave,
+            )
+            .await
+            .expect_err("a failed full pipeline must not issue a certificate");
+            assert_eq!(error, WitnessError::RedactionFailed);
         }
     }
 
