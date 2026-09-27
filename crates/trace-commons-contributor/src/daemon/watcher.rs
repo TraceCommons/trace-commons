@@ -2267,6 +2267,7 @@ mod tests {
     fn grant_test_cfg(scopes: &[&str]) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: true,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.invalid".to_string(),
@@ -2434,7 +2435,17 @@ mod tests {
         let req = super::super::ipc::Request {
             id: 1,
             method: "grant_automatic".to_string(),
-            params: serde_json::json!({}),
+            // The witness the disclosure screen would have shown: the one
+            // configured now.
+            params: serde_json::json!({
+                "witness_signing_address": f
+                    .shared
+                    .store
+                    .load_config()
+                    .unwrap()
+                    .and_then(|cfg| cfg.witness)
+                    .map(|w| w.signing_address),
+            }),
         };
         let resp = super::super::ipc::handle_request(&f.shared, &req);
         assert!(resp.error.is_none(), "{:?}", resp.error);
@@ -3383,6 +3394,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(&f.shared.store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),

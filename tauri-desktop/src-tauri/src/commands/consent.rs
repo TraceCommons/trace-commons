@@ -99,11 +99,14 @@ pub(crate) async fn acknowledge_grant_voids(
 
 /// What the Tauri shell can check before asking for the Flow 1 grant.
 ///
-/// The daemon's `grant_automatic` refuses only when there are no terms to
-/// grant under; it does not check R7. So the shell refuses first when the
-/// contributor has not confirmed the grant screens, is not enrolled, or has
-/// no data-use scope saved -- the scope picker has no default, so an empty
-/// list means nobody chose. The labels are fixed and carry no content.
+/// A first line only: the daemon's `grant_automatic` refuses on its own
+/// without a recorded scope choice (`automatic-grant-scopes-not-chosen`) or
+/// when the witness is not the one shown. The shell refuses before asking
+/// when the contributor has not confirmed the grant screens, is not
+/// enrolled, or never chose scopes through the picker. A saved scope list is
+/// not a choice: `validate_scopes` always adds the floor scope, so an invite
+/// enrollee holds one before the picker runs. The labels are fixed and
+/// carry no content.
 fn grant_precondition(
     confirmed: bool,
     config: Option<&ContributorConfig>,
@@ -114,7 +117,7 @@ fn grant_precondition(
     let Some(config) = config else {
         return Err("automatic-grant-not-enrolled");
     };
-    if config.consent_scopes.is_empty() {
+    if !config.consent_scopes_chosen || config.consent_scopes.is_empty() {
         return Err("automatic-grant-scope-required");
     }
     Ok(())
@@ -145,17 +148,20 @@ pub(crate) async fn automatic_grant(
 
 /// Give the Flow 1 grant: arm projects discovered from now on, never what is
 /// on disk. `confirmed` is the grant screen's button, pressed after the
-/// scope, path and disclosure steps.
+/// scope, path and disclosure steps. `witness_signing_address` is the
+/// witness the disclosure screen showed, `None` for none; the daemon refuses
+/// the grant when the witness configured now is a different one.
 #[tauri::command]
 pub(crate) async fn grant_automatic(
     state: State<'_, AppState>,
     confirmed: bool,
+    witness_signing_address: Option<String>,
 ) -> Result<serde_json::Value, String> {
     grant_precondition(confirmed, load_config(&state)?.as_ref()).map_err(str::to_owned)?;
     call_daemon(
         shared_state(&state)?,
         "grant_automatic",
-        serde_json::json!({}),
+        serde_json::json!({ "witness_signing_address": witness_signing_address }),
     )
     .await
 }
@@ -177,7 +183,7 @@ pub(crate) async fn withdraw_automatic_grant(
 mod tests {
     use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
 
-    fn config(scopes: &[&str]) -> trace_commons_contributor::config::ContributorConfig {
+    fn config(scopes: &[&str], chosen: bool) -> trace_commons_contributor::config::ContributorConfig {
         serde_json::from_value(serde_json::json!({
             "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
             "issuer_url": "https://issuer.invalid",
@@ -188,13 +194,23 @@ mod tests {
             "user_subject": "alice",
             "device_key_id": "sha256:aa",
             "consent_scopes": scopes,
+            "consent_scopes_chosen": chosen,
         }))
         .expect("a contributor config")
     }
 
+    /// What an invite enrollment saves: the floor scope `validate_scopes`
+    /// adds, with nobody having picked it.
+    fn invite_enrolled() -> trace_commons_contributor::config::ContributorConfig {
+        let floor = trace_commons_contributor::consent::validate_scopes(&[])
+            .expect("the floor scope");
+        let floor: Vec<&str> = floor.iter().map(String::as_str).collect();
+        config(&floor, false)
+    }
+
     #[test]
     fn the_grant_needs_confirmation_enrollment_and_a_chosen_scope() {
-        let chosen = config(&["debugging_evaluation"]);
+        let chosen = config(&["debugging_evaluation"], true);
         assert_eq!(
             grant_precondition(false, Some(&chosen)),
             Err("automatic-grant-confirmation-required")
@@ -203,8 +219,11 @@ mod tests {
             grant_precondition(true, None),
             Err("automatic-grant-not-enrolled")
         );
+        // An invite enrollee holds a saved scope before the picker runs.
+        let enrolled = invite_enrolled();
+        assert!(!enrolled.consent_scopes.is_empty());
         assert_eq!(
-            grant_precondition(true, Some(&config(&[]))),
+            grant_precondition(true, Some(&enrolled)),
             Err("automatic-grant-scope-required")
         );
         assert_eq!(grant_precondition(true, Some(&chosen)), Ok(()));

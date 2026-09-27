@@ -190,6 +190,11 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
         return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
     }
     cfg.consent_scopes = scopes.clone();
+    // R7: this call is the contributor's choice, and the only writer of the
+    // record the Flow 1 grant requires. An empty list names nothing -- it
+    // saves the floor scope `validate_scopes` adds -- so it records no
+    // choice. Enrollment never sets it.
+    cfg.consent_scopes_chosen = !scope_names.is_empty();
     if shared.store.save_config(&cfg).is_err() {
         return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
     }
@@ -411,6 +416,147 @@ mod tests {
         assert_eq!(cfg.allowed_hosts, None);
     }
 
+    fn grant(s: &DaemonShared, witness: serde_json::Value) -> Response {
+        crate::daemon::ipc::handle_request(
+            s,
+            &req(
+                "grant_automatic",
+                json!({ "witness_signing_address": witness }),
+            ),
+        )
+    }
+
+    fn error_message(r: &Response) -> String {
+        r.error.as_ref().expect("an error").message.clone()
+    }
+
+    /// R7, held by the daemon. An invite enrollment saves the floor scope
+    /// that nobody picked (`validate_scopes` adds it), so a saved scope is
+    /// not a choice. The grant is refused until `set_consent_scopes` records
+    /// one, and then given.
+    #[tokio::test]
+    async fn the_grant_is_refused_after_invite_enrollment_until_scopes_are_chosen() {
+        let base = spawn_onboard_mock().await;
+        let s = shared();
+        let r = handle_enroll(
+            &s,
+            &req(
+                "enroll",
+                json!({ "invite": format!("{base}/onboard#SOME-CODE") }),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let cfg = s.store.load_config().unwrap().unwrap();
+        assert_eq!(cfg.consent_scopes, vec!["debugging_evaluation"]);
+        assert!(!cfg.consent_scopes_chosen, "enrollment is not a choice");
+
+        let refused = grant(&s, serde_json::Value::Null);
+        assert_eq!(error_message(&refused), "automatic-grant-scopes-not-chosen");
+        assert!(s.policy.lock().unwrap().automatic_grant.is_none());
+
+        let r = handle_set_consent_scopes(
+            &s,
+            &req(
+                "set_consent_scopes",
+                json!({"scopes": ["debugging_evaluation"]}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(
+            s.store
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .consent_scopes_chosen
+        );
+
+        let given = grant(&s, serde_json::Value::Null);
+        assert!(given.error.is_none(), "{:?}", given.error);
+        assert_eq!(given.result.unwrap()["granted"], true);
+    }
+
+    /// An empty scope list saves the floor scope but names nothing, so it
+    /// records no choice.
+    #[tokio::test]
+    async fn an_empty_scope_list_is_not_a_choice() {
+        let base = spawn_onboard_mock().await;
+        let s = shared();
+        let invite = json!({ "invite": format!("{base}/onboard#SOME-CODE") });
+        assert!(
+            handle_enroll(&s, &req("enroll", invite))
+                .await
+                .error
+                .is_none()
+        );
+        let r = handle_set_consent_scopes(&s, &req("set_consent_scopes", json!({"scopes": []})));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(
+            !s.store
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .consent_scopes_chosen
+        );
+    }
+
+    /// The witness the contributor was shown is the witness the grant is
+    /// given under. A witness written between the disclosure screen and the
+    /// grant (Settings, say) would otherwise be bound into the grant unseen,
+    /// and the void rule would not catch it: it compares against the terms
+    /// captured at the grant.
+    #[tokio::test]
+    async fn the_grant_is_refused_when_the_witness_differs_from_the_one_shown() {
+        let base = spawn_onboard_mock().await;
+        let s = shared();
+        let invite = json!({ "invite": format!("{base}/onboard#SOME-CODE") });
+        assert!(
+            handle_enroll(&s, &req("enroll", invite))
+                .await
+                .error
+                .is_none()
+        );
+        let r = handle_set_consent_scopes(
+            &s,
+            &req(
+                "set_consent_scopes",
+                json!({"scopes": ["debugging_evaluation"]}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        // Shown a witness, but none is configured.
+        assert_eq!(
+            error_message(&grant(&s, json!("0xshown"))),
+            "automatic-grant-witness-changed"
+        );
+        // Shown none, but one is configured now.
+        let mut cfg = s.store.load_config().unwrap().unwrap();
+        cfg.witness = Some(crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: "https://witness.invalid".into(),
+            signing_address: "0xconfigured".into(),
+            expected_measurements: Vec::new(),
+        });
+        s.store.save_config(&cfg).unwrap();
+        assert_eq!(
+            error_message(&grant(&s, serde_json::Value::Null)),
+            "automatic-grant-witness-changed"
+        );
+        // Shown a different one.
+        assert_eq!(
+            error_message(&grant(&s, json!("0xshown"))),
+            "automatic-grant-witness-changed"
+        );
+        // Not stated at all.
+        let r = crate::daemon::ipc::handle_request(&s, &req("grant_automatic", json!({})));
+        assert_eq!(error_message(&r), "automatic-grant-witness-required");
+        assert!(s.policy.lock().unwrap().automatic_grant.is_none());
+        // The one configured.
+        let given = grant(&s, json!("0xconfigured"));
+        assert!(given.error.is_none(), "{:?}", given.error);
+    }
+
     #[test]
     fn set_consent_scopes_refuses_when_not_enrolled() {
         let s = shared();
@@ -515,6 +661,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),

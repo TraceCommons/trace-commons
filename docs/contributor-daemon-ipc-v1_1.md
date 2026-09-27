@@ -1705,11 +1705,34 @@ automatically from projects discovered from now on.
 { "granted": true, "granted_at": "2026-09-25T12:00:00Z", "on_disk_recorded": false }
 ```
 
-`grant_automatic` takes no params and returns the grant as `automatic_grant`
-reports it. It is refused with `arming-terms-unavailable` (`ERR_UNAVAILABLE`)
-when there is no config to record terms from, and with `audit-write-failed`
-when its `automatic-granted` entry cannot be written, in which case nothing is
-granted. A second call replaces the first, and records what is on disk again.
+`grant_automatic` takes one required param, `witness_signing_address`: the
+signing address of the witness the contributor was shown on the disclosure
+screen, or `null` when that screen showed none. It returns the grant as
+`automatic_grant` reports it. Nothing is granted when it is refused:
+
+- `arming-terms-unavailable` (`ERR_UNAVAILABLE`): there is no config to record
+  terms from.
+- `automatic-grant-scopes-not-chosen` (`bad_params`): the config's
+  `consent_scopes_chosen` is false, so nobody chose the saved scopes (R7). A
+  saved scope list is not a choice: every enrollment saves at least the floor
+  scope, which `validate_scopes` adds, and an invite enrollment saves it with
+  nobody having picked it. Only `set_consent_scopes` records a choice.
+- `automatic-grant-witness-required` (`bad_params`): `witness_signing_address`
+  is absent, or neither a string nor `null`.
+- `automatic-grant-witness-changed` (`bad_params`): the witness configured now
+  is not the one named, including one configured where none was shown or none
+  where one was. A witness written between the disclosure screen and the grant
+  would otherwise be bound into the grant's terms unseen, and the void rule
+  would not catch it, since it compares against the terms captured at the
+  grant. The terms are captured from the same config read that was checked.
+- `audit-write-failed`: its `automatic-granted` entry cannot be written.
+
+A second call replaces the first, and records what is on disk again.
+
+**Every shell must call `set_consent_scopes` from its scope picker before
+`grant_automatic`**, even when the contributor keeps the scopes enrollment
+saved. As of this writing only the Tauri app gives the grant; the macOS,
+Windows and GTK shells do not call `grant_automatic`.
 
 **It arms nothing already on disk**, recorded per source. Each source's first
 successful discovery in a full watcher pass under the grant records every
@@ -2902,6 +2925,12 @@ Takes an optional `scopes` array of wire-name strings (omitted means the
 floor scope only) and replaces the enrolled config's consent scopes.
 Requires an existing enrollment (`unavailable` / `not-logged-in` otherwise).
 Appends a `consent-scopes-changed` audit entry.
+
+It also records that the contributor chose the scopes: the config field
+`consent_scopes_chosen` (default `false`) becomes `true` when `scopes` names at
+least one scope, and `false` when it is omitted or empty, since that saves the
+floor scope without naming anything. `grant_automatic` requires it. No
+enrollment path sets it, and a new enrollment writes a config without it.
 
 ### `enroll`
 
