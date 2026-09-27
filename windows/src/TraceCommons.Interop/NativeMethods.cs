@@ -587,7 +587,7 @@ internal static class NativeMethods
 
     /// <summary>
     /// The sentence for one queue entry's <c>attestation</c> mark: whether
-    /// that session carries proof of the model call that produced it.
+    /// that session carries proof of its last model call.
     ///
     /// EVERY ROW REACHES HERE, INCLUDING AN INVITED CONTRIBUTOR'S. That is
     /// the opposite of the eligibility line's rule, and deliberately so: the

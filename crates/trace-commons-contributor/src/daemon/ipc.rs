@@ -1872,7 +1872,7 @@ pub fn entry_value(
     // evidence, stored as one artifact under one pin.
     //
     // This is NOT `attestation` below. That says whether the session carries
-    // proof of the model call that produced it; this says whether we hold a
+    // proof of its last model call; this says whether we hold a
     // witness certificate over the reviewed bytes. A session can have either
     // without the other.
     value["holds_certificate"] = serde_json::Value::Bool(e.holds_witness_certificate());
@@ -1897,7 +1897,7 @@ pub fn entry_value(
     // The opposite rule to `eligibility` above, and deliberately. That field
     // answers whether this contributor may send this session, which is a
     // question only an evidence-admitted contributor has. This one answers
-    // whether the session carries proof of the model call that produced it,
+    // whether the session carries proof of its last model call,
     // which is a fact about the trace -- and there is no contributor for whom
     // that is not worth knowing. It is about to be worth more than that: the
     // credit scoring function is expected to weight attestations, and a

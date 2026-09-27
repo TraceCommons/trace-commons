@@ -2094,7 +2094,7 @@ pub use trace_commons_contributor::private_inference_copy::{
 // The block above answers "may I send this?", and says nothing at all when
 // nobody is asking. This one answers a different question that every
 // contributor has all of the time: does this session carry a checkable copy
-// of the model call that produced it? That is a fact about the trace, not a
+// of its last model call? That is a fact about the trace, not a
 // permission, so it is stated on EVERY row -- an invited contributor's
 // included.
 //

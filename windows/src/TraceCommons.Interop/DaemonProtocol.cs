@@ -557,7 +557,7 @@ public sealed class QueueEntry
     public string? EligibilityReason { get; set; }
 
     /// <summary>
-    /// Whether this session carries proof of the model call that produced it:
+    /// Whether this session carries proof of its last model call:
     /// <c>attested</c>, <c>unattested_permanent</c>,
     /// <c>unattested_configuration</c> or <c>unknown</c>.
     /// </summary>
@@ -616,7 +616,7 @@ public sealed class QueueEntry
     /// not because they share a mechanism.
     ///
     /// Not <see cref="Attestation"/>. That says whether the session carries a
-    /// copy of the model call that produced it; this says whether a
+    /// copy of its last model call; this says whether a
     /// certificate is held over the reviewed bytes.
     /// </remarks>
     [JsonPropertyName("holds_certificate")]

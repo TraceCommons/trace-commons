@@ -8,7 +8,7 @@ import Foundation
 /// contributor may send this session; it is a permission question, and it is
 /// absent for an invited contributor because nobody is asking them anything.
 /// The mark answers a different question -- does this session carry a
-/// checkable copy of the call it came from -- which is a fact about the
+/// checkable copy of its last model call -- which is a fact about the
 /// trace, is owed to everyone, and matters to what the work is worth once
 /// credit weights attestations. So there is no "no mark" state: an entry
 /// whose `attestation` key never arrived carries the empty label, and the

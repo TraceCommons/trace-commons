@@ -2449,7 +2449,7 @@ payload (`tc_private_inference_copy`), which now carries **97** fields.
 one an invited contributor does not have. Underneath it is a second question
 every contributor has, all of the time:
 
-> Does this session carry a checkable copy of the model call that produced it?
+> Does this session carry a checkable copy of its last model call?
 
 That is a fact about the trace rather than about anyone's permission, and it
 is about to stop being provenance metadata: the credit scoring function is
@@ -2577,8 +2577,8 @@ it. Emitting the field only under the signup flag would put the second
 reading out of reach of exactly the contributors it is written for.
 
 **This is not `attestation`, and the two must not be conflated.**
-`attestation` answers whether the session carries a checkable copy of the
-model call that produced it. `holds_certificate` answers whether a witness
+`attestation` answers whether the session carries a checkable copy of its
+last model call. `holds_certificate` answers whether a witness
 certificate is held over the reviewed bytes. A session can have either
 without the other, and *holds a certificate*, *is attestable* and *was
 attested* are three different facts. A shell deciding what to put in a

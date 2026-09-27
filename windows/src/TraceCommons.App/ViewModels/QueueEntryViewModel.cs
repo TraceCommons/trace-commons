@@ -211,7 +211,7 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     public string EligibilityReasonText => Eligibility.ReasonLine ?? string.Empty;
 
     /// <summary>
-    /// Whether this session carries proof of the model call that produced it,
+    /// Whether this session carries proof of its last model call,
     /// and everything the row draws about it: the sentence, and its tone.
     /// </summary>
     /// <remarks>
@@ -254,7 +254,7 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     public bool AttestationIsAttention =>
         Attestation.HasMarkLine && Attestation.Tone == PrivateInferenceTone.Attention;
 
-    /// <summary>This session carries a checkable copy of its model call.</summary>
+    /// <summary>This session carries a checkable copy of its last model call.</summary>
     public bool AttestationIsClear =>
         Attestation.HasMarkLine && Attestation.Tone == PrivateInferenceTone.Clear;
 
