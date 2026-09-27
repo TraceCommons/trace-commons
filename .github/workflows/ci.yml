@@ -281,6 +281,21 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
+      # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
+      # run through the real psql against a current and a pre-V76 schema. The
+      # suite creates and drops databases of its own, so the xact_commit guard
+      # below cannot see it; the greps refuse a run that skipped.
+      - name: r1_pipeline_measurement
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --test r1_pipeline_measurement -- --nocapture 2>&1 | tee r1-measurement.log
+          if grep -q '^skipping:' r1-measurement.log; then
+            echo "r1_pipeline_measurement skipped its PostgreSQL tests" >&2
+            exit 1
+          fi
+          grep -q 'test result: ok. 6 passed; 0 failed' r1-measurement.log
+        env:
+          TRACE_COMMONS_R1_MEASUREMENT_PG_TEST_URL: postgres://trace@127.0.0.1:5432/postgres
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
