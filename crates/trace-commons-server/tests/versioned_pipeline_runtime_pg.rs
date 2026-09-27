@@ -11105,7 +11105,9 @@ async fn status_follows_outcomes() {
     );
     assert_eq!(finalized_status.credit, PipelineCreditStatus::Finalized);
 
-    // -- A quarantined run shows Review as the current, blocked phase. --
+    // -- Ruling T11-4: a quarantined run shows Review as both the current
+    // and the responsible phase (Review's own wait set the label), not
+    // Admission (the phase that last committed an outcome). --
     let dir_quarantine = tempfile::tempdir().unwrap();
     let (quarantine_service, _, _) = test_service(
         backend.clone(),
@@ -11154,6 +11156,7 @@ async fn status_follows_outcomes() {
         .pop()
         .unwrap();
     assert_eq!(quarantine_status.current_phase, Some(Phase::Review));
+    assert_eq!(quarantine_status.responsible_phase, Some(Phase::Review));
     assert_eq!(
         quarantine_status.reason_label.as_deref(),
         Some("review_assessment_required")

@@ -9,10 +9,12 @@
 //! status table).
 //!
 //! Withdrawal (`withdraw_submission`) is not read through this module --
-//! Task 7 owns it on `PgPipelineStore`. Export snapshots, the forensic
-//! trace, and the operational summary are not implemented here yet; their
-//! record types and a few private helpers below are already ported ahead of
-//! Tasks 12 and 13, which add the reads that use them.
+//! Task 7 owns it on `PgPipelineStore`. The forensic trace and the
+//! operational summary are not implemented here yet; their record types and
+//! a few private helpers below are already ported ahead of Task 13, which
+//! adds the reads that use them. Export-snapshot-only items (Task 12) are
+//! not ported here -- they have no caller in this task or in Task 13's port
+//! range.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,7 +22,6 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
 use uuid::Uuid;
@@ -30,9 +31,6 @@ use crate::error::DatabaseError;
 use crate::versioned_pipeline::{PipelineRunState, phase_from_db, sha256_prefixed};
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
-pub const PIPELINE_EXPORT_ITEM_MAX: usize = 500;
-pub const PIPELINE_EXPORT_SELECTION_POLICY_ID: &str = "trace_commons.pipeline_export_selection.v1";
-pub const PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID: &str = "trace_commons.authorized_trace_view.v1";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -523,7 +521,7 @@ fn sum_trace_credit_atomic_units(
         })
 }
 
-/// Used by Task 12's forensic trace read (not implemented in this module
+/// Used by Task 13's forensic trace read (not implemented in this module
 /// yet), ported ahead of time per plan.
 #[allow(dead_code)]
 fn json_hash(value: serde_json::Value) -> Result<String, DatabaseError> {
@@ -621,12 +619,23 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
         bundle_id: row.get("bundle_id"),
         processing,
         current_phase,
+        // T11-4: the phase "responsible" for the run's current state is the
+        // one whose own attempt set `last_error_label` (e.g. Review's
+        // `review_assessment_required` on a quarantine wait) -- not
+        // unconditionally the latest phase to have committed an outcome,
+        // which pairs a Review label with an Admission phase and misleads a
+        // contributor into thinking Admission is still holding the run. A
+        // Reject keeps its own rule (Admission or Review, from
+        // `admission_decision`); with no label set, the latest committed
+        // outcome's phase still applies.
         responsible_phase: if processing == PipelineProcessingStatus::Rejected {
             Some(if row.get::<_, String>("admission_decision") == "reject" {
                 Phase::Admission
             } else {
                 Phase::Review
             })
+        } else if row.get::<_, Option<String>>("last_error_label").is_some() {
+            current_phase
         } else {
             latest_outcome_phase
         },
@@ -640,7 +649,7 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
     })
 }
 
-/// Used by Task 12's forensic trace read (not implemented in this module
+/// Used by Task 13's forensic trace read (not implemented in this module
 /// yet), ported ahead of time per plan.
 #[allow(dead_code)]
 fn instrument_status_from_row(row: &Row) -> Result<PipelineInstrumentStatus, DatabaseError> {
@@ -683,17 +692,6 @@ fn attestation_from_row(row: &Row) -> Result<PipelineScoreAttestationEntry, Data
     })
 }
 
-/// Used by Task 12's export snapshot read (not implemented in this module
-/// yet), ported ahead of time per plan.
-#[allow(dead_code)]
-fn source_list_hash(rows: &[Row]) -> String {
-    let mut hasher = Sha256::new();
-    for row in rows {
-        hasher.update(row.get::<_, Uuid>("approved_revision_id").as_bytes());
-    }
-    format!("sha256:{:x}", hasher.finalize())
-}
-
 /// Reads the committed Score decision's `trace_credit` award. Under the
 /// #971 settlement shape an award's `atomic_units` serializes as a decimal
 /// string, not a JSON number (`AtomicUnits` holds a `u128`), so this parses
@@ -718,29 +716,6 @@ fn score_microcredits(decision: &serde_json::Value) -> Option<u64> {
         .and_then(|units| u64::try_from(units.get()).ok())
 }
 
-/// Used by Task 12's export snapshot request validation (not implemented in
-/// this module yet), ported ahead of time per plan.
-#[allow(dead_code)]
-fn is_sha256(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hash| {
-        hash.len() == 64
-            && hash
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    })
-}
-
-/// Used by Task 12's export snapshot request validation (not implemented in
-/// this module yet), ported ahead of time per plan.
-#[allow(dead_code)]
-fn is_safe_label(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 /// Used by Task 13's summary reads (not implemented in this module yet),
 /// ported ahead of time per plan.
 #[allow(dead_code)]
@@ -753,14 +728,6 @@ fn count_from_row(row: &Row, column: &str) -> Result<u64, DatabaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn safe_export_request_metadata_is_bounded() {
-        assert!(is_safe_label("ranking_model_training"));
-        assert!(!is_safe_label("Evaluation"));
-        assert!(is_sha256(&sha256_prefixed(b"request")));
-        assert!(!is_sha256("request"));
-    }
 
     #[test]
     fn score_amount_requires_the_versioned_decision_field() {
