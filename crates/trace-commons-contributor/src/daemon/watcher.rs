@@ -501,7 +501,7 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
     let now = ctx.now;
     let sweep = {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let sweep = policy.sweep_grants(current);
+        let sweep = policy.sweep_grants(current, now);
         // Fixed labels, never the error: its context can carry a path.
         if sweep.changed() && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist the grant sweep");
@@ -621,7 +621,11 @@ impl PassContext {
             .as_ref()
             .and_then(|c| c.witness.as_ref())
             .is_some_and(|w| w.admission_evidence);
-        let gate = super::automatic_gate::evaluate(cfg.as_ref(), gate_enforced());
+        let gate = super::automatic_gate::evaluate_with(
+            cfg.as_ref(),
+            gate_enforced(),
+            shared.account_admission.current(cfg.as_ref()),
+        );
         Self {
             now,
             max_queue_entries,
@@ -2002,6 +2006,108 @@ mod tests {
         assert!(!e.held_for_review());
     }
 
+    /// R3 follows what ingest last said, read through the daemon's state: an
+    /// anchored tenant would be refused with no answer, and is not once
+    /// ingest says it admits by account.
+    #[tokio::test]
+    async fn r3_follows_what_ingest_last_said_about_account_admission() {
+        let f = WatcherFixture::new();
+        let mut cfg = grant_test_cfg(&["debugging_evaluation"]);
+        cfg.tenant_id = format!("nearai-{}", "a".repeat(64));
+        f.shared.store.save_config(&cfg).unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let unanswered = PassContext::read(&f.shared, Utc::now(), 100, Default::default());
+        assert!(unanswered.gate.would_refuse(), "{:?}", unanswered.gate);
+
+        f.shared
+            .account_admission
+            .record_for_test(&cfg, "bounded", true);
+        let answered = PassContext::read(&f.shared, Utc::now(), 100, Default::default());
+        assert!(!answered.gate.would_refuse(), "{:?}", answered.gate);
+
+        f.shared.account_admission.refused();
+        assert!(
+            PassContext::read(&f.shared, Utc::now(), 100, Default::default())
+                .gate
+                .would_refuse()
+        );
+    }
+
+    /// Only the supervisor's full pass asks ingest about account admission.
+    /// Neither the watcher's own full pass nor a scoped one does: they read
+    /// the last answer.
+    #[tokio::test]
+    async fn a_scoped_pass_never_asks_ingest_about_account_admission() {
+        use axum::{Json, Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/account/contribution-status",
+            get({
+                let hits = hits.clone();
+                move || {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        Json(serde_json::json!({
+                            "authority": "bounded", "ready": true,
+                            "retry_after_seconds": null,
+                        }))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let f = WatcherFixture::new();
+        let mut cfg = grant_test_cfg(&["debugging_evaluation"]);
+        cfg.tenant_id = format!("nearai-{}", "a".repeat(64));
+        cfg.ingest_url = format!("http://{addr}");
+        cfg.allowed_hosts = None;
+        f.shared.store.save_config(&cfg).unwrap();
+        let session = crate::account_auth::AccountSession {
+            access_token: super::super::account_admission::native_token_for_test(
+                &cfg.tenant_id,
+                "secret",
+            ),
+            expires_at: Utc::now() + chrono::Duration::hours(6),
+            account_id: "synthetic-account".to_string(),
+        };
+        f.shared
+            .store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&session).unwrap(),
+            )
+            .unwrap();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        let session_at: SessionAt<'_> =
+            &|source, p| source.discover().ok()?.into_iter().find(|r| r.path == p);
+        let now = Utc::now() + chrono::Duration::hours(30);
+        tick_paths(&f.shared, now, std::slice::from_ref(&path), session_at)
+            .await
+            .unwrap();
+        tick(&f.shared, now).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "a watcher pass asked");
+        assert_eq!(
+            f.shared.account_admission.current(Some(&cfg)),
+            super::super::automatic_gate::AccountAdmission::NotAdvertised
+        );
+
+        // The control: the same daemon does ask, from the supervisor's pass.
+        super::super::account_admission::refresh(&f.shared, now, false).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            f.shared.account_admission.current(Some(&cfg)),
+            super::super::automatic_gate::AccountAdmission::Advertised
+        );
+    }
+
     /// Report-only, which is how the gate ships: the approval goes ahead as
     /// before, and is counted as one the gate would have refused.
     #[tokio::test]
@@ -2225,6 +2331,16 @@ mod tests {
             .find(|e| e.action == "auto-upload-voided")
             .expect("the void is recorded");
         assert_eq!(voided.detail.as_deref(), Some("scopes-widened"));
+
+        // And the contributor is told, not only the audit: the notice is on
+        // `status` for every shell, and survives a restart.
+        let status = f.shared.status_value();
+        let voids = status["grant_voids"].as_array().expect("grant_voids");
+        assert_eq!(voids.len(), 1, "{voids:?}");
+        assert_eq!(voids[0]["kind"], "project");
+        assert_eq!(voids[0]["reasons"], serde_json::json!(["scopes-widened"]));
+        let persisted = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
+        assert_eq!(persisted.grant_voids.len(), 1, "saved with the void");
     }
 
     /// Arm and baseline a project under `cfg`, apply `widen`, run a pass,

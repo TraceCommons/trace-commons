@@ -29,4 +29,18 @@ public enum TCConsentCopy {
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// The notice for one void, as a JSON object, from one element of
+    /// `status.grant_voids` passed through as the daemon sent it. Decoded by
+    /// `TCShellCore.GrantVoidNotice`.
+    ///
+    /// Nil when the ABI cannot read the element (an unknown kind, a project
+    /// void without a label) or on a caught panic. The choice between the
+    /// project and the grant wording is made by the ABI, not here.
+    public static func voidNoticeJSON(forVoid wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_grant_void_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
 }

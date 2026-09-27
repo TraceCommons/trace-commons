@@ -20,6 +20,7 @@
 //! - A configured privacy filter that is unavailable stops the pipeline. It
 //!   never degrades to sending unfiltered text.
 
+pub mod account_admission;
 pub mod account_onboarding;
 pub mod admission_setup;
 pub mod approved_envelope;
@@ -489,6 +490,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // block below: it sends nothing, so pause, quiesce and dry-run
                 // do not hold it back (see `settle_near_ai_notice`).
                 settle_near_ai_notice(shared, now);
+                // What ingest says about account admission, read before every
+                // full pass for the gate's R3. See `account_admission`.
+                // Skipped, and any earlier answer dropped, in a dry run and
+                // when nothing is armed.
+                account_admission::refresh(shared, now, dry_run).await;
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
@@ -573,6 +579,30 @@ pub(crate) fn settle_near_ai_notice(
         shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
     outcome
+}
+
+/// A rule-3 admission refusal from ingest cancels its last yes on account
+/// admission, until it says so again (see `account_admission`): the account
+/// was refused (`admission_refused`), its allowance is spent
+/// (`account_limit_reached`), or it is not linked (`account_identity_unlinked`).
+/// Each says ingest will not admit this account by account right now.
+///
+/// The other admission refusals say nothing about that. A lease held by
+/// another attempt, a submission id bound to other bytes, a receipt the
+/// witness declined, or the per-session evidence budget are about one
+/// submission or its evidence, not about account admission.
+fn cancel_account_admission_on_refusal(shared: &ipc::DaemonShared, reason_label: &str) {
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    if matches!(
+        AdmissionRefusal::from_label(reason_label),
+        Some(
+            AdmissionRefusal::Refused
+                | AdmissionRefusal::AccountLimitReached
+                | AdmissionRefusal::AccountIdentityUnlinked
+        )
+    ) {
+        shared.account_admission.refused();
+    }
 }
 
 /// Upload everything that has been approved, whether by the contributor or by
@@ -883,6 +913,15 @@ async fn drain_approved(
         // The queue bookkeeping below still treats the two alike: either way
         // the entry is settled server-side and should leave the queue.
         let newly_uploaded = matches!(decision, uploader::UploadDecision::Uploaded { .. });
+        // `submit_one` reports ingest's refusal of the upload itself as
+        // `Failed`. `Refused` carries no rule-3 label today, but the two
+        // arms are read alike below for admission refusals, so they are
+        // here too: one call, which neither arm can lose.
+        if let uploader::UploadDecision::Refused { reason_label }
+        | uploader::UploadDecision::Failed { reason_label } = &decision
+        {
+            cancel_account_admission_on_refusal(shared, reason_label);
+        }
         let mut q = shared.queue.lock().expect("queue lock");
         match decision {
             uploader::UploadDecision::Uploaded {
@@ -1519,6 +1558,43 @@ fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
 mod tests {
     use super::*;
 
+    /// Only rule 3's refusals cancel account admission: the account was
+    /// refused, its allowance is spent, or it is not linked.
+    #[test]
+    fn only_a_rule_3_refusal_cancels_account_admission() {
+        use trace_commons_protocol::admission::AdmissionRefusal;
+        let (_d, store) = crate::config::tests_support::temp_store();
+        let shared = ipc::DaemonShared::load(store).unwrap();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.tenant_id = format!("nearai-{}", "a".repeat(64));
+        let yes = || {
+            shared
+                .account_admission
+                .record_for_test(&cfg, "bounded", true)
+        };
+        let current = || shared.account_admission.current(Some(&cfg));
+
+        for (label, cancels) in [
+            (AdmissionRefusal::Refused.label(), true),
+            (AdmissionRefusal::AccountLimitReached.label(), true),
+            (AdmissionRefusal::AccountIdentityUnlinked.label(), true),
+            (AdmissionRefusal::LimitReached.label(), false),
+            (AdmissionRefusal::InProgress.label(), false),
+            (AdmissionRefusal::IdentityConflict.label(), false),
+            (AdmissionRefusal::EvidenceRefused.label(), false),
+            ("ingest-unreachable", false),
+            ("parse-failed", false),
+        ] {
+            yes();
+            cancel_account_admission_on_refusal(&shared, label);
+            assert_eq!(
+                current() == super::automatic_gate::AccountAdmission::NotAdvertised,
+                cancels,
+                "{label}"
+            );
+        }
+    }
+
     use crate::daemon::test_support::at;
     use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize};
 
@@ -1532,6 +1608,8 @@ mod tests {
         classifier_status: Arc<AtomicU16>,
         classifier_delay_ms: Arc<AtomicU64>,
         uploads: Arc<AtomicUsize>,
+        /// What ingest answers an upload with instead of accepting it.
+        ingest_reply: Arc<std::sync::Mutex<Option<(StatusCode, serde_json::Value)>>>,
     }
 
     impl TransientRetryHarness {
@@ -1550,6 +1628,9 @@ mod tests {
             let classifier_status = Arc::new(AtomicU16::new(0));
             let classifier_delay_ms = Arc::new(AtomicU64::new(0));
             let uploads = Arc::new(AtomicUsize::new(0));
+            let ingest_reply = Arc::new(std::sync::Mutex::new(
+                None::<(StatusCode, serde_json::Value)>,
+            ));
             let classifier = Self::spawn(Router::new().route(
                 "/privacy/classify",
                 post({
@@ -1608,15 +1689,21 @@ mod tests {
                 "/v1/traces",
                 post({
                     let uploads = uploads.clone();
+                    let ingest_reply = ingest_reply.clone();
                     move |Json(_): Json<serde_json::Value>| {
                         let uploads = uploads.clone();
+                        let reply = ingest_reply.lock().unwrap().clone();
                         async move {
                             uploads.fetch_add(1, Ordering::SeqCst);
+                            if let Some((status, body)) = reply {
+                                return (status, Json(body)).into_response();
+                            }
                             Json(serde_json::json!({
                                 "status": "accepted",
                                 "credit_points_pending": 1.0,
                                 "explanation": []
                             }))
+                            .into_response()
                         }
                     }
                 }),
@@ -1704,6 +1791,7 @@ mod tests {
                 classifier_status,
                 classifier_delay_ms,
                 uploads,
+                ingest_reply,
             }
         }
 
@@ -2217,6 +2305,68 @@ mod tests {
         assert_eq!(h.entry().session_hash, original.session_hash);
         assert_eq!(std::fs::read(&h.session_path).unwrap(), original_bytes);
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// Rule 3 through the upload pass itself: ingest turns the upload away
+    /// for a reason about account admission, and the yes it gave before no
+    /// longer lifts R3.
+    async fn an_upload_refusal_cancels_account_admission(status: StatusCode, label: &str) {
+        let h = TransientRetryHarness::new().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        h.shared
+            .account_admission
+            .record_for_test(&cfg, "bounded", true);
+        assert_eq!(
+            h.shared.account_admission.current(Some(&cfg)),
+            automatic_gate::AccountAdmission::Advertised
+        );
+        *h.ingest_reply.lock().unwrap() = Some((status, serde_json::json!({ "error": label })));
+
+        h.pass(TransientRetryHarness::now()).await;
+
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
+        assert_eq!(h.entry().reason_label.as_deref(), Some(label));
+        assert_eq!(
+            h.shared.account_admission.current(Some(&cfg)),
+            automatic_gate::AccountAdmission::NotAdvertised,
+            "{label} left R3 lifted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_upload_refused_as_account_limit_reached_cancels_account_admission() {
+        an_upload_refusal_cancels_account_admission(
+            StatusCode::TOO_MANY_REQUESTS,
+            "account_limit_reached",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_upload_refused_as_admission_refused_cancels_account_admission() {
+        an_upload_refusal_cancels_account_admission(StatusCode::FORBIDDEN, "admission_refused")
+            .await;
+    }
+
+    /// The control: a lease another attempt holds is not about the account,
+    /// and leaves the yes standing.
+    #[tokio::test]
+    async fn an_upload_held_by_another_attempt_leaves_account_admission() {
+        let h = TransientRetryHarness::new().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        h.shared
+            .account_admission
+            .record_for_test(&cfg, "bounded", true);
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": "admission_in_progress" }),
+        ));
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.shared.account_admission.current(Some(&cfg)),
+            automatic_gate::AccountAdmission::Advertised
+        );
     }
 
     #[tokio::test]

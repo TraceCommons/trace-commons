@@ -509,7 +509,7 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // two render the shared one.
 pub use trace_commons_contributor::consent_copy::{
     AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, GATE_NOT_PINNED_HELP, GATE_READY_HELP,
-    GATE_STATEMENT, gate_help,
+    GATE_STATEMENT, VoidNoticeCopy, gate_help, void_notice_for_wire,
 };
 // COPY-MIGRATED-END
 
