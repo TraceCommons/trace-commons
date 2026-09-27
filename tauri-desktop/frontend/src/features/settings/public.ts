@@ -1,4 +1,5 @@
 export { settingsKeys } from "./api/query-keys";
+export { changeProjectMode } from "./api/projects-api";
 export { ProjectsPanel } from "./components/projects-panel";
 export { SourceRootsPanel } from "./components/source-roots-panel";
 export { useProjects } from "./hooks/use-projects";
