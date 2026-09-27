@@ -11879,4 +11879,93 @@ async fn compatibility_credit_matches_main_gate_path() {
         instrument_status.internal_settlement_state,
         "not_settlement_eligible"
     );
+
+    // Ruling T5-2: the forensic trace of the delta run shows the same state
+    // through `forensic_trace`'s copy of the shared CASE/join, not just
+    // through the contributor-facing status read above.
+    let forensic = product
+        .forensic_trace(&tenant_positive, run_positive.run_id)
+        .await
+        .unwrap()
+        .expect("a completed run has a forensic trace");
+    let forensic_trace_credit = forensic
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit instrument status is present in the forensic trace");
+    assert_eq!(
+        forensic_trace_credit.internal_settlement_state,
+        "not_settlement_eligible"
+    );
+
+    // Ruling T5-1: switch tenant_positive to a minimal bundle with its own
+    // positive trace_credit award, and run it for the SAME principal (hence
+    // the same credit_account_ref, `credit_account_ref` being the
+    // submission's `auth_principal_ref`) as the NoveltyUtility run above.
+    // Batch composition for this minimal run must not sweep in the
+    // NoveltyUtility event, which stays pending and in no batch forever.
+    let minimal_config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(750_000),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let minimal_package = MinimalPolicyBundle::minimal_package(&minimal_config, &scorer, &embedder)
+        .expect("build the minimal package for the batching check");
+    service
+        .register_bundle(&tenant_positive, &minimal_package)
+        .await
+        .expect("register the minimal package");
+    activate_bundle_as_operator(&tenant_positive, &minimal_package.bundle_id).await;
+
+    let run_minimal = submit_and_complete(&service, &tenant_positive, principal).await;
+    assert_eq!(run_minimal.state, PipelineRunState::Complete);
+
+    let minimal_settlements = service
+        .store()
+        .list_settlements(&tenant_positive, run_minimal.run_id)
+        .await
+        .unwrap();
+    assert_eq!(minimal_settlements.len(), 1);
+    let minimal_credit_row = &minimal_settlements[0];
+    assert_eq!(minimal_credit_row.operation_state, "complete");
+    let minimal_event_id = minimal_credit_row
+        .credit_event_id
+        .expect("the minimal run's leg records its credit event");
+    let minimal_batch_id = minimal_credit_row
+        .settlement_batch_id
+        .expect("the minimal run's own leg is composed into a batch");
+
+    let carrying_minimal_event =
+        finalized_batches_carrying(&backend, &tenant_positive, minimal_event_id).await;
+    assert_eq!(
+        carrying_minimal_event.len(),
+        1,
+        "the minimal run's own event is in its batch"
+    );
+    assert_eq!(carrying_minimal_event[0].0, minimal_batch_id);
+    assert_eq!(
+        carrying_minimal_event[0].1.as_deref(),
+        Some("trace_credit"),
+        "the minimal batch carries the trace_credit instrument"
+    );
+
+    // The NoveltyUtility event stays out of the minimal run's batch...
+    assert!(
+        finalized_batches_carrying(&backend, &tenant_positive, event_id)
+            .await
+            .is_empty(),
+        "the NoveltyUtility event must still be in no batch after a later minimal run's batch composition"
+    );
+    // ...and its ledger row is untouched: still pending, never finalized.
+    assert_eq!(
+        credit_event_state(&backend, &tenant_positive, event_id)
+            .await
+            .as_deref(),
+        Some("pending"),
+        "a NoveltyUtility ledger row is never marked final"
+    );
 }

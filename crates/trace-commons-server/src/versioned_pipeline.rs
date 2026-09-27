@@ -5953,6 +5953,7 @@ impl PipelineService {
                     account_ref,
                     &account_hash,
                     event_id,
+                    &ledger_event_type_label,
                 )
                 .await?
             }),
@@ -5982,6 +5983,15 @@ impl PipelineService {
     /// `instrument_id`, and marks those events final -- all inside the
     /// caller's credit transaction, under the per-account advisory lock the
     /// caller holds. `event_id` (the run's own event) must be among them.
+    ///
+    /// Ruling T5-1: only pending events whose `event_type` is `event_type`
+    /// (the caller's own leg's ledger event type -- `PipelineScore`'s
+    /// `Accepted`, computed once by the caller with the same enum-to-string
+    /// path the ledger insert used) are eligible. Without this predicate, a
+    /// still-`pending` `NoveltyUtility` row for the same account and
+    /// instrument would be swept into this batch too, even though `main`
+    /// never pays that event (Review Focus 3).
+    #[allow(clippy::too_many_arguments)]
     async fn finalize_pending_credit_batch(
         &self,
         tx: &Transaction<'_>,
@@ -5990,6 +6000,7 @@ impl PipelineService {
         account_ref: &str,
         account_hash: &str,
         event_id: Uuid,
+        event_type: &str,
     ) -> anyhow::Result<Uuid> {
         let pending_events = tx
             .query(
@@ -6000,8 +6011,9 @@ impl PipelineService {
                     AND instrument_id = $2
                     AND credit_account_ref = $3
                     AND settlement_state = 'pending'
+                    AND event_type = $4
                   ORDER BY credit_event_id",
-                &[&run.tenant_id, &instrument_id, &account_ref],
+                &[&run.tenant_id, &instrument_id, &account_ref, &event_type],
             )
             .await?;
         anyhow::ensure!(

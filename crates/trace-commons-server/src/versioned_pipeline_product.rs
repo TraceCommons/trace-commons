@@ -240,6 +240,38 @@ pub struct PipelineContributorCredit {
     pub submission_count: usize,
 }
 
+/// Shared by `contributor_statuses_for_principals` and `forensic_trace`
+/// (Ruling T5-2, following S11): a `pipeline_run_settlements` row's internal
+/// lifecycle state, given its own row aliased `settlement`, its optional
+/// carrying batch aliased `batch`, and its optional ledger event aliased
+/// `ledger`. A `trace_credit` row whose ledger event is `NoveltyUtility`
+/// (the stored string `TraceCreditEventType::NoveltyUtility`'s own serde
+/// produces, `trace_corpus_storage.rs`, `rename_all = "snake_case"`; the
+/// same string `versioned_pipeline.rs`'s `settle_internal_credit` writes,
+/// Ruling S10) reports `not_settlement_eligible` rather than `pending`
+/// forever, since `main` never batches or pays that event type. Every query
+/// that embeds this must alias its rows exactly as this text assumes, and
+/// must also embed `TRACE_CREDIT_LEDGER_JOIN`.
+const INTERNAL_SETTLEMENT_STATE_CASE: &str = "
+                                    CASE
+                                        WHEN settlement.instrument_id <> 'trace_credit'
+                                            THEN 'not_applicable'
+                                        WHEN ledger.event_type = 'novelty_utility'
+                                            THEN 'not_settlement_eligible'
+                                        WHEN batch.status IS NOT NULL THEN batch.status
+                                        WHEN settlement.credit_event_id IS NOT NULL THEN 'pending'
+                                        ELSE settlement.operation_state
+                                    END";
+
+/// The join `INTERNAL_SETTLEMENT_STATE_CASE` depends on for its
+/// `ledger.event_type` read. Must appear in a query that already joins
+/// `pipeline_run_settlements` as `settlement`.
+const TRACE_CREDIT_LEDGER_JOIN: &str = "
+                          LEFT JOIN trace_credit_ledger ledger
+                            ON ledger.tenant_id = settlement.tenant_id
+                           AND ledger.credit_event_id = settlement.credit_event_id
+                           AND ledger.instrument_id = settlement.instrument_id";
+
 #[derive(Clone)]
 pub struct PipelineProductStore {
     backend: Arc<PgBackend>,
@@ -296,9 +328,8 @@ impl PipelineProductStore {
         }
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let rows = tx
-            .query(
-                "SELECT r.*, s.status AS submission_status,
+        let sql = format!(
+            "SELECT r.*, s.status AS submission_status,
                         score.outcome_id AS score_outcome_id,
                         score.decision AS score_decision,
                         score.outcome_schema_id AS score_schema_id,
@@ -342,26 +373,7 @@ impl PipelineProductStore {
                                 'instrument_id', settlement.instrument_id,
                                 'atomic_units', settlement.atomic_units::text,
                                 'operation_state', settlement.operation_state,
-                                'internal_settlement_state',
-                                    CASE
-                                        WHEN settlement.instrument_id <> 'trace_credit'
-                                            THEN 'not_applicable'
-                                        -- Ruling S11: TraceCreditEventType::NoveltyUtility's
-                                        -- own serde (rename_all snake_case,
-                                        -- trace_corpus_storage.rs) is the same
-                                        -- string versioned_pipeline.rs's
-                                        -- settle_internal_credit writes for a
-                                        -- compatibility run's Trace Credit leg
-                                        -- (Ruling S10). main never batches or
-                                        -- pays this event type, so it is
-                                        -- reported as ineligible rather than
-                                        -- pending forever.
-                                        WHEN ledger.event_type = 'novelty_utility'
-                                            THEN 'not_settlement_eligible'
-                                        WHEN batch.status IS NOT NULL THEN batch.status
-                                        WHEN settlement.credit_event_id IS NOT NULL THEN 'pending'
-                                        ELSE settlement.operation_state
-                                    END,
+                                'internal_settlement_state', {INTERNAL_SETTLEMENT_STATE_CASE},
                                 'credit_event_id', settlement.credit_event_id,
                                 'settlement_batch_id', settlement.settlement_batch_id,
                                 'payout_rail', settlement.payout_rail,
@@ -375,16 +387,14 @@ impl PipelineProductStore {
                             ON batch.tenant_id = settlement.tenant_id
                            AND batch.settlement_batch_id = settlement.settlement_batch_id
                            AND batch.instrument_id = settlement.instrument_id
-                          LEFT JOIN trace_credit_ledger ledger
-                            ON ledger.tenant_id = settlement.tenant_id
-                           AND ledger.credit_event_id = settlement.credit_event_id
-                           AND ledger.instrument_id = settlement.instrument_id
+                          {TRACE_CREDIT_LEDGER_JOIN}
                          WHERE settlement.tenant_id = r.tenant_id
                            AND settlement.run_id = r.run_id
                    ) settlements ON TRUE
-                  ORDER BY requested.ordinal",
-                &[&tenant_id, &principal_refs, &submission_ids],
-            )
+                  ORDER BY requested.ordinal"
+        );
+        let rows = tx
+            .query(&sql, &[&tenant_id, &principal_refs, &submission_ids])
             .await?;
         tx.commit().await?;
         rows.iter().map(status_from_row).collect()
@@ -783,18 +793,11 @@ impl PipelineProductStore {
                 &[&tenant_id, &run_id],
             )
             .await?;
-        let settlement_rows = tx
-            .query(
-                "SELECT settlement.instrument_id,
+        let settlement_sql = format!(
+            "SELECT settlement.instrument_id,
                         settlement.atomic_units::TEXT AS atomic_units_text,
                         settlement.operation_state,
-                        CASE
-                            WHEN settlement.instrument_id <> 'trace_credit'
-                                THEN 'not_applicable'
-                            WHEN batch.status IS NOT NULL THEN batch.status
-                            WHEN settlement.credit_event_id IS NOT NULL THEN 'pending'
-                            ELSE settlement.operation_state
-                        END AS internal_settlement_state,
+                        {INTERNAL_SETTLEMENT_STATE_CASE} AS internal_settlement_state,
                         settlement.credit_event_id, settlement.settlement_batch_id,
                         settlement.payout_rail, settlement.payout_state,
                         settlement.last_error_label
@@ -803,11 +806,11 @@ impl PipelineProductStore {
                      ON batch.tenant_id = settlement.tenant_id
                     AND batch.settlement_batch_id = settlement.settlement_batch_id
                     AND batch.instrument_id = settlement.instrument_id
+                   {TRACE_CREDIT_LEDGER_JOIN}
                   WHERE settlement.tenant_id = $1 AND settlement.run_id = $2
-                  ORDER BY settlement.instrument_id",
-                &[&tenant_id, &run_id],
-            )
-            .await?;
+                  ORDER BY settlement.instrument_id"
+        );
+        let settlement_rows = tx.query(&settlement_sql, &[&tenant_id, &run_id]).await?;
         tx.commit().await?;
         let phases = phase_rows
             .iter()
