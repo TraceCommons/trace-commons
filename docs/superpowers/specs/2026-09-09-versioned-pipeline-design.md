@@ -618,7 +618,15 @@ implements them:
   match the request, and an optional `external_receipt_hash`, a SHA-256
   reference over the external system's receipt (a NEP-141 transfer's
   transaction), which exists only after the call. The leg records both,
-  hash-only.
+  hash-only. The derivation is part of the adapter's identity: a new
+  derivation is a new adapter. A NEAR adapter uses the derivation the NEAR
+  credit outbox already audits as `near_transaction_hash_hash`,
+  `sha256_prefixed` over the normalized base58 transaction hash, so one
+  transaction has one reference across a leg, an outbox line and an audit
+  row. That hash is unkeyed: it keeps the raw value out of rows and logs, but
+  a reader with the chain can still link a leg to its transaction. A keyed
+  derivation would be a separate decision. One external receipt answers one
+  leg until an adapter that batches legs into one transaction exists.
 
 Every phase input carries the tenant's `TenantStorageRef`, the derived key that
 ingest uses for every index and storage write. A policy queries an index with
@@ -680,6 +688,9 @@ pipeline_run_settlements
          OR atomic_units <= 9223372036854775807)
   operation_ref_hash, result_ref_hash nullable
   external_receipt_hash nullable
+  CHECK (external_receipt_hash IS NULL
+         OR (operation_state = 'complete'
+             AND external_receipt_hash ~ '^sha256:[0-9a-f]{64}$'))
   operation_state: pending | leased | retry | held | complete | forfeited | failed
   lease_token, lease_expires_at
   attempt_count, max_attempts, next_attempt_at
@@ -687,6 +698,8 @@ pipeline_run_settlements
   created_at, updated_at
   primary key (tenant_id, run_id, instrument_id)
   unique (tenant_id, operation_ref_hash)
+  unique (tenant_id, external_receipt_hash)
+    where external_receipt_hash is not null
 
 phase_outcomes
   tenant_id, outcome_id, run_id, trace_id

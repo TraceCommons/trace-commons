@@ -738,7 +738,8 @@ until all required operations complete.
 - A completed operation whose adapter effect has an external record MUST
   record the adapter's external receipt hash, a lowercase SHA-256 reference,
   never the raw transaction hash. A repeated operation MUST return the same
-  external receipt hash.
+  external receipt hash. The hash MUST be set only on a `complete` leg, and
+  one external receipt hash MUST answer at most one leg per tenant.
 - The runner MUST build each `SettlementRequest` through
   `SettlementRequest::new`, and MUST fail a leg closed, without a retry, when
   the receipt does not answer the request.
