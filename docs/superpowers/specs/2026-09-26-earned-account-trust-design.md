@@ -1,7 +1,8 @@
 # Earned Account Trust (Flow 3) — Design
 
-Date: 2026-09-26
-Status: draft, spec for Zaki's review
+Date: 2026-09-26 (decisions recorded 2026-09-27)
+Status: design accepted; the seven questions it raised were decided on
+2026-09-27 (see "Decisions"). Implementation not started
 Item: Z9 in the #991 work split ("The earned-trust mechanism for Flow 3")
 Extends: [`2026-09-23-connect-and-forget-consent-design.md`](2026-09-23-connect-and-forget-consent-design.md),
 "The trust model" and "The three paths"
@@ -18,7 +19,7 @@ open. Under its trust model, every contributor has a NEAR AI login, an invite
 is full trust, and a contributor without an invite "may still arm any folder,
 and sends within server-side limits set by how far the server trusts their
 account. That trust grows over time; it is Flow 3's mechanism"
-(`2026-09-23-connect-and-forget-consent-design.md:146-148`). Its Open list
+(`2026-09-23-connect-and-forget-consent-design.md:153-155`). Its Open list
 still carries "Earned-trust signals and thresholds": "which signals count,
 what they accumulate toward and where the limits sit are not" settled.
 
@@ -73,7 +74,7 @@ on only against stated conditions.
 ## The principle
 
 The consent spec's rule, restated for this mechanism: **trust relaxes what may
-be sent, never what may be said** (`2026-09-23-connect-and-forget-consent-design.md:166`).
+be sent, never what may be said** (`2026-09-23-connect-and-forget-consent-design.md:173`).
 
 Earned trust changes exactly one number: the account's effective allowance in
 processing-cost units per policy period. Everything else is outside its reach:
@@ -164,9 +165,10 @@ Signals deliberately **not** read in v1:
 - **The submit-time credit estimate** (`credit_points_pending`). It is a
   client-visible heuristic, not a server judgement.
 - **Inference provenance (R4).** The consent spec says R4 "feeds account
-  trust" (`2026-09-23-connect-and-forget-consent-design.md:161`). It should,
+  trust" (`2026-09-23-connect-and-forget-consent-design.md:168`). It should,
   but #1005's v2 certificate with signed `inference_provenance` is not yet a
-  fact source. It is Open question 5.
+  fact source. Decided (decision 5): not in v1; the follow-up is a tier
+  requirement, never a multiplier, tracked in #1059.
 
 ### Aggregation
 
@@ -198,7 +200,7 @@ changes, and a calibration can be argued about tier by tier.
 | `evaluated_failed`, `evaluated_not_accepted` | **neutral.** A low-value trace earns nothing; it has already spent allowance, which is its cost |
 | `submission_withdrawn` | **neutral: nets out, never penalises.** Withdrawal is a consent right, and a rule that charged for it would chill it. It removes the withdrawn contribution's unit, so submit-accept-withdraw cycles gain nothing |
 | `submission_revoked` (operator) | **neutral: nets out.** Revocation reasons are free text (`trace_revocation_reason_for_request`, `crates/trace-commons-server/src/bin/trace-commons-ingest.rs:56512`), cover operator error and policy changes, and cannot be put in a hash-only fact. A punitive revocation should be an `abuse_penalty` |
-| `submission_quarantined` | **neutral: nets out** in v1. Quarantine judges the trace's residual privacy risk; the pilot's 114 quarantines examined on 2026-08-31 were verdicts from a NEAR AI degradation window, not contributor conduct. A per-account quarantine *rate* is measured in shadow (Open question 3) |
+| `submission_quarantined` | **neutral: nets out** in v1. Quarantine judges the trace's residual privacy risk; the pilot's 114 quarantines examined on 2026-08-31 were verdicts from a NEAR AI degradation window, not contributor conduct. A per-account quarantine *rate* is measured in shadow as a candidate cap (decision 3) |
 | `abuse_penalty` | **negative.** The tier is 0 for a cooldown `C` after the latest penalty, and qualified contributions before that penalty stop counting |
 | Invite revocation | **neutral for earned trust**; see "What loses trust" |
 
@@ -282,8 +284,7 @@ the code make that the natural line as well as the safe one:
 
 The route to full trust from Flow 3 is therefore an operator issuing an
 invite, informed by the account's explain output (below). That keeps a human
-decision at the point where volume becomes unlimited. Open question 1 offers
-the alternatives.
+decision at the point where volume becomes unlimited (decision 1).
 
 ## What loses trust
 
@@ -302,7 +303,7 @@ the alternatives.
   conduct-driven revocation should come with an `abuse_penalty`. Facts
   recorded while invited count under the same rule, including the weekly cap,
   so an invitee's unlimited volume does not convert into a top tier faster
-  than `c` per week allows. Open question 4.
+  than `c` per week allows (decision 4).
 - **Account closure or principal unlink.** Nothing to evaluate: admission
   already refuses a closed account or unlinked principal before any allowance
   is read.
@@ -525,8 +526,8 @@ table added to `TRACE_COMMONS_RLS_TABLES` (`postgres.rs:169`).
 
 ## Reconciling with the consent spec
 
-The consent spec's rev 7 fixed two structural properties of Flow 3
-(`2026-09-23-connect-and-forget-consent-design.md:693-698`): **whatever is
+The consent spec's rev 7 fixed two structural properties of Flow 3, as it
+read before the 2026-09-27 amendment: **whatever is
 earned is expressed as project mode**, and **nothing is earned silently**.
 Rev 8 then made arming the contributor's act and trust a server-side volume
 limit. Under rev 8 what Flow 3 earns is volume, not mode, so the first
@@ -534,8 +535,12 @@ property no longer describes the mechanism: an armed folder is armed by the
 contributor, and earned trust only lets it send more. This spec keeps the
 second property in the form rev 8 allows: a tier change is recorded in the
 account audit, exposed on the status route, and (once a shell shows it)
-announced to the contributor, in both directions. Open question 6 asks
-whether the consent spec should be amended to say so.
+announced to the contributor, in both directions.
+
+Decision 6 amended the consent spec to match: its "The three paths" section
+now says Flow 3 earns allowance rather than project mode, and replaces the
+"folder becomes automatic" announcement with the tier-change notice
+(`2026-09-23-connect-and-forget-consent-design.md:705-723`).
 
 ## Rollout
 
@@ -618,68 +623,54 @@ allowance.
   double-count a week; RLS isolation for both new tables.
 - The explain drill wired into rollout-smoke evidence.
 
-## Open questions for Zaki
+## Decisions
 
-1. **Can earned trust ever reach invite-equivalence?**
-   (a) Never by accrual; the top tier is finite, and an operator issues an
-   invite to go further. (b) A top tier with no cumulative cap, still labelled
-   `bounded`. (c) Automatic invite issuance at the top tier.
-   **Recommendation: (a).** It keeps `invited` iff active grant intact in the
-   three places that enforce it, needs no client change, and keeps a human
-   decision where volume becomes unlimited. (b) is reachable later by raising
-   the ceiling in a reviewed version; (c) makes the invite path gameable by
-   whatever games the tiers.
+Decided by Zaki on 2026-09-27; each adopts the recommendation this spec made.
+The options not taken are kept for the record.
 
-2. **Does quality enter as a threshold, a weight, or not at all in v1?**
-   (a) Threshold `q >= q_min` under allowlisted eras. (b) Weight units by `q`.
-   (c) Gate pass only, no `q`.
-   **Recommendation: (a).** A weight couples admission to a still-moving
-   credit calibration; (c) lets gate-passing boilerplate count. If Zaki
-   prefers to wait for V3 to settle, (c) for the first shadow run and (a)
-   before switch-on.
+1. **Earned trust never equals an invite by accrual.** The top tier's
+   allowance is finite and the authority stays `bounded`; an operator issues
+   an invite, informed by the explain output, to go further. This keeps
+   `invited` iff active grant intact where the code enforces it and needs no
+   client change. Not taken: (b) a top tier with no cumulative cap, still
+   labelled `bounded` (reachable later by raising the ceiling in a reviewed
+   version); (c) automatic invite issuance at the top tier, which would make
+   the invite path gameable by whatever games the tiers.
 
-3. **How is quarantine weighted?**
-   (a) Neutral, netting out only. (b) A rate threshold: above a stated
-   quarantine rate in the window, tier is capped. (c) Each quarantine a
-   negative unit.
-   **Recommendation: (a) now, measure (b) in shadow.** Quarantine judges the
-   trace's residual risk, and the pilot's quarantines came from a scorer
-   degradation window rather than from contributors. Punishing it would
-   punish contributors for the pipeline's recall. If the shadow shows a
-   per-account rate that separates bad actors, (b) is a policy parameter, not
-   a redesign.
+2. **Quality enters as a threshold, `q >= q_min`,** under allowlisted
+   credit-quality eras. If V3's calibration has not settled when the first
+   shadow run starts, that run uses gate pass only, and the threshold is in
+   place before switch-on. Not taken: (b) weighting units by `q`, which would
+   couple admission to a still-moving credit calibration; (c) gate pass only as
+   the permanent rule, which lets gate-passing boilerplate count.
 
-4. **What happens to earned standing when an invite is revoked?**
-   (a) Fall to the earned tier, with facts from the invited period counted
-   under the weekly cap. (b) Fall to tier 0 and re-earn. (c) Earned tier, but
-   facts from the invited period excluded.
-   **Recommendation: (a),** with a conduct-driven revocation accompanied by an
-   `abuse_penalty`. Cohort revocations are common (hackathon codes) and should
-   not erase real history; the weekly cap stops an invitee's unlimited volume
-   from converting into a top tier.
+3. **Quarantine only removes that submission's unit.** A per-account
+   quarantine-rate cap is measured in shadow and, if the data separates bad
+   actors, becomes a policy parameter rather than a redesign. Not taken: (c)
+   each quarantine a negative unit, which would punish contributors for the
+   pipeline's recall.
 
-5. **Should inference provenance (R4, #1005) earn trust?**
-   (a) Not in v1. (b) A multiplier on units from sessions with verified
-   `inference_provenance`. (c) A separate tier requirement ("at least k
-   provenance-attested units").
-   **Recommendation: (a) in v1, (c) as the follow-up.** The consent spec says
-   R4 feeds account trust, and provenance is harder to fake than content
-   metrics, but it is not yet a server-recorded fact, and (b) would make
-   connected inference a faster route to volume, which the consent spec
-   explicitly declines ("one route toward automatic contribution, not the
-   door to it").
+4. **On invite revocation the account falls to its earned tier,** with facts
+   from the invited period counted under the weekly cap. A revocation for
+   misconduct comes with an `abuse_penalty`. Not taken: (b) fall to tier 0
+   and re-earn, which erases real history on cohort revocations; (c) exclude
+   invited-period facts.
 
-6. **Amend the consent spec's Flow 3 properties?** Rev 7 says "whatever is
-   earned is expressed as project mode"; under rev 8 what is earned is volume.
-   (a) Amend the consent spec: Flow 3 earns allowance; "nothing earned
-   silently" becomes the tier-change notice. (b) Keep both, and have a tier
-   change also offer to switch Ask-me folders to Automatic.
-   **Recommendation: (a).** (b) reintroduces the server deciding a folder's
-   mode, which rev 8 moved away from, and the offer can be a later client
-   feature without being part of trust.
+5. **Inference provenance does not earn trust in v1.** The follow-up is a tier
+   requirement ("at least k provenance-attested units"), never a multiplier,
+   tracked in #1059. Not taken: (b) a multiplier on provenance-attested
+   units, which would make connected inference a faster route to volume, the
+   thing the consent spec declines ("one route toward automatic contribution,
+   not the door to it").
 
-7. **Where do the worker routes' credentials sit?**
-   (a) `require_admin`, as the contributor-cap and dedup passes do. (b) A new
-   scoped worker bearer, per the repo's scoped-credential convention.
-   **Recommendation: (a) for the shadow phase** (batch, operator-run), and
-   (b) before an inline or scheduled recorder runs unattended in production.
+6. **The consent spec is amended:** Flow 3 earns allowance, and "nothing is
+   earned silently" becomes a tier-change notice. The amendment is made in
+   `2026-09-23-connect-and-forget-consent-design.md`, "The three paths". Not
+   taken: (b) keeping the project-mode rule and having a tier change offer to
+   switch Ask-me folders to Automatic, which would reintroduce the server
+   deciding a folder's mode.
+
+7. **Worker credentials: `require_admin` during shadow,** as the
+   contributor-cap and dedup passes use, and a scoped worker bearer before any
+   recorder or evaluator runs unattended in production. Not taken: a scoped
+   bearer from the start, which the operator-run batch phase does not need.
