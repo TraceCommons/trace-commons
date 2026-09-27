@@ -3,11 +3,10 @@
 
 //! Operator-owned connection descriptors and their versioned, length-framed identity.
 
-use sha2::{Digest, Sha256};
 use trace_commons_protocol::inference_connection::{
     ConnectionWitnessConfig, DISCLOSURE_VERSION, InferenceConnectionOffer, MAX_MEASUREMENT_BYTES,
     MAX_MEASUREMENTS, MAX_URL_BYTES, SelectInferenceConnection, SelectedInferenceConnection,
-    valid_identifier,
+    config_digest, offer_revision, valid_identifier,
 };
 use uuid::Uuid;
 
@@ -105,18 +104,15 @@ impl OperatorInferenceConnection {
             return Err(ConnectionConfigError::ReceiptUrl);
         }
 
-        let config_digest = digest(&encode_config(
+        // The encoding lives in the protocol crate so a client recomputes
+        // exactly these digests from the witness material it is sent.
+        let config_digest = config_digest(
             &provider_id,
             disclosure_version,
             &witness,
             inference_receipt_endpoint.as_deref(),
-        ));
-        let revision = digest(&encode_revision(
-            &offer_id,
-            &provider_id,
-            disclosure_version,
-            &config_digest,
-        ));
+        );
+        let revision = offer_revision(&offer_id, &provider_id, disclosure_version, &config_digest);
         Ok(Self {
             offer_id,
             provider_id,
@@ -157,46 +153,6 @@ impl OperatorInferenceConnection {
     }
 }
 
-fn encode_config(
-    provider_id: &str,
-    disclosure_version: &str,
-    witness: &ConnectionWitnessConfig,
-    inference_receipt_endpoint: Option<&str>,
-) -> Vec<u8> {
-    let mut config = Vec::new();
-    config.extend_from_slice(b"trace-commons/inference-connection-config/v1\0");
-    frame(&mut config, provider_id.as_bytes());
-    frame(&mut config, disclosure_version.as_bytes());
-    frame(&mut config, witness.url.as_bytes());
-    frame(&mut config, witness.signing_address.as_bytes());
-    config.extend_from_slice(&(witness.expected_measurements.len() as u32).to_be_bytes());
-    for measurement in &witness.expected_measurements {
-        frame(&mut config, measurement.as_bytes());
-    }
-    match inference_receipt_endpoint {
-        Some(endpoint) => {
-            config.push(1);
-            frame(&mut config, endpoint.as_bytes());
-        }
-        None => config.push(0),
-    }
-    config
-}
-
-fn encode_revision(
-    offer_id: &str,
-    provider_id: &str,
-    disclosure_version: &str,
-    config_digest: &str,
-) -> Vec<u8> {
-    let mut descriptor = b"trace-commons/inference-connection-offer/v1\0".to_vec();
-    frame(&mut descriptor, offer_id.as_bytes());
-    frame(&mut descriptor, provider_id.as_bytes());
-    frame(&mut descriptor, disclosure_version.as_bytes());
-    frame(&mut descriptor, config_digest.as_bytes());
-    descriptor
-}
-
 fn valid_https_url(raw: &str) -> bool {
     if raw.is_empty() || raw.len() > MAX_URL_BYTES {
         return false;
@@ -210,15 +166,6 @@ fn valid_https_url(raw: &str) -> bool {
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-}
-
-fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
-    output.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    output.extend_from_slice(bytes);
-}
-
-fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 #[cfg(test)]
@@ -410,14 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn framing_disambiguates_field_boundaries_and_catalog_controls_selection() {
-        let mut left = Vec::new();
-        frame(&mut left, b"ab");
-        frame(&mut left, b"c");
-        let mut right = Vec::new();
-        frame(&mut right, b"a");
-        frame(&mut right, b"bc");
-        assert_ne!(left, right);
+    fn catalog_controls_selection() {
         let offer = connection();
         let published = offer.offer();
         let mut request = SelectInferenceConnection {
@@ -435,31 +375,11 @@ mod tests {
 
     #[test]
     fn disclosure_version_changes_config_digest_and_revision_encoding() {
-        let current = digest(&encode_config(
-            "near-ai",
-            DISCLOSURE_VERSION,
-            &witness(),
-            None,
-        ));
-        let future = digest(&encode_config(
-            "near-ai",
-            "future-disclosure-v2",
-            &witness(),
-            None,
-        ));
+        let current = config_digest("near-ai", DISCLOSURE_VERSION, &witness(), None);
+        let future = config_digest("near-ai", "future-disclosure-v2", &witness(), None);
         assert_ne!(current, future);
-        let current_revision = digest(&encode_revision(
-            "offer",
-            "near-ai",
-            DISCLOSURE_VERSION,
-            &current,
-        ));
-        let future_revision = digest(&encode_revision(
-            "offer",
-            "near-ai",
-            "future-disclosure-v2",
-            &future,
-        ));
+        let current_revision = offer_revision("offer", "near-ai", DISCLOSURE_VERSION, &current);
+        let future_revision = offer_revision("offer", "near-ai", "future-disclosure-v2", &future);
         assert_ne!(current_revision, future_revision);
         assert!(matches!(
             OperatorInferenceConnection::new(
@@ -471,6 +391,91 @@ mod tests {
             ),
             Err(ConnectionConfigError::Disclosure)
         ));
+    }
+
+    /// The digests the server publishes are the ones a client recomputes
+    /// from the witness material: the protocol function over the same fields,
+    /// and the byte-exact values pinned before the encoding moved there.
+    #[test]
+    fn published_digests_are_what_a_client_recomputes() {
+        let receipt = "https://receipt.example/v1";
+        let mut pinned = witness();
+        pinned
+            .expected_measurements
+            .push(format!("rtmr3={}", "cd".repeat(48)));
+        let configured = OperatorInferenceConnection::new(
+            "offer".into(),
+            "near-ai".into(),
+            DISCLOSURE_VERSION,
+            pinned.clone(),
+            Some(receipt.into()),
+        )
+        .unwrap();
+        let offer = configured.offer();
+        assert_eq!(
+            offer.config_digest,
+            "sha256:383855ed69b5a6c0341f46429c4f9328a3b925d4152d687895e061faccf14d54"
+        );
+        assert_eq!(
+            offer.revision,
+            "sha256:87d8925d318f67e19233fc39dfa2ea82864c5d5951cc1bfa9591badcee93d3d5"
+        );
+        assert_eq!(
+            offer.config_digest,
+            config_digest("near-ai", DISCLOSURE_VERSION, &pinned, Some(receipt))
+        );
+        let selected = configured.selected(Uuid::new_v4(), 1);
+        assert_eq!(selected.verify_digests("offer", "near-ai"), Ok(()));
+        assert_eq!(selected.validate(), Ok(()));
+    }
+
+    /// The protocol crate's pin check is a copy of the attestation parser's
+    /// rule, since a permissive client crate cannot take this dependency
+    /// path. Hold the two to the same answer, whitespace-only included.
+    #[test]
+    fn protocol_pin_check_agrees_with_the_attestation_parser() {
+        use trace_commons_attestation::measurements::ExpectedMeasurements;
+        use trace_commons_protocol::inference_connection::valid_measurement_entry;
+        let pin = |key: &str| format!("{key}={}", "ab".repeat(48));
+        let cases = [
+            pin("mrtd"),
+            pin("MrConfigId"),
+            pin("rtmr0"),
+            pin("rtmr1"),
+            pin("rtmr2"),
+            pin("rtmr3"),
+            format!("{} , {}", pin("mrtd"), pin("rtmr3")),
+            format!("{},", pin("mrtd")),
+            format!(",{}", pin("mrtd")),
+            format!("  {}  ", pin("mrtd")),
+            String::new(),
+            " ".into(),
+            "\t\n".into(),
+            ",".into(),
+            " , , ".into(),
+            "mrtd".into(),
+            "=".into(),
+            format!("={}", "ab".repeat(48)),
+            pin("mrtdd"),
+            pin("compose_hash"),
+            pin("os_image_hash"),
+            format!("mrtd={}", "ab".repeat(47)),
+            format!("mrtd={}0", "ab".repeat(48)),
+            format!("mrtd={}", "zz".repeat(48)),
+            format!("{},{}", pin("mrtd"), pin("MRTD")),
+            format!("{},garbage", pin("mrtd")),
+        ];
+        for case in cases {
+            let attestation = matches!(
+                ExpectedMeasurements::from_env_value(Some(&case)),
+                Ok(Some(_))
+            );
+            assert_eq!(
+                valid_measurement_entry(&case),
+                attestation,
+                "parsers disagree on {case:?}"
+            );
+        }
     }
 
     #[test]
