@@ -2707,6 +2707,29 @@ pub trait TraceCorpusStore: Send + Sync {
         reason: Option<&str>,
     ) -> Result<(), DatabaseError>;
 
+    /// As [`Self::update_trace_submission_status`], without the store's own
+    /// audit row. For a caller that mirrors the file audit log's event for
+    /// this change itself, so the DB audit table holds that event and no row
+    /// the file log lacks. The default delegates, which suits stores that
+    /// keep no audit rows of their own.
+    async fn update_trace_submission_status_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await
+    }
+
     async fn claim_trace_review_lease(
         &self,
         tenant_id: &str,

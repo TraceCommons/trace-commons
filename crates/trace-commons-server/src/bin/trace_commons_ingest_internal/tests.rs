@@ -5231,11 +5231,24 @@ fn append_ranking_backfill_fixture(
     root: &std::path::Path,
     tenant_id: &str,
 ) -> RankingBackfillFixture {
+    append_ranking_backfill_fixture_for_submissions(
+        root,
+        tenant_id,
+        (Uuid::new_v4(), Uuid::new_v4()),
+        (Uuid::new_v4(), Uuid::new_v4()),
+    )
+}
+
+/// Same fixture, pointed at existing `(submission_id, trace_id)` pairs. The
+/// PostgreSQL ranking tables carry a foreign key to `trace_submissions`, so a
+/// backfill into a real mirror needs submissions that are already there.
+fn append_ranking_backfill_fixture_for_submissions(
+    root: &std::path::Path,
+    tenant_id: &str,
+    (submission_id, trace_id): (Uuid, Uuid),
+    (rejected_submission_id, rejected_trace_id): (Uuid, Uuid),
+) -> RankingBackfillFixture {
     let now = Utc::now();
-    let submission_id = Uuid::new_v4();
-    let trace_id = Uuid::new_v4();
-    let rejected_submission_id = Uuid::new_v4();
-    let rejected_trace_id = Uuid::new_v4();
     let feature_id = Uuid::new_v4();
     let prediction_id = Uuid::new_v4();
     let label_id = Uuid::new_v4();
@@ -11738,6 +11751,26 @@ async fn aggregate_read_handlers_use_shared_typed_audit_metadata() {
         false,
         false,
     );
+
+    // `cleanup_pg_trace_tenant` deletes the tenant row and its policy with it,
+    // and the policy read answers 404 when no policy exists, so the read below
+    // needs one to succeed and be audited.
+    backend
+        .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+            tenant_id: "tenant-a".to_string(),
+            policy_version: "tenant-a-aggregate-read-policy-v1".to_string(),
+            allowed_consent_scopes: vec![
+                serde_storage_string(&ConsentScope::DebuggingEvaluation)
+                    .expect("DB tenant policy scope serializes"),
+            ],
+            allowed_uses: vec![
+                serde_storage_string(&TraceAllowedUse::Evaluation)
+                    .expect("DB tenant policy use serializes"),
+            ],
+            updated_by_principal_ref: principal_storage_ref("admin-token-a"),
+        })
+        .await
+        .expect("DB tenant policy writes");
 
     let Json(_) = get_tenant_policy_handler(State(state.clone()), auth_headers("admin-token-a"))
         .await
@@ -19587,7 +19620,7 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
 
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_options(
+    let mut state = test_state_with_options(
         temp.path().to_path_buf(),
         Some(db_mirror),
         None,
@@ -19596,6 +19629,13 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
         false,
         false,
     );
+    // The rejected fixture puts prose back into a metadata-only envelope, so
+    // consent concordance corrects `message_text_included` upward and the
+    // `message_text -> Medium` floor applies (see
+    // `ranker_exports_write_provenance_and_maintenance_invalidates_sources`).
+    // Without accepting Medium it is quarantined and never becomes a ranker
+    // candidate; the queued jobs below therefore filter on no risk tier.
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
     let mut preferred = sample_envelope().await;
     make_metadata_only_low_risk(&mut preferred);
     preferred.consent.scopes = vec![ConsentScope::RankingTraining];
@@ -19675,7 +19715,7 @@ async fn export_worker_claims_and_runs_queued_ranker_jobs_from_safe_metadata() {
                 metadata: replayable_export_job_metadata(
                     Some(5),
                     Some(TraceCorpusStatus::Accepted),
-                    Some(ResidualPiiRisk::Low),
+                    None,
                     Some(ConsentScope::RankingTraining),
                     None,
                 ),
@@ -19817,7 +19857,7 @@ async fn export_worker_run_queued_jobs_makes_bounded_progress_after_job_failure(
             TraceExportDatasetKind::BenchmarkConversion,
             "queued benchmark scheduler job",
             now - Duration::minutes(5),
-            export_job_request_metadata(
+            replayable_export_job_metadata(
                 Some(5),
                 Some(TraceCorpusStatus::Accepted),
                 Some(ResidualPiiRisk::Low),
@@ -19830,7 +19870,7 @@ async fn export_worker_run_queued_jobs_makes_bounded_progress_after_job_failure(
             TraceExportDatasetKind::RankerTrainingCandidates,
             "queued ranker scheduler job",
             now - Duration::minutes(4),
-            export_job_request_metadata(
+            replayable_export_job_metadata(
                 Some(5),
                 Some(TraceCorpusStatus::Accepted),
                 Some(ResidualPiiRisk::Low),
@@ -20050,7 +20090,7 @@ async fn admin_can_retry_failed_export_job_for_scheduler_execution() {
         })
         .await
         .expect("tenant-b export grant writes");
-    let mut metadata = export_job_request_metadata(
+    let mut metadata = replayable_export_job_metadata(
         Some(5),
         Some(TraceCorpusStatus::Accepted),
         Some(ResidualPiiRisk::Low),
@@ -20520,7 +20560,7 @@ async fn export_worker_retry_failed_jobs_applies_backoff_and_retry_limits() {
             .await
             .expect("export grant writes");
         let mut metadata = if replayable_metadata {
-            export_job_request_metadata(
+            replayable_export_job_metadata(
                 Some(5),
                 Some(TraceCorpusStatus::Accepted),
                 Some(ResidualPiiRisk::Low),
@@ -20578,7 +20618,7 @@ async fn export_worker_retry_failed_jobs_applies_backoff_and_retry_limits() {
         })
         .await
         .expect("tenant-b export grant writes");
-    let mut tenant_b_metadata = export_job_request_metadata(
+    let mut tenant_b_metadata = replayable_export_job_metadata(
         Some(5),
         Some(TraceCorpusStatus::Accepted),
         Some(ResidualPiiRisk::Low),
@@ -20738,7 +20778,7 @@ async fn export_job_scheduler_tick_retries_due_failures_then_runs_queued_jobs() 
             "scheduler due failed replay",
             Some(now - Duration::seconds(90)),
             {
-                let mut metadata = export_job_request_metadata(
+                let mut metadata = replayable_export_job_metadata(
                     Some(5),
                     Some(TraceCorpusStatus::Accepted),
                     Some(ResidualPiiRisk::Low),
@@ -20754,7 +20794,7 @@ async fn export_job_scheduler_tick_retries_due_failures_then_runs_queued_jobs() 
             StorageTraceExportJobStatus::Queued,
             "scheduler queued replay",
             None,
-            export_job_request_metadata(
+            replayable_export_job_metadata(
                 Some(5),
                 Some(TraceCorpusStatus::Accepted),
                 Some(ResidualPiiRisk::Low),
@@ -20826,7 +20866,7 @@ async fn export_job_scheduler_tick_retries_due_failures_then_runs_queued_jobs() 
         })
         .await
         .expect("tenant-b export grant writes");
-    let mut tenant_b_metadata = export_job_request_metadata(
+    let mut tenant_b_metadata = replayable_export_job_metadata(
         Some(5),
         Some(TraceCorpusStatus::Accepted),
         Some(ResidualPiiRisk::Low),
@@ -27149,6 +27189,10 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     assert!(!body_text.contains("admin-token-a"));
     assert!(!body_text.contains("operator vector-index drill"));
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed("operator vector-index drill"))
+    );
 
     let vector_entries = backend
         .list_trace_vector_entries("tenant-a")
@@ -27676,6 +27720,394 @@ async fn db_reconciliation_drill_without_db_mirror_returns_operator_error() {
     );
 }
 
+/// Asserts the DB audit table is an exact mirror of the file audit log: the
+/// same events, in the same order, with the same ids and chain fields, and
+/// every row's canonical payload is its file event. Returns the DB rows.
+async fn assert_db_audit_mirrors_file_log(
+    backend: &PgBackend,
+    root: &Path,
+    context: &str,
+) -> Vec<StorageTraceAuditEventRecord> {
+    let file_events = read_all_audit_events(root, "tenant-a").expect("file audit log");
+    let db_events = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB audit rows");
+    assert_eq!(
+        db_events
+            .iter()
+            .map(|row| (
+                row.audit_event_id,
+                row.previous_event_hash.clone(),
+                row.event_hash.clone()
+            ))
+            .collect::<Vec<_>>(),
+        file_events
+            .iter()
+            .map(|event| (
+                event.event_id,
+                event.previous_event_hash.clone(),
+                event.event_hash.clone()
+            ))
+            .collect::<Vec<_>>(),
+        "{context}: DB rows are the file events, in order, with their chain fields \
+         (file kinds: {:?})",
+        file_events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (row, event) in db_events.iter().zip(&file_events) {
+        assert!(
+            event.event_hash.is_some(),
+            "{context}: file event is chained"
+        );
+        let canonical: TraceCommonsAuditEvent = serde_json::from_str(
+            row.canonical_event_json
+                .as_deref()
+                .expect("mirrored row carries its canonical payload"),
+        )
+        .expect("canonical payload parses");
+        assert_eq!(canonical.kind, event.kind, "{context}");
+        assert_eq!(canonical.reason, event.reason, "{context}");
+    }
+    let projection_failures = collect_db_audit_canonical_projection_failures(&db_events)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(
+        projection_failures.is_empty(),
+        "{context}: {projection_failures:?}"
+    );
+    let chain_failures = collect_db_audit_hash_chain_failures(&db_events)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(chain_failures.is_empty(), "{context}: {chain_failures:?}");
+    db_events
+}
+
+/// The file audit log is canonical and the DB audit table mirrors it exactly,
+/// in both dual-write modes: every event the submit, remediation, idempotent
+/// retry, operator re-scrub, review and revocation paths write is one row
+/// with the file event's id, chain fields and canonical payload, and the DB
+/// holds no audit row the file log lacks.
+#[tokio::test]
+async fn db_audit_table_mirrors_the_file_audit_log_in_both_dual_write_modes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for require_db_mirror_writes in [false, true] {
+        let context = format!("require_db_mirror_writes={require_db_mirror_writes}");
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.require_db_mirror_writes = require_db_mirror_writes;
+            state_mut.accept_medium_risk_submissions = false;
+        }
+
+        // First landing, quarantined; then a remediation re-POST and an
+        // idempotent retry of the remediated body.
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(first.clone()),
+        )
+        .await
+        .expect("first submission");
+        let mut corrected = first.clone();
+        corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(corrected.clone()),
+        )
+        .await
+        .expect("remediation");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(corrected),
+        )
+        .await
+        .expect("idempotent retry");
+
+        // A second quarantined submission, re-scrubbed twice by an operator
+        // (it stays quarantined), then reviewed.
+        let mut second = sample_envelope().await;
+        second.events[0].redacted_content =
+            Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(second.clone()),
+        )
+        .await
+        .expect("second submission");
+        assert_eq!(receipt.status, "quarantined", "{context}");
+        for _ in 0..2 {
+            let _ = review_quarantine_rescrub_handler(
+                State(state.clone()),
+                auth_headers("review-token-a"),
+                AxumPath(second.submission_id),
+                Json(TraceQuarantineRescrubRequest {
+                    reason: Some("operator free text that must not reach the DB".into()),
+                }),
+            )
+            .await
+            .expect("operator rescrub");
+        }
+        let _ = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(second.submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("reviewer free text that must not reach the DB".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect("review decision");
+
+        // And the first submission is revoked.
+        let revoked = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(first.submission_id),
+        )
+        .await
+        .expect("revocation");
+        assert_eq!(revoked, StatusCode::NO_CONTENT);
+
+        let db_events = assert_db_audit_mirrors_file_log(&backend, temp.path(), &context).await;
+        let kinds = read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file audit log")
+            .into_iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>();
+        for expected in [
+            "submitted",
+            "quarantine_remediated",
+            "idempotent_submit",
+            "quarantine_operator_rescrub",
+            "review_decision",
+            "revoked",
+            "revocation_artifact_invalidation",
+        ] {
+            assert!(
+                kinds.iter().any(|kind| kind == expected),
+                "{context}: {expected} in {kinds:?}"
+            );
+        }
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "quarantine_operator_rescrub")
+                .count(),
+            2,
+            "{context}: a second re-scrub records a row of its own"
+        );
+        // Hash-only: the free text reached neither the rows nor their payloads.
+        for row in &db_events {
+            let row_text = format!("{:?} {:?}", row.reason, row.canonical_event_json.as_deref());
+            assert!(
+                !row_text.contains("free text"),
+                "{context}: free text leaked into audit row {}",
+                row.audit_event_id
+            );
+        }
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Concurrent submissions: the append lock orders each event's chain fields,
+/// its DB row and its file line together, so both logs hold one unforked
+/// chain in the same order, in both dual-write modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for require_db_mirror_writes in [false, true] {
+        let context = format!("require_db_mirror_writes={require_db_mirror_writes}");
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = require_db_mirror_writes;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            let state = state.clone();
+            tasks.push(tokio::spawn(async move {
+                submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+                    .await
+                    .map(|_| ())
+                    .map_err(|(status, _)| status)
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("submission task joins")
+                .unwrap_or_else(|status| panic!("{context}: submission failed with {status}"));
+        }
+
+        let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
+        assert_eq!(file_events.len(), 8, "{context}");
+        let mut previous = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+        for event in &file_events {
+            assert_eq!(
+                event.previous_event_hash.as_deref(),
+                Some(previous.as_str()),
+                "{context}: the file chain does not fork"
+            );
+            previous = event.event_hash.clone().expect("chained");
+        }
+        assert_db_audit_mirrors_file_log(&backend, temp.path(), &context).await;
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// A submit row written before the DB mirrored the file event -- the id
+/// derived from the submission, no chain fields, no canonical payload -- is
+/// counted as legacy, with its file `submitted` event, and neither is drift.
+#[tokio::test]
+async fn reconciliation_counts_legacy_submit_audit_rows_apart_from_drift() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission");
+
+    // Replace the mirrored row with the row the old scheme wrote.
+    let file_event = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file audit log")
+        .into_iter()
+        .find(|event| event.kind == "submitted")
+        .expect("submitted event");
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw client");
+    client
+        .execute(
+            "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
+            &[&file_event.event_id],
+        )
+        .await
+        .expect("mirrored row removed");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let legacy_id = deterministic_trace_uuid("submit-audit", &record);
+    backend
+        .append_trace_audit_event(StorageTraceAuditEventWrite {
+            audit_event_id: legacy_id,
+            tenant_id: "tenant-a".to_string(),
+            actor_principal_ref: record.auth_principal_ref.clone(),
+            actor_role: "contributor".to_string(),
+            action: StorageTraceAuditAction::Submit,
+            reason: Some("auth_method=static_token".to_string()),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Submission {
+                status: storage_corpus_status(record.status),
+                privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
+            },
+        })
+        .await
+        .expect("legacy row writes");
+
+    let Json(response) = maintenance_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceMaintenanceRequest {
+            purpose: Some("legacy_submit_audit_reconcile".to_string()),
+            dry_run: true,
+            backfill_db_mirror: false,
+            index_vectors: false,
+            reconcile_db_mirror: true,
+            verify_audit_chain: false,
+            prune_export_cache: false,
+            max_export_age_hours: None,
+            purge_expired_before: None,
+        }),
+    )
+    .await
+    .expect("maintenance reconciles");
+    let report = response
+        .db_reconciliation
+        .expect("reconciliation report exists");
+    assert_eq!(report.legacy_submit_audit_row_count, 1);
+    assert!(
+        report.missing_audit_event_ids_in_db.is_empty(),
+        "{:?}",
+        report.missing_audit_event_ids_in_db
+    );
+    assert!(report.missing_audit_event_ids_in_files.is_empty());
+    assert!(
+        !report
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap.starts_with("missing_audit_event_ids")),
+        "{:?}",
+        report.blocking_gaps
+    );
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     use axum::body::Body;
@@ -27708,6 +28140,20 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     )
     .await
     .expect("submission mirrors to DB");
+    // An accepted submission is indexed by the vector worker; reconciliation
+    // reports one without an active vector entry as a gap, so index it first,
+    // as a deployment's worker would.
+    let _ = vector_index_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceVectorIndexRequest {
+            purpose: Some("reconciliation drill vector index".to_string()),
+            dry_run: false,
+            limit: None,
+        }),
+    )
+    .await
+    .expect("vector worker indexes the accepted submission");
 
     let response = app(state.clone())
         .oneshot(
@@ -29557,12 +30003,28 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
             false,
         );
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    // A disabled remote store accepts no writes, and without object-primary
+    // submit/review it also refuses the compatibility plaintext envelope file,
+    // so no submission can land through `state` itself. The submissions these
+    // revocation items point at predate the switch to the disabled remote
+    // store: seed them through the same root and DB mirror with no artifact
+    // store configured, then run the worker on the disabled-remote state.
+    let mut seed_state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone()),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut seed_state).require_db_mirror_writes = true;
 
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
     let submission_id = envelope.submission_id;
     let _ = submit_trace_handler(
-        State(state.clone()),
+        State(seed_state.clone()),
         auth_headers("token-a"),
         submit_body(envelope),
     )
@@ -29573,7 +30035,7 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     make_metadata_only_low_risk(&mut tenant_b_envelope);
     let tenant_b_submission_id = tenant_b_envelope.submission_id;
     let _ = submit_trace_handler(
-        State(state.clone()),
+        State(seed_state.clone()),
         auth_headers("token-b"),
         submit_body(tenant_b_envelope),
     )
@@ -29831,6 +30293,22 @@ async fn revocation_worker_deletes_disabled_remote_object_payload_with_configure
             false,
         );
     Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    // A disabled remote store accepts no writes, and without object-primary
+    // submit/review it also refuses the compatibility plaintext envelope file,
+    // so no submission can land through `state` itself. The submissions these
+    // revocation items point at predate the switch to the disabled remote
+    // store: seed them through the same root and DB mirror with no artifact
+    // store configured, then run the worker on the disabled-remote state.
+    let mut seed_state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone()),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut seed_state).require_db_mirror_writes = true;
     let fake_deleter = Arc::new(FakeRemoteObjectDeleter::default());
     Arc::make_mut(&mut state).remote_object_deleter = Some(fake_deleter.clone());
 
@@ -29838,7 +30316,7 @@ async fn revocation_worker_deletes_disabled_remote_object_payload_with_configure
     make_metadata_only_low_risk(&mut envelope);
     let submission_id = envelope.submission_id;
     let _ = submit_trace_handler(
-        State(state.clone()),
+        State(seed_state.clone()),
         auth_headers("token-a"),
         submit_body(envelope),
     )
@@ -30434,6 +30912,330 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
     assert!(!body_text.contains("token-a"));
     assert!(!body_text.contains("Please inspect the workspace"));
 
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An object-primary state backed by a filesystem "remote" artifact store,
+/// with DB mirror writes required.
+fn object_primary_revocation_test_state(
+    root: &Path,
+    remote_root: &Path,
+    backend: Arc<PgBackend>,
+) -> Arc<AppState> {
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+        Some("file_system"),
+        Some(remote_root.to_str().expect("utf8 temp path")),
+        Some("test-kms-key-ref"),
+        Some("test-credential-ref"),
+    )
+    .expect("filesystem remote config parses");
+    let artifact_store =
+        ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+            .expect("filesystem remote service store builds");
+    let mut state =
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            root.to_path_buf(),
+            Some(backend),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            true,
+            false,
+        );
+    {
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.db_reviewer_require_object_refs = true;
+        state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+            tenant_ids_by_feature: Arc::new(BTreeMap::from([(
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                BTreeSet::from(["tenant-a".to_string()]),
+            )])),
+        };
+    }
+    state
+}
+
+async fn submit_object_primary_revocation_fixture(state: &Arc<AppState>) -> Uuid {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("object-primary submission mirrors to DB");
+    submission_id
+}
+
+/// Revocation deletes an object-primary submission's envelope at once. The
+/// envelope's object ref must say so, and its queued delete item must be
+/// complete with a physical-delete receipt -- otherwise the revocation worker
+/// later finds an active ref for an object that is gone and fails the item
+/// on every attempt.
+#[tokio::test]
+async fn revoking_an_object_primary_submission_marks_its_envelope_ref_deleted() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let state =
+        object_primary_revocation_test_state(temp.path(), remote_temp.path(), backend.clone());
+    let submission_id = submit_object_primary_revocation_fixture(&state).await;
+
+    let revoked = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("contributor revokes");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
+
+    let envelope_ref = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read")
+        .into_iter()
+        .find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope
+        })
+        .expect("submitted envelope ref");
+    assert!(
+        envelope_ref.deleted_at.is_some(),
+        "revocation deleted the envelope, so its object ref is marked deleted"
+    );
+    let items = backend
+        .list_trace_revocation_propagation_items("tenant-a", submission_id)
+        .await
+        .expect("propagation items read");
+    let delete_item = items
+        .iter()
+        .find(|item| {
+            item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id }
+                        if object_ref_id == envelope_ref.object_ref_id
+                )
+        })
+        .expect("the envelope's delete item");
+    assert_eq!(
+        delete_item.status,
+        StorageTraceRevocationPropagationItemStatus::Done,
+        "the envelope's queued delete is complete"
+    );
+    assert!(delete_item.evidence_hash.is_some());
+    assert!(
+        items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(object_ref_id),
+                        ..
+                    } if object_ref_id == envelope_ref.object_ref_id
+                )
+        }),
+        "a physical-delete receipt records the envelope's deletion"
+    );
+
+    // The worker has nothing left to fail on for the envelope.
+    let Json(worker) = revocation_propagation_worker_handler(
+        State(state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("revocation_envelope_ref_deleted".to_string()),
+            dry_run: false,
+            limit: 20,
+        }),
+    )
+    .await
+    .expect("revocation worker runs");
+    assert_eq!(worker.failed, 0);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Backstop: an object that is already gone is deleted, and the worker
+/// completes its item with a receipt. An object that is present but fails
+/// verification is not: that stays a failure, with no receipt.
+#[tokio::test]
+async fn revocation_worker_treats_a_missing_object_as_deleted_but_not_a_failing_one() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let state =
+        object_primary_revocation_test_state(temp.path(), remote_temp.path(), backend.clone());
+    let submission_id = submit_object_primary_revocation_fixture(&state).await;
+    let tenant_ref = tenant_storage_ref("tenant-a");
+    let store = state.artifact_store.as_ref().expect("artifact store");
+
+    // A second service-owned object for the submission that exists but will
+    // fail verification: its ref records a different ciphertext hash.
+    let tampered_receipt = store
+        .put_json(
+            &tenant_ref,
+            TraceArtifactKind::ContributionEnvelope,
+            "revocation-backstop-review-snapshot",
+            &serde_json::json!({ "artifact": "review_snapshot" }),
+        )
+        .expect("review snapshot artifact writes");
+    let tampered_ref_id = deterministic_trace_uuid_for_external_ref(
+        "revocation-backstop-tampered-object-ref",
+        "tenant-a",
+        submission_id,
+        "review_snapshot",
+    );
+    backend
+        .append_trace_object_ref(StorageTraceObjectRefWrite {
+            object_ref_id: tampered_ref_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ReviewSnapshot,
+            object_store: store.object_store_name().to_string(),
+            object_key: tampered_receipt.object_key,
+            content_sha256: sha256_prefixed("not the stored ciphertext"),
+            encryption_key_ref: format!("tenant:{tenant_ref}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("tampered object ref writes");
+
+    // The envelope's object disappears before revocation reaches it, so the
+    // revocation path has nothing to delete and leaves its ref active.
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope_receipt = record
+        .artifact_receipt
+        .clone()
+        .expect("object-primary receipt");
+    assert!(
+        store
+            .delete_artifact(&tenant_ref, &envelope_receipt)
+            .expect("envelope object deletes"),
+        "the envelope object existed"
+    );
+
+    let revoked = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("contributor revokes");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
+    let envelope_ref_id = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read")
+        .into_iter()
+        .find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope
+        })
+        .expect("submitted envelope ref")
+        .object_ref_id;
+
+    let Json(worker) = revocation_propagation_worker_handler(
+        State(state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("revocation_missing_object_backstop".to_string()),
+            dry_run: false,
+            limit: 20,
+        }),
+    )
+    .await
+    .expect("revocation worker runs");
+    assert_eq!(worker.failed, 1, "only the tampered object fails");
+
+    let object_refs = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read");
+    let envelope_ref = object_refs
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == envelope_ref_id)
+        .expect("envelope ref");
+    assert!(
+        envelope_ref.deleted_at.is_some(),
+        "an already-missing object is marked deleted"
+    );
+    let tampered_ref = object_refs
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == tampered_ref_id)
+        .expect("tampered ref");
+    assert!(
+        tampered_ref.deleted_at.is_none(),
+        "an object that fails verification is not deleted"
+    );
+
+    let items = backend
+        .list_trace_revocation_propagation_items("tenant-a", submission_id)
+        .await
+        .expect("propagation items read");
+    let receipt_for = |object_ref_id: Uuid| {
+        items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(receipt_ref),
+                        ..
+                    } if receipt_ref == object_ref_id
+                )
+        })
+    };
+    assert!(
+        receipt_for(envelope_ref_id),
+        "a receipt records the missing object"
+    );
+    assert!(
+        !receipt_for(tampered_ref_id),
+        "no receipt for an object that failed verification"
+    );
+    let delete_item_status = |object_ref_id: Uuid| {
+        items
+            .iter()
+            .find(|item| {
+                item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                    && matches!(
+                        item.target,
+                        StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id: target }
+                            if target == object_ref_id
+                    )
+            })
+            .map(|item| item.status)
+    };
+    assert_eq!(
+        delete_item_status(envelope_ref_id),
+        Some(StorageTraceRevocationPropagationItemStatus::Done)
+    );
+    assert_ne!(
+        delete_item_status(tampered_ref_id),
+        Some(StorageTraceRevocationPropagationItemStatus::Done)
+    );
+    let tampered_path_count = count_files_under_dir(remote_temp.path());
+    assert!(
+        tampered_path_count >= 1,
+        "the object that failed verification is still stored"
+    );
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
@@ -31204,8 +32006,15 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
             true,
             false,
         );
+    // `set_metadata_only_user_message` puts prose back into a metadata-only
+    // envelope, so consent concordance corrects `message_text_included` upward
+    // and the `message_text -> Medium` floor applies (see
+    // `ranker_exports_write_provenance_and_maintenance_invalidates_sources`).
+    // Accept Medium, as the deployment does, and select the tier these traces
+    // honestly belong to rather than a Low tier they no longer reach.
     {
         let state_mut = Arc::make_mut(&mut state);
+        state_mut.accept_medium_risk_submissions = true;
         state_mut.tenant_rollout_gates = TraceTenantRolloutGates::default()
             .with_feature(
                 TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
@@ -31258,7 +32067,7 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
             limit: Some(10),
             purpose: Some("tenant_a_object_primary_replay_canary".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             consent_scope: Some("debugging_evaluation".to_string()),
         }),
     )
@@ -31307,7 +32116,7 @@ async fn object_primary_replay_export_tenant_allowlist_keeps_fallback_tenant_fil
             limit: Some(10),
             purpose: Some("tenant_b_replay_fallback".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             consent_scope: Some("debugging_evaluation".to_string()),
         }),
     )
@@ -31349,6 +32158,13 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
         TraceTenantRolloutFeature::DbReplayExportReads,
         &["tenant-a"],
     );
+    // `set_metadata_only_user_message` puts prose back into a metadata-only
+    // envelope, so consent concordance corrects `message_text_included` upward
+    // and the `message_text -> Medium` floor applies (see
+    // `ranker_exports_write_provenance_and_maintenance_invalidates_sources`).
+    // Accept Medium, as the deployment does, and select the tier these traces
+    // honestly belong to rather than a Low tier they no longer reach.
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
 
     let mut tenant_a_envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut tenant_a_envelope);
@@ -31380,7 +32196,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
             limit: Some(10),
             purpose: Some("tenant_a_db_replay_canary".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             consent_scope: Some("debugging_evaluation".to_string()),
         }),
     )
@@ -31444,7 +32260,7 @@ async fn db_replay_export_reads_tenant_allowlist_keeps_fallback_tenant_file_back
             limit: Some(10),
             purpose: Some("tenant_b_replay_fallback".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             consent_scope: Some("debugging_evaluation".to_string()),
         }),
     )
@@ -31891,8 +32707,15 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
             true,
             false,
         );
+    // `set_metadata_only_user_message` puts prose back into a metadata-only
+    // envelope, so consent concordance corrects `message_text_included` upward
+    // and the `message_text -> Medium` floor applies (see
+    // `ranker_exports_write_provenance_and_maintenance_invalidates_sources`).
+    // Accept Medium, as the deployment does, and select the tier these traces
+    // honestly belong to rather than a Low tier they no longer reach.
     {
         let state_mut = Arc::make_mut(&mut state);
+        state_mut.accept_medium_risk_submissions = true;
         state_mut.tenant_rollout_gates = TraceTenantRolloutGates::default()
             .with_feature(TraceTenantRolloutFeature::DbReviewerReads, &["tenant-a"])
             .with_feature(
@@ -31950,7 +32773,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
             purpose: Some("tenant_a_object_primary_benchmark_canary".to_string()),
             consent_scope: Some("benchmark_only".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             external_ref: None,
         }),
     )
@@ -31980,7 +32803,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
             purpose: Some("tenant_a_object_primary_ranker_canary".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
             consent_scope: Some("ranking_training".to_string()),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
         }),
     )
     .await
@@ -32049,7 +32872,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
             purpose: Some("tenant_b_benchmark_fallback".to_string()),
             consent_scope: Some("benchmark_only".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
             external_ref: None,
         }),
     )
@@ -32078,7 +32901,7 @@ async fn object_primary_derived_exports_tenant_allowlist_keeps_fallback_tenant_f
             purpose: Some("tenant_b_ranker_fallback".to_string()),
             status: Some(TraceCorpusStatus::Accepted),
             consent_scope: Some("ranking_training".to_string()),
-            privacy_risk: Some(ResidualPiiRisk::Low),
+            privacy_risk: Some(ResidualPiiRisk::Medium),
         }),
     )
     .await
@@ -32732,6 +33555,93 @@ async fn rollback_drill_records_smoke_evidence_and_preserves_db_rows() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// A drill's `purpose` is free text the operator types, and drills produce
+/// hash-only evidence: the response carries `purpose_hash`, never the text.
+/// Every drill route is exercised, so a new drill that echoes its request
+/// fails here. Drills that need a configured DB mirror or object store refuse
+/// this PostgreSQL-free state, and their refusals must not echo it either.
+#[tokio::test]
+async fn drill_responses_carry_purpose_hash_not_operator_purpose_text() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let purpose = "operator drill purpose canary 5f1e";
+    let mut succeeded = Vec::new();
+    for route in [
+        "/v1/admin/rollback-drill",
+        "/v1/admin/key-rotation-drill",
+        "/v1/admin/audit-chain-drill",
+        "/v1/admin/db-reconciliation-drill",
+        "/v1/admin/postgres-rls-drill",
+        "/v1/admin/retention-dry-run-drill",
+        "/v1/admin/vector-index-drill",
+        "/v1/admin/analytics-release-drill",
+        "/v1/admin/benchmark-readiness-drill",
+        "/v1/admin/revocation-propagation-drill",
+        "/v1/admin/revocation-effects-drill",
+        "/v1/admin/canary-read-drill",
+        "/v1/admin/object-primary-read-drill",
+        "/v1/admin/object-store-migration-drill",
+        "/v1/admin/credit-settlement-drill",
+        "/v1/admin/near-attestation-drill",
+        "/v1/admin/near-attestation-key-drift-drill",
+        "/v1/admin/ranking/readiness-drill",
+    ] {
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "purpose": purpose, "record_evidence": false })
+                            .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("drill response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .expect("body reads");
+        let body_text = std::str::from_utf8(&body).expect("body is utf8");
+        assert!(
+            !body_text.contains(purpose),
+            "{route} ({status}) echoed the operator purpose text"
+        );
+        if status == StatusCode::OK {
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).expect("drill response parses");
+            assert_eq!(
+                value["purpose_hash"],
+                serde_json::json!(sha256_prefixed(purpose)),
+                "{route} must carry the purpose as a hash"
+            );
+            succeeded.push(route);
+        }
+    }
+    // Pin which drills this state actually reaches, so the hash assertion
+    // above cannot silently stop running for all of them.
+    assert_eq!(
+        succeeded,
+        vec![
+            "/v1/admin/key-rotation-drill",
+            "/v1/admin/audit-chain-drill",
+            "/v1/admin/retention-dry-run-drill",
+            "/v1/admin/analytics-release-drill",
+            "/v1/admin/benchmark-readiness-drill",
+            "/v1/admin/object-store-migration-drill",
+            "/v1/admin/near-attestation-drill",
+            "/v1/admin/near-attestation-key-drift-drill",
+            "/v1/admin/ranking/readiness-drill",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn key_rotation_drill_records_failed_evidence_for_bridge_token_config() {
     use axum::body::Body;
@@ -33339,50 +34249,67 @@ async fn maintenance_reconciliation_reports_db_audit_hash_chain_drift() {
         false,
         false,
     );
-    let canonical_event = TraceCommonsAuditEvent {
-        event_id: Uuid::new_v4(),
-        tenant_id: "tenant-a".to_string(),
-        submission_id: Uuid::new_v4(),
-        kind: "trace_content_read".to_string(),
-        created_at: Utc::now(),
-        status: None,
-        actor_role: Some(TokenRole::Reviewer),
-        actor_principal_ref: Some("reviewer-a".to_string()),
-        reason: Some(format!(
-            "surface=review_decision;purpose_hash={}",
-            sha256_prefixed("review reason")
-        )),
-        export_count: None,
-        export_id: None,
-        decision_inputs_hash: None,
-        previous_event_hash: Some("sha256:not-genesis".to_string()),
-        event_hash: Some("sha256:not-the-canonical-payload-hash".to_string()),
-    };
-    backend
-        .append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: canonical_event.event_id,
-            tenant_id: canonical_event.tenant_id.clone(),
-            actor_principal_ref: canonical_event.actor_principal_ref.clone().unwrap(),
-            actor_role: "reviewer".to_string(),
-            action: StorageTraceAuditAction::Read,
-            reason: canonical_event.reason.clone(),
-            request_id: None,
-            submission_id: Some(canonical_event.submission_id),
-            object_ref_id: None,
-            export_manifest_id: None,
-            decision_inputs_hash: None,
-            previous_event_hash: canonical_event.previous_event_hash.clone(),
-            event_hash: canonical_event.event_hash.clone(),
-            canonical_event_json: Some(
-                serde_json::to_string(&canonical_event).expect("canonical audit serializes"),
-            ),
-            metadata: StorageTraceAuditSafeMetadata::TraceContentRead {
-                surface: "review_decision".to_string(),
-                purpose_hash: Some(sha256_prefixed("review reason")),
-            },
-        })
+    // Drift has to be injected out of band. Appending a drifted row through
+    // `append_trace_audit_event` makes it the DB chain head, and the store
+    // refuses every later append whose `previous_event_hash` is the file
+    // chain's head instead -- including the audit row this maintenance run
+    // writes for itself, which fails closed with `AuditChainDriftRejected`
+    // before reconciliation can report anything. So: let a first maintenance
+    // run write a real, correctly chained audit row to both the file log and
+    // the mirror, then tamper with that row's canonical payload directly as the
+    // table owner. The head `event_hash` is untouched, the next append still
+    // chains, and only a recomputation of the payload hash can see the edit --
+    // which is the drift reconciliation exists to report.
+    let _ = maintenance_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceMaintenanceRequest {
+            purpose: Some("audit_hash_chain_drift_seed".to_string()),
+            dry_run: true,
+            backfill_db_mirror: false,
+            index_vectors: false,
+            reconcile_db_mirror: false,
+            verify_audit_chain: false,
+            prune_export_cache: false,
+            max_export_age_hours: None,
+            purge_expired_before: None,
+        }),
+    )
+    .await
+    .expect("seed maintenance run writes a chained audit row");
+    let seeded = backend
+        .list_trace_audit_events("tenant-a")
         .await
-        .expect("hash-drifted DB audit row writes");
+        .expect("seeded DB audit rows read");
+    let tampered = seeded
+        .iter()
+        .find(|event| event.event_hash.is_some() && event.canonical_event_json.is_some())
+        .expect("seed maintenance run mirrored a hashed audit row");
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("owner connection");
+        let tx = client.transaction().await.expect("tamper transaction");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tamper tenant context");
+        let updated = tx
+            .execute(
+                "UPDATE trace_audit_events
+                    SET canonical_event_json = canonical_event_json || ' '
+                  WHERE tenant_id = $1 AND audit_event_id = $2",
+                &[&"tenant-a", &tampered.audit_event_id],
+            )
+            .await
+            .expect("owner tampers with the mirrored canonical payload");
+        assert_eq!(updated, 1);
+        tx.commit().await.expect("tamper commits");
+    }
 
     let Json(response) = maintenance_handler(
         State(state),
@@ -34444,6 +35371,12 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
         .expect("reconciliation report is present");
     let reconciliation_json =
         serde_json::to_value(&reconciliation).expect("reconciliation serializes");
+    // Calibration datasets are keyed by `{dataset_hash}:{target_use}:{policy}`,
+    // and the dataset hash is the real digest of the fixture label.
+    let calibration_dataset_key = format!(
+        "{}:ranking_model_training:trace-credit-policy-reconcile-v1",
+        sha256_prefixed("ranking-calibration-reconcile")
+    );
     assert_eq!(
         reconciliation_json["file_latest_ranking_model_version_count"],
         serde_json::json!(1)
@@ -34458,15 +35391,11 @@ async fn maintenance_reconciliation_reports_ranking_control_plane_gaps() {
     );
     assert_eq!(
         reconciliation_json["missing_ranking_calibration_dataset_keys_in_db"],
-        serde_json::json!([
-            "sha256:ranking-calibration-reconcile:ranking_model_training:trace-credit-policy-reconcile-v1"
-        ])
+        serde_json::json!([calibration_dataset_key])
     );
     assert_eq!(
         reconciliation_json["ranking_calibration_dataset_manifest_conflict_keys"],
-        serde_json::json!([
-            "sha256:ranking-calibration-reconcile:ranking_model_training:trace-credit-policy-reconcile-v1"
-        ])
+        serde_json::json!([calibration_dataset_key])
     );
     assert_eq!(
         reconciliation_json["missing_ranking_feature_ids_in_db"],
@@ -35072,7 +36001,8 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
         vec![first_trace_id.to_string()]
     );
     assert_eq!(second_entry.duplicate_score, Some(0.92));
-    assert_eq!(second_entry.novelty_score, Some(0.08000004));
+    // f32 arithmetic, as the worker computes it: 1.0 - 0.92 is 0.07999998.
+    assert_eq!(second_entry.novelty_score, Some(1.0_f32 - 0.92));
     assert!(
         second_entry
             .cluster_id
@@ -35787,7 +36717,33 @@ async fn maintenance_backfill_mirrors_ranking_control_plane_rows() {
         false,
         false,
     );
-    let fixture = append_ranking_backfill_fixture(temp.path(), "tenant-a");
+    // The ranking rows reference submissions, and in PostgreSQL that is a
+    // foreign key into `trace_submissions`. Submit the two sources first (the
+    // submit path mirrors them), so the backfill below is about the ranking
+    // control plane rows alone.
+    let mut sources = Vec::new();
+    for message in [
+        "ranking backfill preferred source",
+        "ranking backfill rejected source",
+    ] {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_user_message(&mut envelope, message);
+        sources.push((envelope.submission_id, envelope.trace_id));
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(envelope),
+        )
+        .await
+        .expect("ranking source submission mirrors to DB");
+    }
+    let fixture = append_ranking_backfill_fixture_for_submissions(
+        temp.path(),
+        "tenant-a",
+        sources[0],
+        sources[1],
+    );
 
     let Json(response) = maintenance_handler(
         State(state.clone()),
@@ -50339,7 +51295,7 @@ async fn ranking_calibration_dataset_conflict_quarantine_archives_stale_db_mirro
     assert_eq!(response.conflict_key, conflict_key);
     assert_eq!(
         response.archived_record.source_manifest_hash,
-        format!("sha256:{fixture_key}-manifest-v2")
+        sha256_prefixed(&format!("{fixture_key}-manifest-v2"))
     );
     let db_records = backend
         .list_trace_ranking_calibration_datasets("tenant-a")
@@ -50348,7 +51304,7 @@ async fn ranking_calibration_dataset_conflict_quarantine_archives_stale_db_mirro
     assert_eq!(db_records.len(), 1);
     assert_eq!(
         db_records[0].source_manifest_hash,
-        format!("sha256:{fixture_key}-manifest-v1")
+        sha256_prefixed(&format!("{fixture_key}-manifest-v1"))
     );
     assert_eq!(
         db_records[0].status,
@@ -61638,6 +62594,37 @@ fn operational_summary_blocks_vector_nearest_neighbor_policy_gaps() {
         )));
 }
 
+/// Writes `job` together with the active access grant it references.
+///
+/// `trace_export_jobs (tenant_id, grant_id)` is a foreign key into
+/// `trace_export_access_grants`, so a job row whose grant was never written is
+/// rejected by PostgreSQL. Fixtures that only care about the job still have to
+/// seed the grant the real request path would have created first.
+async fn upsert_export_job_with_active_grant(
+    backend: &PgBackend,
+    job: StorageTraceExportJobWrite,
+) -> Result<StorageTraceExportJobRecord, DatabaseError> {
+    backend
+        .upsert_trace_export_access_grant(StorageTraceExportAccessGrantWrite {
+            tenant_id: job.tenant_id.clone(),
+            export_job_id: job.export_job_id,
+            grant_id: job.grant_id,
+            caller_principal_ref: job.caller_principal_ref.clone(),
+            requested_dataset_kind: job.requested_dataset_kind.clone(),
+            purpose: job.purpose.clone(),
+            max_item_cap: job.max_item_cap,
+            status: StorageTraceExportAccessGrantStatus::Active,
+            requested_at: job.requested_at,
+            expires_at: job.expires_at,
+            metadata: BTreeMap::from([(
+                "grant_type".to_string(),
+                "export_job_fixture".to_string(),
+            )]),
+        })
+        .await?;
+    backend.upsert_trace_export_job(job).await
+}
+
 #[tokio::test]
 async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -61660,8 +62647,9 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
     let now = Utc::now();
     let export_job_id = Uuid::new_v4();
     let grant_id = Uuid::new_v4();
-    backend
-        .upsert_trace_export_job(StorageTraceExportJobWrite {
+    upsert_export_job_with_active_grant(
+        backend.as_ref(),
+        StorageTraceExportJobWrite {
             tenant_id: "tenant-a".to_string(),
             export_job_id,
             grant_id,
@@ -61678,11 +62666,13 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
             item_count: None,
             last_error: None,
             metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
-        })
-        .await
-        .expect("stale export job writes");
-    backend
-        .upsert_trace_export_job(StorageTraceExportJobWrite {
+        },
+    )
+    .await
+    .expect("stale export job writes");
+    upsert_export_job_with_active_grant(
+        backend.as_ref(),
+        StorageTraceExportJobWrite {
             tenant_id: "tenant-b".to_string(),
             export_job_id,
             grant_id: Uuid::new_v4(),
@@ -61699,9 +62689,10 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
             item_count: None,
             last_error: None,
             metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
-        })
-        .await
-        .expect("tenant-b same-id stale export job writes");
+        },
+    )
+    .await
+    .expect("tenant-b same-id stale export job writes");
 
     let utility_error = recover_stale_export_job_handler(
         State(state.clone()),
@@ -61716,8 +62707,9 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
     assert_eq!(utility_error.0, StatusCode::FORBIDDEN);
 
     let fresh_export_job_id = Uuid::new_v4();
-    backend
-        .upsert_trace_export_job(StorageTraceExportJobWrite {
+    upsert_export_job_with_active_grant(
+        backend.as_ref(),
+        StorageTraceExportJobWrite {
             tenant_id: "tenant-a".to_string(),
             export_job_id: fresh_export_job_id,
             grant_id: Uuid::new_v4(),
@@ -61734,9 +62726,10 @@ async fn admin_can_expire_stale_running_export_job_without_trace_body_reads() {
             item_count: None,
             last_error: None,
             metadata: BTreeMap::from([("state".to_string(), "started".to_string())]),
-        })
-        .await
-        .expect("fresh export job writes");
+        },
+    )
+    .await
+    .expect("fresh export job writes");
     let fresh_error = recover_stale_export_job_handler(
         State(state.clone()),
         auth_headers("admin-token-a"),
@@ -64419,7 +65412,47 @@ async fn ranking_evidence_routes_mirror_and_read_from_db_when_reviewer_reads_are
             .expect("admin operational summary reads DB ranking health");
     assert_eq!(operational.ranking.active_model_count, 1);
     assert_eq!(operational.ranking.at_risk_model_count, 0);
-    assert!(operational.promotion_gates.ready);
+    // Promotion also gates on the PostgreSQL runtime role: a role that is a
+    // superuser, bypasses RLS, or owns the trace tables is not RLS-ready, and
+    // the test database URL (local or CI) names exactly such a role. Derive
+    // that independently of the handler, then require the ranking evidence
+    // above to add no blocking gate of its own.
+    let runtime_role_safe = {
+        let client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("role diagnostics connection");
+        client
+            .query_one(
+                "SELECT NOT (r.rolsuper OR r.rolbypassrls)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM pg_tables t
+                             WHERE t.tableowner = current_user
+                               AND t.tablename LIKE 'trace\\_%'
+                        )
+                   FROM pg_roles r
+                  WHERE r.rolname = current_user",
+                &[],
+            )
+            .await
+            .expect("runtime role diagnostics read")
+            .get::<_, bool>(0)
+    };
+    assert_eq!(
+        operational.promotion_gates.trace_corpus_rls_ready,
+        Some(runtime_role_safe)
+    );
+    let expected_blocking_gates: Vec<String> = if runtime_role_safe {
+        Vec::new()
+    } else {
+        vec!["postgres_trace_rls_not_ready".to_string()]
+    };
+    assert_eq!(
+        operational.promotion_gates.blocking_gates,
+        expected_blocking_gates
+    );
+    assert_eq!(operational.promotion_gates.ready, runtime_role_safe);
 
     cleanup_pg_trace_tenant(&backend, "tenant-a").await;
     cleanup_pg_trace_tenant(&backend, "tenant-b").await;
@@ -74421,6 +75454,11 @@ async fn novelty_credit_emission_withheld_on_central_issuer_denied() {
     // short-circuits when empty).
     Arc::make_mut(&mut state).credit_settlement_central_issuer_principal_refs =
         Arc::new(BTreeSet::from(["some-other-central-issuer".to_string()]));
+    // The central-issuer check guards POSITIVE credit issuance only, and the
+    // novelty delta defaults to zero since #180 -- at zero the check is not
+    // consulted and a zero-point event is emitted. Configure a positive delta,
+    // as an operator enabling novelty credit would, so the check is reached.
+    Arc::make_mut(&mut state).novelty_utility_credit_points_delta = 1.0;
 
     let Json(response) = gate_evaluate_worker_handler(
         State(state.clone()),

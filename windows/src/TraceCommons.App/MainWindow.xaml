@@ -21,6 +21,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:interop="using:TraceCommons.Interop"
     xmlns:controls="using:TraceCommons.App.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -482,6 +483,93 @@
                             Click="OnHealthAction" />
                 </Grid>
             </Border>
+
+            <!--
+                Every grant the daemon voided that no shell has shown yet (R6
+                of the connect and forget design). Beside the health banner
+                rather than in it: the health slot carries one label, and a
+                void must neither hide an outage nor be hidden by one.
+
+                EVERY STRING HERE IS BOUND, and all of it comes from the Rust
+                through tc_grant_void_notice. The button records that the
+                notice was shown and nothing else.
+            -->
+            <ItemsControl ItemsSource="{x:Bind ViewModel.GrantVoidCards, Mode=OneWay}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="interop:GrantVoidCard">
+                        <Border Padding="14,12"
+                                Margin="0,0,0,8"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                                <Viewbox Grid.Column="0"
+                                         Width="14" Height="14"
+                                         VerticalAlignment="Top"
+                                         Margin="0,2,0,0">
+                                    <Canvas Width="16" Height="16">
+                                        <Path Data="M8 2.2 14.6 13.4H1.4Z"
+                                              Stroke="{ThemeResource TcGoldTextBrush}"
+                                              StrokeThickness="1.4" />
+                                        <Path Data="M8 6.6v3"
+                                              Stroke="{ThemeResource TcGoldTextBrush}"
+                                              StrokeThickness="1.4" />
+                                        <Ellipse Canvas.Left="7.5" Canvas.Top="11.2"
+                                                 Width="1" Height="1"
+                                                 Fill="{ThemeResource TcGoldTextBrush}" />
+                                    </Canvas>
+                                </Viewbox>
+
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Text="{x:Bind Notice.Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Body}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.ReasonsHeading}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap" />
+                                    <ItemsControl ItemsSource="{x:Bind Notice.Reasons}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="x:String">
+                                                <TextBlock Text="{x:Bind}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           Margin="12,0,0,0"
+                                                           TextWrapping="Wrap" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{x:Bind Notice.Rearm}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+
+                                <!-- Turn back on sits beside the sentence saying
+                                     that doing so agrees to the new settings.
+                                     It is the Settings arming call. -->
+                                <StackPanel Grid.Column="2"
+                                            Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <Button Visibility="{x:Bind CanRearm}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.RearmAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnRearmGrantVoid" />
+                                    <Button Visibility="{x:Bind CanAcknowledge}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.Acknowledge}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAcknowledgeGrantVoid" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
 
             <!--
                 The offer to answer model calls on this computer.

@@ -70,6 +70,15 @@ still fail after V2 activation; the flag alone does not make a mixed-client
 rollout safe. Roll back by configuring `v1` and restarting. Keep both-profile
 verifiers deployed so previously issued V2 certificates remain verifiable.
 
+"Restart" holds for a witness run as a plain process. On the dstack CVM it is a
+redeploy: the variable is not in `app-compose.json`'s `allowed_envs`, so it is
+set in the measured `deploy/witness/docker-compose.yml`, and switching it in
+either direction moves `mrconfigid`. Re-pin the new measurement in ingest and
+in every client before they will accept the switched witness. The production
+deployment sets nothing and issues V1. See
+[`../../deploy/witness/README.md`](../../deploy/witness/README.md), "Rolling
+out v2: verifiers first".
+
 ## The three switches, and who owns each
 
 Attested inference is off unless **three independent parties** each turn
