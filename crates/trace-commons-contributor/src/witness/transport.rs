@@ -661,6 +661,32 @@ pub fn verify_certificate(
     Ok(())
 }
 
+/// The redaction pipeline a certificate certifies, read only once
+/// [`verify_certificate`] has accepted it against `pinned_address`.
+///
+/// This is the witness's `redaction_pipeline_version()` alias -- the value
+/// `FULL_REDACTION_PIPELINE_VERSIONS` lists -- which the witness signs as
+/// `redaction_policy_version` in both the v1 and the v2 preimage. Never
+/// read that field any other way: an unverified copy of it is a claim, and
+/// is exactly what a certificate over some other artifact, or from some
+/// other key, would carry.
+///
+/// Returned as the exact string signed. Nothing here trims, lowercases or
+/// otherwise normalises it; a caller comparing it must compare exactly.
+pub fn certified_redaction_pipeline_version(
+    response: &WitnessedEnvelope,
+    pinned_address: &str,
+) -> Result<String, WitnessTrustError> {
+    verify_certificate(response, pinned_address)?;
+    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    certificate
+        .get("redaction_policy_version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or(WitnessTrustError::WitnessResponseMalformed)
+}
+
 /// Recover the signer from a stored certificate without exposing its raw
 /// signature or certificate JSON to a shell.
 ///
@@ -999,6 +1025,16 @@ pub(crate) fn signed_fixture_with_verdict(
 #[cfg(test)]
 pub(crate) fn signed_admission_fixture(bytes: Vec<u8>, account: &str) -> WitnessedEnvelope {
     tests::signed_admission_fixture(bytes, account)
+}
+
+/// [`signed_fixture`] with the certificate's `redaction_policy_version` set
+/// to `policy`, signed by the same test-only key.
+#[cfg(test)]
+pub(crate) fn signed_fixture_with_policy(
+    bytes: Vec<u8>,
+    policy: &str,
+) -> (WitnessedEnvelope, String) {
+    tests::signed_fixture_with_policy(bytes, policy)
 }
 
 /// Explicit token-bundle request, bound to a separately acquired capture lease.
@@ -1537,6 +1573,27 @@ mod tests {
         let mut certificate: serde_json::Value =
             serde_json::from_str(&certificate_json_for(&bytes)).unwrap();
         certificate["residual_risk_verdict"] = serde_json::json!(verdict);
+        let signing_bytes = certificate_signing_bytes(&certificate)
+            .expect("the fixture certificate is well formed");
+        (
+            WitnessedEnvelope {
+                envelope_bytes: bytes,
+                admission: None,
+                certificate_json: certificate.to_string(),
+                signature_hex: sign_eip191(&key, &signing_bytes),
+            },
+            address_of(&key),
+        )
+    }
+
+    pub(crate) fn signed_fixture_with_policy(
+        bytes: Vec<u8>,
+        policy: &str,
+    ) -> (WitnessedEnvelope, String) {
+        let key = test_signer("witness-review-test-only");
+        let mut certificate: serde_json::Value =
+            serde_json::from_str(&certificate_json_for(&bytes)).unwrap();
+        certificate["redaction_policy_version"] = serde_json::json!(policy);
         let signing_bytes = certificate_signing_bytes(&certificate)
             .expect("the fixture certificate is well formed");
         (
