@@ -733,11 +733,11 @@ impl BundleManifest {
 }
 
 /// Every length and count in a canonical encoding is a big-endian `u64`.
-fn encode_len(output: &mut Vec<u8>, len: usize) {
+pub(crate) fn encode_len(output: &mut Vec<u8>, len: usize) {
     output.extend_from_slice(&(len as u64).to_be_bytes());
 }
 
-fn encode_string(output: &mut Vec<u8>, value: &str) {
+pub(crate) fn encode_string(output: &mut Vec<u8>, value: &str) {
     encode_len(output, value.len());
     output.extend_from_slice(value.as_bytes());
 }

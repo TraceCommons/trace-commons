@@ -52,18 +52,16 @@ pub struct IndexEntryKey {
 }
 
 impl IndexEntryKey {
-    /// Every length is a big-endian `u64`, as in the pipeline contracts.
+    /// Encodes each string with the pipeline's length-prefix framing: a
+    /// big-endian `u64` length followed by the bytes.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        fn string(output: &mut Vec<u8>, value: &str) {
-            output.extend_from_slice(&(value.len() as u64).to_be_bytes());
-            output.extend_from_slice(value.as_bytes());
-        }
+        use crate::pipeline::encode_string;
         let mut bytes = b"trace-commons-index-entry-key\0".to_vec();
-        string(&mut bytes, self.tenant_storage_ref.as_str());
-        string(&mut bytes, &self.index_id);
+        encode_string(&mut bytes, self.tenant_storage_ref.as_str());
+        encode_string(&mut bytes, &self.index_id);
         bytes.extend_from_slice(self.revision_id.as_bytes());
-        string(&mut bytes, &self.projection_id);
-        string(&mut bytes, &self.model_id);
+        encode_string(&mut bytes, &self.projection_id);
+        encode_string(&mut bytes, &self.model_id);
         bytes.extend_from_slice(&self.chunk.to_be_bytes());
         bytes
     }
