@@ -32,6 +32,47 @@ use crate::versioned_pipeline::{PipelineRunState, phase_from_db, sha256_prefixed
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
 
+/// T11-5 (P3-D13): amounts cross the API as decimal strings, because a
+/// JavaScript client (the Tauri app) cannot hold an integer above `2^53`
+/// exactly. `AtomicUnits` already serializes this way on its own; these two
+/// helpers give the same wire shape to the plain-`u64` amount fields in this
+/// module's product record types (`score_microcredits`, `credit_microcredits`,
+/// and `PipelineContributorCredit`'s totals) via `#[serde(with = "...")]`.
+mod decimal_amount {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        String::deserialize(deserializer)?
+            .parse::<u64>()
+            .map_err(serde::de::Error::custom)
+    }
+
+    /// The `Option<u64>` counterpart: `None` stays JSON `null`; `Some` is
+    /// the same decimal string as `decimal_amount`.
+    pub mod option {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<u64>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            value.map(|value| value.to_string()).serialize(serializer)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<u64>, D::Error> {
+            Option::<String>::deserialize(deserializer)?
+                .map(|raw| raw.parse::<u64>().map_err(serde::de::Error::custom))
+                .transpose()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelineProcessingStatus {
@@ -83,6 +124,7 @@ pub struct PipelineContributorStatus {
     pub responsible_phase: Option<Phase>,
     pub reason_label: Option<String>,
     pub credit: PipelineCreditStatus,
+    #[serde(with = "decimal_amount::option")]
     pub score_microcredits: Option<u64>,
     pub score_outcome_id: Option<Uuid>,
     /// Compatibility projection for clients that only understand Trace Credit.
@@ -100,10 +142,21 @@ pub struct PipelineScoreAttestationEntry {
     pub bundle_id: String,
     pub outcome_schema_id: String,
     pub outcome_schema_version: u32,
+    #[serde(with = "decimal_amount")]
     pub credit_microcredits: u64,
     pub decision: serde_json::Value,
 }
 
+// T11-5: checked every `u64` field below against the decimal-string amount
+// rule. None of them is an amount -- `PipelineLifecycleSummary`,
+// `PipelineWorkSummary`, and `PipelineOperationalSummary`'s fields are all
+// counts or durations (of invalidations, snapshots, policies, errors,
+// commands, credit events, outbox rows -- never a credit or token amount),
+// and `PipelinePhaseTrace`'s are hashes and an outcome version. None gets
+// `decimal_amount`. `PipelineForensicTrace`'s only amount-bearing field is
+// `instruments: Vec<PipelineInstrumentStatus>`, whose own `atomic_units` is
+// already `AtomicUnits` (decimal-string on its own), so it needs no
+// additional attribute either.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineLifecycleSummary {
     pub pending_index_invalidations: u64,
@@ -169,9 +222,13 @@ pub struct PipelineForensicTrace {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineContributorCredit {
+    #[serde(with = "decimal_amount")]
     pub scored_microcredits: u64,
+    #[serde(with = "decimal_amount")]
     pub finalized_microcredits: u64,
+    #[serde(with = "decimal_amount")]
     pub pending_microcredits: u64,
+    #[serde(with = "decimal_amount")]
     pub held_microcredits: u64,
     pub submission_count: usize,
 }
@@ -698,17 +755,24 @@ fn attestation_from_row(row: &Row) -> Result<PipelineScoreAttestationEntry, Data
 /// it as `AtomicUnits` and converts to `u64`: `trace_credit` settlement rows
 /// are bounded at `i64::MAX` by `pipeline_run_settlements_trace_credit_bound`,
 /// so a stored award that does not fit `u64` cannot exist.
+///
+/// Finding I1: `InstrumentAward::new` refuses a zero amount
+/// (`ZeroInstrumentAward`), so a scored-but-zero `trace_credit` leg is
+/// represented as *no* `trace_credit` entry in `awards`, not a zero-valued
+/// one. A valid `awards` array with no `trace_credit` entry therefore reads
+/// as `Some(0)`, not `None` -- `None` is reserved for `awards` missing or
+/// malformed, or a `trace_credit` entry whose amount does not parse.
 fn score_microcredits(decision: &serde_json::Value) -> Option<u64> {
-    decision
-        .get("awards")?
-        .as_array()?
-        .iter()
-        .find(|award| {
-            award
-                .get("instrument_id")
-                .and_then(serde_json::Value::as_str)
-                == Some("trace_credit")
-        })?
+    let awards = decision.get("awards")?.as_array()?;
+    let Some(award) = awards.iter().find(|award| {
+        award
+            .get("instrument_id")
+            .and_then(serde_json::Value::as_str)
+            == Some("trace_credit")
+    }) else {
+        return Some(0);
+    };
+    award
         .get("atomic_units")?
         .as_str()?
         .parse::<AtomicUnits>()
@@ -740,5 +804,115 @@ mod tests {
             Some(7)
         );
         assert_eq!(score_microcredits(&serde_json::json!({"credit": 7})), None);
+    }
+
+    /// Finding I1: a valid, empty `awards` array, and a valid `awards`
+    /// array with only a non-`trace_credit` entry, both mean "scored zero
+    /// trace credit" (`Some(0)`) -- `InstrumentAward::new` refuses a zero
+    /// amount, so "no `trace_credit` award" is the only way a policy can
+    /// express a zero `trace_credit` leg. `None` is reserved for a missing
+    /// or malformed `awards` field.
+    #[test]
+    fn a_missing_trace_credit_award_reads_as_zero_not_unscored() {
+        assert_eq!(
+            score_microcredits(&serde_json::json!({"awards": []})),
+            Some(0)
+        );
+        assert_eq!(
+            score_microcredits(&serde_json::json!({
+                "awards": [
+                    {"instrument_id": "storage_rebate", "atomic_units": "5"}
+                ]
+            })),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn amount_fields_serialize_as_decimal_strings() {
+        // 2^53 + 1: the smallest integer a JavaScript `Number` cannot hold
+        // exactly, so this is the value that would actually expose a
+        // regression back to a raw JSON number.
+        const UNSAFE_FOR_JS_NUMBER: u64 = 9_007_199_254_740_993;
+
+        let status = PipelineContributorStatus {
+            submission_id: Uuid::nil(),
+            trace_id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            bundle_id: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            processing: PipelineProcessingStatus::Complete,
+            current_phase: None,
+            responsible_phase: None,
+            reason_label: None,
+            credit: PipelineCreditStatus::Finalized,
+            score_microcredits: Some(UNSAFE_FOR_JS_NUMBER),
+            score_outcome_id: Some(Uuid::nil()),
+            settlement_batch_id: None,
+            payout: None,
+            instruments: Vec::new(),
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            value["score_microcredits"],
+            serde_json::json!(UNSAFE_FOR_JS_NUMBER.to_string())
+        );
+        let round_tripped: PipelineContributorStatus = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, status);
+
+        // `None` stays JSON `null`, not the string `"null"` or a number.
+        let unscored = PipelineContributorStatus {
+            score_microcredits: None,
+            ..status.clone()
+        };
+        let unscored_value = serde_json::to_value(&unscored).unwrap();
+        assert_eq!(
+            unscored_value["score_microcredits"],
+            serde_json::Value::Null
+        );
+        let unscored_round_tripped: PipelineContributorStatus =
+            serde_json::from_value(unscored_value).unwrap();
+        assert_eq!(unscored_round_tripped, unscored);
+
+        let entry = PipelineScoreAttestationEntry {
+            submission_id: Uuid::nil(),
+            run_id: Uuid::nil(),
+            score_outcome_id: Uuid::nil(),
+            bundle_id: status.bundle_id.clone(),
+            outcome_schema_id: "trace_commons.pipeline_score_outcome.v1".to_string(),
+            outcome_schema_version: 1,
+            credit_microcredits: UNSAFE_FOR_JS_NUMBER,
+            decision: serde_json::json!({"awards": []}),
+        };
+        let entry_value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            entry_value["credit_microcredits"],
+            serde_json::json!(UNSAFE_FOR_JS_NUMBER.to_string())
+        );
+        let entry_round_tripped: PipelineScoreAttestationEntry =
+            serde_json::from_value(entry_value).unwrap();
+        assert_eq!(entry_round_tripped, entry);
+
+        let credit = PipelineContributorCredit {
+            scored_microcredits: UNSAFE_FOR_JS_NUMBER,
+            finalized_microcredits: UNSAFE_FOR_JS_NUMBER,
+            pending_microcredits: 0,
+            held_microcredits: 0,
+            submission_count: 1,
+        };
+        let credit_value = serde_json::to_value(&credit).unwrap();
+        assert_eq!(
+            credit_value["scored_microcredits"],
+            serde_json::json!(UNSAFE_FOR_JS_NUMBER.to_string())
+        );
+        assert_eq!(credit_value["pending_microcredits"], serde_json::json!("0"));
+        assert_eq!(
+            credit_value["submission_count"],
+            serde_json::json!(1),
+            "submission_count is a count, not an amount, and stays a JSON number"
+        );
+        let credit_round_tripped: PipelineContributorCredit =
+            serde_json::from_value(credit_value).unwrap();
+        assert_eq!(credit_round_tripped, credit);
     }
 }

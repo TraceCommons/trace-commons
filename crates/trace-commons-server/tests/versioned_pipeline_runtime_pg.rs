@@ -10833,6 +10833,28 @@ async fn product_reads_are_tenant_and_principal_scoped() {
         "tenant A must not see tenant B's submission"
     );
 
+    // Finding I2: within the SAME tenant, one contributor's submission id
+    // asked for by a different principal returns nothing -- not the other
+    // principal's row, not an error. Nothing above exercises this: it is
+    // the `auth_principal_ref` predicate specifically, not the tenant
+    // predicate, that has to hold here.
+    let cross_principal_same_tenant = product
+        .contributor_statuses(&tenant_a, principal_1, &[run_a2.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_principal_same_tenant.is_empty(),
+        "principal 1 must not see principal 2's submission in the same tenant"
+    );
+    let cross_principal_same_tenant_attestation = product
+        .score_attestation_entries(&tenant_a, principal_1, &[run_a2.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_principal_same_tenant_attestation.is_empty(),
+        "principal 1 must not see principal 2's score attestation in the same tenant"
+    );
+
     // The admin-scoped read over both of tenant A's principals sees both of
     // tenant A's submissions and never tenant B's, even when tenant B's
     // submission id is requested in the same batch.
@@ -11211,7 +11233,10 @@ async fn attestation_entries_are_hash_only() {
 /// Task 11: a `storage_rebate` award above `u64::MAX` round-trips through
 /// the status read as the exact decimal string, since
 /// `PipelineInstrumentStatus.atomic_units` is `AtomicUnits` (a `u128`, #971)
-/// serialized as a decimal string, not a JSON number.
+/// serialized as a decimal string, not a JSON number. Also covers Finding
+/// I1: this run's awards have no `trace_credit` entry at all (only
+/// `storage_rebate`), so the credit status must read `Zero`/`Some(0)`, not
+/// fall through to `Pending`.
 #[tokio::test]
 async fn amounts_above_u64_round_trip_as_strings() {
     let Some(backend) = runtime_backend(4).await else {
@@ -11245,9 +11270,66 @@ async fn amounts_above_u64_round_trip_as_strings() {
     assert_eq!(rebate.instrument_id, "storage_rebate");
     assert_eq!(rebate.atomic_units, large_amount);
 
+    // Finding I1: no `trace_credit` award in this run's Score decision, so
+    // the credit status must be `Zero` with `score_microcredits == Some(0)`
+    // -- not `Pending` (the pre-fix behavior, since `score_microcredits`
+    // used to return `None` whenever no `trace_credit` award was found).
+    assert_eq!(status.credit, PipelineCreditStatus::Zero);
+    assert_eq!(status.score_microcredits, Some(0));
+
     let serialized = serde_json::to_value(rebate).unwrap();
     assert_eq!(
         serialized["atomic_units"],
         serde_json::json!("18446744073709551616")
     );
+}
+
+/// Finding I1: `minimal_config` awards nothing at all
+/// (`instrument_awards: vec![]`) -- `InstrumentAward::new` refuses a zero
+/// amount (`ZeroInstrumentAward`), so "no trace_credit award" is how main's
+/// compatibility policy represents a scored-but-zero run, not an error and
+/// not "unscored" (`score_outcome_id` is still `Some`; Score did commit).
+/// The status and attestation reads must show `Zero`/`Some(0)`/`0`, and the
+/// attestation read for the whole principal must not fail closed on this
+/// one run (the pre-fix `score_microcredits` returned `None` here, which
+/// `attestation_from_row` turned into a `Serialization` error that stopped
+/// `collect()` for the entire batch).
+#[tokio::test]
+async fn zero_credit_runs_read_as_zero_not_pending() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("zero-credit-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:zero-credit";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.credit, PipelineCreditStatus::Zero);
+    assert_eq!(status.score_microcredits, Some(0));
+
+    let entries = product
+        .own_score_attestation_entries(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the zero-credit run's attestation entry must not be dropped by a batch-wide error"
+    );
+    assert_eq!(entries[0].credit_microcredits, 0);
 }
