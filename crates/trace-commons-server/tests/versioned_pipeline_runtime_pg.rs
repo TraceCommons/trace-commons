@@ -18,9 +18,9 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
-    InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Phase, PhaseResult, ReasonCode,
-    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence, SettleDecision,
-    SettleEvidence, TRACE_CREDIT_DECIMALS,
+    InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult,
+    ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence,
+    SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{
     Embedder, IdentifiedEmbedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder,
@@ -49,6 +49,7 @@ use trace_commons_server::versioned_pipeline_bundle::{
     PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
     pipeline_result_ref,
 };
+use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry, credit_account_hash,
 };
@@ -11612,5 +11613,270 @@ async fn forensic_trace_is_tenant_scoped() {
     assert!(
         own.is_some(),
         "tenant A can read its own run's forensic trace"
+    );
+}
+
+/// Builds a service over an isolated index and the reference scorer and
+/// embedder, with `config` as its default compatibility bundle and a
+/// `trace_credit` recording settlement adapter on payout rail `none`. Mirrors
+/// `test_service`, but for the compatibility family (Review Focus 3):
+/// `compatibility_package` pins only `trace_credit`, so no `storage_rebate`
+/// adapter or cap is needed here.
+async fn compatibility_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .build()
+    .expect("build pipeline service");
+    Arc::new(service)
+}
+
+/// The `(event_type, points_delta)` of the one `trace_credit_ledger` row for
+/// `run_id`, or `None` if there is none.
+async fn credit_ledger_event_for_run(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Option<(String, String)> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for credit_ledger_event_for_run");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT event_type, points_delta FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("query credit ledger event for run");
+    tx.commit()
+        .await
+        .expect("commit credit_ledger_event_for_run");
+    row.map(|row| (row.get("event_type"), row.get("points_delta")))
+}
+
+/// Count of `trace_near_credit_outbox` rows for `tenant_id` -- always zero
+/// while payout stays disabled (the default). A `NoveltyUtility` leg has no
+/// settlement batch, and this table's `settlement_batch_id` FK means no
+/// outbox row could reference one anyway.
+async fn count_near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for count_near_outbox_rows");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_near_credit_outbox WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count near outbox rows")
+        .get(0);
+    tx.commit().await.expect("commit count_near_outbox_rows");
+    count
+}
+
+/// Activates `bundle_id`, already registered for `tenant_id`, as the
+/// tenant's bundle. Switching a tenant's active bundle is an operator
+/// action: the runtime login holds no UPDATE on `pipeline_active_bundles`,
+/// so this runs `PgPipelineStore::activate_bundle`'s own statement through
+/// an owner connection, as `activation_does_not_rebind_an_existing_run`
+/// does.
+async fn activate_bundle_as_operator(tenant_id: &str, bundle_id: &str) {
+    let mut owner = owner_client().await;
+    let tx = owner
+        .transaction()
+        .await
+        .expect("tx for activating a bundle as the operator");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for activating a bundle");
+    let activated = tx
+        .execute(
+            "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
+             SELECT $1, bundle_id
+             FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2
+             ON CONFLICT (tenant_id) DO UPDATE
+                SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
+            &[&tenant_id, &bundle_id],
+        )
+        .await
+        .expect("activate the bundle as the operator");
+    assert_eq!(activated, 1, "the bundle is registered for the tenant");
+    tx.commit().await.expect("commit activating the bundle");
+}
+
+/// Review Focus 3 / Ruling S11: a compatibility run's Trace Credit leg
+/// dispatches through the same adapter and the same `settle_internal_credit`
+/// transaction PR 2's minimal family uses, but writes a `NoveltyUtility`
+/// ledger event that `main` never batches or pays -- so it must read back as
+/// `not_settlement_eligible`, never `pending` forever. The default delta (0)
+/// makes no award at all: no settlement row, no ledger row.
+#[tokio::test]
+async fn compatibility_credit_matches_main_gate_path() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    let zero_config = CompatibilityBundleConfig::local_reference();
+    assert_eq!(zero_config.novelty_utility_microcredits, 0);
+    let service =
+        compatibility_test_service(backend.clone(), artifact_store(&dir), zero_config).await;
+
+    let mut positive_config = CompatibilityBundleConfig::local_reference();
+    positive_config.novelty_utility_microcredits = 2_500_000;
+    let scorer = ReferencePerplexityScorer::new();
+    let embedder = ReferenceEmbedder::new();
+    let positive_package =
+        MinimalPolicyBundle::compatibility_package(&positive_config, &scorer, &embedder)
+            .expect("build the positive-delta compatibility package");
+
+    let tenant_zero = format!("compat-credit-zero-{}", uuid::Uuid::new_v4());
+    let tenant_positive = format!("compat-credit-positive-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-credit";
+
+    // Bind tenant_positive to the positive-delta package *before* its first
+    // submit -- `register_default_bundle`'s `activate_bundle_if_none` (which
+    // `submit_and_complete` calls through `submit_registered`) only
+    // activates the service's own default (the zero-delta package) when no
+    // bundle is active yet for the tenant.
+    service
+        .register_bundle(&tenant_positive, &positive_package)
+        .await
+        .expect("register the positive-delta package");
+    activate_bundle_as_operator(&tenant_positive, &positive_package.bundle_id).await;
+
+    let run_zero = submit_and_complete(&service, &tenant_zero, principal).await;
+    let run_positive = submit_and_complete(&service, &tenant_positive, principal).await;
+
+    assert_eq!(run_zero.state, PipelineRunState::Complete);
+    assert_eq!(run_positive.state, PipelineRunState::Complete);
+
+    // Delta 0: no award, so Score seeds no settlement operations and Settle
+    // writes no ledger row.
+    let zero_settlements = service
+        .store()
+        .list_settlements(&tenant_zero, run_zero.run_id)
+        .await
+        .unwrap();
+    assert!(
+        zero_settlements.is_empty(),
+        "a zero-delta compatibility run seeds no settlement operations"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant_zero, run_zero.run_id).await,
+        0,
+        "a zero-delta compatibility run writes no ledger row"
+    );
+
+    // Delta 2_500_000: one complete `trace_credit` settlement row, with no
+    // settlement batch (Ruling S8).
+    let positive_settlements = service
+        .store()
+        .list_settlements(&tenant_positive, run_positive.run_id)
+        .await
+        .unwrap();
+    assert_eq!(positive_settlements.len(), 1);
+    let credit_row = &positive_settlements[0];
+    assert_eq!(
+        credit_row.instrument_id,
+        InstrumentId::trace_credit().as_str()
+    );
+    assert_eq!(credit_row.operation_state, "complete");
+    assert_eq!(credit_row.atomic_units, AtomicUnits::from_raw(2_500_000));
+    assert!(
+        credit_row.settlement_batch_id.is_none(),
+        "a NoveltyUtility leg is never composed into a batch"
+    );
+    let event_id = credit_row
+        .credit_event_id
+        .expect("a completed leg records its credit event");
+
+    // Exactly one ledger row, with the `NoveltyUtility` event type and the
+    // configured delta, and carried by no finalized batch.
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant_positive, run_positive.run_id).await,
+        1
+    );
+    let (event_type, points_delta) =
+        credit_ledger_event_for_run(&backend, &tenant_positive, run_positive.run_id)
+            .await
+            .expect("the run's ledger row exists");
+    assert_eq!(event_type, "novelty_utility");
+    assert_eq!(
+        Microcredits::from_credit_decimal(&points_delta)
+            .expect("points_delta is a valid credit decimal")
+            .get(),
+        2_500_000
+    );
+    assert!(
+        finalized_batches_carrying(&backend, &tenant_positive, event_id)
+            .await
+            .is_empty(),
+        "a NoveltyUtility ledger event is in no settlement batch"
+    );
+
+    // No NEAR outbox row: payout is disabled by default (Review Focus 5).
+    assert_eq!(count_near_outbox_rows(&backend, &tenant_positive).await, 0);
+
+    // Product read (Ruling S11): the contributor status reports this leg as
+    // not_settlement_eligible, never pending forever.
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant_positive, principal, &[run_positive.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.credit, PipelineCreditStatus::NotSettlementEligible);
+    let instrument_status = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit instrument status is present");
+    assert_eq!(
+        instrument_status.internal_settlement_state,
+        "not_settlement_eligible"
     );
 }

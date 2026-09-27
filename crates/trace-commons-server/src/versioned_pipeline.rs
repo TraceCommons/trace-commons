@@ -39,14 +39,14 @@ use crate::trace_artifact_store::{
 };
 use crate::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
-    TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
+    TraceCreditEventType, TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
     TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
     TraceSubmissionWrite, safe_residual_risk_basis_labels,
 };
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
-    PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, dependency_content_hash, pipeline_operation_ref,
-    pipeline_result_ref,
+    PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, PipelineTraceCreditEvent, dependency_content_hash,
+    pipeline_operation_ref, pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::{
     PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry,
@@ -5445,6 +5445,7 @@ impl PipelineService {
                             score_outcome.outcome_id,
                             &account_ref,
                             &receipt,
+                            bundle.trace_credit_event,
                         )
                         .await
                     {
@@ -5803,6 +5804,7 @@ impl PipelineService {
         score_outcome_id: Uuid,
         account_ref: &str,
         receipt: &SettlementReceipt,
+        trace_credit_event: PipelineTraceCreditEvent,
     ) -> anyhow::Result<InternalCreditResult> {
         let lease_token = required_lease_token(run)?;
         let account_hash = credit_account_hash(account_ref);
@@ -5812,6 +5814,16 @@ impl PipelineService {
             .trace_credit_microcredits()
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
         let external_ref = pipeline_ledger_source_key(&run.tenant_id, &run.request_idempotency_key);
+        // Ruling S10: only the stored event type varies by bundle family.
+        // `PipelineScore` keeps PR 2's ledger event (`Accepted`); a
+        // compatibility run's `NoveltyUtility` leg is main's gate-emitted,
+        // never-settled event, which `trace_credit_event_type_is_settlement_eligible`
+        // in `trace-commons-ingest.rs` excludes.
+        let ledger_event_type = match trace_credit_event {
+            PipelineTraceCreditEvent::PipelineScore => TraceCreditEventType::Accepted,
+            PipelineTraceCreditEvent::NoveltyUtility => TraceCreditEventType::NoveltyUtility,
+        };
+        let ledger_event_type_label = enum_string(&ledger_event_type)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -5878,7 +5890,7 @@ impl PipelineService {
                 event_type, points_delta, reason, external_ref, actor_principal_ref,
                 actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id
              ) VALUES (
-                $1,$2,$3,$4,$5,'accepted',$6,$7,$8,$5,'pipeline_worker','pending',$9,$10,$11
+                $1,$2,$3,$4,$5,$12,$6,$7,$8,$5,'pipeline_worker','pending',$9,$10,$11
              )
              ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
             &[
@@ -5893,6 +5905,7 @@ impl PipelineService {
                 &run.run_id,
                 &score_outcome_id,
                 &settlement.instrument_id,
+                &ledger_event_type_label,
             ],
         )
         .await?;
@@ -5912,30 +5925,37 @@ impl PipelineService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?
             .get("settlement_state");
-        let batch_id = if event_state == "final" {
-            // The event already settled in an earlier batch: reuse that
-            // batch rather than composing a second one that carries it.
-            let carrying = tx
-                .query(
-                    "SELECT settlement_batch_id FROM trace_credit_settlement_batches
-                      WHERE tenant_id = $1 AND instrument_id = $2
-                        AND status = 'finalized'
-                        AND $3 = ANY(source_credit_event_ids)",
-                    &[&run.tenant_id, &settlement.instrument_id, &event_id],
+        // Ruling S10: a `NoveltyUtility` leg is never composed or finalized
+        // into a batch -- it completes with no `settlement_batch_id`, same
+        // as `main` never pays that event. `PipelineScore` keeps PR 2's
+        // batch-or-reuse behavior unchanged.
+        let batch_id = match trace_credit_event {
+            PipelineTraceCreditEvent::NoveltyUtility => None,
+            PipelineTraceCreditEvent::PipelineScore => Some(if event_state == "final" {
+                // The event already settled in an earlier batch: reuse that
+                // batch rather than composing a second one that carries it.
+                let carrying = tx
+                    .query(
+                        "SELECT settlement_batch_id FROM trace_credit_settlement_batches
+                          WHERE tenant_id = $1 AND instrument_id = $2
+                            AND status = 'finalized'
+                            AND $3 = ANY(source_credit_event_ids)",
+                        &[&run.tenant_id, &settlement.instrument_id, &event_id],
+                    )
+                    .await?;
+                anyhow::ensure!(carrying.len() == 1, "settlement_operation_mismatch");
+                carrying[0].get::<_, Uuid>("settlement_batch_id")
+            } else {
+                self.finalize_pending_credit_batch(
+                    &tx,
+                    run,
+                    &settlement.instrument_id,
+                    account_ref,
+                    &account_hash,
+                    event_id,
                 )
-                .await?;
-            anyhow::ensure!(carrying.len() == 1, "settlement_operation_mismatch");
-            carrying[0].get::<_, Uuid>("settlement_batch_id")
-        } else {
-            self.finalize_pending_credit_batch(
-                &tx,
-                run,
-                &settlement.instrument_id,
-                account_ref,
-                &account_hash,
-                event_id,
-            )
-            .await?
+                .await?
+            }),
         };
         update_settlement_on_tx(
             &tx,
@@ -5947,7 +5967,7 @@ impl PipelineService {
                 result_ref_hash: Some(receipt.result_ref_hash()),
                 external_receipt_hash: receipt.external_receipt_hash(),
                 credit_event_id: Some(event_id),
-                settlement_batch_id: Some(batch_id),
+                settlement_batch_id: batch_id,
                 payout_state: None,
                 error_label: None,
             },

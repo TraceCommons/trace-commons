@@ -33,6 +33,11 @@ use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
 };
 
+use crate::versioned_pipeline_compat::{
+    COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
+    COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
+    CompatibilityBundleConfig, CompatibilityScorePolicy, CompatibilitySettlePolicy,
+};
 use crate::versioned_pipeline_index::IsolatedPipelineIndex;
 
 /// Test-index identity the minimal Score policy proposes entries against.
@@ -467,12 +472,29 @@ const MINIMAL_REVIEW_IMPLEMENTATION: &str = "trace_commons.review.minimal.v1";
 const MINIMAL_SCORE_IMPLEMENTATION: &str = "trace_commons.score.minimal.v1";
 const MINIMAL_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.minimal.v1";
 
+/// Which event type the Trace Credit leg of PR 2's FR2 settlement
+/// transaction (`settle_internal_credit` in `versioned_pipeline.rs`) writes
+/// to the ledger for this bundle's family, and whether that leg composes and
+/// finalizes a batch (Ruling S10). `PipelineScore` is the minimal family's
+/// unchanged PR 2 behavior: the ledger's `Accepted` event type, batched and
+/// finalized like every other credit event. `NoveltyUtility` is the
+/// compatibility family's leg: the ledger's `NoveltyUtility` event type,
+/// which `main`'s `trace_credit_event_type_is_settlement_eligible` excludes
+/// from settlement -- that leg completes in the same transaction but is
+/// never composed into a batch or paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineTraceCreditEvent {
+    PipelineScore,
+    NoveltyUtility,
+}
+
 pub struct MinimalPolicyBundle {
     pub package: BundlePackage,
     pub admission: Arc<dyn AdmissionPolicy>,
     pub review: Arc<dyn ReviewPolicy>,
     pub score: Arc<dyn ScorePolicy>,
     pub settle: Arc<dyn SettlePolicy>,
+    pub trace_credit_event: PipelineTraceCreditEvent,
 }
 
 impl MinimalPolicyBundle {
@@ -548,10 +570,77 @@ impl MinimalPolicyBundle {
         Ok(package)
     }
 
+    /// Builds an unsigned package for the compatibility family, naming
+    /// `config`, `scorer`, and `embedder` by content hash. As
+    /// [`Self::minimal_package`], but under the compatibility implementation
+    /// ids, with the compatibility Score policy's own dependency and
+    /// projection names, and `trace_credit` pinned to
+    /// `config.instrument.descriptor` so a `CompatibilityScorePolicy`'s
+    /// awards are accepted at Score time (`ScoreDecision::for_bundle`,
+    /// Ruling S3).
+    pub fn compatibility_package(
+        config: &CompatibilityBundleConfig,
+        scorer: &dyn IdentifiedPerplexityScorer,
+        embedder: &dyn IdentifiedEmbedder,
+    ) -> anyhow::Result<BundlePackage> {
+        config.validate()?;
+        let config_bytes = serde_json::to_vec(config)?;
+        let config_hash = dependency_content_hash(&config_bytes);
+        let scorer_descriptor = scorer.content_descriptor();
+        let embedder_descriptor = embedder.content_descriptor();
+        let scorer_hash = dependency_content_hash(&scorer_descriptor);
+        let embedder_hash = dependency_content_hash(&embedder_descriptor);
+
+        let policy_ref = |phase: &str, implementation_id: &str| PolicyRef {
+            policy_id: format!("trace_commons.{phase}.compatibility"),
+            implementation_id: implementation_id.to_string(),
+            configuration_hash: config_hash.clone(),
+            data_artifact_hashes: Vec::new(),
+            projection_ids: Vec::new(),
+        };
+
+        let mut instruments = BTreeMap::new();
+        instruments.insert(
+            InstrumentId::trace_credit(),
+            config.instrument.descriptor.clone(),
+        );
+
+        let manifest = BundleManifest {
+            format_version: BUNDLE_MANIFEST_FORMAT_VERSION,
+            admission: policy_ref("admission", COMPATIBILITY_ADMISSION_IMPLEMENTATION),
+            review: policy_ref("review", COMPATIBILITY_REVIEW_IMPLEMENTATION),
+            score: PolicyRef {
+                policy_id: "trace_commons.score.compatibility".to_string(),
+                implementation_id: COMPATIBILITY_SCORE_IMPLEMENTATION.to_string(),
+                configuration_hash: config_hash.clone(),
+                data_artifact_hashes: vec![scorer_hash.clone(), embedder_hash.clone()],
+                projection_ids: vec![config.projection_id.clone()],
+            },
+            settle: policy_ref("settle", COMPATIBILITY_SETTLE_IMPLEMENTATION),
+            instruments,
+        };
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(config_hash, config_bytes);
+        artifacts.insert(scorer_hash, scorer_descriptor);
+        artifacts.insert(embedder_hash, embedder_descriptor);
+
+        let package = BundlePackage {
+            bundle_id: manifest.bundle_id()?,
+            manifest,
+            artifacts,
+        };
+        package.validate()?;
+        Ok(package)
+    }
+
     /// Builds a runnable bundle from `package` and the runtime dependencies
     /// it names. Every dependency's `content_descriptor()` must hash to a
     /// value the package's Score policy ref names and stores; a substituted
     /// or changed dependency is refused rather than silently accepted.
+    /// `package`'s four implementation ids must be entirely one known
+    /// family -- all minimal or all compatibility -- or the package is not
+    /// runnable by this bundle at all.
     pub fn from_package_with_runtime(
         package: BundlePackage,
         scorer: Arc<dyn IdentifiedPerplexityScorer>,
@@ -561,6 +650,8 @@ impl MinimalPolicyBundle {
         package
             .validate()
             .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+        require_named_dependency(&package, &scorer.content_descriptor())?;
+        require_named_dependency(&package, &embedder.content_descriptor())?;
 
         let implementation_ids = [
             package.manifest.admission.implementation_id.as_str(),
@@ -568,58 +659,99 @@ impl MinimalPolicyBundle {
             package.manifest.score.implementation_id.as_str(),
             package.manifest.settle.implementation_id.as_str(),
         ];
-        anyhow::ensure!(
-            implementation_ids
-                == [
-                    MINIMAL_ADMISSION_IMPLEMENTATION,
-                    MINIMAL_REVIEW_IMPLEMENTATION,
-                    MINIMAL_SCORE_IMPLEMENTATION,
-                    MINIMAL_SETTLE_IMPLEMENTATION,
-                ],
-            "bundle_policy_not_runnable"
-        );
 
-        require_named_dependency(&package, &scorer.content_descriptor())?;
-        require_named_dependency(&package, &embedder.content_descriptor())?;
+        if implementation_ids
+            == [
+                MINIMAL_ADMISSION_IMPLEMENTATION,
+                MINIMAL_REVIEW_IMPLEMENTATION,
+                MINIMAL_SCORE_IMPLEMENTATION,
+                MINIMAL_SETTLE_IMPLEMENTATION,
+            ]
+        {
+            let config_bytes = package
+                .artifacts
+                .get(&package.manifest.score.configuration_hash)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            let config: PipelineBundleConfig = serde_json::from_slice(config_bytes)
+                .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
 
-        let config_bytes = package
-            .artifacts
-            .get(&package.manifest.score.configuration_hash)
-            .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
-        let config: PipelineBundleConfig = serde_json::from_slice(config_bytes)
-            .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            let awards = InstrumentAwards::new(
+                config
+                    .instrument_awards
+                    .iter()
+                    .map(|award| {
+                        InstrumentAward::new(
+                            InstrumentId::new(award.instrument_id.clone())?,
+                            award.atomic_units,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, ContractError>>()?,
+            )?;
+            let decision = ScoreDecision::for_bundle(&package.manifest, awards)
+                .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
 
-        let awards = InstrumentAwards::new(
-            config
-                .instrument_awards
-                .iter()
-                .map(|award| {
-                    InstrumentAward::new(
-                        InstrumentId::new(award.instrument_id.clone())?,
-                        award.atomic_units,
-                    )
-                })
-                .collect::<Result<Vec<_>, ContractError>>()?,
-        )?;
-        let decision = ScoreDecision::for_bundle(&package.manifest, awards)
-            .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
-
-        // The scorer is checked above to prove it matches the named
-        // dependency; the minimal Score policy does not call it, so it is
-        // not held by the bundle.
-        Ok(Self {
-            package,
-            admission: Arc::new(MinimalAdmissionPolicy),
-            review: Arc::new(MinimalReviewPolicy),
-            score: Arc::new(FixedScorePolicy {
-                decision,
-                index: config.include_index.then(|| FixedIndexSpec {
-                    embedder,
-                    index_reader,
+            // The scorer is checked above to prove it matches the named
+            // dependency; the minimal Score policy does not call it, so it
+            // is not held by the bundle.
+            Ok(Self {
+                package,
+                admission: Arc::new(MinimalAdmissionPolicy),
+                review: Arc::new(MinimalReviewPolicy),
+                score: Arc::new(FixedScorePolicy {
+                    decision,
+                    index: config.include_index.then(|| FixedIndexSpec {
+                        embedder,
+                        index_reader,
+                    }),
                 }),
-            }),
-            settle: Arc::new(FixedSettlePolicy),
-        })
+                settle: Arc::new(FixedSettlePolicy),
+                trace_credit_event: PipelineTraceCreditEvent::PipelineScore,
+            })
+        } else if implementation_ids
+            == [
+                COMPATIBILITY_ADMISSION_IMPLEMENTATION,
+                COMPATIBILITY_REVIEW_IMPLEMENTATION,
+                COMPATIBILITY_SCORE_IMPLEMENTATION,
+                COMPATIBILITY_SETTLE_IMPLEMENTATION,
+            ]
+        {
+            let config_bytes = package
+                .artifacts
+                .get(&package.manifest.score.configuration_hash)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            let config: CompatibilityBundleConfig = serde_json::from_slice(config_bytes)
+                .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            // Ruling S4: refuse at bind time, not at the first positive
+            // award, a package whose manifest does not pin `trace_credit` to
+            // this config's own instrument descriptor.
+            anyhow::ensure!(
+                package
+                    .manifest
+                    .instruments
+                    .get(&InstrumentId::trace_credit())
+                    == Some(&config.instrument.descriptor),
+                PIPELINE_BUNDLE_INVALID_LABEL
+            );
+            let score = CompatibilityScorePolicy::new(
+                package.manifest.clone(),
+                config,
+                scorer,
+                embedder,
+                index_reader,
+            )
+            .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+
+            Ok(Self {
+                package,
+                admission: Arc::new(MinimalAdmissionPolicy),
+                review: Arc::new(MinimalReviewPolicy),
+                score: Arc::new(score),
+                settle: Arc::new(CompatibilitySettlePolicy),
+                trace_credit_event: PipelineTraceCreditEvent::NoveltyUtility,
+            })
+        } else {
+            anyhow::bail!("bundle_policy_not_runnable")
+        }
     }
 }
 
@@ -900,5 +1032,126 @@ mod tests {
         assert_eq!(content.bytes(), bytes.as_slice());
         assert_eq!(content.worker_identity(), "minimal_review_passthrough");
         assert!(!output.result().evidence.content_changed);
+    }
+
+    #[test]
+    fn compatibility_package_names_its_dependencies_and_pins_trace_credit() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let config = CompatibilityBundleConfig::local_reference();
+        let package = MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+            .expect("build compatibility bundle package");
+
+        assert_eq!(
+            package.manifest.admission.implementation_id,
+            COMPATIBILITY_ADMISSION_IMPLEMENTATION
+        );
+        assert_eq!(
+            package.manifest.review.implementation_id,
+            COMPATIBILITY_REVIEW_IMPLEMENTATION
+        );
+        assert_eq!(
+            package.manifest.score.implementation_id,
+            COMPATIBILITY_SCORE_IMPLEMENTATION
+        );
+        assert_eq!(
+            package.manifest.settle.implementation_id,
+            COMPATIBILITY_SETTLE_IMPLEMENTATION
+        );
+        assert_eq!(
+            package.manifest.score.projection_ids,
+            vec![config.projection_id.clone()]
+        );
+        let named = &package.manifest.score.data_artifact_hashes;
+        assert!(named.contains(&dependency_content_hash(&scorer.content_descriptor())));
+        assert!(named.contains(&dependency_content_hash(&embedder.content_descriptor())));
+        assert_eq!(
+            package
+                .manifest
+                .instruments
+                .get(&InstrumentId::trace_credit()),
+            Some(&config.instrument.descriptor)
+        );
+
+        let bundle = MinimalPolicyBundle::from_package_with_runtime(
+            package,
+            Arc::new(scorer),
+            Arc::new(embedder),
+            IsolatedPipelineIndex::new(),
+        )
+        .expect("build compatibility bundle from package");
+        assert_eq!(
+            bundle.trace_credit_event,
+            PipelineTraceCreditEvent::NoveltyUtility
+        );
+    }
+
+    /// A package cannot mix families: a compatibility Score paired with a
+    /// minimal Settle (or any other combination that is not entirely one
+    /// known family) is refused before either policy is ever constructed.
+    #[test]
+    fn mixed_family_ids_are_not_runnable() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let config = CompatibilityBundleConfig::local_reference();
+        let mut package = MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+            .expect("build compatibility bundle package");
+        package.manifest.settle.implementation_id = MINIMAL_SETTLE_IMPLEMENTATION.to_string();
+        package.bundle_id = package
+            .manifest
+            .bundle_id()
+            .expect("recompute bundle id after mutating settle's implementation id");
+
+        let error = MinimalPolicyBundle::from_package_with_runtime(
+            package,
+            Arc::new(scorer),
+            Arc::new(embedder),
+            IsolatedPipelineIndex::new(),
+        )
+        .err()
+        .expect("mixed family implementation ids must not build a bundle");
+        assert_eq!(error.to_string(), "bundle_policy_not_runnable");
+    }
+
+    /// Ruling: the compatibility arm parses `CompatibilityBundleConfig`
+    /// strictly and refuses a package whose config artifact is not one, with
+    /// `bundle_package_invalid` -- exercised here by a config artifact whose
+    /// bytes are still hash-consistent with the manifest (so
+    /// `BundlePackage::validate` itself passes, unlike
+    /// `a_substituted_or_changed_dependency_is_refused`'s tamper case) but do
+    /// not deserialize into a `CompatibilityBundleConfig`.
+    #[test]
+    fn tampered_compatibility_config_is_invalid() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let config = CompatibilityBundleConfig::local_reference();
+        let mut package = MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+            .expect("build compatibility bundle package");
+
+        let old_config_hash = package.manifest.score.configuration_hash.clone();
+        let invalid_config_bytes = b"{}".to_vec();
+        let new_config_hash = dependency_content_hash(&invalid_config_bytes);
+        package.artifacts.remove(&old_config_hash);
+        package
+            .artifacts
+            .insert(new_config_hash.clone(), invalid_config_bytes);
+        package.manifest.admission.configuration_hash = new_config_hash.clone();
+        package.manifest.review.configuration_hash = new_config_hash.clone();
+        package.manifest.score.configuration_hash = new_config_hash.clone();
+        package.manifest.settle.configuration_hash = new_config_hash;
+        package.bundle_id = package
+            .manifest
+            .bundle_id()
+            .expect("recompute bundle id after swapping the config artifact");
+
+        let error = MinimalPolicyBundle::from_package_with_runtime(
+            package,
+            Arc::new(scorer),
+            Arc::new(embedder),
+            IsolatedPipelineIndex::new(),
+        )
+        .err()
+        .expect("an invalid config artifact must not build a bundle");
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
     }
 }

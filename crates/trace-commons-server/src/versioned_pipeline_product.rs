@@ -96,6 +96,12 @@ pub enum PipelineCreditStatus {
     Held,
     Finalized,
     Failed,
+    /// Ruling S11: a compatibility bundle's `NoveltyUtility` Trace Credit
+    /// leg. It completes like any other leg, but the ledger event type it
+    /// wrote is one `main` never batches or pays
+    /// (`trace_credit_event_type_is_settlement_eligible` excludes it), so it
+    /// would otherwise sit at `Pending` forever.
+    NotSettlementEligible,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,6 +346,18 @@ impl PipelineProductStore {
                                     CASE
                                         WHEN settlement.instrument_id <> 'trace_credit'
                                             THEN 'not_applicable'
+                                        -- Ruling S11: TraceCreditEventType::NoveltyUtility's
+                                        -- own serde (rename_all snake_case,
+                                        -- trace_corpus_storage.rs) is the same
+                                        -- string versioned_pipeline.rs's
+                                        -- settle_internal_credit writes for a
+                                        -- compatibility run's Trace Credit leg
+                                        -- (Ruling S10). main never batches or
+                                        -- pays this event type, so it is
+                                        -- reported as ineligible rather than
+                                        -- pending forever.
+                                        WHEN ledger.event_type = 'novelty_utility'
+                                            THEN 'not_settlement_eligible'
                                         WHEN batch.status IS NOT NULL THEN batch.status
                                         WHEN settlement.credit_event_id IS NOT NULL THEN 'pending'
                                         ELSE settlement.operation_state
@@ -357,6 +375,10 @@ impl PipelineProductStore {
                             ON batch.tenant_id = settlement.tenant_id
                            AND batch.settlement_batch_id = settlement.settlement_batch_id
                            AND batch.instrument_id = settlement.instrument_id
+                          LEFT JOIN trace_credit_ledger ledger
+                            ON ledger.tenant_id = settlement.tenant_id
+                           AND ledger.credit_event_id = settlement.credit_event_id
+                           AND ledger.instrument_id = settlement.instrument_id
                          WHERE settlement.tenant_id = r.tenant_id
                            AND settlement.run_id = r.run_id
                    ) settlements ON TRUE
@@ -950,6 +972,13 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
                 .is_some_and(|instrument| instrument.internal_settlement_state == "finalized") =>
         {
             PipelineCreditStatus::Finalized
+        }
+        (Some(_), Some(_))
+            if trace_credit.is_some_and(|instrument| {
+                instrument.internal_settlement_state == "not_settlement_eligible"
+            }) =>
+        {
+            PipelineCreditStatus::NotSettlementEligible
         }
         _ => PipelineCreditStatus::Pending,
     };

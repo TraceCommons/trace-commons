@@ -11,11 +11,11 @@
 //! numbers. Score never writes the live index; Settle applies the stored
 //! command later from committed Score evidence only.
 //!
-//! The compatibility Settle policy, the bundle constructor that binds this
-//! policy to a `BundlePackage`, and the baseline-comparison helper against
-//! the current fixture land in a later task; this module holds only the
-//! config and [`CompatibilityScorePolicy`].
+//! The bundle constructor that binds these policies to a `BundlePackage`
+//! lives in `versioned_pipeline_bundle.rs`
+//! (`MinimalPolicyBundle::compatibility_package`).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,10 +23,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, BundleManifest, InstrumentAward, InstrumentAwards, InstrumentDescriptor,
-    InstrumentId, InstrumentKind, MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult, PolicyError,
-    ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput, ScoreOutput, ScorePolicy,
-    SealedIndexCommand, SealedIndexEntry, TRACE_CREDIT_DECIMALS, TRACE_CREDIT_INSTRUMENT_ID,
+    AtomicUnits, BundleManifest, IndexMembershipDecision, InstrumentAward, InstrumentAwards,
+    InstrumentDescriptor, InstrumentId, InstrumentKind, MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult,
+    PolicyError, ReasonCode, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput,
+    ScoreOutput, ScorePolicy, SealedIndexCommand, SealedIndexEntry, SettleDecision,
+    SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy, TRACE_CREDIT_DECIMALS,
+    TRACE_CREDIT_INSTRUMENT_ID,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedPerplexityScorer, NearestNeighbor,
@@ -39,7 +41,8 @@ use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
 
 use crate::credit_quality::{constants_at, credit_quality};
 use crate::versioned_pipeline_bundle::{
-    MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, PipelineInstrumentAwardConfig, dependency_content_hash,
+    MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, PipelineInstrumentAwardConfig,
+    dependency_content_hash, settlement_operations,
 };
 
 /// Implementation id this policy family answers to in a bundle manifest
@@ -255,6 +258,16 @@ fn permanent(label: &'static str) -> PolicyError {
     PolicyError::permanent(label).expect("static label")
 }
 
+/// A generic error-mapping function, not a closure: `Settle::execute` maps
+/// two different error types (`ContractError` and `TryFromIntError`) to the
+/// same permanent label, and a plain closure is monomorphic over its one
+/// inferred parameter type, so one closure cannot serve both call sites (as
+/// `versioned_pipeline_bundle.rs`'s `settle_invalid`/`score_invalid` already
+/// do it this way).
+fn settle_invalid<E>(_: E) -> PolicyError {
+    permanent("settle_output_invalid")
+}
+
 #[async_trait]
 impl ScorePolicy for CompatibilityScorePolicy {
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
@@ -450,6 +463,160 @@ fn hash_neighbors(neighbors: &[NearestNeighbor]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// Applies the stored Score command from committed evidence only -- it never
+/// re-queries the live index (the whole point of a shadow Score policy).
+/// Membership is `Include` only when Score actually stored a command *and*
+/// its own evidence says the run was eligible; either alone is not enough
+/// (a command with a since-changed `include_eligible` flag, or a flag with
+/// no command to back it, both fail closed to `Exclude`).
+pub struct CompatibilitySettlePolicy;
+
+#[async_trait]
+impl SettlePolicy for CompatibilitySettlePolicy {
+    async fn execute(
+        &self,
+        input: &SettleInput,
+    ) -> Result<PhaseResult<SettleDecision, SettleEvidence, SettleEvaluation>, PolicyError> {
+        let include =
+            input.index_command.is_some() && input.score_evidence.include_eligible == Some(true);
+        let membership = match (&input.index_command, include) {
+            (Some(command), true) => IndexMembershipDecision::Include {
+                command_hash: command.content_hash().map_err(settle_invalid)?,
+                entry_count: u32::try_from(command.entries().len()).map_err(settle_invalid)?,
+            },
+            _ => IndexMembershipDecision::Exclude {
+                reason: ReasonCode::new(COMPATIBILITY_EXCLUDE_REASON).expect("static label"),
+            },
+        };
+        let operations =
+            settlement_operations(input.run_id, input.score.awards()).map_err(settle_invalid)?;
+        let decision =
+            SettleDecision::new(membership, &input.score, operations).map_err(settle_invalid)?;
+        Ok(PhaseResult {
+            decision,
+            evidence: SettleEvidence::operations(
+                include,
+                u32::try_from(input.score.awards().iter().len()).map_err(settle_invalid)?,
+            ),
+            evaluation: SettleEvaluation {
+                rule_id: COMPATIBILITY_SETTLE_RULE.to_string(),
+            },
+        })
+    }
+}
+
+/// One documented fixture's expected outcome at each phase, as the baseline
+/// fixture states it (`expected_fixture_classes`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompatibilityFixtureDecision {
+    pub admission: String,
+    pub review: String,
+    pub score: String,
+    pub settle: String,
+}
+
+/// What this bundle's `local_reference()` configuration is observed to
+/// produce, checked against the current baseline fixture
+/// (`docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json`)
+/// by [`compare_compatibility_baseline`]. Holds only the fields the
+/// comparison actually reads from that fixture (Ruling T4-1): the corpus
+/// order and its declared starting index state, three of the fixture's
+/// `configuration_identities` labels, and the per-fixture expected outcomes.
+///
+/// `configuration_identities.embedder_model_id` is deliberately not a field
+/// here: see the comment on [`compare_compatibility_baseline`]'s own
+/// `embedder_model_id` handling (Rulings T4-3/T4-4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompatibilityBaselineObservation {
+    pub fixture_order: Vec<String>,
+    pub initial_index: String,
+    pub scorer_model_id: String,
+    pub projection_id: String,
+    pub index_id: String,
+    pub gate_floors: String,
+    pub fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
+}
+
+/// Deserializes only the parts of the baseline fixture the comparison reads.
+/// `embedder_model_id` is intentionally absent -- see
+/// [`compare_compatibility_baseline`].
+#[derive(Deserialize)]
+struct CompatibilityBaselineDocument {
+    corpus: CompatibilityBaselineCorpus,
+    configuration_identities: CompatibilityBaselineIdentities,
+    expected_fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityBaselineCorpus {
+    /// Relative to the repository root, as the fixture states it. Read at
+    /// runtime (not `include_str!`) so the comparison actually reads "the
+    /// corpus file it names" rather than a second hardcoded path that could
+    /// silently drift from this one.
+    path: String,
+    initial_index: String,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityBaselineIdentities {
+    scorer_model_id: String,
+    projection_id: String,
+    index_id: String,
+    gate_floors: String,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityCorpusDocument {
+    fixtures: Vec<CompatibilityCorpusFixture>,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityCorpusFixture {
+    label: String,
+}
+
+/// Compares `observation` against the current compatibility baseline
+/// fixture and the corpus file it names, at their present (R1-corrected)
+/// shape: `corpus.path`/`corpus.order`/`corpus.initial_index`, a handful of
+/// `configuration_identities` labels, and `expected_fixture_classes`. Never
+/// reads or writes either file except by loading them (Ruling T4-1); the
+/// fixture and corpus are read-only inputs pinned under `docs/superpowers/specs`.
+pub fn compare_compatibility_baseline(
+    observation: &CompatibilityBaselineObservation,
+) -> anyhow::Result<()> {
+    let baseline: CompatibilityBaselineDocument = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json"
+    )))?;
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let corpus_path = manifest_dir.join("../..").join(&baseline.corpus.path);
+    let corpus_bytes = std::fs::read_to_string(&corpus_path)
+        .map_err(|_| anyhow::anyhow!("compatibility corpus fixture unreadable"))?;
+    let corpus: CompatibilityCorpusDocument = serde_json::from_str(&corpus_bytes)?;
+    let fixture_order = corpus
+        .fixtures
+        .into_iter()
+        .map(|fixture| fixture.label)
+        .collect::<Vec<_>>();
+    // T4-3/T4-4: `configuration_identities.embedder_model_id` in the fixture
+    // is "reference_embedder.v1", but `ReferenceEmbedder::model_id()`
+    // reports "reference-embedder-v1" (underscore vs. hyphen) -- a contract
+    // mismatch tracked as a request to PR 1 (#971). This comparison does not
+    // check `embedder_model_id` against the running embedder until that
+    // lands.
+    let expected = CompatibilityBaselineObservation {
+        fixture_order,
+        initial_index: baseline.corpus.initial_index,
+        scorer_model_id: baseline.configuration_identities.scorer_model_id,
+        projection_id: baseline.configuration_identities.projection_id,
+        index_id: baseline.configuration_identities.index_id,
+        gate_floors: baseline.configuration_identities.gate_floors,
+        fixture_classes: baseline.expected_fixture_classes,
+    };
+    anyhow::ensure!(observation == &expected, "compatibility baseline mismatch");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +635,7 @@ mod tests {
 
     use crate::credit_quality::{CREDIT_QUALITY_ACTIVE, QWEN3_8_EFFECTIVE_FROM_UNIX};
     use crate::versioned_pipeline::pipeline_tenant_storage_ref;
+    use crate::versioned_pipeline_index::IsolatedPipelineIndex;
 
     // ---- test doubles ----------------------------------------------------
 
@@ -1169,5 +1337,259 @@ mod tests {
             .unwrap_err();
         assert!(error.is_transient());
         assert_eq!(error.label(), "index_unavailable");
+    }
+
+    #[test]
+    fn production_compatibility_rejects_zero_floors() {
+        let mut config = CompatibilityBundleConfig::local_reference();
+        assert!(!config.is_qualifiable());
+        config.qualification = CompatibilityQualification::ProductionCompatible;
+        assert_eq!(
+            config.validate().unwrap_err().to_string(),
+            COMPATIBILITY_ZERO_FLOOR_LABEL
+        );
+
+        config.perplexity_floor_micros = 1;
+        config.tail_fraction_floor_micros = 1;
+        config.novelty_floor_micros = 1;
+        config.validate().unwrap();
+        assert!(config.is_qualifiable());
+    }
+
+    fn settle_input(
+        score: ScoreDecision,
+        evidence: ScoreEvidence,
+        index_command: Option<SealedIndexCommand>,
+    ) -> SettleInput {
+        SettleInput {
+            run_id: Uuid::new_v4(),
+            tenant_storage_ref: pipeline_tenant_storage_ref("tenant-a"),
+            trace_id: Uuid::new_v4(),
+            registry_revision_id: Uuid::nil(),
+            source_content_hash: dependency_content_hash(b"settle-input-source"),
+            score,
+            score_evidence: evidence,
+            index_command,
+        }
+    }
+
+    #[tokio::test]
+    async fn settle_uses_committed_include_flag_not_live_index() {
+        let settle = CompatibilitySettlePolicy;
+        let config = CompatibilityBundleConfig::local_reference();
+        let manifest = manifest_pinning_trace_credit(&config);
+        let awards = InstrumentAwards::new(vec![
+            InstrumentAward::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(1_000_000),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let score = ScoreDecision::for_bundle(&manifest, awards.clone()).unwrap();
+        let mut evidence = ScoreEvidence::fixed(awards);
+        let command = SealedIndexCommand::new(
+            &config.index_id,
+            Uuid::nil(),
+            &config.projection_id,
+            "reference-embedder-v1",
+            vec![SealedIndexEntry {
+                chunk: 0,
+                content_hash: dependency_content_hash(b"chunk-0"),
+                embedding: vec![0.0, 1.0],
+            }],
+        )
+        .unwrap();
+
+        // A stored command AND a committed `include_eligible: true` --
+        // membership is `Include`.
+        evidence.include_eligible = Some(true);
+        let included = settle
+            .execute(&settle_input(
+                score.clone(),
+                evidence.clone(),
+                Some(command.clone()),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            included.decision.index_membership,
+            IndexMembershipDecision::Include { .. }
+        ));
+
+        // A stored command, but the committed flag is `false`: membership
+        // must follow the committed flag, not the mere presence of a
+        // command (which is what "not the live index" means here -- there
+        // is no live index in this policy at all, only committed evidence).
+        evidence.include_eligible = Some(false);
+        let excluded_by_flag = settle
+            .execute(&settle_input(
+                score.clone(),
+                evidence.clone(),
+                Some(command.clone()),
+            ))
+            .await
+            .unwrap();
+        match excluded_by_flag.decision.index_membership {
+            IndexMembershipDecision::Exclude { reason } => {
+                assert_eq!(
+                    reason,
+                    ReasonCode::new(COMPATIBILITY_EXCLUDE_REASON).unwrap()
+                );
+            }
+            IndexMembershipDecision::Include { .. } => {
+                panic!("a false committed flag must exclude even with a stored command")
+            }
+        }
+
+        // The committed flag says `true`, but there is no stored command at
+        // all: membership must not fabricate one from the flag alone.
+        evidence.include_eligible = Some(true);
+        let excluded_by_missing_command = settle
+            .execute(&settle_input(score, evidence, None))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                excluded_by_missing_command.decision.index_membership,
+                IndexMembershipDecision::Exclude { .. }
+            ),
+            "a true flag with no stored command must not fabricate membership"
+        );
+    }
+
+    /// The `configuration_identities.gate_floors` label the compatibility
+    /// baseline fixture pins for [`CompatibilityBundleConfig::local_reference`]:
+    /// uncalibrated, all-zero floors, not production qualifiable.
+    const COMPATIBILITY_LOCAL_GATE_FLOORS_LABEL: &str = "local_zero_uncalibrated_reference";
+
+    /// The five fixture classes' expected per-phase outcomes, exactly as
+    /// `docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json`
+    /// states them under `expected_fixture_classes`.
+    fn compatibility_local_reference_observation(
+        config: &CompatibilityBundleConfig,
+    ) -> CompatibilityBaselineObservation {
+        let corpus_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json",
+        );
+        let corpus_bytes =
+            std::fs::read_to_string(&corpus_path).expect("read compatibility corpus fixture");
+        let corpus: CompatibilityCorpusDocument =
+            serde_json::from_str(&corpus_bytes).expect("parse compatibility corpus fixture");
+        let fixture_classes = BTreeMap::from([
+            (
+                "clean_tool_plan".to_string(),
+                CompatibilityFixtureDecision {
+                    admission: "admit".to_string(),
+                    review: "approved".to_string(),
+                    score: "completed".to_string(),
+                    settle: "completed".to_string(),
+                },
+            ),
+            (
+                "locally_redacted_secret".to_string(),
+                CompatibilityFixtureDecision {
+                    admission: "admit".to_string(),
+                    review: "approved".to_string(),
+                    score: "completed".to_string(),
+                    settle: "completed".to_string(),
+                },
+            ),
+            (
+                "privacy_quarantine_approved".to_string(),
+                CompatibilityFixtureDecision {
+                    admission: "quarantine".to_string(),
+                    review: "approved".to_string(),
+                    score: "completed".to_string(),
+                    settle: "completed".to_string(),
+                },
+            ),
+            (
+                "privacy_quarantine_rejected".to_string(),
+                CompatibilityFixtureDecision {
+                    admission: "quarantine".to_string(),
+                    review: "rejected".to_string(),
+                    score: "skipped".to_string(),
+                    settle: "skipped".to_string(),
+                },
+            ),
+            (
+                "privacy_risk_rejected".to_string(),
+                CompatibilityFixtureDecision {
+                    admission: "reject".to_string(),
+                    review: "skipped".to_string(),
+                    score: "skipped".to_string(),
+                    settle: "skipped".to_string(),
+                },
+            ),
+        ]);
+        CompatibilityBaselineObservation {
+            fixture_order: corpus
+                .fixtures
+                .into_iter()
+                .map(|fixture| fixture.label)
+                .collect(),
+            initial_index: if IsolatedPipelineIndex::new().entry_count(
+                &pipeline_tenant_storage_ref("baseline-tenant"),
+                MINIMAL_INDEX_ID,
+            ) == 0
+            {
+                "empty".to_string()
+            } else {
+                "seeded".to_string()
+            },
+            scorer_model_id: config.scorer_model_id.clone(),
+            projection_id: config.projection_id.clone(),
+            index_id: config.index_id.clone(),
+            gate_floors: COMPATIBILITY_LOCAL_GATE_FLOORS_LABEL.to_string(),
+            fixture_classes,
+        }
+    }
+
+    /// Ruling T4-1: written against the R1-corrected fixture as it stands
+    /// now (a `gate_floors` label, `corpus.path`/`order`/`initial_index`,
+    /// no `fixture_order` list). Proves the comparison (a) passes for an
+    /// observation built from this bundle's `local_reference()` config and
+    /// the corpus file's own order, and (b) actually detects drift -- a
+    /// changed fixture class, identity label, corpus order, or starting
+    /// index state each make it fail, so the equality check above is not a
+    /// tautology.
+    #[test]
+    fn compatibility_baseline_is_executable_and_detects_drift() {
+        let config = CompatibilityBundleConfig::local_reference();
+        // The fixture's `gate_floors` label describes exactly this
+        // configuration; if `local_reference()` ever stops being the
+        // all-zero, non-qualifiable reference, this constant (and the
+        // fixture) need a fresh look, not a silent pass.
+        assert_eq!(
+            config.qualification,
+            CompatibilityQualification::LocalSyntheticNonQualifiable
+        );
+        assert_eq!(config.perplexity_floor_micros, 0);
+        assert_eq!(config.tail_fraction_floor_micros, 0);
+        assert_eq!(config.novelty_floor_micros, 0);
+
+        let expected = compatibility_local_reference_observation(&config);
+        compare_compatibility_baseline(&expected).unwrap();
+
+        let mut changed_class = expected.clone();
+        changed_class
+            .fixture_classes
+            .get_mut("clean_tool_plan")
+            .unwrap()
+            .score = "failed".to_string();
+        assert!(compare_compatibility_baseline(&changed_class).is_err());
+
+        let mut changed_identity = expected.clone();
+        changed_identity.gate_floors = "changed".to_string();
+        assert!(compare_compatibility_baseline(&changed_identity).is_err());
+
+        let mut changed_order = expected.clone();
+        changed_order.fixture_order.swap(0, 1);
+        assert!(compare_compatibility_baseline(&changed_order).is_err());
+
+        let mut changed_index = expected;
+        changed_index.initial_index = "seeded".to_string();
+        assert!(compare_compatibility_baseline(&changed_index).is_err());
     }
 }
