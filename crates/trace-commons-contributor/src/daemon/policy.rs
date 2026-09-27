@@ -153,6 +153,32 @@ pub struct VoidedGrant {
     pub reasons: Vec<&'static str>,
 }
 
+/// A void the contributor has not been shown yet.
+///
+/// R6 makes a void notice a ship condition: a grant that stops must say so
+/// in every shell, not only in the audit. A sweep records one of these for
+/// each project it returns to ask-first and one for the Flow 1 grant, and it
+/// stays until a shell reports it shown (`acknowledge_grant_voids`) or the
+/// contributor acts on what it is about -- sets that project's mode, or
+/// gives the grant again -- which makes it stale.
+///
+/// Kept in the policy file, beside the grants it describes, so a void
+/// during a pass no shell was watching is still shown at the next launch.
+/// `project_key` is the policy's own key (a local path, as every key in this
+/// file is); it never crosses the socket, which carries the `project_id` and
+/// label derived from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantVoidNotice {
+    /// Unique within this policy file, so a shell acknowledges exactly the
+    /// notices it showed and never one that arrived after it drew.
+    pub id: u64,
+    pub voided_at: DateTime<Utc>,
+    /// The project voided, or `None` for the Flow 1 grant itself.
+    pub project_key: Option<String>,
+    /// Fixed reason labels, as `grant_terms::widening_from` gives them.
+    pub reasons: Vec<String>,
+}
+
 /// A project the app should offer to arm, and the evidence for offering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArmingSuggestion {
@@ -198,6 +224,13 @@ pub struct ProjectPolicy {
     /// the contributor sets the project's mode themselves.
     #[serde(default)]
     pub armed_by_grant: BTreeSet<String>,
+    /// Voids not yet shown to the contributor. See [`GrantVoidNotice`].
+    #[serde(default)]
+    pub grant_voids: Vec<GrantVoidNotice>,
+    /// The id the next [`GrantVoidNotice`] gets. Never reused, so an
+    /// acknowledgement naming an old id cannot clear a newer notice.
+    #[serde(default)]
+    pub next_grant_void_id: u64,
 }
 
 /// The Flow 1 grant: "contribute automatically from projects discovered from
@@ -249,6 +282,8 @@ impl ProjectPolicy {
             automatic_grant: None,
             sessions_on_disk_at_grant: BTreeSet::new(),
             armed_by_grant: BTreeSet::new(),
+            grant_voids: Vec::new(),
+            next_grant_void_id: 0,
         }
     }
 
@@ -256,6 +291,8 @@ impl ProjectPolicy {
     /// a source has been recorded, and then nothing from that source's
     /// recording pass.
     pub fn grant_automatic(&mut self, now: DateTime<Utc>, terms: super::grant_terms::GrantTerms) {
+        // Giving the grant again answers a notice that it had stopped.
+        self.grant_voids.retain(|n| n.project_key.is_some());
         self.automatic_grant = Some(AutomaticGrant {
             granted_at: now,
             granted_under: terms,
@@ -538,9 +575,14 @@ impl ProjectPolicy {
     /// the new terms. A project with no recorded terms is baselined rather
     /// than voided, because there is nothing to compare against -- see
     /// [`ProjectEntry::armed_under`].
-    pub fn sweep_grants(&mut self, current: &super::grant_terms::GrantTerms) -> GrantSweep {
+    pub fn sweep_grants(
+        &mut self,
+        current: &super::grant_terms::GrantTerms,
+        now: DateTime<Utc>,
+    ) -> GrantSweep {
         let mut sweep = GrantSweep::default();
-        for entry in self.projects.values_mut() {
+        let mut voided_keys: Vec<(String, Vec<&'static str>)> = Vec::new();
+        for (key, entry) in self.projects.iter_mut() {
             if entry.mode != ProjectMode::AutoUpload {
                 continue;
             }
@@ -554,6 +596,7 @@ impl ProjectPolicy {
                     if !reasons.is_empty() {
                         entry.mode = ProjectMode::NotifyOnly;
                         entry.armed_under = None;
+                        voided_keys.push((key.clone(), reasons.clone()));
                         sweep.voided.push(VoidedGrant {
                             project_label: entry.label.clone(),
                             reasons,
@@ -569,7 +612,43 @@ impl ProjectPolicy {
                 sweep.automatic_grant_voided = Some(reasons);
             }
         }
+        // Recorded with the void, in the same save, so a void is never
+        // written without the notice that tells the contributor about it.
+        for (key, reasons) in voided_keys {
+            self.push_grant_void(Some(key), &reasons, now);
+        }
+        if let Some(reasons) = sweep.automatic_grant_voided.clone() {
+            self.push_grant_void(None, &reasons, now);
+        }
         sweep
+    }
+
+    /// Record a notice, replacing any still outstanding for the same grant:
+    /// the newer one says everything the contributor now needs to know.
+    fn push_grant_void(
+        &mut self,
+        project_key: Option<String>,
+        reasons: &[&'static str],
+        now: DateTime<Utc>,
+    ) {
+        self.grant_voids.retain(|n| n.project_key != project_key);
+        let id = self.next_grant_void_id;
+        self.next_grant_void_id = id.saturating_add(1);
+        self.grant_voids.push(GrantVoidNotice {
+            id,
+            voided_at: now,
+            project_key,
+            reasons: reasons.iter().map(|r| (*r).to_string()).collect(),
+        });
+    }
+
+    /// Drop the notices a shell reports it has shown. Returns how many went;
+    /// an id that is not outstanding is ignored rather than refused, since a
+    /// second shell may have acknowledged it first.
+    pub fn acknowledge_grant_voids(&mut self, ids: &[u64]) -> usize {
+        let before = self.grant_voids.len();
+        self.grant_voids.retain(|n| !ids.contains(&n.id));
+        before - self.grant_voids.len()
     }
 
     /// Whether `mode` may be set on `project_key` at all, before anything is
@@ -612,6 +691,9 @@ impl ProjectPolicy {
         // A mode set here is the contributor's own decision about the project,
         // not the grant's; `arm_by_grant` re-adds it after calling this.
         self.armed_by_grant.remove(project_key);
+        // And it answers any notice that this project's grant had stopped.
+        self.grant_voids
+            .retain(|n| n.project_key.as_deref() != Some(project_key));
         let shown = display_path_for_key(project_key);
         self.projects.insert(
             project_key.to_string(),
@@ -1358,11 +1440,17 @@ mod tests {
     #[test]
     fn widening_the_terms_voids_the_automatic_grant() {
         let mut p = granted_with_disk(&[], &[]);
-        let same = p.sweep_grants(&grant_terms_with("https://ingest.invalid"));
+        let same = p.sweep_grants(
+            &grant_terms_with("https://ingest.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
         assert!(same.automatic_grant_voided.is_none());
         assert!(p.automatic_grant.is_some());
 
-        let moved = p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"));
+        let moved = p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
         assert_eq!(
             moved.automatic_grant_voided,
             Some(vec![super::super::grant_terms::VOID_DESTINATION])
@@ -1370,6 +1458,140 @@ mod tests {
         assert!(moved.changed());
         assert!(p.automatic_grant.is_none());
         assert!(!p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
+    }
+
+    /// A policy with `/w/api` armed under `ingest`'s terms and the Flow 1
+    /// grant given under the same terms.
+    fn armed_and_granted(ingest: &str) -> ProjectPolicy {
+        let mut p = granted_with_disk(&[], &[]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        assert!(p.record_grant_terms("/w/api", grant_terms_with(ingest)));
+        p
+    }
+
+    /// R6's ship condition, in the policy: every void leaves a notice for
+    /// the shells, one per project returned to ask-first and one for the
+    /// Flow 1 grant, carrying the same reason labels as the audit.
+    #[test]
+    fn a_void_leaves_a_notice_for_each_grant_it_stopped() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        let at = t("2026-09-25T04:00:00Z");
+
+        p.sweep_grants(&grant_terms_with("https://ingest.invalid"), at);
+        assert!(p.grant_voids.is_empty(), "nothing voided, nothing to say");
+
+        p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), at);
+        assert_eq!(p.grant_voids.len(), 2, "{:?}", p.grant_voids);
+        let project = p
+            .grant_voids
+            .iter()
+            .find(|n| n.project_key.is_some())
+            .expect("a notice for the project");
+        assert_eq!(project.project_key.as_deref(), Some("/w/api"));
+        assert_eq!(project.reasons, vec!["destination-changed".to_string()]);
+        assert_eq!(project.voided_at, at);
+        let grant = p
+            .grant_voids
+            .iter()
+            .find(|n| n.project_key.is_none())
+            .expect("a notice for the automatic grant");
+        assert_eq!(grant.reasons, vec!["destination-changed".to_string()]);
+        assert_ne!(
+            project.id, grant.id,
+            "each notice is its own to acknowledge"
+        );
+    }
+
+    /// What the grant's notice says about projects (`VOID_GRANT_PROJECTS`)
+    /// is what the sweep does: a project armed under terms that still cover
+    /// what is in force stays armed and gets no notice, while the grant
+    /// armed under older terms is voided.
+    #[test]
+    fn voiding_the_grant_leaves_a_project_whose_terms_still_cover_it() {
+        let mut p = granted_with_disk(&[], &[]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.set_mode("/w/new", ProjectMode::AutoUpload, now).unwrap();
+        p.record_grant_terms("/w/new", grant_terms_with("https://elsewhere.invalid"));
+
+        let sweep = p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
+        assert!(sweep.automatic_grant_voided.is_some());
+        assert!(sweep.voided.is_empty());
+        assert_eq!(p.resolve("/w/new"), ProjectMode::AutoUpload);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(p.grant_voids[0].project_key.is_none());
+    }
+
+    /// A shell acknowledges exactly the notices it showed. An id it did not
+    /// name stays, and a stale or unknown id is not an error.
+    #[test]
+    fn acknowledging_clears_only_the_notices_named() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        let ids: Vec<u64> = p.grant_voids.iter().map(|n| n.id).collect();
+        assert_eq!(ids.len(), 2);
+
+        assert_eq!(p.acknowledge_grant_voids(&[ids[0], 9_999]), 1);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert_eq!(p.grant_voids[0].id, ids[1]);
+        assert_eq!(p.acknowledge_grant_voids(&[ids[0]]), 0, "already gone");
+        assert_eq!(p.acknowledge_grant_voids(&[ids[1]]), 1);
+        assert!(p.grant_voids.is_empty());
+    }
+
+    /// Ids are never reused, so an acknowledgement for an old notice cannot
+    /// clear one raised after the shell drew.
+    #[test]
+    fn a_later_void_never_reuses_an_acknowledged_id() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        let first: Vec<u64> = p.grant_voids.iter().map(|n| n.id).collect();
+        assert_eq!(p.acknowledge_grant_voids(&first), 2);
+
+        let now = t("2026-09-25T05:00:00Z");
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        p.record_grant_terms("/w/api", grant_terms_with("https://elsewhere.invalid"));
+        p.sweep_grants(&grant_terms_with("https://third.invalid"), now);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(!first.contains(&p.grant_voids[0].id));
+        assert_eq!(p.acknowledge_grant_voids(&first), 0);
+        assert_eq!(p.grant_voids.len(), 1);
+    }
+
+    /// Acting on what a notice is about makes it stale: setting that
+    /// project's mode clears its notice, and giving the grant again clears
+    /// the grant's. Neither touches the other.
+    #[test]
+    fn acting_on_a_voided_grant_clears_its_notice() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        let now = t("2026-09-25T04:00:00Z");
+        p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
+        assert_eq!(p.grant_voids.len(), 2);
+
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(p.grant_voids[0].project_key.is_none());
+
+        p.grant_automatic(now, grant_terms_with("https://elsewhere.invalid"));
+        assert!(p.grant_voids.is_empty());
+    }
+
+    /// A policy file written before notices existed still loads, with none.
+    #[test]
+    fn a_policy_file_without_notices_loads_with_none() {
+        let mut value = serde_json::to_value(ProjectPolicy::new()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("grant_voids");
+        object.remove("next_grant_void_id");
+        let p: ProjectPolicy = serde_json::from_value(value).unwrap();
+        assert!(p.grant_voids.is_empty());
+        assert_eq!(p.next_grant_void_id, 0);
     }
 
     fn armed_policy() -> ProjectPolicy {

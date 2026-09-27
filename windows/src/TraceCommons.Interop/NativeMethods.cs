@@ -281,6 +281,17 @@ internal static class NativeMethods
     internal static extern IntPtr tc_consent_gate_help(int pinned);
 
     /// <summary>
+    /// The notice for one element of <c>status.grant_voids</c>, passed
+    /// through as the daemon sent it, as an owned JSON object. The choice
+    /// between the project and the automatic-grant wording is made on the
+    /// Rust side. NULL for an argument that is not a JSON object, and on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_grant_void_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? voidJson);
+
+    /// <summary>
     /// Every fixed word on the private-inference offer and settings card, as
     /// an owned JSON object.
     ///
