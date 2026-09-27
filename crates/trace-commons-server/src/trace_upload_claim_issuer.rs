@@ -2049,7 +2049,9 @@ impl TraceUploadClaimIssuerState {
             })?;
             // The cache answers first for latency; only used to short-circuit
             // an obviously-unknown code before paying for the database
-            // round trip below.
+            // round trip below. A use in the separate ingest process may leave
+            // this entry cached, but onboard_device_key's final transaction
+            // still enforces the durable global use counter.
             match registry.lookup(&subject_hash) {
                 Ok(Some(_)) => {}
                 Ok(None) => {
@@ -2613,7 +2615,7 @@ fn audience_claim_contains(audience: Option<&serde_json::Value>, expected: &str)
     }
 }
 
-fn valid_onboard_invite_code(invite_code: &str) -> bool {
+pub fn valid_onboard_invite_code(invite_code: &str) -> bool {
     invite_code.len() == 16
         && invite_code
             .chars()

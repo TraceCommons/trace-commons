@@ -43,6 +43,115 @@ pub struct Status {
     /// default is the state that claims nothing.
     #[serde(default)]
     pub routing: RoutingStatus,
+    /// Grants the daemon voided that no shell has shown yet (R6 of the
+    /// connect-and-forget design). Kept as the daemon sent them: each goes
+    /// back to `consent_copy::void_notice_for_wire`, which reads `kind` and
+    /// `reasons` and returns the words, so this shell never does. Absent on
+    /// a daemon older than the field, which has voided nothing it can say.
+    #[serde(default)]
+    pub grant_voids: Vec<serde_json::Value>,
+    /// Approved sessions held because the privacy witness is busy. Read
+    /// independently of `health` for the reason `daily_budget` is: a higher
+    /// label can hold the slot while these sessions are still waiting.
+    /// Absent on a daemon older than the field, which holds nothing on it.
+    #[serde(default)]
+    pub witness_capacity: WitnessCapacity,
+}
+
+/// `status.witness_capacity`. A count and one timestamp; nothing identifying.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WitnessCapacity {
+    #[serde(default)]
+    pub waiting_sessions: u64,
+    /// When the first held session is tried again, rendered in local time.
+    #[serde(default)]
+    pub next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Status {
+    /// The health banner's lines, in order: the health label's own
+    /// sentence, the spent budget, and sessions waiting on the witness.
+    ///
+    /// The label's sentence steps aside where a line below says the same
+    /// thing with real numbers: `daily-cap-reached` for the budget, and
+    /// `witness-saturated` for the witness. Both of those are drawn from
+    /// their own status objects rather than waiting for the label, because
+    /// the slot holds one label and either can be masked.
+    pub fn health_banner_lines(&self) -> Vec<String> {
+        let witness = self.witness_capacity_line();
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(label) = self.health.last_error_label.as_deref() {
+            let shown_below = (label == "daily-cap-reached" && self.daily_budget.blocked)
+                || (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some());
+            if !shown_below {
+                lines.push(crate::copy::health_sentence(label).to_string());
+            }
+        }
+        if self.daily_budget.blocked {
+            lines.push(crate::copy::daily_cap_sentence(
+                self.daily_budget.blocked_entries,
+                self.daily_budget.resets_at,
+            ));
+        }
+        lines.extend(witness);
+        lines
+    }
+
+    /// The core's notice for sessions waiting on a busy witness, as one
+    /// banner line: its title, its counted body, and the next try in local
+    /// time when the daemon gave one. `None` when nothing is waiting.
+    fn witness_capacity_line(&self) -> Option<String> {
+        let waiting = self.witness_capacity.waiting_sessions;
+        if waiting == 0 {
+            return None;
+        }
+        let notice = crate::copy::witness_capacity_notice(waiting);
+        let mut line = format!("{}. {}", notice.title, notice.body);
+        if let Some(at) = self.witness_capacity.next_retry_at {
+            line.push_str(&format!(
+                " {}: {}.",
+                notice.next_check,
+                at.with_timezone(&chrono::Local).format("%H:%M")
+            ));
+        }
+        Some(line)
+    }
+}
+
+/// One void notice as the window draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantVoidCard {
+    /// For `acknowledge_grant_voids`. An element without one is still shown;
+    /// it just cannot be acknowledged.
+    pub id: Option<u64>,
+    /// The core's words, from `consent_copy::void_notice_for_wire`.
+    pub notice: trace_commons_contributor::consent_copy::VoidNoticeCopy,
+    /// The project "Turn back on" arms, present only when the core offered
+    /// the button -- never on the grant's notice or an unplaced one.
+    pub rearm_project_id: Option<String>,
+}
+
+impl Status {
+    /// Every void, as the cards the window draws.
+    pub fn grant_void_notices(&self) -> Vec<GrantVoidCard> {
+        self.grant_voids
+            .iter()
+            .filter_map(|element| {
+                let notice = crate::copy::void_notice_for_wire(element)?;
+                let rearm_project_id = notice
+                    .rearm_action
+                    .and_then(|_| element.get("project_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                Some(GrantVoidCard {
+                    id: element.get("id").and_then(serde_json::Value::as_u64),
+                    notice,
+                    rearm_project_id,
+                })
+            })
+            .collect()
+    }
 }
 
 /// `status.routing`. Three states and one per-process timestamp; nothing
@@ -1017,6 +1126,118 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_with_voids(voids: serde_json::Value) -> Status {
+        serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": null, "since": null },
+            "grant_voids": voids,
+        }))
+        .expect("status decodes")
+    }
+
+    /// R6's void notice: every element becomes the core's words, with the
+    /// id `acknowledge_grant_voids` takes. The shell never picks the words.
+    #[test]
+    fn each_grant_void_becomes_the_cores_notice_with_its_id() {
+        let project = serde_json::json!({
+            "id": 4, "kind": "project", "project_id": "p", "project_label": "api",
+            "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T12:00:00Z",
+        });
+        let grant = serde_json::json!({
+            "id": 5, "kind": "automatic_grant", "project_id": null, "project_label": null,
+            "reasons": ["destination-changed"], "voided_at": "2026-09-26T12:00:00Z",
+        });
+        let status = status_with_voids(serde_json::json!([project.clone(), grant.clone()]));
+        let notices = status.grant_void_notices();
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].id, Some(4));
+        assert_eq!(
+            notices[0].notice,
+            trace_commons_contributor::consent_copy::void_notice_for_wire(&project).unwrap()
+        );
+        assert_eq!(notices[1].id, Some(5));
+        assert_eq!(
+            notices[1].notice,
+            trace_commons_contributor::consent_copy::void_notice_for_wire(&grant).unwrap()
+        );
+        // "Turn back on" arms the project's own id, and only there: the
+        // grant's notice has no project to arm.
+        assert_eq!(notices[0].rearm_project_id.as_deref(), Some("p"));
+        assert!(notices[0].notice.rearm_action.is_some());
+        assert_eq!(notices[1].rearm_project_id, None);
+    }
+
+    fn status_with(health: Option<&str>, capacity: serde_json::Value) -> Status {
+        serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": health, "since": null },
+            "witness_capacity": capacity,
+        }))
+        .expect("status decodes")
+    }
+
+    /// Sessions held on a busy witness get the core's notice in the health
+    /// banner, counted, with the next try -- and the bare label's own line
+    /// steps aside for it.
+    #[test]
+    fn sessions_waiting_on_the_witness_get_the_cores_notice_in_the_banner() {
+        let status = status_with(
+            Some("witness-saturated"),
+            serde_json::json!({"waiting_sessions": 2, "next_retry_at": "2030-01-01T00:01:00Z"}),
+        );
+        let notice = trace_commons_contributor::consent_copy::witness_capacity_notice(2);
+        let lines = status.health_banner_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with(notice.title), "{}", lines[0]);
+        assert!(lines[0].contains(&notice.body), "{}", lines[0]);
+        assert!(lines[0].contains(notice.next_check), "{}", lines[0]);
+    }
+
+    /// A higher label holds the slot, and the waiting sessions are still told.
+    #[test]
+    fn a_higher_label_does_not_hide_sessions_waiting_on_the_witness() {
+        let status = status_with(
+            Some("queue-full"),
+            serde_json::json!({"waiting_sessions": 1, "next_retry_at": null}),
+        );
+        let lines = status.health_banner_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], crate::copy::health_sentence("queue-full"));
+        assert!(
+            !lines[1]
+                .contains(trace_commons_contributor::consent_copy::WITNESS_CAPACITY_NEXT_CHECK)
+        );
+    }
+
+    /// Nothing waiting, or a daemon older than the field: no witness line.
+    #[test]
+    fn nothing_waiting_on_the_witness_adds_nothing() {
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.health_banner_lines().is_empty());
+        let none = status_with(
+            None,
+            serde_json::json!({"waiting_sessions": 0, "next_retry_at": null}),
+        );
+        assert!(none.health_banner_lines().is_empty());
+    }
+
+    /// A daemon older than the field has nothing to report; an element the
+    /// core cannot place is still shown, in the core's words.
+    #[test]
+    fn grant_voids_default_to_none_and_an_unplaced_one_is_still_shown() {
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.grant_void_notices().is_empty());
+
+        let odd = status_with_voids(serde_json::json!([{ "id": 7, "kind": "folder" }]));
+        let notices = odd.grant_void_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].id, Some(7));
+        assert!(!notices[0].notice.title.is_empty());
+        assert_eq!(notices[0].rearm_project_id, None, "nothing to arm");
+    }
 
     /// The defect this fixes: `ui::preview` used to call `App::offer_undo`
     /// on any `Ok` response from `approve`, ignoring `approved`. Correct

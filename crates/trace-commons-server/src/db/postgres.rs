@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
+#[path = "postgres_account_trust.rs"]
+mod account_trust;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
 #[path = "postgres_public_run.rs"]
@@ -169,6 +171,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenant_policies",
     "trace_tenant_access_grants",
     "trace_submissions",
+    "trace_witness_certificate_evidence",
     "trace_object_refs",
     "trace_derived_records",
     "trace_audit_events",
@@ -204,6 +207,17 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "device_keys",
     "onboarding_invites",
     "trace_accounts",
+    "trace_account_trust",
+    "trace_account_invite_grants",
+    "trace_account_trust_events",
+    "trace_account_admission_budget",
+    "trace_account_admission_submissions",
+    "trace_account_trust_facts",
+    "trace_source_sessions",
+    "trace_submission_sessions",
+    "trace_account_inference_connections",
+    "trace_account_inference_connection_requests",
+    "trace_account_inference_connection_events",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",
@@ -895,6 +909,40 @@ pub async fn apply_and_record_migration(
     Ok(())
 }
 
+/// Decide what to do with one `MIGRATIONS` row, given the name
+/// `_trace_commons_migrations` holds for its version, if any.
+///
+/// `Ok(false)`: not recorded, so apply it. `Ok(true)`: recorded under this
+/// row's own name, so it is already applied. `Err`: recorded under a *different*
+/// name, meaning another migration already took this version number, so this
+/// row's SQL has never run here.
+///
+/// The runner used to check the version alone, and skipped the row in that
+/// last case. Two branches that each add the next free version (say two
+/// different `V75`s) both pass every check on their own, and whichever merges
+/// second never runs on a database that applied the first: its tables are
+/// missing, and nothing says so until something queries them. Refusing to start
+/// turns that into a boot failure naming both migrations, which is the only
+/// point at which it can still be fixed by renumbering.
+///
+/// Every recorded name on `main` equals its file stem and none has ever been
+/// renamed, so this check cannot refuse a database that `main` migrated.
+fn recorded_migration_state(
+    recorded_name: Option<&str>,
+    version: i32,
+    expected_name: &str,
+) -> Result<bool, DatabaseError> {
+    match recorded_name {
+        None => Ok(false),
+        Some(recorded) if recorded == expected_name => Ok(true),
+        Some(recorded) => Err(DatabaseError::Migration(format!(
+            "V{version} is already recorded as `{recorded}`, but this build's V{version} is \
+             `{expected_name}`; two migrations claim the same version, so `{expected_name}` \
+             has never been applied here. Renumber one of them; refusing to skip it"
+        ))),
+    }
+}
+
 /// Every migration in `migrations/`, in the order `run_migrations` applies
 /// them: `(version, recorded name, SQL text)`. The recorded name is the file
 /// stem and the SQL is the file itself, embedded at compile time.
@@ -1347,10 +1395,154 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "public_run_function_acl",
         include_str!("../../../../migrations/V74__public_run_function_acl.sql"),
     ),
+    (
+        75,
+        "account_trust",
+        include_str!("../../../../migrations/V75__account_trust.sql"),
+    ),
+    (
+        76,
+        "trace_witness_certificate_evidence",
+        include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+    ),
+    (
+        77,
+        "account_admission",
+        include_str!("../../../../migrations/V77__account_admission.sql"),
+    ),
+    (
+        78,
+        "trace_source_sessions",
+        include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+    ),
+    (
+        79,
+        "inference_connection",
+        include_str!("../../../../migrations/V79__inference_connection.sql"),
+    ),
+    (
+        80,
+        "account_trust_merge",
+        include_str!("../../../../migrations/V80__account_trust_merge.sql"),
+    ),
 ];
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn select_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
+        catalog: &crate::inference_connection::OperatorInferenceConnection,
+    ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
+    {
+        PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
+    }
+
+    async fn current_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        catalog: &[crate::inference_connection::OperatorInferenceConnection],
+    ) -> Result<
+        Option<crate::db::postgres_inference_connection::InferenceConnectionStatus>,
+        DatabaseError,
+    > {
+        PgBackend::current_inference_connection(self, tenant, account, catalog).await
+    }
+
+    async fn disconnect_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        connection_id: Uuid,
+    ) -> Result<crate::db::postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError>
+    {
+        PgBackend::disconnect_inference_connection(self, tenant, account, connection_id).await
+    }
+
+    async fn record_account_trust_fact(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        source: crate::account_trust::TrustFactSource,
+    ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
+        PgBackend::record_account_trust_fact(self, account, source).await
+    }
+    async fn legacy_admission_record(
+        &self,
+        tenant: &str,
+        submission: Uuid,
+    ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
+        PgBackend::legacy_admission_record(self, tenant, submission).await
+    }
+    async fn resume_legacy_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: Uuid,
+        body_hash: &str,
+        lease: Uuid,
+        lease_seconds: i64,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        PgBackend::resume_legacy_admission(
+            self,
+            tenant,
+            anchor,
+            submission,
+            body_hash,
+            lease,
+            lease_seconds,
+        )
+        .await
+    }
+    async fn account_admission_record(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionRecord>, DatabaseError> {
+        PgBackend::account_admission_record(self, tenant, submission).await
+    }
+    async fn reserve_account_admission(
+        &self,
+        request: &crate::admission_ledger::AccountAdmissionReservation,
+    ) -> Result<crate::admission_ledger::AccountAdmissionResult, DatabaseError> {
+        PgBackend::reserve_account_admission(self, request).await
+    }
+
+    async fn account_admission_status(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        principal: &str,
+        policy: &crate::account_trust::BoundedPolicy,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionStatus>, DatabaseError> {
+        PgBackend::account_admission_status(self, account, principal, policy).await
+    }
+
+    async fn transition_account_admission(
+        &self,
+        tenant: &str,
+        principal: &str,
+        account: Uuid,
+        submission: Uuid,
+        lease: Uuid,
+        next: &str,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::transition_account_admission(
+            self, tenant, principal, account, submission, lease, next,
+        )
+        .await
+    }
+    async fn redeem_account_invite(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        invite_hash: &str,
+        idempotency_key: Uuid,
+    ) -> Result<crate::db::AccountInviteRedemption, DatabaseError> {
+        self.redeem_account_invite_in_tx(tenant, account, invite_hash, idempotency_key)
+            .await
+    }
     async fn get_reward_offer(
         &self,
         program: Uuid,
@@ -1414,6 +1606,9 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::account_admission_runtime_ready(self).await
+    }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         self.check_admission_runtime().await
     }
@@ -1597,13 +1792,15 @@ impl Database for PgBackend {
                 )
                 .await?;
             for (version, name, sql) in MIGRATIONS {
-                let already_applied = client
+                let recorded_name: Option<String> = client
                     .query_opt(
-                        "SELECT 1 FROM _trace_commons_migrations WHERE version = $1",
+                        "SELECT name FROM _trace_commons_migrations WHERE version = $1",
                         &[version],
                     )
                     .await?
-                    .is_some();
+                    .map(|row| row.get(0));
+                let already_applied =
+                    recorded_migration_state(recorded_name.as_deref(), *version, name)?;
                 if !already_applied {
                     apply_and_record_migration(&mut client, *version, name, sql).await?;
                 }
@@ -3283,6 +3480,14 @@ impl Database for PgBackend {
         self.near_anchor_for_principal(tenant, principal).await
     }
 
+    async fn get_near_provisioned_account(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        self.near_account_for_principal(tenant, principal).await
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         public_key: &str,
@@ -4573,6 +4778,48 @@ impl Database for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)? as i64;
 
+        // Source-session withdrawal is account-scoped. Carry B's sessions onto
+        // A so a withdrawal made by either identity reaches every mapped
+        // version, and a session B already withdrew stays withdrawn for
+        // resumed uploads under A (withdrawal wins on overlap); the mappings
+        // follow. This runs through V78's SECURITY DEFINER function, so the
+        // merge-executing login needs no privilege on the session tables. The
+        // function accepts only a proposal consumed by this transaction, like
+        // the reward hook above, so the consume must stay outside a SAVEPOINT.
+        let source_sessions_moved: i64 = tx
+            .query_one(
+                "SELECT public.trace_source_sessions_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
+        // Invite trust follows the identity: B's grant rows (with their
+        // revocations) are copied onto A, and A's authority is re-derived from
+        // its combined unrevoked grants, so an invited B does not come out
+        // uninvited and a revoked grant confers nothing. V80's definer function
+        // does this under the same consumed-proposal proof as the hooks above;
+        // the rule is stated in that migration.
+        let invite_grants_carried: i64 = tx
+            .query_one(
+                "SELECT public.trace_account_trust_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.
         tx.execute(
@@ -4606,6 +4853,8 @@ impl Database for PgBackend {
             "principals_moved": principals_moved,
             "authenticators_moved": authenticators_moved,
             "public_runs_moved": public_runs_moved,
+            "source_sessions_moved": source_sessions_moved,
+            "invite_grants_carried": invite_grants_carried,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (
@@ -6871,6 +7120,74 @@ mod tests {
         );
     }
 
+    /// Two changes that each add a `V75` pass every check on their own branch
+    /// and collide on merge. On a fresh database the second insert fails its
+    /// primary key; on a database that already applied the first, the runner
+    /// used to skip the second silently. Refuse the table outright instead.
+    #[test]
+    fn migration_versions_are_unique_and_strictly_increasing() {
+        for pair in super::MIGRATIONS.windows(2) {
+            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
+            assert!(
+                later > earlier,
+                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
+            );
+        }
+    }
+
+    /// The directory can hold two files with one version and different stems
+    /// (two branches, both merged); the table test above only sees the one the
+    /// table lists. Catch the duplicate at the file level too.
+    #[test]
+    fn no_two_migration_files_share_a_version() {
+        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
+        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
+            let name = entry
+                .expect("dir entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8 name");
+            let Some(rest) = name.strip_prefix('V') else {
+                continue;
+            };
+            let Some((version, _)) = rest.split_once("__") else {
+                continue;
+            };
+            let version: i32 = version.parse().expect("numeric migration version");
+            if let Some(previous) = seen.insert(version, name.clone()) {
+                panic!("V{version} is claimed by both {previous} and {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unrecorded_version_is_applied() {
+        assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
+    }
+
+    #[test]
+    fn a_version_recorded_under_its_own_name_is_skipped() {
+        assert!(
+            super::recorded_migration_state(Some("account_trust"), 75, "account_trust")
+                .expect("not an error")
+        );
+    }
+
+    #[test]
+    fn a_version_recorded_under_another_name_refuses_to_start() {
+        let err =
+            super::recorded_migration_state(Some("versioned_pipeline_runs"), 75, "account_trust")
+                .expect_err("a collision must refuse, not skip");
+        let message = err.to_string();
+        assert!(
+            message.contains("V75")
+                && message.contains("versioned_pipeline_runs")
+                && message.contains("account_trust"),
+            "the refusal must name the version and both stems: {message}"
+        );
+    }
+
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");
@@ -6997,6 +7314,11 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V75__account_trust.sql"),
+            include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+            include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+            include_str!("../../../../migrations/V79__inference_connection.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7019,6 +7341,11 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V75__account_trust.sql"),
+            include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+            include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+            include_str!("../../../../migrations/V79__inference_connection.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

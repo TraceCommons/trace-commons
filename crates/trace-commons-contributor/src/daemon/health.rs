@@ -33,8 +33,8 @@ pub const LABEL_DAILY_CAP_REACHED: &str = "daily-cap-reached";
 /// whose evidence was declined that the service is down leaves them retrying
 /// a queue that will never drain.
 pub const LABEL_ADMISSION_REFUSED: &str = "admission-refused";
-/// The account's admission budget for this window is spent. The commons is
-/// working; it has taken as much from this account as the window allows.
+/// Account admission allowance is exhausted. The policy may be lifetime or
+/// fixed-period; this health condition does not promise an automatic reset.
 pub const LABEL_ADMISSION_LIMIT_REACHED: &str = "admission-limit-reached";
 /// The NEAR AI first-use notice has not been delivered interactively yet, so
 /// the daemon will not send anything through that filter.
@@ -59,6 +59,15 @@ pub const LABEL_QUEUE_FULL: &str = "queue-full";
 /// by three different surfaces at three different points -- reading the
 /// file, building the envelope, and a one-shot `submit` line.
 pub const LABEL_SESSION_TOO_LARGE: &str = "session-too-large";
+/// Approved sessions are waiting because the privacy witness is at capacity
+/// (`503 witness_saturated`). Nothing is sent until it can check them; the
+/// daemon asks again after the witness's own delay. `status.witness_capacity`
+/// carries how many are waiting and when the next attempt is due, because
+/// this slot holds one label and a higher one can mask it.
+///
+/// The same string as the queue reason those sessions carry,
+/// `submit::REASON_WITNESS_SATURATED`.
+pub const LABEL_WITNESS_SATURATED: &str = crate::submit::REASON_WITNESS_SATURATED;
 /// A declared export cannot be imported by this build's qualified reader.
 pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-version-unsupported";
 
@@ -70,7 +79,7 @@ pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-ver
 /// same kind of fact as a daily cap, and a refused contribution is a decision
 /// somewhere else that the contributor cannot argue with -- burning the clock
 /// on either would delete traces for a condition they had no move against.
-const EXPIRY_BLOCKING_LABELS: [&str; 9] = [
+const EXPIRY_BLOCKING_LABELS: [&str; 10] = [
     LABEL_NOT_LOGGED_IN,
     LABEL_PII_FILTER_UNAVAILABLE,
     LABEL_CLAIM_MINT_FAILED,
@@ -80,6 +89,7 @@ const EXPIRY_BLOCKING_LABELS: [&str; 9] = [
     LABEL_CANARY_FAILED,
     LABEL_ADMISSION_REFUSED,
     LABEL_ADMISSION_LIMIT_REACHED,
+    LABEL_WITNESS_SATURATED,
 ];
 
 /// Return the precedence of a health label, where lower values indicate higher
@@ -99,17 +109,22 @@ pub fn precedence(label: &str) -> u8 {
         LABEL_ADMISSION_REFUSED => 5,
         LABEL_INGEST_UNREACHABLE => 6,
         LABEL_QUEUE_FULL => 7,
+        // Below a full queue, which the contributor can act on, and above
+        // the budgets: a busy witness clears on its own, sooner than a
+        // window rolls over. `status.witness_capacity` reports it whatever
+        // holds this slot.
+        LABEL_WITNESS_SATURATED => 8,
         // Beside the daily cap, which it is the server-side twin of: both are
         // budgets that come back on their own.
-        LABEL_ADMISSION_LIMIT_REACHED => 8,
-        LABEL_DAILY_CAP_REACHED => 9,
+        LABEL_ADMISSION_LIMIT_REACHED => 9,
+        LABEL_DAILY_CAP_REACHED => 10,
         // Last, below every condition above it, because it is the only one
         // that is not about the daemon: everything else here stops the
         // whole pipeline, while this describes one file the contributor can
         // still work around by leaving it alone. It must never mask an
         // outage.
-        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 10,
-        _ => 11,
+        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 11,
+        _ => 12,
     }
 }
 
@@ -284,6 +299,7 @@ mod tests {
             LABEL_CLAIM_MINT_FAILED,
             LABEL_INGEST_UNREACHABLE,
             LABEL_QUEUE_FULL,
+            LABEL_WITNESS_SATURATED,
             LABEL_DAILY_CAP_REACHED,
         ];
         let mut seen = std::collections::BTreeSet::new();

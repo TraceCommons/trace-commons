@@ -2173,7 +2173,7 @@ pub const CERTIFICATE_LIST_EMPTY: &str =
     "Nothing here yet. A session joins this list once your witness has reviewed it.";
 
 pub const ATTESTATION_ATTESTED: &str =
-    "This session carries a checkable copy of the model call it came from.";
+    "This session carries a checkable copy of its last model call.";
 
 /// `unattested_permanent`.
 ///
@@ -2183,7 +2183,7 @@ pub const ATTESTATION_ATTESTED: &str =
 /// eligibility twin does -- somebody told only "there is no copy" tries to
 /// make one -- without the eligibility sentence's "cannot be sent", which is
 /// simply untrue for an invited contributor.
-pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy of the model call it came from, and \
+pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy of its last model call, and \
      nothing you change now will add one to work already finished.";
 
 /// `unattested_configuration`.
@@ -2191,7 +2191,7 @@ pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy
 /// **The only mark whose sentence names a setting**, because it is the only
 /// one where changing something helps. The row stays about its own session:
 /// what the setting changes is the sessions recorded from now on.
-pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no copy of the model call it came from. A setting \
+pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no copy of its last model call. A setting \
      decides whether the ones you record from now on will.";
 
 /// `unknown`, and any mark label this build has never heard of.
@@ -2201,7 +2201,7 @@ pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no 
 /// gets its own sentence rather than borrowing a known one, because a
 /// contributor told "no copy" about a session that has one will stop offering
 /// work that is fine.
-pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of the model call it came from has \
+pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of its last model call has \
      not been worked out. That is not the same as a no.";
 
 /// `no_inference_call`.
@@ -2487,7 +2487,7 @@ pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
 /// weight. See #810.
 ///
 /// **Keyed off [`AdmissionRefusal`] rather than off re-typed strings, and
-/// that is the point.** These five labels reach a queue entry's
+/// that is the point.** These seven labels reach a queue entry's
 /// `reason_label` in the server's wire spelling -- `admission_refused`, with
 /// an underscore -- while `daemon::health`'s constants for the same events
 /// are hyphenated. A table written against the wrong spelling would match
@@ -2495,7 +2495,7 @@ pub fn near_ai_enroll_tone(label: &str) -> PrivateInferenceTone {
 /// while looking fixed. Matching on the enum takes the spelling from the
 /// protocol crate and makes the set exhaustive, so neither can drift.
 ///
-/// `None` for anything that is not one of the five. The shells' existing
+/// `None` for anything that is not one of the seven. The shells' existing
 /// tables still answer those, and claiming them here would silently take over
 /// wording that has not been moved into this crate yet -- see the follow-up
 /// for the rest of `queue_outcome_counts`.
@@ -2505,6 +2505,10 @@ pub fn outcome_refusal_line(label: &str) -> Option<&'static str> {
     Some(match AdmissionRefusal::from_label(label)? {
         AdmissionRefusal::Refused => OUTCOME_ADMISSION_REFUSED,
         AdmissionRefusal::LimitReached => OUTCOME_ADMISSION_LIMIT_REACHED,
+        AdmissionRefusal::AccountLimitReached => OUTCOME_ACCOUNT_LIMIT_REACHED,
+        AdmissionRefusal::AccountIdentityUnlinked => {
+            "Sent, and this identity needs a verified account link"
+        }
         AdmissionRefusal::InProgress => OUTCOME_ADMISSION_IN_PROGRESS,
         AdmissionRefusal::IdentityConflict => OUTCOME_ADMISSION_IDENTITY_CONFLICT,
         AdmissionRefusal::EvidenceRefused => OUTCOME_ADMISSION_EVIDENCE_REFUSED,
@@ -2534,6 +2538,7 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         }
         health::LABEL_PII_FILTER_UNAVAILABLE => "Waiting for the privacy scan",
         health::LABEL_CANARY_FAILED => "Privacy scan failed its self-test",
+        health::LABEL_WITNESS_SATURATED => "Waiting for the privacy witness; not sent yet",
         _ => "Status unavailable",
     }
 }
@@ -2545,6 +2550,8 @@ pub const OUTCOME_ADMISSION_REFUSED: &str = "Sent, and the commons declined it";
 /// `admission_limit_reached`. Not a judgement on the work: the account's
 /// allowance for this window is spent, and the window rolls over.
 pub const OUTCOME_ADMISSION_LIMIT_REACHED: &str = "Sent, and over the account's allowance for now";
+pub const OUTCOME_ACCOUNT_LIMIT_REACHED: &str =
+    "Sent, and this account has reached its contribution allowance";
 
 /// `admission_in_progress`. **Not a refusal**, and it must not read as one.
 /// Another attempt at the same submission holds the lease, which the next
@@ -2678,6 +2685,7 @@ mod tests {
             health::LABEL_CLAIM_MINT_FAILED,
             health::LABEL_PII_FILTER_UNAVAILABLE,
             health::LABEL_CANARY_FAILED,
+            health::LABEL_WITNESS_SATURATED,
         ] {
             let line = queue_outcome_line(label);
             assert_ne!(line, "Status unavailable", "{label}");
@@ -3715,6 +3723,30 @@ mod tests {
         }
     }
 
+    /// A session is many model calls, and the witness attests only the
+    /// last one (`trace_commons_protocol::witness_provenance`: a
+    /// contribution's *final* declared inference call). No mark sentence may
+    /// read as if the session were a single call, and each names the call
+    /// it actually covers.
+    #[test]
+    fn attestation_marks_name_the_last_model_call_not_the_session() {
+        for line in [
+            ATTESTATION_ATTESTED,
+            ATTESTATION_UNATTESTED_PERMANENT,
+            ATTESTATION_UNATTESTED_CONFIGURATION,
+            ATTESTATION_UNKNOWN,
+        ] {
+            assert!(
+                !line.contains("the model call it came from"),
+                "reads as if the session were one call: {line:?}"
+            );
+            assert!(
+                line.contains("its last model call"),
+                "does not name the call it covers: {line:?}"
+            );
+        }
+    }
+
     /// An unrecognised mark reads as unevaluated and NEVER as "no copy":
     /// telling a contributor their attested session carries nothing is the
     /// one wrong answer this table can give.
@@ -4190,7 +4222,7 @@ mod tests {
         }
     }
 
-    /// Every one of the five says its own thing, and a label that is not a
+    /// Every one of the seven says its own thing, and a label that is not a
     /// refusal is not claimed.
     #[test]
     fn each_refusal_says_its_own_thing_and_nothing_else_is_claimed() {

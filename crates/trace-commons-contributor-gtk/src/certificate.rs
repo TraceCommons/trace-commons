@@ -16,7 +16,7 @@
 //!
 //! **This is not [`crate::attestation`], and the difference is the whole
 //! point.** The mark answers *does this session carry a checkable copy of
-//! the model call that produced it?* This answers *is a certificate held
+//! its last model call?* This answers *is a certificate held
 //! over what was reviewed?* Holds-a-certificate, is-attestable and
 //! was-attested are three different facts about a session, and reading the
 //! mark to build this list would be reading the wrong one.

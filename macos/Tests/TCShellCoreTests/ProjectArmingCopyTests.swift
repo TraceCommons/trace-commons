@@ -93,13 +93,13 @@ final class ProjectArmingCopyTests: XCTestCase {
         XCTAssertEqual(
             ProjectArmingCopy.confirmationBody,
             """
-            Every future session in this project will be scrubbed and contributed \
-            without asking you. You won't review them first.
+            Sessions from this project will be scrubbed and contributed without asking \
+            you, including any already waiting. You won't review them first.
 
-            A session is sent a day after you last work on it, so there is time to \
-            change your mind.
+            No session is sent until it has been quiet for a day.
 
-            You can turn this off at any time.
+            You can turn this off at any time. Anything it hasn't sent yet goes back to \
+            waiting for you, and anything already sent stays sent.
             """
         )
     }

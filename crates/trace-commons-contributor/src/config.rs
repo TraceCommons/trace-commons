@@ -43,6 +43,11 @@ pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
 /// this machine the ability to read and withdraw the previous contributor's
 /// traces.
 pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
+/// This device's inference-connection state (`daemon::inference_connection`):
+/// a selection awaiting explicit installation here, and what the last
+/// installation wrote into the config. Belongs to this enrollment, so it is
+/// swept by `wipe()` with the config it describes.
+pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -142,6 +147,20 @@ pub struct ContributorConfig {
     /// The witness's own `required` mode is where a refusal belongs.
     #[serde(default)]
     pub inference_receipt_check_attestation: bool,
+    /// The contributor chose `consent_scopes` themselves, through
+    /// `set_consent_scopes`, rather than holding what enrollment saved.
+    ///
+    /// R7 of the connect-and-forget design: the Flow 1 grant is refused
+    /// without it (`grant_automatic`, `automatic-grant-scopes-not-chosen`).
+    /// A scope list alone cannot say this, because `validate_scopes` always
+    /// adds the floor scope and an invite enrollment saves it with nobody
+    /// having picked it. Every enrollment path writes `false`; only
+    /// `set_consent_scopes` writes `true`, and a new enrollment starts over.
+    ///
+    /// `#[serde(default)]` is required: a config written before this field
+    /// existed has no such key, and reads as not chosen.
+    #[serde(default)]
+    pub consent_scopes_chosen: bool,
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -787,6 +806,7 @@ impl ConfigStore {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -806,6 +826,7 @@ impl ConfigStore {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1241,6 +1262,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
@@ -1286,6 +1308,15 @@ mod tests {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":[]}"#;
         let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.inference_receipt_check_attestation);
+    }
+
+    /// R7: a config written before the scope choice was recorded holds no
+    /// choice, so the Flow 1 grant stays refused until the picker runs.
+    #[test]
+    fn a_config_that_predates_the_scope_choice_record_holds_no_choice() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.consent_scopes_chosen);
     }
 
     #[test]
@@ -1381,6 +1412,7 @@ mod tests {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();

@@ -374,8 +374,8 @@ span labels are mapped to `unknown` so a malformed sidecar cannot smuggle
 emails, paths, or tokens through label names.
 
 The sidecar runs as an untrusted local subprocess with a cleared environment
-except `PATH`, `LANG`, and `LC_ALL`. Sidecar failures are non-fatal: the client
-falls back to deterministic local redaction rather than uploading raw content.
+except `PATH`, `LANG`, and `LC_ALL`. Sidecar failures refuse redaction: no deterministic-only fallback is
+returned for contribution or witness certification.
 
 | Variable | Effect |
 |----------|--------|
@@ -1177,6 +1177,21 @@ scoped standing policy and cannot widen capture beyond it.
 
 ## Production hardening roadmap
 
+Account-admission submissions require `source_session: {adapter, native_id}`.
+The server validates this identity, stores only an account-scoped digest, and
+rejects a resumed version after any mapped version is withdrawn. Authenticated
+clients can check `POST /v1/account/source-sessions/status` before witness or
+upload; it returns `active`, `withdrawn`, or `unsupported`. The submit
+transaction is the final gate, since the status read can race withdrawal.
+
+This account-admission mode is default-off. Older submissions without a
+source-session mapping retain submission-ID withdrawal only. Existing V43
+tombstones do not contain a native source ID, and neither a content hash nor
+`conversation_id` can reliably reconstruct it. Previously stored local
+sessions must be held and re-confirmed before a client enables automatic
+contribution; parser-bound IDs and offline hold/re-grant behavior require
+client-side verification before rollout.
+
 The current implementation is a usable MVP for local development and controlled
 internal pilots. A production deployment needs the following before broad tenant
 rollout.
@@ -1229,8 +1244,8 @@ unapproved/missing-replayability sources.
 **Privacy Filter sidecar operations.** Run sidecars as untrusted local
 subprocesses/containers with timeouts, output-size limits, and no access to
 Trace Commons credentials. Pass only the minimum text needed. Accept only the
-safe projection. Treat failures as non-fatal warnings with deterministic
-fallback. Add canary-secret tests.
+safe projection. Treat classifier failures as refusals, with no deterministic-only
+fallback. Run canary-secret tests.
 
 ## Implementation status
 
@@ -1242,7 +1257,7 @@ but with production hardening still open.
 | Local opt-in policy / opt-out | MVP | CLI + scoped web/runtime policy files; submit tokens and issuer workload creds stay in env; hosted tenants can use a guarded HTTPS upload-claim issuer. |
 | Local preview / queue / flush / credit | MVP | Local redacted envelopes, atomic queue writes, malformed-envelope quarantine, scoped `queue-status`, and acknowledgeable/snoozable periodic credit notices via a local retry outbox. |
 | Deterministic local redaction | MVP | Generic secret/path scrubbing, stable placeholders, tool-aware payload handling, Privacy Filter safe projection. |
-| Privacy Filter sidecar | MVP | Command/stdin/stdout path with safe projection, non-fatal fallback, minimal env, stderr hashing, IO limits, canary tests. Container sandboxing still open. |
+| Privacy Filter sidecar | MVP | Command/stdin/stdout path with safe projection, fail-closed classifier errors, minimal env, stderr hashing, IO limits, canary tests. Container sandboxing still open. |
 | Autonomous post-turn / periodic contribution | MVP | Runtime queues/flushes scoped envelopes only under an enabled policy with an endpoint and an eligible envelope; periodic agent-loop worker with typed retry backoff, in-memory EdDSA claim refresh, compaction, and credit-notice drain. |
 | Web settings + preview endpoints | MVP | Authenticated gateway endpoints and UI controls; server-side tenant/user checks are the trust boundary; queue/submit preflight scoped opt-in. |
 | Private ingestion service | MVP | Validates schema/consent, re-runs redaction, computes hashes/credit, optional hourly quotas, stores accepted/quarantined records, serves review/status/export routes; can dark-launch DB dual-write + encrypted artifacts. |
@@ -1258,7 +1273,7 @@ but with production hardening still open.
 | Vector duplicate/novelty index | Partial | DB schema + dedicated worker + metadata indexer + object-ref gating + per-source content-read audits; exact-hash + deterministic-similarity scoring with optional private embedder/search adapters; stale/cross-profile neighbor diagnostics. Deployed vector-store ops + canary evidence open. |
 | Ranking/model utility pipeline | Partial | Offline utility-credit worker; immutable model manifests, calibration runs, holdout registry, server-owned floors, backtest/risk/readiness reports, prediction-credit, worker-run ledger, credit-cycle automation. Deployed evaluator ops + gold/holdout stewardship open. |
 | Benchmark conversion pipeline | Partial | Tenant-scoped candidate artifacts with lifecycle metadata, source-hash revalidation, audits, provenance, idempotent utility credit, evaluator/registry worker routes + outbox, readiness drill. Deployed external evaluator/registry adapter ops open. |
-| Production sidecar operations | Partial | Timeout/IO limits, minimal env, stderr hashing, fallback, safe projection, canary coverage. Container sandboxing + deployment-specific isolation open. |
+| Production sidecar operations | Partial | Timeout/IO limits, minimal env, stderr hashing, fail-closed errors, safe projection, canary coverage. Container sandboxing + deployment-specific isolation open. |
 
 ## Research hooks
 
@@ -1278,3 +1293,54 @@ whole central pipeline:
   hard).
 - `canonical_summary_for_embedding` — redacted-only summaries for embedding and
   duplicate detection.
+
+### Full-pipeline certificate version contract (#991 Z1)
+
+The protocol crate publishes `FULL_REDACTION_PIPELINE_VERSIONS` and
+`is_full_redaction_pipeline_version` for exact membership checks by clients
+and servers. This is a pipeline capability list, not a replacement for
+certificate signature, artifact digest, signer/measurement pinning, consent,
+or the operator's configured witness bypass policy.
+
+Sidecar classifier errors now refuse the operation, just like NEAR AI and
+self-hosted classifier errors. The sidecar suffix is `privacy-filter-sidecar-v2`;
+v1 certificates cannot prove a completed classifier pass and are excluded.
+Deterministic-only, unknown, and extended version strings are also excluded.
+Operators using sidecar witnesses must update the witness and explicitly add
+its new exact version to their operator allowlist before accepting it; no
+operator allowlist is broadened automatically. Existing v1 signatures remain
+historically verifiable but do not satisfy this full-pipeline contract.
+
+### Final-call inference provenance (#991 Z2)
+
+A v2 witness certificate may carry one of three closed inference classes:
+`provider_tee_final_call`, `gateway_final_call`, or explicit `unattested`.
+An attested class means the witness verified a pinned receipt for the **last
+declared inference call** and bound the receipt to that call's original request
+and response body bytes. The model is recorded only when the verified receipt
+bound one. The certificate signs the provenance fields and the SHA-256 of the
+exact redacted request body the contributor submits to ingest (the
+`POST /v1/traces` body), not of any inference request or response. It does not prove
+whole-session authenticity, that earlier calls were included, receipt
+uniqueness or replay prevention, or the correctness of a model's output.
+
+Legacy v1 certificates have no inference claim. Reads label them `legacy_v1`
+and expose the conservative `unattested` policy class; v2 `unattested` is an
+explicit signed claim. The server records a verified certificate's original
+header bytes and the SHA-256 of the received request body in a forced-RLS
+PostgreSQL row. It never stores a transcript in that row or puts the evidence
+bytes in an exported envelope. The PII-backstop bypass is a separate operator
+decision: provenance capture can be enabled by a signing-address and
+measurement pin while that bypass remains off.
+
+The server rescrubs a submission after verification. A matching stored-object
+digest links the active rescrubbed artifact to the historical certificate; it
+does not mean the witness signed the rescrubbed bytes. Policy consumers use the
+tenant-scoped `get_current_verified_witness_evidence` read, which selects the
+current object reference and active submission state in the same database
+transaction without trusting a caller-supplied digest. The object loader must
+verify the selected object's bytes before use. Exact signed-source retries may
+rebind the derived object digest without changing original certificate or body
+evidence. Missing evidence, v1, inactive or revoked submissions, and
+object-digest mismatches do not expose an attested class. File-only ingestion
+has no durable inference-provenance read and makes no such claim.

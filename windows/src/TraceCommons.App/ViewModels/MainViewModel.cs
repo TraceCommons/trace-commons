@@ -80,6 +80,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private HealthNavigationTarget _healthNavigation;
     private ArmingOffer? _armingOffer;
     private HealthCopy? _budget;
+    private HealthCopy? _witness;
     private HistoryRollup _rollup = new();
 
     /// <summary>
@@ -146,6 +147,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     /// <summary>The pending queue, newest state as the daemon reports it.</summary>
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
+
+    /// <summary>
+    /// One card per grant the daemon voided and no shell has shown yet.
+    /// Rebuilt from every status read: a card another shell already
+    /// acknowledged must go, not linger saying something stopped.
+    /// </summary>
+    public ObservableCollection<GrantVoidCard> GrantVoidCards { get; } = new();
 
     /// <summary>
     /// This entry as the queue describes it NOW, or null if it has left the
@@ -686,6 +694,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string BudgetTitle => _budget?.Title ?? string.Empty;
 
     public string BudgetDetail => _budget?.Detail ?? string.Empty;
+
+    // Approved sessions held because the privacy witness is busy. Drawn from
+    // status.witness_capacity rather than the health label, which a higher
+    // label can mask; see SetWitnessCapacity.
+
+    /// <summary>Whether approved sessions are waiting on the privacy witness.</summary>
+    public bool HasWitnessBanner => _witness is not null;
+
+    public string WitnessTitle => _witness?.Title ?? string.Empty;
+
+    public string WitnessDetail => _witness?.Detail ?? string.Empty;
 
     /// <summary>
     /// Whether this condition has an action worth offering.
@@ -1478,7 +1497,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // say the same thing with real numbers, so it has to see
                 // this pass's budget rather than the previous pass's.
                 SetBudget(parsedStatus.DailyBudget);
+                // Likewise the witness banner, which SetHealth steps the bare
+                // witness-saturated line aside for.
+                SetWitnessCapacity(parsedStatus.WitnessCapacity);
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
+                SetGrantVoids(GrantVoidNotices.Cards(parsedStatus.GrantVoids));
             }
 
             DaemonResponse rollup = await _host
@@ -1602,7 +1625,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     private void SetHealth(string? label)
     {
-        HealthCopy? next = _budget is not null && label == "daily-cap-reached"
+        HealthCopy? next = (_budget is not null && label == "daily-cap-reached")
+            || (_witness is not null && label == "witness-saturated")
             ? null
             : HealthCopy.ForLabel(label);
         _healthNavigation = next is null ? HealthNavigationTarget.None : HealthNavigation.ForLabel(label);
@@ -1641,6 +1665,81 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(HasBudgetBanner));
         Raise(nameof(BudgetTitle));
         Raise(nameof(BudgetDetail));
+    }
+
+    private void SetGrantVoids(IReadOnlyList<GrantVoidCard> cards)
+    {
+        GrantVoidCards.Clear();
+        foreach (GrantVoidCard card in cards)
+        {
+            GrantVoidCards.Add(card);
+        }
+    }
+
+    /// <summary>
+    /// The button on one void notice: records that this notice was shown,
+    /// then re-reads status so the daemon's own list decides what stays.
+    /// </summary>
+    public async Task AcknowledgeGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (card.Id is not { } id)
+        {
+            return;
+        }
+
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.AcknowledgeGrantVoids,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, ulong[]> { ["ids"] = new[] { id } }))
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Turn back on" on a project's void notice: the Settings arming call,
+    /// unchanged. The daemon clears the notice when it arms the project; a
+    /// refusal changes nothing, and the notice stays with the core's
+    /// refusal line shown.
+    /// </summary>
+    public async Task RearmGrantVoidAsync(GrantVoidCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (GrantVoidNotices.RearmParams(card) is not { } payload)
+        {
+            return;
+        }
+
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
+            .ConfigureAwait(true);
+
+        Notice = response.IsError ? card.Notice.RearmFailed ?? string.Empty : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Takes status.witness_capacity and re-renders the third banner, in the
+    /// Rust's words. Independent of SetHealth for the reason SetBudget is.
+    /// Compared by value before raising.
+    /// </summary>
+    private void SetWitnessCapacity(WitnessCapacity? capacity)
+    {
+        HealthCopy? next = HealthCopy.ForWitnessCapacity(
+            capacity,
+            WitnessCapacitySurface.Notice(capacity));
+        if (Equals(_witness, next))
+        {
+            return;
+        }
+
+        _witness = next;
+        Raise(nameof(HasWitnessBanner));
+        Raise(nameof(WitnessTitle));
+        Raise(nameof(WitnessDetail));
     }
 
     private void SetPaused(bool paused)

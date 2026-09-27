@@ -29,18 +29,40 @@ public sealed class ConsentCopyTests
     [Fact]
     public void TheContractShapeParses()
     {
-        const string json = """
-            {
-              "gate_statement": "The statement.",
-              "ready_help": "The armed tooltip.",
-              "not_pinned_help": "The disarmed tooltip."
-            }
-            """;
-
-        ConsentCopy copy = Assert.IsType<ConsentCopy>(ConsentSurface.Parse(json));
+        ConsentCopy copy = Assert.IsType<ConsentCopy>(ConsentSurface.Parse(Json(Complete)));
         Assert.Equal("The statement.", copy.GateStatement);
         Assert.Equal("The armed tooltip.", copy.ReadyHelp);
         Assert.Equal("The disarmed tooltip.", copy.NotPinnedHelp);
+        Assert.Equal("The scope.", copy.AutoScrubScope);
+        Assert.Equal("The limit.", copy.AutoScrubLimit);
+        Assert.Equal("Nobody looks.", copy.AutoNoReview);
+    }
+
+    /// <summary>
+    /// A complete payload, one value per field. The refusal cases below each
+    /// differ from it in exactly one field, so a case that means to test one
+    /// empty field is not also refused for a missing one.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> Complete = new Dictionary<string, string>
+    {
+        ["gate_statement"] = "The statement.",
+        ["ready_help"] = "The armed tooltip.",
+        ["not_pinned_help"] = "The disarmed tooltip.",
+        ["auto_scrub_scope"] = "The scope.",
+        ["auto_scrub_limit"] = "The limit.",
+        ["auto_no_review"] = "Nobody looks.",
+    };
+
+    private static string Json(IReadOnlyDictionary<string, string> fields) => JsonSerializer.Serialize(fields);
+
+    /// <summary>One missing and one empty variant of every field.</summary>
+    public static IEnumerable<object?[]> OneFieldShort()
+    {
+        foreach (string field in Complete.Keys)
+        {
+            yield return new object?[] { Json(Complete.Where(p => p.Key != field).ToDictionary(p => p.Key, p => p.Value)) };
+            yield return new object?[] { Json(Complete.ToDictionary(p => p.Key, p => p.Key == field ? string.Empty : p.Value)) };
+        }
     }
 
     /// <summary>
@@ -51,10 +73,7 @@ public sealed class ConsentCopyTests
     /// claim goes is worse than rendering nothing.
     /// </summary>
     [Theory]
-    [InlineData("""{"ready_help":"a","not_pinned_help":"b"}""")]
-    [InlineData("""{"gate_statement":"","ready_help":"a","not_pinned_help":"b"}""")]
-    [InlineData("""{"gate_statement":"a","ready_help":"","not_pinned_help":"b"}""")]
-    [InlineData("""{"gate_statement":"a","ready_help":"b","not_pinned_help":""}""")]
+    [MemberData(nameof(OneFieldShort))]
     [InlineData("not json at all")]
     [InlineData("")]
     [InlineData(null)]
@@ -207,6 +226,7 @@ public sealed class ConsentCopyTests
         {
             // The payload's wire keys, and nothing else.
             "gate_statement", "ready_help", "not_pinned_help",
+            "auto_scrub_scope", "auto_scrub_limit", "auto_no_review",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Trace Commons",
+  "version": "0.1.0",
+  "identifier": "ai.tracecommons.tauri.prototype",
+  "build": {
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../frontend/dist"
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["tracecommons"]
+      }
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Trace Commons",
+        "width": 980,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 560,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "capabilities": ["default"],
+      "csp": {
+        "default-src": "'self' asset:",
+        "connect-src": "ipc: http://ipc.localhost",
+        "font-src": "'self' asset: data:",
+        "img-src": "'self' asset: http://asset.localhost data:",
+        "style-src": "'self' 'unsafe-inline' asset:",
+        "object-src": "'none'"
+      },
+      "devCsp": {
+        "default-src": "'self' http://127.0.0.1:1420",
+        "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420",
+        "font-src": "'self' asset: data: http://127.0.0.1:1420",
+        "img-src": "'self' asset: http://asset.localhost data: http://127.0.0.1:1420",
+        "style-src": "'self' 'unsafe-inline' http://127.0.0.1:1420",
+        "object-src": "'none'"
+      }
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["../assets/trace-commons.ico", "../assets/trace-commons.png"]
+  }
+}

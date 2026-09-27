@@ -249,7 +249,7 @@ fn an_attached_subscriber_receives_the_snapshot_push() {
 /// Attaching where nothing is listening names that, and is distinct from
 /// every start failure.
 #[test]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn attaching_with_no_daemon_says_nothing_is_listening() {
     let dir = tempfile::tempdir().unwrap();
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -258,16 +258,10 @@ fn attaching_with_no_daemon_says_nothing_is_listening() {
     assert_eq!(take_err(err), "no-daemon-listening");
 }
 
-/// A platform whose endpoint cannot carry a held-open connection says so, in
-/// its own fixed label, and does not hang.
-///
-/// The Windows named pipe is a synchronous handle: a reader parked on it does
-/// not run in parallel with a write, so a held-open client never completes a
-/// round trip. An earlier revision of this change shipped that and the
-/// Windows CI job ran one subscribe for forty-five minutes before it was
-/// killed. This test is what stops it coming back silently.
+/// Any future platform without a persistent transport names that limitation
+/// instead of returning a handle that cannot complete a round trip.
 #[test]
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn attaching_is_refused_where_the_transport_cannot_be_held_open() {
     let dir = tempfile::tempdir().unwrap();
     let mut err: *mut c_char = std::ptr::null_mut();

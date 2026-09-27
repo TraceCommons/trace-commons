@@ -917,6 +917,7 @@ fn persist(
         public_since: None,
         witness: Some(witness),
         inference_receipt_endpoint: receipt_endpoint,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: true,
     };
     let session = crate::account_auth::AccountSession {
