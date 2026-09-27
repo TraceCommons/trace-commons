@@ -4,6 +4,7 @@ import {
   getContributorDisclosureCopy,
   getEligibilityCopy,
   getEligibilityGroupCopy,
+  getGrantVoidNotice,
   getProjectIgnoreCopy,
   getQuitConfirmationCopy,
   getRedactionSummary,
@@ -19,6 +20,7 @@ const copyKeys = {
   witnessReview: ["contributor-copy", "witness-review"] as const,
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
+  grantVoid: (id: number) => ["contributor-copy", "grant-void", id] as const,
   eligibility: (label: string, reason: string | null) =>
     ["contributor-copy", "eligibility", label, reason] as const,
   eligibilityGroup: (pending: number, contributable: number | null) =>
@@ -49,6 +51,15 @@ export function useArmingOfferCopy(projectLabel: string, count: number) {
     queryKey: copyKeys.armingOffer(projectLabel, count),
     queryFn: () => getArmingOfferCopy(projectLabel, count),
     enabled: projectLabel.length > 0 && count > 0,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/** The notice for one void. Keyed by its id, which is never reused. */
+export function useGrantVoidNotice(id: number, wire: Record<string, unknown>) {
+  return useQuery({
+    queryKey: copyKeys.grantVoid(id),
+    queryFn: () => getGrantVoidNotice(wire),
     staleTime: Number.POSITIVE_INFINITY,
   });
 }

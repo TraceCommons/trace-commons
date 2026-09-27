@@ -55,6 +55,11 @@ export async function getCoreStatus(): Promise<CoreStatus> {
   return parseCoreStatus(await tauriInvoke("core_status"));
 }
 
+/** Record that the void notices with these ids were shown. Re-arms nothing. */
+export async function acknowledgeGrantVoids(ids: number[]): Promise<void> {
+  await tauriInvoke("acknowledge_grant_voids", { ids });
+}
+
 export async function retryDaemonStartup(): Promise<void> {
   await invokeTauriVoid("retry_daemon_startup");
 }
