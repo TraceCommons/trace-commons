@@ -30,6 +30,28 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertEqual(status.grantVoids.map(\.id), [4])
     }
 
+    // MARK: - Witness capacity
+
+    /// Sessions held on a busy witness, beside `health` because a higher
+    /// label can mask `witness-saturated`.
+    func testStatusDecodesWitnessCapacity() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":"queue-full","since":null},
+         "witness_capacity":{"waiting_sessions":2,"next_retry_at":"2030-01-01T00:01:00Z"}}
+        """)
+        XCTAssertEqual(status.witnessCapacity.waitingSessions, 2)
+        XCTAssertNotNil(status.witnessCapacity.nextRetryAt)
+    }
+
+    func testStatusFromAnOlderDaemonHasNothingWaitingOnTheWitness() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertFalse(status.witnessCapacity.waiting)
+    }
+
     func testStatusFromAnOlderDaemonHasNoGrantVoids() throws {
         let status = try decode(DaemonStatus.self, """
         {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
