@@ -842,7 +842,18 @@ final class AppModel: ObservableObject {
         // The budget banner says the same thing with real numbers, so the
         // bare label is suppressed when it is going to be drawn.
         if label == "daily-cap-reached" && status.dailyBudget.blocked { return nil }
+        // Likewise the witness banner, with the count -- only when it is
+        // actually going to be drawn.
+        if label == "witness-saturated" && witnessCapacityHealth != nil { return nil }
         return HealthCopy.forLabel(label)
+    }
+
+    /// The banner for approved sessions held on a busy privacy witness, when
+    /// there are any. Independent of `health` for the reason `budgetHealth`
+    /// is: another label can hold the daemon's one health slot while these
+    /// sessions are still waiting.
+    var witnessCapacityHealth: HealthCopy? {
+        HealthCopy.forWitnessCapacity(status.witnessCapacity)
     }
 
     /// The spent-budget banner, when there is one.

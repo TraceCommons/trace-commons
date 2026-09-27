@@ -265,6 +265,9 @@ struct DaemonStatus: Decodable, Equatable {
     /// Grants the daemon voided that no shell has shown yet (R6). A daemon
     /// that predates the field has voided nothing it can report.
     let grantVoids: [GrantVoidWire]
+    /// Approved sessions held because the privacy witness is busy. A daemon
+    /// that predates the field holds nothing on it.
+    let witnessCapacity: WitnessCapacity
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -278,6 +281,7 @@ struct DaemonStatus: Decodable, Equatable {
         case dailyBudget = "daily_budget"
         case routing
         case grantVoids = "grant_voids"
+        case witnessCapacity = "witness_capacity"
     }
 
     init(
@@ -291,7 +295,8 @@ struct DaemonStatus: Decodable, Equatable {
         health: DaemonHealth,
         dailyBudget: DailyBudget = .unknown,
         routing: RoutingStatus = .notDeclared,
-        grantVoids: [GrantVoidWire] = []
+        grantVoids: [GrantVoidWire] = [],
+        witnessCapacity: WitnessCapacity = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -304,6 +309,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.dailyBudget = dailyBudget
         self.routing = routing
         self.grantVoids = grantVoids
+        self.witnessCapacity = witnessCapacity
     }
 
     init(from decoder: Decoder) throws {
@@ -322,6 +328,8 @@ struct DaemonStatus: Decodable, Equatable {
         // exactly what the fallback says.
         routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
         grantVoids = try c.decodeIfPresent([GrantVoidWire].self, forKey: .grantVoids) ?? []
+        witnessCapacity =
+            try c.decodeIfPresent(WitnessCapacity.self, forKey: .witnessCapacity) ?? .none
     }
 
     static let unknown = DaemonStatus(
