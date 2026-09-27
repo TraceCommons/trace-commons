@@ -112,6 +112,52 @@ final class InsightsSummaryModelTests: XCTestCase {
         model.close()
     }
 
+    // `open()` starts copy -> list -> summary and `episode_list` on separate
+    // detached tasks against one store, so whichever reaches the store lock
+    // second used to fail at once with insights_store_busy -- the flake behind
+    // this suite's "summary nil after the chain settled". Holding the lock
+    // from here makes the overlap certain instead of a scheduling accident:
+    // every store call `open()` makes arrives while it is held, and it is
+    // released well inside the store's wait bound.
+    @MainActor
+    func testOpenWaitsForAStoreLockHeldElsewhereInsteadOfReportingBusy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("insights")
+        let source = root.appendingPathComponent("session.jsonl")
+        try Data("""
+        {"type":"session_meta","payload":{}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture"}]}}
+        """.utf8).write(to: source)
+        _ = try TCInsights.call(.init(
+            storeDirectory: store.path,
+            operation: .init("analyze", source: "codex", file: source.path, save: true)))
+
+        let descriptor = Darwin.open(store.appendingPathComponent("store.lock").path, O_RDWR)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        defer { Darwin.close(descriptor) }
+        XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
+
+        let model = InsightsModel(service: { request in
+            try await Task.detached {
+                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
+            }.value
+        })
+        model.open()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(flock(descriptor, LOCK_UN), 0)
+        try await settle(model)
+        for _ in 0..<500 where model.episodeBusy { try await Task.sleep(for: .milliseconds(10)) }
+
+        XCTAssertNil(model.error, "list must wait for the lock, not report the store busy")
+        XCTAssertNil(model.summaryError, "summary must wait for the lock, not report the store busy")
+        XCTAssertNil(model.episodeError, "episode_list must wait for the lock, not report the store busy")
+        XCTAssertNotNil(model.summary)
+        XCTAssertEqual(model.snapshots.count, 1)
+        model.close()
+    }
+
     @MainActor
     private func settle(_ model: InsightsModel) async throws {
         for _ in 0..<500 {
