@@ -429,6 +429,9 @@ stores no object.
 ### BND-001: Bundle identity
 
 - The manifest MUST include its format version.
+- A manifest that names another format version MUST be refused as an
+  unsupported version, not as a manifest with a missing field. The version
+  check MUST happen before the rule that `instruments` must be present.
 - A bundle manifest MUST select one policy for each phase.
 - Each policy reference MUST identify its policy, implementation,
   configuration, data artifacts, and projection identifiers.
@@ -615,7 +618,8 @@ and shadow comparison. No active index mutation can occur.
 - Atomic units MUST be `u128`. They MUST travel as a canonical decimal
   string: ASCII digits only, with no sign, no leading zero, and no value above
   `u128::MAX`. A JSON number MUST be refused.
-- The award-set identity MUST encode each amount as 16 big-endian bytes.
+- The award-set identity MUST encode each amount as 16 big-endian bytes,
+  under the `trace-commons-instrument-awards-v2` domain tag.
 - Each award MUST name an instrument that the bound bundle pins. Before the
   Score outcome commits, the runner MUST check the Score decision against the
   run's bound manifest. The check requires an equal bundle identifier and a

@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 pub const PIPELINE_OUTCOME_SCHEMA_ID: &str = "trace_commons.pipeline_outcome";
 pub const PIPELINE_OUTCOME_SCHEMA_VERSION: u32 = 1;
-pub const BUNDLE_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const BUNDLE_MANIFEST_FORMAT_VERSION: u32 = 2;
 pub const MICROCREDITS_PER_CREDIT: u64 = 1_000_000;
 pub const MAX_INSTRUMENT_ID_LEN: usize = 64;
 pub const TRACE_CREDIT_INSTRUMENT_ID: &str = "trace_credit";
@@ -490,7 +490,7 @@ impl InstrumentAwards {
     /// Canonical identity for the complete ordered award set. Each amount is
     /// its full 16-byte big-endian `u128`.
     pub fn canonical_id(&self) -> String {
-        let mut bytes = b"trace-commons-instrument-awards\0".to_vec();
+        let mut bytes = b"trace-commons-instrument-awards-v2\0".to_vec();
         encode_len(&mut bytes, self.0.len());
         for award in &self.0 {
             encode_string(&mut bytes, award.instrument_id.as_str());
@@ -606,6 +606,10 @@ pub struct BundleManifest {
 /// `bundle_id` applies, so a reader that uses `instrument` or
 /// `require_pinned` without the bundle identifier still gets only valid
 /// descriptors.
+///
+/// `instruments` is optional here so an earlier-format manifest is refused as
+/// an unsupported version, not as a missing field: `TryFrom` checks
+/// `format_version` before it looks at `instruments` at all.
 #[derive(Deserialize)]
 struct BundleManifestFields {
     format_version: u32,
@@ -613,21 +617,27 @@ struct BundleManifestFields {
     review: PolicyRef,
     score: PolicyRef,
     settle: PolicyRef,
-    #[serde(deserialize_with = "unique_instruments")]
-    instruments: BTreeMap<InstrumentId, InstrumentDescriptor>,
+    #[serde(default, deserialize_with = "unique_instruments")]
+    instruments: Option<BTreeMap<InstrumentId, InstrumentDescriptor>>,
 }
 
 impl TryFrom<BundleManifestFields> for BundleManifest {
     type Error = ContractError;
 
     fn try_from(fields: BundleManifestFields) -> Result<Self, Self::Error> {
+        if fields.format_version != BUNDLE_MANIFEST_FORMAT_VERSION {
+            return Err(ContractError::UnsupportedManifestVersion);
+        }
+        let instruments = fields
+            .instruments
+            .ok_or(ContractError::MissingInstruments)?;
         let manifest = Self {
             format_version: fields.format_version,
             admission: fields.admission,
             review: fields.review,
             score: fields.score,
             settle: fields.settle,
-            instruments: fields.instruments,
+            instruments,
         };
         manifest.canonical_bytes()?;
         Ok(manifest)
@@ -636,10 +646,11 @@ impl TryFrom<BundleManifestFields> for BundleManifest {
 
 /// Loads the pinned instruments and refuses a repeated instrument. A plain
 /// map keeps the last copy, and a reader that keeps the first copy would pin
-/// a different descriptor.
+/// a different descriptor. `#[serde(default)]` on the field supplies `None`
+/// when `instruments` is absent, so this only runs for a present map.
 fn unique_instruments<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<BTreeMap<InstrumentId, InstrumentDescriptor>, D::Error> {
+) -> Result<Option<BTreeMap<InstrumentId, InstrumentDescriptor>>, D::Error> {
     struct UniqueInstruments;
 
     impl<'de> serde::de::Visitor<'de> for UniqueInstruments {
@@ -665,7 +676,7 @@ fn unique_instruments<'de, D: serde::Deserializer<'de>>(
         }
     }
 
-    deserializer.deserialize_map(UniqueInstruments)
+    deserializer.deserialize_map(UniqueInstruments).map(Some)
 }
 
 impl BundleManifest {
@@ -905,6 +916,8 @@ impl BundlePackage {
 pub enum ContractError {
     #[error("unsupported bundle manifest version")]
     UnsupportedManifestVersion,
+    #[error("the bundle manifest does not pin its instruments")]
+    MissingInstruments,
     #[error("policy identity is missing")]
     MissingPolicyIdentity,
     #[error("artifact hash is malformed")]
@@ -2601,7 +2614,7 @@ mod tests {
     #[test]
     fn award_set_identity_encodes_each_amount_in_sixteen_bytes() {
         let awards = InstrumentAwards::new(vec![award("storage_rebate", u128::MAX)]).unwrap();
-        let mut expected = b"trace-commons-instrument-awards\0".to_vec();
+        let mut expected = b"trace-commons-instrument-awards-v2\0".to_vec();
         expected.extend_from_slice(&1u64.to_be_bytes());
         expected.extend_from_slice(&("storage_rebate".len() as u64).to_be_bytes());
         expected.extend_from_slice(b"storage_rebate");
@@ -3490,7 +3503,7 @@ mod tests {
             bytes.extend_from_slice(value.as_bytes());
         };
         let mut expected = b"trace-commons-bundle-manifest\0".to_vec();
-        expected.extend_from_slice(&1u32.to_be_bytes());
+        expected.extend_from_slice(&2u32.to_be_bytes());
         for name in ["admission", "review", "score", "settle"] {
             string(&mut expected, &format!("trace_commons.{name}.golden"));
             string(&mut expected, &format!("trace_commons.{name}.golden.v1"));
@@ -3528,7 +3541,7 @@ mod tests {
         assert_eq!(manifest.canonical_bytes().unwrap(), expected);
         assert_eq!(
             manifest.bundle_id().unwrap(),
-            "sha256:c913706a95ab42d083b633979578fc4e46b39fe8f4204620ba7c6a2e3d6e1b76"
+            "sha256:7e00781724e54a3610bbf90d14dd71747504b0259fc5ad0501f96aa9de7c70bf"
         );
 
         let artifacts = ["admission", "review", "score", "settle"]
@@ -3548,7 +3561,7 @@ mod tests {
         };
         assert_eq!(
             package.package_hash().unwrap(),
-            "sha256:d0e78bc1bec67983332689133b313bd6ab92acc9ac44f2112a653022f3cdbe29"
+            "sha256:b51d9aa1dffb7c36155b9b6e0af13b653e64318fbbcf2b45c946b8f69f9ce0d2"
         );
 
         let awards =
@@ -3556,7 +3569,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             awards.canonical_id(),
-            "sha256:c53b5473d879aeb407a52c4740aea317aa5f90cb41c0b62bfa9c932332889955"
+            "sha256:534c40c6561a936c851072ae5cb6df221d1557bc1cf461f635243b6e603bfa26"
         );
 
         let command = SealedIndexCommand::new(
@@ -4047,6 +4060,64 @@ mod tests {
     }
 
     #[test]
+    fn manifest_without_instruments_is_refused_as_missing() {
+        use serde_json::{from_value, to_value};
+
+        let mut stored = to_value(golden_manifest()).unwrap();
+        stored.as_object_mut().unwrap().remove("instruments");
+        let error = from_value::<BundleManifest>(stored).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            ContractError::MissingInstruments.to_string()
+        );
+        assert!(!error.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn earlier_format_manifest_is_refused_as_unsupported() {
+        use serde_json::{from_value, json, to_value};
+
+        // An earlier format is refused as an unsupported version, not as a
+        // missing-field error: a format-1 manifest with no `instruments`
+        // still reports the version error, because the version check runs
+        // before the rule that `instruments` must be present.
+        let mut without_instruments = to_value(golden_manifest()).unwrap();
+        without_instruments["format_version"] = json!(1);
+        without_instruments
+            .as_object_mut()
+            .unwrap()
+            .remove("instruments");
+        let error = from_value::<BundleManifest>(without_instruments).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            ContractError::UnsupportedManifestVersion.to_string()
+        );
+        assert!(!error.to_string().contains("missing field"));
+
+        // A format-1 manifest with `instruments` present is refused the same
+        // way.
+        let mut with_instruments = to_value(golden_manifest()).unwrap();
+        with_instruments["format_version"] = json!(1);
+        let error = from_value::<BundleManifest>(with_instruments.clone()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            ContractError::UnsupportedManifestVersion.to_string()
+        );
+
+        // The same check applies through `BundlePackage` deserialization.
+        let package = json!({
+            "bundle_id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "manifest": with_instruments,
+            "artifacts": {},
+        });
+        let error = from_value::<BundlePackage>(package).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            ContractError::UnsupportedManifestVersion.to_string()
+        );
+    }
+
+    #[test]
     fn manifest_loading_repeats_the_bundle_identity_checks() {
         use serde_json::{Value, from_value, json, to_value};
 
@@ -4088,7 +4159,7 @@ mod tests {
                 ContractError::TraceCreditDecimals,
             ),
             (
-                |manifest| manifest["format_version"] = json!(2),
+                |manifest| manifest["format_version"] = json!(3),
                 ContractError::UnsupportedManifestVersion,
             ),
             (
