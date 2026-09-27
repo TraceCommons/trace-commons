@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -689,6 +690,53 @@ pub struct LocalInsightStore {
 // Closing only this descriptor is insufficient when a concurrent process spawn
 // inherited the same open file description. Explicit unlock ends our transaction
 // independently of when a child reaches exec or exits.
+/// How long one store operation waits for another holder of `store.lock`
+/// before reporting [`InsightsStoreError::Busy`].
+///
+/// Every store operation holds the lock for one short read-modify-write of
+/// `index.json`, so a contender is almost always gone within milliseconds.
+/// Failing at the first `WouldBlock` made ordinary overlap -- a shell opening
+/// Insights runs `copy`/`list`/`summary` and `episode_list` on separate tasks
+/// -- surface as a busy store. The bound keeps a genuinely stuck holder (a
+/// hung process, another window mid-import) from blocking the caller for
+/// long, and `Busy` still means what it meant: retry later.
+const STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
+const STORE_LOCK_FIRST_BACKOFF: Duration = Duration::from_millis(1);
+const STORE_LOCK_MAX_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Take the advisory lock on `file`, waiting up to `bound` for a current
+/// holder to release it.
+///
+/// This blocks the calling thread. Every caller already runs store operations
+/// off any async executor: the FFI is a synchronous C call that the macOS
+/// shell makes from detached tasks and Windows from `Task.Run`; Tauri wraps
+/// `dispatch_json` in `spawn_blocking`; GTK runs `service::execute` on
+/// `std::thread::spawn`. The CLI's `insights` subcommand runs synchronously
+/// inside its `#[tokio::main]` before any other task exists, so the one
+/// thread it blocks is doing nothing else. The daemon does not open the
+/// Insights store. `std::fs::File` has no timed lock, so this polls
+/// `try_lock` with a capped exponential backoff rather than calling the
+/// unbounded blocking `lock`.
+fn lock_within(file: &File, bound: Duration) -> Result<()> {
+    let deadline = Instant::now() + bound;
+    let mut backoff = STORE_LOCK_FIRST_BACKOFF;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            // Not contention: waiting would not change the answer. Mapped to
+            // Busy as before this wait existed.
+            Err(std::fs::TryLockError::Error(_)) => bail!(InsightsStoreError::Busy),
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            bail!(InsightsStoreError::Busy);
+        }
+        std::thread::sleep(backoff.min(deadline - now));
+        backoff = (backoff * 2).min(STORE_LOCK_MAX_BACKOFF);
+    }
+}
+
 struct StoreLock {
     file: File,
 }
@@ -763,8 +811,7 @@ impl LocalInsightStore {
         let lock = options
             .open(lock_path)
             .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
-        lock.try_lock()
-            .map_err(|_| anyhow!(InsightsStoreError::Busy))?;
+        lock_within(&lock, STORE_LOCK_WAIT)?;
         let lock = StoreLock { file: lock };
         let path = self.dir.join("index.json");
         reject_symlinks(&path)?;
@@ -1447,6 +1494,60 @@ mod tests {
             .expect("a completed store operation must not leave a lock in an inherited descriptor");
         contender.unlock().unwrap();
         drop(inherited);
+    }
+
+    // Two shells (or two tasks in one shell) open the store at once: the
+    // macOS app's `open()` runs `copy` -> `list` -> `summary` while
+    // `episode_list` runs on another detached task. The second caller must
+    // wait for the first to finish, not report the store busy.
+    #[test]
+    fn a_second_caller_waits_for_a_holder_that_releases_within_the_bound() {
+        use std::sync::{Arc, Barrier};
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("store");
+        let holder = LocalInsightStore::open(&dir).unwrap();
+        let contender = LocalInsightStore::open(&dir).unwrap();
+        let (guard, _) = holder.locked().unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let contender_started = Arc::clone(&started);
+        let waiter = std::thread::spawn(move || {
+            contender_started.wait();
+            contender.locked().map(|_| ())
+        });
+        started.wait();
+        // Well inside the bound, so this does not depend on scheduling.
+        std::thread::sleep(Duration::from_millis(100));
+        drop(guard);
+        let outcome = waiter.join().unwrap();
+        assert!(
+            outcome.is_ok(),
+            "a holder released within the bound must not surface as busy: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_outlasts_the_bound_still_reports_busy() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        // One ordinary operation creates the lock file.
+        drop(store.locked().unwrap());
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.dir.join("store.lock"))
+            .unwrap();
+        contender.try_lock().unwrap();
+        let begun = std::time::Instant::now();
+        let error = store.locked().map(|_| ()).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<InsightsStoreError>(),
+            Some(&InsightsStoreError::Busy)
+        );
+        // It waited the bound out rather than giving up at once, and did not
+        // wait indefinitely either (the holder never releases).
+        assert!(begun.elapsed() >= STORE_LOCK_WAIT);
+        contender.unlock().unwrap();
     }
 
     #[test]
