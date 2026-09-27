@@ -9,15 +9,20 @@
 //! backends live outside this repository and depend on this crate.
 
 pub mod decision;
+pub mod dependency;
 pub mod embedder;
 pub mod perplexity;
 pub mod pipeline;
 pub mod reference;
+pub mod settlement;
 pub mod vector_index;
 
 pub use decision::{
     AuthorPerplexity, EnclaveGateOrchestratorConfig, InsertedChunkEntry, OrchestrationDecision,
     PerplexityOnlyOutcome,
+};
+pub use dependency::{
+    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
 };
 pub use embedder::{Embedder, MOCK_EMBEDDING_DIM};
 pub use perplexity::{
@@ -25,6 +30,7 @@ pub use perplexity::{
     TokenRarityScorer, scorer_status_is_transient,
 };
 pub use reference::{ReferenceEmbedder, ReferencePerplexityScorer};
+pub use settlement::{SettlementAdapter, SettlementError, SettlementRequest};
 pub use vector_index::{
     IndexEntryKey, IndexSnapshot, IndexUpsertResult, IndexWriteError, NearestNeighbor, VectorIndex,
     VectorIndexReader, VectorIndexSnapshot, VectorIndexWriter,

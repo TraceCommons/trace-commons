@@ -599,6 +599,18 @@ capabilities. Settle policies receive write capabilities.
 Policies hold their scorers, embedders, vector indexes, and credit adapters as
 trait objects. This boundary prevents Score from modifying an index.
 
+`trace-commons-gate-api` defines these seams. A proprietary backend
+implements them:
+
+- `IdentifiedPerplexityScorer`, `IdentifiedEmbedder`, `IdentifiedIndexReader`,
+  `IdentifiedIndexWriter` — each extends its base trait with the identity a
+  bundle package names by content descriptor. `production_qualified`
+  defaults to `false`, and readiness fails closed on it.
+- `SettlementAdapter` — an async `settle`, a typed `SettlementError`
+  (`Unavailable` is safe to retry; `Conflict` and `Rejected` are not, and
+  never followed by a second effect), and the idempotency contract: the
+  same result for a repeated `operation_ref_hash`, no repeated effect.
+
 Every phase input carries the tenant's `TenantStorageRef`, the derived key that
 ingest uses for every index and storage write. A policy queries an index with
 that key. It never receives the raw tenant identifier, so it cannot open an

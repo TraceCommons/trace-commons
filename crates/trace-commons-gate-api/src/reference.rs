@@ -11,6 +11,7 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::dependency::{IdentifiedEmbedder, IdentifiedPerplexityScorer};
 use crate::embedder::{Embedder, MOCK_EMBEDDING_DIM};
 use crate::perplexity::{PerplexityResult, PerplexityScorer};
 
@@ -27,6 +28,16 @@ pub struct ReferencePerplexityScorer;
 impl ReferencePerplexityScorer {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl IdentifiedPerplexityScorer for ReferencePerplexityScorer {
+    fn dependency_identity(&self) -> &str {
+        "reference_perplexity_test_only"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-reference-perplexity-scorer.v1".to_vec()
     }
 }
 
@@ -104,6 +115,20 @@ impl ReferenceEmbedder {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&out[0..8]);
         (u64::from_be_bytes(buf) % MOCK_EMBEDDING_DIM as u64) as usize
+    }
+}
+
+impl IdentifiedEmbedder for ReferenceEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "reference_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "reference-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-reference-embedder.v1".to_vec()
     }
 }
 
@@ -213,5 +238,31 @@ mod tests {
             v.iter().all(|x| *x == 0.0),
             "empty input yields the zero vector"
         );
+    }
+
+    #[test]
+    fn reference_dependencies_keep_their_identities() {
+        let scorer = ReferencePerplexityScorer::new();
+        assert_eq!(
+            scorer.dependency_identity(),
+            "reference_perplexity_test_only"
+        );
+        assert_eq!(
+            scorer.content_descriptor(),
+            b"trace-commons-reference-perplexity-scorer.v1".to_vec()
+        );
+        assert!(!scorer.production_qualified());
+
+        let embedder = ReferenceEmbedder::new();
+        assert_eq!(
+            embedder.dependency_identity(),
+            "reference_embedder_test_only"
+        );
+        assert_eq!(embedder.model_id(), "reference-embedder-v1");
+        assert_eq!(
+            embedder.content_descriptor(),
+            b"trace-commons-reference-embedder.v1".to_vec()
+        );
+        assert!(!embedder.production_qualified());
     }
 }
