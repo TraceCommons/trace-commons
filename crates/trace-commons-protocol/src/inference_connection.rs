@@ -108,6 +108,98 @@ impl SelectInferenceConnection {
     }
 }
 
+/// Bounded, syntax-only checks a client applies to what the server sent, so a
+/// malformed or oversized offer is refused rather than shown or installed.
+impl InferenceConnectionOffer {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !valid_identifier(&self.offer_id) {
+            return Err("offer_id_invalid");
+        }
+        if !valid_identifier(&self.provider_id) {
+            return Err("provider_id_invalid");
+        }
+        if !valid_digest(&self.revision) || !valid_digest(&self.config_digest) {
+            return Err("digest_invalid");
+        }
+        if self.disclosure_version != DISCLOSURE_VERSION {
+            return Err("disclosure_version_invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Shape checks only: an `https` URL with no credentials, query or fragment,
+/// a `0x`-prefixed 20-byte signing address, and a bounded, non-empty pin
+/// list. Whether each pin parses as a measurement set is the verifier's
+/// question, and a client asks it before installing.
+impl ConnectionWitnessConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !valid_https_url(&self.url) {
+            return Err("witness_url_invalid");
+        }
+        let address_valid = self
+            .signing_address
+            .strip_prefix("0x")
+            .is_some_and(|hex| hex.len() == 40 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
+        if !address_valid {
+            return Err("signing_address_invalid");
+        }
+        if self.expected_measurements.is_empty()
+            || self.expected_measurements.len() > MAX_MEASUREMENTS
+            || self
+                .expected_measurements
+                .iter()
+                .any(|entry| entry.is_empty() || entry.len() > MAX_MEASUREMENT_BYTES)
+        {
+            return Err("measurements_invalid");
+        }
+        Ok(())
+    }
+}
+
+impl SelectedInferenceConnection {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.connection_id.is_nil() {
+            return Err("connection_id_invalid");
+        }
+        if self.state_version < 1 {
+            return Err("state_version_invalid");
+        }
+        if !valid_digest(&self.revision) || !valid_digest(&self.config_digest) {
+            return Err("digest_invalid");
+        }
+        if self.disclosure_version != DISCLOSURE_VERSION {
+            return Err("disclosure_version_invalid");
+        }
+        self.witness.validate()?;
+        if self
+            .inference_receipt_endpoint
+            .as_deref()
+            .is_some_and(|endpoint| !valid_https_url(endpoint))
+        {
+            return Err("receipt_endpoint_invalid");
+        }
+        Ok(())
+    }
+}
+
+/// An absolute `https` URL with a host, no user info, no query and no
+/// fragment, at most [`MAX_URL_BYTES`] long.
+pub fn valid_https_url(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > MAX_URL_BYTES {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
 pub fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_BYTES
@@ -202,6 +294,72 @@ mod tests {
                     .validate()
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn client_side_validation_refuses_malformed_server_values() {
+        let offer = InferenceConnectionOffer {
+            offer_id: "near-ai".into(),
+            revision: format!("sha256:{}", "a".repeat(64)),
+            provider_id: "near-ai".into(),
+            disclosure_version: DISCLOSURE_VERSION.into(),
+            config_digest: format!("sha256:{}", "b".repeat(64)),
+        };
+        assert!(offer.validate().is_ok());
+        let mut bad = offer.clone();
+        bad.provider_id = "has space".into();
+        assert_eq!(bad.validate(), Err("provider_id_invalid"));
+        let mut bad = offer.clone();
+        bad.config_digest = "sha256:short".into();
+        assert_eq!(bad.validate(), Err("digest_invalid"));
+        let mut bad = offer.clone();
+        bad.disclosure_version = "other".into();
+        assert_eq!(bad.validate(), Err("disclosure_version_invalid"));
+
+        let selected = SelectedInferenceConnection {
+            connection_id: Uuid::new_v4(),
+            state_version: 1,
+            revision: offer.revision.clone(),
+            config_digest: offer.config_digest.clone(),
+            disclosure_version: DISCLOSURE_VERSION.into(),
+            witness: ConnectionWitnessConfig {
+                url: "https://witness.example/v1".into(),
+                signing_address: format!("0x{}", "ab".repeat(20)),
+                expected_measurements: vec![format!("mrtd={}", "ab".repeat(48))],
+            },
+            inference_receipt_endpoint: Some("https://receipt.example/v1".into()),
+        };
+        assert!(selected.validate().is_ok());
+        type Change = fn(&mut SelectedInferenceConnection);
+        let changes: [(Change, &str); 7] = [
+            (|s| s.connection_id = Uuid::nil(), "connection_id_invalid"),
+            (|s| s.state_version = 0, "state_version_invalid"),
+            (
+                |s| s.witness.url = "http://witness.example".into(),
+                "witness_url_invalid",
+            ),
+            (
+                |s| s.witness.url = "https://witness.example/?t=1".into(),
+                "witness_url_invalid",
+            ),
+            (
+                |s| s.witness.signing_address = "0x12".into(),
+                "signing_address_invalid",
+            ),
+            (
+                |s| s.witness.expected_measurements.clear(),
+                "measurements_invalid",
+            ),
+            (
+                |s| s.inference_receipt_endpoint = Some("http://receipt.example".into()),
+                "receipt_endpoint_invalid",
+            ),
+        ];
+        for (change, label) in changes {
+            let mut altered = selected.clone();
+            change(&mut altered);
+            assert_eq!(altered.validate(), Err(label));
         }
     }
 

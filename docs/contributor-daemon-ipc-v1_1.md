@@ -507,6 +507,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
+| `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
+| `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
+| `inference_connection_select` | `offer_id`, `revision`, `config_digest`, `disclosure_version` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true` | account session; installs nothing; see "Connecting inference" below |
+| `inference_connection_install` | `connection_id`, `config_digest` (both **required**) | `installed: true`, `connection_id`, `state_version`, `receipt_endpoint_installed` | account session; the separate explicit step that writes the witness on this device; see "Connecting inference" below |
+| `inference_connection_disconnect` | `connection_id` (**required**) | `disconnected: true`, `connection_id`, `state_version`, `local_witness_removed` | account session; see "Connecting inference" below |
 
 ### `status`
 
@@ -3434,6 +3439,122 @@ the contributor to account sign-in instead of showing a dead end, once
 account sign-in exists to route to. Acquiring an account session is separate
 work, tracked outside this document; nothing in this contract should be
 read as that flow already existing.
+
+### Connecting inference
+
+K12 of the connect-and-forget consent design
+(`docs/superpowers/specs/2026-09-23-connect-and-forget-consent-design.md`):
+an invited contributor gets a redaction witness by deliberately connecting
+inference, never as a side effect of joining. The five
+`inference_connection_*` methods call the server routes described in
+`docs/operator/inference-connection.md`. All five are asynchronous only (the
+synchronous entry point answers `inference-connection-requires-async`) and all
+five present the **account session**, never the device key; without a live
+one they answer `unavailable` / `account-session-required` before any network
+call, exactly as withdrawal does, so a shell routes the contributor to account
+sign-in. A session the server rejects (expired, or a device bearer) is the same
+label. A rotated session the server hands back is kept whatever the outcome,
+and a result carries `credential_warning` when it could not be stored.
+
+The flow a shell drives:
+
+1. `inference_connection_offers` lists the operator's offers. Each offer is
+   identifiers and digests only; the daemon refuses the whole list
+   (`inference-connection-response-invalid`) if any offer is malformed, rather
+   than showing a subset. The disclosure copy is the shell's own; the server's
+   description text is not passed through.
+2. The shell shows one offer and the disclosure its `disclosure_version`
+   names, and on the contributor's choice calls `inference_connection_select`
+   with **exactly** that offer's `offer_id`, `revision`, `config_digest` and
+   `disclosure_version`. The daemon sends those values unchanged and fills in
+   nothing. Pass `expected_current_version` as the `state_version` from
+   `inference_connection_current` when replacing an existing selection
+   (including selecting again from a new device); omit it when there is none.
+   Pass `idempotency_key` to make a retry of the same choice safe; the daemon
+   generates one when it is absent. A response naming any other revision,
+   digest or disclosure is refused.
+3. **Selecting installs nothing.** The witness material the server returns is
+   held on this device only. The shell then asks the contributor, separately,
+   whether to use this witness on this device, and on confirmation calls
+   `inference_connection_install` with the `connection_id` and
+   `config_digest` from the select result. The daemon re-reads the account's
+   selection first; if it was disconnected or replaced since, the answer is
+   `inference-connection-not-current`, and if its revision was retired it is
+   `connection_reselection_required`. Either way nothing is written and the
+   held selection is discarded.
+4. Install writes `witness` (`url`, `signing_address`,
+   `expected_measurements`, exactly as returned) and, when the selection
+   carries one, `inference_receipt_endpoint`. Nothing else in the config
+   changes; `admission_evidence` keeps an existing witness's value and is off
+   on a first installation. An absent receipt endpoint leaves the configured
+   one alone and carries no inference provenance claim. The pins must parse
+   and an operator allowlist, when set, must admit the witness host
+   (`inference-connection-witness-refused`); a receipt endpoint must pass the
+   same checks a published one does at signup
+   (`inference-connection-receipt-endpoint-refused`).
+
+**Installing changes the witness, so it voids armed grants.** A new witness is
+a new recipient under R6: the watcher's next grant sweep voids every armed
+`auto_upload` project and the automatic grant made under the old terms,
+writes `auto-upload-voided` / `automatic-grant-voided`, and raises void
+notices (see "Void notices"). That is intended. A shell should say so before
+the contributor confirms installation, and must not re-arm on their behalf.
+
+**Every device asks.** A selection is an account record, not permission for a
+device to install anything. `inference_connection_current` on a device that
+did not select reports the selection with `installed_on_this_device: false`
+and `pending_install: false`, and `inference_connection_install` there answers
+`inference-connection-select-required` until that device selects and
+confirms. Login, invite redemption and the capability reads never select.
+
+**A selection grants no other consent.** No folder, trace, raw-session,
+consent-scope or standing contribution consent follows from selecting or
+installing, and none of these methods changes a project mode.
+
+**A retired revision.** When the operator replaces the selected entry,
+`inference_connection_current` reports `selection.reselection_required: true`
+and changes nothing on this device; select and install answer
+`connection_reselection_required` and install nothing. The current operator
+configuration is never substituted for what the contributor chose: the shell
+shows the current offers and the contributor chooses again.
+
+**Disconnect.** `inference_connection_disconnect` revokes the named
+connection on the server, then removes from this device exactly what the
+installation wrote -- the witness and receipt endpoint, where the config
+still holds those values. A witness configured some other way is left alone
+(`local_witness_removed: false`). When the connection this device installed is
+found no longer live -- disconnected or replaced from another device --
+`inference_connection_current` removes what it wrote the same way and reports
+`revocation_applied: true`. New use stops once the revocation is observed; an
+offline device keeps its settings until it next asks. Nothing already
+disclosed is recalled, and no provider credential is revoked.
+
+Refusal labels, all `unavailable` unless noted: `account-session-required`,
+`not-logged-in`, `connection_reselection_required`,
+`inference-connection-version-conflict` (the account changed; re-read
+`inference_connection_current`), `inference-connection-idempotency-conflict`,
+`inference-connection-account-ineligible`,
+`inference-connection-offer-invalid` (no such offer, or not its current
+revision), `inference-connection-not-found`,
+`inference-connection-response-invalid`, `inference-connection-unavailable`,
+`inference-connection-select-required`,
+`inference-connection-confirmation-mismatch`,
+`inference-connection-not-current`, `inference-connection-witness-refused`,
+`inference-connection-receipt-endpoint-refused`,
+`inference-connection-state-unreadable`,
+`inference-connection-state-write-failed`, `config-write-failed`,
+`audit-write-failed`. A missing or malformed param is `bad_params` with the
+param's name (or the protocol's label, such as `digest_invalid`) as message.
+
+Audit rows, label-only: `inference-connection-selected` (`detail`: the
+`offer_id`), `inference-connection-installed` (`detail`: `witness` or
+`witness,receipt-endpoint`; written before the config), and
+`inference-connection-disconnected` (`detail`: `local-witness-removed` or
+`nothing-installed-here`), plus `inference-connection-revocation-applied`
+for an observed revocation. No URL, signing address, pin, token or
+connection id is written. The per-device state (a selection awaiting install,
+and what was installed) is in `daemon-inference-connection.json` and is
+removed at logout.
 
 ## Events
 

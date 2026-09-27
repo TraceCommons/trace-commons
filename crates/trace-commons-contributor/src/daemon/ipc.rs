@@ -328,6 +328,11 @@ pub const METHODS: &[&str] = &[
     "hello",
     "history_detail",
     "history_rollup",
+    "inference_connection_offers",
+    "inference_connection_current",
+    "inference_connection_select",
+    "inference_connection_install",
+    "inference_connection_disconnect",
     "list_audit",
     "list_history",
     "list_pending",
@@ -1995,6 +2000,26 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("enroll", "enroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
+    (
+        "inference_connection_offers",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_current",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_select",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_install",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_disconnect",
+        "inference-connection-requires-async",
+    ),
     ("history_detail", "session-detail-requires-async"),
     ("skill_candidate", "skill-candidate-requires-async"),
     ("skill_evaluate", "skill-evaluation-requires-async"),
@@ -3220,6 +3245,21 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "inference_connection_offers" => {
+            super::inference_connection::handle_offers(shared, req).await
+        }
+        "inference_connection_current" => {
+            super::inference_connection::handle_current(shared, req).await
+        }
+        "inference_connection_select" => {
+            super::inference_connection::handle_select(shared, req).await
+        }
+        "inference_connection_install" => {
+            super::inference_connection::handle_install(shared, req).await
+        }
+        "inference_connection_disconnect" => {
+            super::inference_connection::handle_disconnect(shared, req).await
+        }
         "history_detail" => super::public_run::handle_detail(shared, req).await,
         "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
         "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
@@ -11048,10 +11088,54 @@ mod tests {
         }
     }
 
+    /// Through the real dispatcher, as a shell reaches them: with no account
+    /// session every inference-connection method refuses with the same label
+    /// withdrawal uses, before any network call and whatever its params.
+    #[tokio::test]
+    async fn inference_connection_methods_require_an_account_session() {
+        let s = shared();
+        let id = uuid::Uuid::new_v4().to_string();
+        for (method, params) in [
+            ("inference_connection_offers", serde_json::json!({})),
+            ("inference_connection_current", serde_json::json!({})),
+            (
+                "inference_connection_select",
+                serde_json::json!({
+                    "offer_id": "near-ai",
+                    "revision": format!("sha256:{}", "a".repeat(64)),
+                    "config_digest": format!("sha256:{}", "b".repeat(64)),
+                    "disclosure_version":
+                        trace_commons_protocol::inference_connection::DISCLOSURE_VERSION,
+                }),
+            ),
+            (
+                "inference_connection_install",
+                serde_json::json!({
+                    "connection_id": id,
+                    "config_digest": format!("sha256:{}", "b".repeat(64)),
+                }),
+            ),
+            (
+                "inference_connection_disconnect",
+                serde_json::json!({ "connection_id": id }),
+            ),
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+            let response = handle_request_async(&s, &req(method, params)).await;
+            let error = response.error.expect("refused without a session");
+            assert_eq!(error.code, ERR_UNAVAILABLE, "{method}");
+            assert_eq!(
+                error.message,
+                super::super::withdraw::ERR_ACCOUNT_SESSION_REQUIRED,
+                "{method}"
+            );
+        }
+    }
+
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 27);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 32);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -11481,7 +11565,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

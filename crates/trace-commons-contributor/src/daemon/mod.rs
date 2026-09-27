@@ -43,6 +43,7 @@ pub mod grant_terms;
 pub mod harness;
 pub mod health;
 pub mod history;
+pub mod inference_connection;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
