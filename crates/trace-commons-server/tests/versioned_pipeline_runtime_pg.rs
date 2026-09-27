@@ -2333,6 +2333,96 @@ async fn receipt_replay_and_conflict_are_exact() {
     assert_eq!(count_runs(&backend, &tenant).await, 1);
 }
 
+/// `replay_receipt` is the read-only lookup `submit_trace_handler`'s
+/// completed-admission branch uses for a retried upload for a
+/// pipeline-routed tenant, instead of the legacy file record the pipeline
+/// never writes. It must behave exactly like `submit`'s own replay check for
+/// the same key/content -- `None` before any run exists, `Replayed` for
+/// identical content, `ContentConflict` for different content -- while never
+/// creating, staging, storing, or counting anything. It must also report the
+/// principal `submit` recorded when it first created the run
+/// (`trace_submissions.auth_principal_ref`), so a caller can check ownership
+/// before acting on either outcome.
+#[tokio::test]
+async fn replay_receipt_reads_without_writing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("replay-receipt-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    // No run yet: a retry the pipeline has never seen for this key.
+    assert!(
+        service
+            .replay_receipt(&tenant, &key, &raw)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("first receipt creates a run")
+    };
+
+    // Identical content: the same run, read-only, with the principal
+    // `receipt()` submitted it under.
+    let PipelineReplayReceipt {
+        result,
+        auth_principal_ref,
+    } = service
+        .replay_receipt(&tenant, &key, &raw)
+        .await
+        .unwrap()
+        .expect("a run now exists for this key");
+    assert_eq!(auth_principal_ref, "principal_sha256:test");
+    let PipelineReceiptResult::Replayed(replayed) = result else {
+        panic!("identical bytes replay")
+    };
+    assert_eq!(created.run_id, replayed.run_id);
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+
+    // Different content, same key: a conflict, not a second run. Still
+    // reports the original principal, so a caller can distinguish a
+    // conflict its own principal caused from one it did not.
+    let mut changed = raw.clone();
+    changed.push(b' ');
+    let conflicted = service
+        .replay_receipt(&tenant, &key, &changed)
+        .await
+        .unwrap()
+        .expect("a run still exists for this key");
+    assert_eq!(conflicted.auth_principal_ref, "principal_sha256:test");
+    assert!(matches!(
+        conflicted.result,
+        PipelineReceiptResult::ContentConflict
+    ));
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+
+    // A different key under the same tenant still has no run.
+    assert!(
+        service
+            .replay_receipt(&tenant, "an-unrelated-key", &raw)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// Seeds an unrelated prior submission for `tenant` and a tombstone on it
 /// that matches `redaction_hash`. A tombstone can only reference an
 /// existing submission (its foreign key), and in production it matches a

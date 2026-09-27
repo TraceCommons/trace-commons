@@ -2797,6 +2797,15 @@ pub enum PipelineReceiptResult {
     QuotaExceeded(PipelineQuotaScope),
 }
 
+/// `PipelineService::replay_receipt`'s result: the outcome for the retried
+/// key, plus the principal the run was originally created under, so a
+/// caller can check ownership before acting on either outcome.
+#[derive(Debug)]
+pub struct PipelineReplayReceipt {
+    pub result: PipelineReceiptResult,
+    pub auth_principal_ref: String,
+}
+
 /// A run's full state: the run row, its recorded phase outcomes, and its
 /// settlements.
 pub struct PipelineInspection {
@@ -3347,6 +3356,67 @@ impl PipelineService {
                 Err(anyhow::anyhow!(PIPELINE_RECEIPT_STAGING_MISSING_LABEL))
             }
         }
+    }
+
+    /// A read-only replay lookup for a caller that already knows a
+    /// submission was admitted and only needs to know what to hand back --
+    /// `trace-commons-ingest`'s `submit_trace_handler`, for a retried upload
+    /// whose legacy admission ledger already marked it `completed`. That
+    /// path never wrote a legacy file record for a pipeline-routed tenant, so
+    /// it cannot replay from there; this is the pipeline-side equivalent.
+    ///
+    /// One short tenant transaction, read-only (`existing_receipt_run`, the
+    /// same lookup `receipt_key_refusal` uses): `Replayed` for a run whose
+    /// content hash matches `request_bytes`, `ContentConflict` for a run
+    /// whose content differs, `None` when no run exists for the key yet.
+    /// Unlike `precheck_receipt`, this never checks a staged attempt, a
+    /// tombstone, or the quota, and it creates, stages, stores, or counts
+    /// nothing -- `submit` keeps its own replay check
+    /// (`receipt_key_refusal`) for the write path; this is a narrower read
+    /// for a caller that isn't submitting anything new. It also does not
+    /// need the re-scrubbed envelope, only the raw request bytes whose hash
+    /// the key was recorded against.
+    ///
+    /// Also reads the run's `trace_submissions.auth_principal_ref` (the
+    /// principal `submit` recorded when it first created the run --
+    /// `PipelineRunRecord` itself carries only `submission_id`, not who
+    /// submitted it) in the same transaction, so the caller can apply its
+    /// own ownership check before handing back either outcome. A caller that
+    /// only reached this because its own reservation already bound the
+    /// retry to one principal still needs this: an admission anchor can
+    /// cover more than one principal (one per device on the same account),
+    /// so a completed reservation alone does not prove the retrying
+    /// principal is the one that made the original submission.
+    pub async fn replay_receipt(
+        &self,
+        tenant_id: &str,
+        request_idempotency_key: &str,
+        request_bytes: &[u8],
+    ) -> anyhow::Result<Option<PipelineReplayReceipt>> {
+        let request_content_hash = sha256_prefixed(request_bytes);
+        let request_idempotency_key_hash = sha256_prefixed(request_idempotency_key.as_bytes());
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        let Some(existing) =
+            existing_receipt_run(&tx, tenant_id, &request_idempotency_key_hash).await?
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let auth_principal_ref: String = tx
+            .query_one(
+                "SELECT auth_principal_ref FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &existing.submission_id],
+            )
+            .await?
+            .get(0);
+        let result = replay_result(existing, &request_content_hash);
+        tx.commit().await?;
+        Ok(Some(PipelineReplayReceipt {
+            result,
+            auth_principal_ref,
+        }))
     }
 
     /// The receipt's early refusal check (`submit` step 1, fix round 1

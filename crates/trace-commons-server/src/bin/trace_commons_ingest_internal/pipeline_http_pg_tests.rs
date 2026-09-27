@@ -22,10 +22,18 @@ use super::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use axum::body::to_bytes;
+use axum::extract::State;
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind,
 };
 use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
+use trace_commons_protocol::trace_contribution::{
+    RawTraceCaptureTurn, RawTraceContribution, TraceContributionEventType,
+};
+use trace_commons_server::admission_evidence::AdmissionProviderTrust;
+use trace_commons_server::admission_ledger::AdmissionLimits;
 use trace_commons_server::versioned_pipeline::{
     PipelineCaps, PipelineCrashPoint, PipelineServiceBuilder,
 };
@@ -36,6 +44,7 @@ use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::witness_service;
 
 /// This suite's own runtime role, distinct from `trace_pipeline_runtime_test`
 /// (`tests/versioned_pipeline_runtime_pg.rs`, Task 8) so the two suites never
@@ -54,6 +63,12 @@ static PIPELINE_HTTP_SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::co
 /// skips on any setup failure, which the controller ruled out here -- this
 /// suite reads only `TRACE_COMMONS_PG_TEST_DATABASE_URL` and panics on any
 /// failure once it is set. Returns `None` only when the variable is unset.
+///
+/// Also grants EXECUTE on `trace_reserve_admission`/`trace_transition_admission`
+/// (the migration owner already holds both `WITH GRANT OPTION`, from the same
+/// migration that revokes them from `PUBLIC`): a real HTTP submission through
+/// a NEAR-admission-gated tenant calls these through `state.db_mirror`, which
+/// runs as this suite's runtime role, not the migration owner.
 async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
     let _guard = PIPELINE_HTTP_SETUP_LOCK.lock().await;
@@ -75,7 +90,10 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
          END $$;
          GRANT USAGE ON SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};
          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};
-         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};"
+         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};
+         GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),
+                                   trace_transition_admission(TEXT,UUID,UUID,TEXT)
+               TO {PIPELINE_HTTP_RUNTIME_ROLE};"
         ))
         .await
         .expect("provision runtime role");
@@ -728,4 +746,723 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 
     stop.send(()).expect("send shutdown to app 2");
     join_within(server, 20, "app 2").await;
+}
+
+// ----------------------------------------------------------------------------
+// O1: a retried upload for a pipeline-routed tenant whose admission ledger
+// already marked it `completed` must replay the pipeline receipt instead of
+// 500ing on the legacy file record the pipeline never writes, and must not
+// hand that receipt to a principal other than the one who made the original
+// submission. `admission::reserve`'s completed-lookup only ever answers
+// `true` for a NEAR-namespaced tenant (`near-`/`nearai-`) with a provisioned
+// admission anchor (`admission::anchor`) -- every other tenant gets `Ok(None)`
+// from `reserve` and never reaches the branch these bugs are in. Reaching
+// that combination for real needs the same NEAR evidence/witness
+// verification chain
+// `admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`
+// exercises, reused here through its `pub(super)` exports
+// (`FixtureSigner`, `FixtureEnclave`, `provision_synthetic_near_account`,
+// `provision_second_device_on_the_same_account`) rather than a second copy.
+// ----------------------------------------------------------------------------
+
+/// The same `AdmissionLimits` value for every O1 test that reserves
+/// admission for real (all but the legacy-fallback test): the global budget
+/// row (`trace_admission_global_budget`) is a `PostgreSQL` singleton, not
+/// tenant-scoped, so two tests reserving in the same database must agree on
+/// `global_cost_limit` or the second one's reservation answers
+/// `configuration_changed` instead of `reserved`.
+fn o1_admission_limits() -> AdmissionLimits {
+    AdmissionLimits {
+        window_attempts: 1,
+        account_cost_limit: 100,
+        global_cost_limit: 1000,
+        processing_cost_bound: 10,
+        lease_seconds: 60,
+        challenge_ttl_seconds: 60,
+    }
+}
+
+/// A `PipelineService` with no crash point, built through the production
+/// injection seam (`assemble_test_pipeline_service`) every test in this file
+/// must use.
+fn o1_pipeline_service(backend: Arc<PgBackend>, dir: &tempfile::TempDir) -> Arc<PipelineService> {
+    let index = IsolatedPipelineIndex::new();
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_o1_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_o1_test_only",
+        "none",
+    );
+    let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+        storage_rebate as Arc<dyn SettlementAdapter>,
+        trace_credit as Arc<dyn SettlementAdapter>,
+    ];
+    assemble_test_pipeline_service(backend, local_artifacts(dir), index, adapters, None)
+}
+
+/// The principal a static token resolves to, independent of tenant (static
+/// token principal refs are a function of the token alone --
+/// `static_token_principal_refs`) -- computed through a throwaway tenant
+/// before the real one is known, the same trick
+/// `admission_pg_tests::principal_for` uses (not shared with it: this is
+/// six mechanical lines, not the fixture logic O1's review round asked to
+/// stop duplicating).
+fn o1_principal_for(token: &str) -> String {
+    let mut throwaway = BTreeMap::new();
+    insert_token(
+        &mut throwaway,
+        "near-o1-placeholder-tenant",
+        token,
+        TokenRole::Contributor,
+    );
+    throwaway.get(token).unwrap().principal_ref.clone()
+}
+
+/// One witness-verified admission upload: issues a fresh challenge directly
+/// through `admission::challenge_handler` (a plain function call, not an HTTP
+/// round trip -- the challenge nonce itself is not what a caller's test is
+/// about), witnesses a fresh contribution against it, and signs a matching
+/// provider-TEE receipt. This is the same construction
+/// `admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`
+/// does inline for its own accepted submission, built here from its
+/// `pub(super)` `FixtureSigner`/`FixtureEnclave` rather than a second copy.
+///
+/// Returns the envelope bytes and the evidence/witness request headers ready
+/// to POST to `/v1/traces` (the caller still adds its own auth header), and
+/// the evidence's `redaction_policy_version`, which `state.witness_bypass`
+/// must allow before any of these headers can verify.
+///
+/// `submission_id`, when given, overrides the witnessed envelope's own id.
+/// `RawTraceContribution::submission_id` is settable before witnessing, so
+/// the resulting certificate legitimately covers a chosen id -- for a second
+/// upload that must collide with a first one's submission id while
+/// genuinely differing in content (not a same-bytes replay).
+///
+/// Callable both before and after the real server starts: it only reads
+/// `state` (`admission::challenge_handler`) and does not touch
+/// `state.witness_bypass` itself, so it is safe to call again on a cloned
+/// `Arc` handle once the server already holds its own clone -- unlike
+/// mutating `state.witness_bypass`, which must happen before the server
+/// starts (`Arc::make_mut` would otherwise silently mutate an orphaned copy).
+#[allow(clippy::too_many_arguments)]
+async fn evidenced_upload(
+    state: &Arc<AppState>,
+    token: &str,
+    anchor: &str,
+    signer: &Arc<admission_pg_tests::FixtureSigner>,
+    provider: &ring::signature::Ed25519KeyPair,
+    provider_key: &str,
+    trust: AdmissionProviderTrust,
+    submission_id: Option<Uuid>,
+    content_seed: &str,
+) -> (Vec<u8>, HeaderMap, String) {
+    let challenge_response =
+        admission::challenge_handler(State(state.clone()), auth_headers(token))
+            .await
+            .expect("admission challenge succeeds");
+    let challenge_body = to_bytes(challenge_response.into_body(), 1024 * 1024)
+        .await
+        .expect("challenge response body bytes");
+    let challenge_value: serde_json::Value =
+        serde_json::from_slice(&challenge_body).expect("challenge response body json");
+    let binding = AdmissionBinding::parse(challenge_value["binding"].as_str().unwrap()).unwrap();
+    assert_eq!(binding.account_anchor_sha256, anchor);
+
+    let request_body = serde_json::json!({
+        "model": "synthetic-model",
+        "metadata": {REQUEST_METADATA_KEY: binding.encode().unwrap()},
+        "messages": [{"role": "user", "content": format!("please summarize {content_seed}")}],
+    })
+    .to_string();
+    let response_body = format!("{{\"answer\":\"{content_seed} succeeded\"}}");
+    let receipt_text = format!(
+        "synthetic-model:{}:{}",
+        hash_hex(request_body.as_bytes()),
+        hash_hex(response_body.as_bytes())
+    );
+    let receipt = trace_commons_server::near_attestation::receipt::ReceiptPayload {
+        text: receipt_text.clone(),
+        signature: hex::encode(provider.sign(receipt_text.as_bytes()).as_ref()),
+        signing_address: provider_key.to_string(),
+        signing_algo: trace_commons_server::near_attestation::receipt::ReceiptAlgo::Ed25519,
+        signature_kind:
+            trace_commons_server::near_attestation::receipt::ReceiptSignatureKind::ProviderTee,
+    };
+
+    let mut raw = RawTraceContribution::from_capture_turns(
+        &[RawTraceCaptureTurn {
+            user_input: format!("summarize {content_seed}"),
+            response: None,
+            tool_calls: Vec::new(),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            state: Some("Completed".into()),
+        }],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            pseudonymous_contributor_id: Some("sha256:synthetic-admission".into()),
+            ..Default::default()
+        },
+    );
+    if let Some(submission_id) = submission_id {
+        raw.submission_id = submission_id;
+    }
+    raw.ironclaw
+        .feature_flags
+        .insert("agent".into(), "opencode".into());
+    let mut event = raw.events.last().unwrap().clone();
+    event.event_id = Uuid::new_v4();
+    event.event_type = TraceContributionEventType::HttpExchange;
+    event.content = Some(response_body.clone());
+    event.structured_payload = serde_json::json!({
+        "request": {"method": "POST", "body": request_body},
+        "response": {"status": 200},
+    });
+    raw.events = vec![event];
+
+    let witness = witness_service::surface::WitnessService::new(
+        Arc::new(witness_service::DeterministicRedaction::new(Vec::new())),
+        signer.clone(),
+        Arc::new(admission_pg_tests::FixtureEnclave(signer.address())),
+        1024 * 1024,
+    )
+    .with_contribution_redactor(Arc::new(
+        witness_service::PipelineContributionRedaction::deterministic_only(Vec::new()),
+    ))
+    .with_admission_provider_trust(trust);
+    let (witnessed, evidence, evidence_signature) = witness
+        .witness_admission_contribution(witness_service::WitnessContributionRequest {
+            raw_contribution: raw,
+            granted: witness_service::GrantedConsent {
+                scopes: vec![
+                    ConsentScope::DebuggingEvaluation,
+                    ConsentScope::ModelTraining,
+                ],
+                uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
+            },
+            offered_receipt: Some(receipt),
+        })
+        .await
+        .expect("witness admission contribution succeeds");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
+        serde_json::to_string(&witness_service::http::certificate_json(
+            &witnessed.certificate,
+            witnessed.residual_risk_verdict(),
+        ))
+        .unwrap()
+        .parse()
+        .unwrap(),
+    );
+    headers.insert(
+        trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
+        witnessed.signature_hex.parse().unwrap(),
+    );
+    headers.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&evidence).unwrap().parse().unwrap(),
+    );
+    headers.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        evidence_signature.parse().unwrap(),
+    );
+
+    (
+        witnessed.envelope_bytes,
+        headers,
+        evidence.redaction_policy_version,
+    )
+}
+
+/// Builds the fresh Ed25519 provider keypair, its hex-encoded public key,
+/// the `FixtureSigner`, and the `AdmissionProviderTrust` that trusts it --
+/// the same fixture identity
+/// `admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`
+/// builds for itself, constructed fresh per O1 test so the tests stay
+/// independent of each other.
+fn o1_evidence_identity() -> (
+    ring::signature::Ed25519KeyPair,
+    String,
+    Arc<admission_pg_tests::FixtureSigner>,
+    AdmissionProviderTrust,
+) {
+    use ring::signature::KeyPair as _;
+    let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let provider_key = hex::encode(provider.public_key().as_ref());
+    let signer = Arc::new(admission_pg_tests::FixtureSigner::new(
+        "o1-pipeline-replay-witness",
+    ));
+    let trust = AdmissionProviderTrust::new(
+        [provider_key.clone()],
+        Vec::new(),
+        ["synthetic-model".into()],
+        1,
+    )
+    .unwrap();
+    (provider, provider_key, signer, trust)
+}
+
+/// The rule this test proves: the same upload posted twice must return the
+/// same receipt. The first POST is a real upload through the HTTP handler
+/// (it takes `route_pipeline_receipt` and creates the run, via a real,
+/// evidence-verified admission reservation, not a direct
+/// `PipelineService::submit` call), and the second POST of the same bytes
+/// takes the completed-admission branch this task fixes.
+///
+/// Also covers the brief's second test requirement ("the same key with
+/// different content after completion returns 409"): a third POST, with
+/// fresh evidence for a genuinely different envelope forced to the same
+/// submission id, is refused by `admission::reserve` itself before it can
+/// ever reach the pipeline's own `ContentConflict` branch (S3 finding) --
+/// see the comment on that branch in `submit_trace_handler`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_http_pipeline_receipt_replays_on_retry() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("checked by runtime_backend, which already returned Some");
+    let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        .await
+        .expect("connect as the migration owner for the near-account fixture rows");
+
+    let token = "near-retry-fixture-token";
+    let principal = o1_principal_for(token);
+    let (tenant, anchor, _device) =
+        admission_pg_tests::provision_synthetic_near_account(&admin, &principal).await;
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, token, TokenRole::Contributor);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = o1_pipeline_service(backend.clone(), &dir);
+    let (provider, provider_key, signer, trust) = o1_evidence_identity();
+
+    let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.accept_medium_risk_submissions = true;
+    state_mut.pipeline_service = Some(service);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    state_mut.admission = Some(admission::AdmissionConfig {
+        limits: o1_admission_limits(),
+        providers: trust.clone(),
+    });
+
+    // Build the first, accepted upload's bytes and evidence headers, then set
+    // `state.witness_bypass` from its `redaction_policy_version` -- both
+    // before the server starts (`evidenced_upload` mutates nothing, but
+    // `witness_bypass` below does, and `Arc::make_mut` must still see a
+    // refcount of one).
+    let (body_1, evidence_headers_1, policy_version) = evidenced_upload(
+        &state,
+        token,
+        &anchor,
+        &signer,
+        &provider,
+        &provider_key,
+        trust.clone(),
+        None,
+        "the first upload",
+    )
+    .await;
+    Arc::make_mut(&mut state).witness_bypass =
+        trace_commons_server::redaction_witness::config::witness_bypass_config_from_values(
+            Some("true"),
+            Some(&signer.address()),
+            Some("synthetic-admission-measurement"),
+            Some(&policy_version),
+            None,
+        )
+        .unwrap();
+    // A second handle to call `admission::challenge_handler` again for the
+    // third POST below, once the server already owns its own clone.
+    let state_handle = state.clone();
+
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+
+    // First POST: a real upload, with real evidence. Takes
+    // `route_pipeline_receipt` and creates the pipeline run.
+    let first = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .headers(reqwest_headers(evidence_headers_1))
+        .header("content-type", "application/json")
+        .body(body_1.clone())
+        .send()
+        .await
+        .expect("first, evidence-verified upload over real HTTP");
+    assert_eq!(first.status(), 200, "first upload must be accepted");
+    let first_receipt: serde_json::Value = first.json().await.expect("first receipt body");
+    assert_eq!(first_receipt["status"], "processing");
+
+    // Second POST: the exact same bytes, no evidence headers -- a terminal
+    // retry. `admission::reserve` finds the ledger already `completed` for
+    // this exact body hash; before the fix, the completed-admission branch
+    // 500ed reading the legacy file record the pipeline never wrote.
+    let second = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .header("content-type", "application/json")
+        .body(body_1.clone())
+        .send()
+        .await
+        .expect("second retry over real HTTP");
+    assert_eq!(second.status(), 200, "second retry must replay, not 500");
+    let second_receipt: serde_json::Value = second.json().await.expect("second receipt body");
+    assert_eq!(
+        first_receipt, second_receipt,
+        "both retries must return the exact same pipeline receipt"
+    );
+
+    // Third POST (S3): a genuinely different, independently witnessed
+    // envelope, forced to the same submission id, with its own fresh
+    // evidence. `admission::reserve`'s own completed-lookup is keyed on
+    // body_hash, so this never reads as a terminal retry of a `completed`
+    // submission; `reserve_submission_admission`'s conflict check
+    // (`prior.body_hash <> p_body`) answers it directly.
+    let (body_2, evidence_headers_2, _) = evidenced_upload(
+        &state_handle,
+        token,
+        &anchor,
+        &signer,
+        &provider,
+        &provider_key,
+        trust,
+        Some(first_receipt_submission_id(&body_1)),
+        "a different upload",
+    )
+    .await;
+    let conflict = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .headers(reqwest_headers(evidence_headers_2))
+        .header("content-type", "application/json")
+        .body(body_2)
+        .send()
+        .await
+        .expect("conflicting upload over real HTTP");
+    assert_eq!(conflict.status(), 409, "changed content must be refused");
+    let conflict_body: serde_json::Value = conflict.json().await.expect("conflict body");
+    assert_eq!(conflict_body["error"], "admission_identity_conflict");
+
+    let run_count: i64 = admin
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("admin client to count runs")
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_runs WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .expect("count pipeline_runs")
+        .get(0);
+    assert_eq!(
+        run_count, 1,
+        "neither retry nor the refused conflict may create a second pipeline run"
+    );
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "replay-on-retry test server").await;
+}
+
+/// The `submission_id` a `TraceContributionEnvelope`'s raw JSON bytes carry,
+/// read back out rather than threaded through as a separate value --
+/// `evidenced_upload`'s first call does not return the envelope it built,
+/// only its bytes and headers.
+fn first_receipt_submission_id(envelope_bytes: &[u8]) -> Uuid {
+    let envelope: TraceContributionEnvelope =
+        serde_json::from_slice(envelope_bytes).expect("envelope bytes parse");
+    envelope.submission_id
+}
+
+/// I1: a second device on the same NEAR account shares its admission anchor
+/// (V58 keys `trace_near_provisioned_devices` on `(tenant_id,
+/// principal_ref)`; nothing makes `anchor_hash` unique per principal), so
+/// `admission::reserve`'s completed-lookup -- keyed on `(tenant, anchor,
+/// submission, body_hash)`, not on principal -- answers a retry from either
+/// device's credential the same way. `admission::reserve`'s own comment says
+/// the handler still checks ownership before returning the existing receipt;
+/// before this fix the completed-admission branch's pipeline lookup did not.
+/// A second device retrying the first device's submission must get the
+/// legacy branch's own 409 `admission_identity_conflict`, not the pipeline
+/// receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_http_pipeline_receipt_refuses_a_different_devices_retry() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("checked by runtime_backend, which already returned Some");
+    let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        .await
+        .expect("connect as the migration owner for the near-account fixture rows");
+
+    let token_a = "near-device-a-fixture-token";
+    let token_b = "near-device-b-fixture-token";
+    let principal_a = o1_principal_for(token_a);
+    let principal_b = o1_principal_for(token_b);
+    let (tenant, anchor, _device_a) =
+        admission_pg_tests::provision_synthetic_near_account(&admin, &principal_a).await;
+    let _device_b = admission_pg_tests::provision_second_device_on_the_same_account(
+        &admin,
+        &tenant,
+        &anchor,
+        &principal_b,
+    )
+    .await;
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, token_a, TokenRole::Contributor);
+    insert_token(&mut tokens, &tenant, token_b, TokenRole::Contributor);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = o1_pipeline_service(backend.clone(), &dir);
+    let (provider, provider_key, signer, trust) = o1_evidence_identity();
+
+    let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.accept_medium_risk_submissions = true;
+    state_mut.pipeline_service = Some(service);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    state_mut.admission = Some(admission::AdmissionConfig {
+        limits: o1_admission_limits(),
+        providers: trust.clone(),
+    });
+
+    let (body, evidence_headers, policy_version) = evidenced_upload(
+        &state,
+        token_a,
+        &anchor,
+        &signer,
+        &provider,
+        &provider_key,
+        trust,
+        None,
+        "device a's upload",
+    )
+    .await;
+    Arc::make_mut(&mut state).witness_bypass =
+        trace_commons_server::redaction_witness::config::witness_bypass_config_from_values(
+            Some("true"),
+            Some(&signer.address()),
+            Some("synthetic-admission-measurement"),
+            Some(&policy_version),
+            None,
+        )
+        .unwrap();
+
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+
+    let created = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token_a)))
+        .headers(reqwest_headers(evidence_headers))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("device a's evidence-verified upload over real HTTP");
+    assert_eq!(created.status(), 200, "device a's upload must be accepted");
+
+    // Positive control: device A retrying its own submission still replays.
+    let own_retry = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token_a)))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("device a's own retry over real HTTP");
+    assert_eq!(
+        own_retry.status(),
+        200,
+        "the owning device must still replay"
+    );
+
+    // Device B -- a different principal, same account/anchor -- retries
+    // device A's submission id with the exact same bytes and no evidence.
+    // `admission::reserve`'s completed-lookup matches (same tenant, same
+    // anchor, same submission id, same body hash), so device B's retry also
+    // reaches the completed-admission branch; the ownership check inside it
+    // must refuse it.
+    let other_device_retry = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token_b)))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("device b's retry over real HTTP");
+    assert_eq!(
+        other_device_retry.status(),
+        409,
+        "a different device on the same account must not get another device's receipt"
+    );
+    let other_device_body: serde_json::Value = other_device_retry
+        .json()
+        .await
+        .expect("device b's response body");
+    assert_eq!(other_device_body["error"], "admission_identity_conflict");
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "different-device-retry test server").await;
+}
+
+/// Requirement in the completed-admission branch when the tenant is routed
+/// but no pipeline run exists yet: falls back to the legacy record read,
+/// unchanged. Models a submission that completed admission on the legacy
+/// path before this tenant was ever routed to the pipeline: the legacy file
+/// record exists, no pipeline run does, and the retry must still replay the
+/// legacy receipt rather than erroring or trying the pipeline's own fixed
+/// receipt.
+///
+/// No direct `PipelineService` call: the admission-ledger `completed` row is
+/// stood up directly (see `mark_admission_completed`'s own doc comment for
+/// why -- reaching this exact combination, an already-completed submission
+/// with no pipeline run, through the real evidence-verified `/v1/traces`
+/// route is not possible for a tenant this test also routes to the
+/// pipeline, since a real upload would create the run this test needs
+/// absent).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_http_pipeline_receipt_falls_back_to_legacy_record_without_a_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("checked by runtime_backend, which already returned Some");
+    let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        .await
+        .expect("connect as the migration owner for the near-account fixture rows");
+
+    let token = "near-legacy-fallback-fixture-token";
+    let principal = o1_principal_for(token);
+    let (tenant, anchor, _device) =
+        admission_pg_tests::provision_synthetic_near_account(&admin, &principal).await;
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, token, TokenRole::Contributor);
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let body = serde_json::to_vec(&envelope).expect("envelope serialises");
+    mark_admission_completed(&admin, &tenant, &anchor, envelope.submission_id, &body).await;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    // No pipeline run is seeded for this key -- `replay_receipt` must answer
+    // `None`. A legacy file record stands in for one written before this
+    // tenant was routed.
+    let record: TraceCommonsSubmissionRecord = serde_json::from_value(serde_json::json!({
+        "tenant_id": tenant,
+        "tenant_storage_ref": tenant_storage_ref(&tenant),
+        "auth_principal_ref": principal,
+        "submission_id": envelope.submission_id,
+        "trace_id": envelope.trace_id,
+        "status": "accepted",
+        "privacy_risk": "low",
+        "submission_score": 0.0,
+        "credit_points_pending": 0.0,
+        "consent_scopes": [],
+        "received_at": chrono::Utc::now().to_rfc3339(),
+        "object_key": "obj/o1-legacy-fallback-fixture",
+    }))
+    .expect("legacy submission record fixture deserialises");
+    write_submission_record(dir.path(), &record).expect("write the legacy record fixture");
+
+    let service = o1_pipeline_service(backend.clone(), &dir);
+
+    let mut state = test_state_with_tokens(dir.path().to_path_buf(), tokens);
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.accept_medium_risk_submissions = true;
+    state_mut.pipeline_service = Some(service);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    state_mut.admission = Some(admission::AdmissionConfig {
+        limits: o1_admission_limits(),
+        providers: AdmissionProviderTrust::new(
+            [hash_hex(Uuid::new_v4().as_bytes())],
+            Vec::new(),
+            ["synthetic-model".into()],
+            1,
+        )
+        .expect("provider trust fixture value (never exercised by this terminal retry)"),
+    });
+
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("retry over real HTTP");
+    assert_eq!(response.status(), 200);
+    let receipt: serde_json::Value = response.json().await.expect("receipt body");
+    assert_eq!(receipt["status"], "accepted");
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "legacy-fallback test server").await;
+}
+
+/// Marks `submission_id` `completed` in the admission ledger directly, by
+/// inserting the row `admission::reserve`'s terminal-retry read
+/// (`lookup_completed_submission_admission`, a plain `SELECT`) expects to
+/// find -- never through `trace_reserve_admission`/`trace_transition_admission`
+/// (the real reservation path, exercised for real by the other two tests in
+/// this section through `evidenced_upload`). This one models an admission
+/// row that reached `completed` before this tenant was ever pipeline-routed,
+/// with no pipeline run to match -- a state a real upload cannot produce for
+/// a tenant this test also routes to the pipeline, since the upload itself
+/// would create the run. `kind = 'window'` here for the same reason: no
+/// evidence was verified.
+async fn mark_admission_completed(
+    admin: &PgBackend,
+    tenant: &str,
+    anchor: &str,
+    submission_id: Uuid,
+    body: &[u8],
+) {
+    let client = admin
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("admin client for the completed-admission fixture row");
+    client
+        .execute(
+            "INSERT INTO trace_admission_submissions
+               (tenant_id, submission_id, anchor_hash, body_hash, kind, receipt_hash, challenge_hash,
+                status, lease_id, lease_expires_at, last_cost_bound, attempt_held, ever_processed)
+             VALUES ($1, $2, $3, $4, 'window', NULL, NULL, 'completed', $5, NOW(), $6, FALSE, TRUE)",
+            &[
+                &tenant,
+                &submission_id,
+                &anchor,
+                &hash_hex(body),
+                &Uuid::new_v4(),
+                &10i64,
+            ],
+        )
+        .await
+        .expect("insert fixture trace_admission_submissions row");
 }
