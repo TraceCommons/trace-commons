@@ -37,7 +37,7 @@ use trace_commons_gate_enclave::chunk_aggregate::{
 use trace_commons_gate_enclave::chunker::{ChunkerConfig, chunk_envelope_plaintext};
 use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
 
-use crate::credit_quality::{CREDIT_QUALITY_ACTIVE, constants_at, credit_quality};
+use crate::credit_quality::{constants_at, credit_quality};
 use crate::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, PipelineInstrumentAwardConfig, dependency_content_hash,
 };
@@ -93,7 +93,6 @@ fn default_trace_credit_instrument() -> PipelineInstrumentAwardConfig {
 pub struct CompatibilityBundleConfig {
     pub qualification: CompatibilityQualification,
     pub scorer_model_id: String,
-    pub embedder_model_id: String,
     pub projection_id: String,
     pub index_id: String,
     pub perplexity_floor_micros: u64,
@@ -105,10 +104,6 @@ pub struct CompatibilityBundleConfig {
     pub chunk_max_tokens: u32,
     pub chunk_cap: u32,
     pub chunk_min_tokens: u64,
-    /// Informational only: shadow credit quality is scored with the era
-    /// constants in force when the decision is made ([`constants_at`]), never
-    /// with a version pinned ahead of time in config.
-    pub credit_quality_version: i32,
     /// The `NoveltyUtility` flat credit delta, in trace-credit microcredits,
     /// awarded when both floors pass. Default `0`: no award unless an
     /// operator opts in (P3-D6 — this is a configured delta, never `q`).
@@ -124,7 +119,6 @@ impl CompatibilityBundleConfig {
         Self {
             qualification: CompatibilityQualification::LocalSyntheticNonQualifiable,
             scorer_model_id: "reference_perplexity.v1".to_string(),
-            embedder_model_id: "reference_embedder.v1".to_string(),
             projection_id: MINIMAL_PROJECTION_ID.to_string(),
             index_id: MINIMAL_INDEX_ID.to_string(),
             perplexity_floor_micros: 0,
@@ -136,7 +130,6 @@ impl CompatibilityBundleConfig {
             chunk_max_tokens: 3072,
             chunk_cap: 16,
             chunk_min_tokens: 64,
-            credit_quality_version: CREDIT_QUALITY_ACTIVE.version,
             novelty_utility_microcredits: 0,
             instrument: default_trace_credit_instrument(),
         }
@@ -144,7 +137,6 @@ impl CompatibilityBundleConfig {
 
     pub fn production_compatible(
         scorer_model_id: String,
-        embedder_model_id: String,
         projection_id: String,
         index_id: String,
         perplexity_floor_micros: u64,
@@ -154,7 +146,6 @@ impl CompatibilityBundleConfig {
         let config = Self {
             qualification: CompatibilityQualification::ProductionCompatible,
             scorer_model_id,
-            embedder_model_id,
             projection_id,
             index_id,
             perplexity_floor_micros,
@@ -166,7 +157,6 @@ impl CompatibilityBundleConfig {
             chunk_max_tokens: 3072,
             chunk_cap: 16,
             chunk_min_tokens: 64,
-            credit_quality_version: CREDIT_QUALITY_ACTIVE.version,
             novelty_utility_microcredits: 0,
             instrument: default_trace_credit_instrument(),
         };
@@ -177,7 +167,6 @@ impl CompatibilityBundleConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.scorer_model_id.trim().is_empty()
-                && !self.embedder_model_id.trim().is_empty()
                 && !self.projection_id.trim().is_empty()
                 && !self.index_id.trim().is_empty(),
             "compatibility dependency identity is missing"
@@ -223,6 +212,11 @@ pub struct CompatibilityScorePolicy {
     scorer: Arc<dyn IdentifiedPerplexityScorer>,
     embedder: Arc<dyn IdentifiedEmbedder>,
     index_reader: Arc<dyn IdentifiedIndexReader>,
+    /// The Score start time, read once per `execute` call and handed to
+    /// [`constants_at`]. Defaults to the real clock; a test may substitute a
+    /// fixed instant with [`Self::with_clock`], which production code cannot
+    /// reach (it is `#[cfg(test)]`).
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 impl CompatibilityScorePolicy {
@@ -240,7 +234,16 @@ impl CompatibilityScorePolicy {
             scorer,
             embedder,
             index_reader,
+            clock: Arc::new(|| chrono::Utc::now().timestamp()),
         })
+    }
+
+    /// Test-only: pins the Score start time `execute` reads, so a test can
+    /// exercise a specific credit-quality calibration era deterministically.
+    #[cfg(test)]
+    fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
     }
 }
 
@@ -255,6 +258,7 @@ fn permanent(label: &'static str) -> PolicyError {
 #[async_trait]
 impl ScorePolicy for CompatibilityScorePolicy {
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+        let now = (self.clock)();
         if input.reviewed_artifact.is_empty() {
             return Err(permanent("score_input_empty"));
         }
@@ -323,7 +327,7 @@ impl ScorePolicy for CompatibilityScorePolicy {
             >= self.config.perplexity_floor_micros
             && perplexity.tail_fraction_micros >= self.config.tail_fraction_floor_micros;
         let novelty_passed = novelty_score_micros >= self.config.novelty_floor_micros;
-        let constants = constants_at(chrono::Utc::now().timestamp());
+        let constants = constants_at(now);
         let shadow = credit_quality(
             i64::try_from(perplexity.representative_perplexity_micros).unwrap_or(i64::MAX),
             i64::try_from(perplexity.peak_perplexity_micros).unwrap_or(i64::MAX),
@@ -462,6 +466,7 @@ mod tests {
     };
     use uuid::Uuid;
 
+    use crate::credit_quality::{CREDIT_QUALITY_ACTIVE, QWEN3_8_EFFECTIVE_FROM_UNIX};
     use crate::versioned_pipeline::pipeline_tenant_storage_ref;
 
     // ---- test doubles ----------------------------------------------------
@@ -763,6 +768,30 @@ mod tests {
             .unwrap()
     }
 
+    /// As [`run_score`], but pins the Score start time to `at` instead of
+    /// the real clock.
+    async fn run_score_at(
+        config: &CompatibilityBundleConfig,
+        scorer: FixedPerplexityScorer,
+        index_reader: Arc<RecordingIndexReader>,
+        at: i64,
+    ) -> ScoreOutput {
+        let manifest = manifest_pinning_trace_credit(config);
+        let policy = CompatibilityScorePolicy::new(
+            manifest,
+            config.clone(),
+            Arc::new(scorer),
+            Arc::new(ReferenceEmbedder::new()),
+            index_reader,
+        )
+        .unwrap()
+        .with_clock(move || at);
+        policy
+            .execute(&score_input(b"hello world, this is a compatibility trace"))
+            .await
+            .unwrap()
+    }
+
     // ---- tests ---------------------------------------------------------
 
     #[tokio::test]
@@ -871,19 +900,30 @@ mod tests {
     async fn shadow_quality_uses_the_era_constants() {
         let mut config = CompatibilityBundleConfig::local_reference();
         config.novelty_utility_microcredits = 1_000_000;
-        let now = chrono::Utc::now().timestamp();
-        let expected_version = constants_at(now).version;
+        // Pin the Score start time to before the Qwen3.8 switch, so this
+        // test exercises a non-active era: `constants_at(now)`,
+        // `CREDIT_QUALITY_ACTIVE`, and `config.credit_quality_version` (now
+        // removed) all agreed on V3 "today", which let each of them pass
+        // silently even if `execute` used the wrong one.
+        let before_qwen3_8 = QWEN3_8_EFFECTIVE_FROM_UNIX - 1;
+        let expected_version = constants_at(before_qwen3_8).version;
+        assert_ne!(
+            expected_version, CREDIT_QUALITY_ACTIVE.version,
+            "test setup must exercise a non-active era, or it can't catch execute() reading the wrong constants"
+        );
 
-        let low_quality = run_score(
+        let low_quality = run_score_at(
             &config,
             FixedPerplexityScorer::uniform(200, 2.0, 0.0),
             RecordingIndexReader::new(),
+            before_qwen3_8,
         )
         .await;
-        let high_quality = run_score(
+        let high_quality = run_score_at(
             &config,
             FixedPerplexityScorer::uniform(200, 40.0, 0.0),
             RecordingIndexReader::new(),
+            before_qwen3_8,
         )
         .await;
 
@@ -1004,6 +1044,74 @@ mod tests {
         );
         assert_eq!(evidence.total_chunk_count, Some(3));
         assert_eq!(evidence.chunks_capped, Some(false));
+        // The config no longer carries an `embedder_model_id` (T4-3): the
+        // evidence and the stored command both take the model id straight
+        // from the embedder dependency itself.
+        assert_eq!(
+            evidence.embedder_model_id.as_deref(),
+            Some(embedder.model_id())
+        );
+        assert_eq!(command.model_id(), embedder.model_id());
+    }
+
+    /// The uncapped test above cannot tell `chunk.chunk_index` (the ORIGINAL
+    /// position) apart from the chunks-iteration loop position, because
+    /// nothing is dropped: reverting `execute` to the loop index still
+    /// passes it. Here the plan is capped, so the two diverge.
+    #[tokio::test]
+    async fn command_keeps_original_chunk_numbers_when_the_plan_is_capped() {
+        let mut config = CompatibilityBundleConfig::local_reference();
+        config.chunk_target_tokens = 1;
+        config.chunk_max_tokens = 1;
+        config.chunk_cap = 2;
+
+        // Three 4-char fixed-window chunks with original indices 0 ("aaaa"),
+        // 1 ("bbbb"), 2 ("cccc"); capped to 2 survivors.
+        // `strided_selection_indices(3, 2)` (chunker.rs) keeps original
+        // indices [0, 2] and drops "bbbb" (index 1). The first surviving
+        // chunk in iteration order ("aaaa", original index 0) finds a
+        // near-identical neighbor and is excluded from the command; only
+        // "cccc" (original index 2) is inserted. Using the loop position
+        // (0, since "aaaa" was excluded and "cccc" is the second chunk
+        // *iterated*, position 1) instead of `chunk.chunk_index` would
+        // wrongly record that surviving entry as chunk `1`.
+        let reader = RecordingIndexReader::new();
+        reader.queue_neighbors(vec![NearestNeighbor {
+            entry_id: Uuid::nil(),
+            similarity: 1.0,
+        }]);
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let manifest = manifest_pinning_trace_credit(&config);
+        let policy = CompatibilityScorePolicy::new(
+            manifest,
+            config.clone(),
+            Arc::new(FixedPerplexityScorer::uniform(100, 10.0, 0.0)),
+            embedder,
+            reader,
+        )
+        .unwrap();
+
+        let output = policy.execute(&score_input(b"aaaabbbbcccc")).await.unwrap();
+        let command = output
+            .index_command()
+            .expect("both floors pass by default under local_reference()");
+        assert_eq!(
+            command
+                .entries()
+                .iter()
+                .map(|e| e.chunk)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "the surviving entry must keep its ORIGINAL chunk number, not its position among survivors"
+        );
+        let evidence = &output.result().evidence;
+        assert_eq!(evidence.chunk_count, Some(2), "two chunks survive the cap");
+        assert_eq!(
+            evidence.total_chunk_count,
+            Some(3),
+            "three chunks existed before the cap"
+        );
+        assert_eq!(evidence.chunks_capped, Some(true));
     }
 
     #[tokio::test]
