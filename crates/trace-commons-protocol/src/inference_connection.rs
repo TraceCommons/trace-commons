@@ -1,6 +1,7 @@
 //! Wire contract for explicit selection of an operator-published inference connection.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const DISCLOSURE_VERSION: &str = "inference-connection-disclosure-v1";
@@ -128,10 +129,12 @@ impl InferenceConnectionOffer {
     }
 }
 
-/// Shape checks only: an `https` URL with no credentials, query or fragment,
-/// a `0x`-prefixed 20-byte signing address, and a bounded, non-empty pin
-/// list. Whether each pin parses as a measurement set is the verifier's
-/// question, and a client asks it before installing.
+/// An `https` URL with no credentials, query or fragment, a `0x`-prefixed
+/// 20-byte signing address, and a bounded, non-empty pin list in which every
+/// entry is a measurement set [`valid_measurement_entry`] accepts -- the same
+/// rule the server applies when it loads the offer, so a pin list the client
+/// accepts is one the server could have published and one the client's
+/// verifier parses without skipping an entry.
 impl ConnectionWitnessConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
         if !valid_https_url(&self.url) {
@@ -149,7 +152,7 @@ impl ConnectionWitnessConfig {
             || self
                 .expected_measurements
                 .iter()
-                .any(|entry| entry.is_empty() || entry.len() > MAX_MEASUREMENT_BYTES)
+                .any(|entry| entry.len() > MAX_MEASUREMENT_BYTES || !valid_measurement_entry(entry))
         {
             return Err("measurements_invalid");
         }
@@ -181,6 +184,158 @@ impl SelectedInferenceConnection {
         }
         Ok(())
     }
+}
+
+impl SelectedInferenceConnection {
+    /// Recompute this selection's `config_digest` from the witness material
+    /// it carries, and its `revision` from that digest, and refuse unless both
+    /// match what the server stated.
+    ///
+    /// `offer_id` and `provider_id` are the offer the contributor was shown:
+    /// neither travels in the select response, and both are bound into the
+    /// digests. Without this check a server could answer the digest the
+    /// contributor chose with some other URL, address or pin set.
+    pub fn verify_digests(&self, offer_id: &str, provider_id: &str) -> Result<(), &'static str> {
+        let config = config_digest(
+            provider_id,
+            &self.disclosure_version,
+            &self.witness,
+            self.inference_receipt_endpoint.as_deref(),
+        );
+        if config != self.config_digest {
+            return Err("config_digest_mismatch");
+        }
+        if offer_revision(offer_id, provider_id, &self.disclosure_version, &config) != self.revision
+        {
+            return Err("revision_mismatch");
+        }
+        Ok(())
+    }
+}
+
+const CONFIG_DIGEST_DOMAIN: &[u8] = b"trace-commons/inference-connection-config/v1\0";
+const REVISION_DOMAIN: &[u8] = b"trace-commons/inference-connection-offer/v1\0";
+
+/// The bytes an offer's `config_digest` is taken over: a domain tag, then
+/// each field length-framed (`u32` big-endian length, then the bytes), the
+/// pin count as a `u32`, and the receipt endpoint behind a presence byte.
+/// The server computes published digests with this function and a client
+/// recomputes them with it, so the two cannot drift.
+pub fn encode_config(
+    provider_id: &str,
+    disclosure_version: &str,
+    witness: &ConnectionWitnessConfig,
+    inference_receipt_endpoint: Option<&str>,
+) -> Vec<u8> {
+    let mut config = CONFIG_DIGEST_DOMAIN.to_vec();
+    frame(&mut config, provider_id.as_bytes());
+    frame(&mut config, disclosure_version.as_bytes());
+    frame(&mut config, witness.url.as_bytes());
+    frame(&mut config, witness.signing_address.as_bytes());
+    config.extend_from_slice(&(witness.expected_measurements.len() as u32).to_be_bytes());
+    for measurement in &witness.expected_measurements {
+        frame(&mut config, measurement.as_bytes());
+    }
+    match inference_receipt_endpoint {
+        Some(endpoint) => {
+            config.push(1);
+            frame(&mut config, endpoint.as_bytes());
+        }
+        None => config.push(0),
+    }
+    config
+}
+
+/// The bytes an offer's `revision` is taken over. The revision binds the
+/// offer id and provider to the configuration digest.
+pub fn encode_revision(
+    offer_id: &str,
+    provider_id: &str,
+    disclosure_version: &str,
+    config_digest: &str,
+) -> Vec<u8> {
+    let mut descriptor = REVISION_DOMAIN.to_vec();
+    frame(&mut descriptor, offer_id.as_bytes());
+    frame(&mut descriptor, provider_id.as_bytes());
+    frame(&mut descriptor, disclosure_version.as_bytes());
+    frame(&mut descriptor, config_digest.as_bytes());
+    descriptor
+}
+
+/// `sha256:` and the lowercase hex SHA-256 of `bytes`.
+pub fn sha256_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+/// The `config_digest` of a connection configuration.
+pub fn config_digest(
+    provider_id: &str,
+    disclosure_version: &str,
+    witness: &ConnectionWitnessConfig,
+    inference_receipt_endpoint: Option<&str>,
+) -> String {
+    sha256_digest(&encode_config(
+        provider_id,
+        disclosure_version,
+        witness,
+        inference_receipt_endpoint,
+    ))
+}
+
+/// The `revision` of an offer.
+pub fn offer_revision(
+    offer_id: &str,
+    provider_id: &str,
+    disclosure_version: &str,
+    config_digest: &str,
+) -> String {
+    sha256_digest(&encode_revision(
+        offer_id,
+        provider_id,
+        disclosure_version,
+        config_digest,
+    ))
+}
+
+fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    output.extend_from_slice(bytes);
+}
+
+/// Registers a pin may name. Mirrors `MeasurementField` in
+/// `trace-commons-attestation`, which this crate does not depend on; the
+/// server's tests hold the two parsers to the same answers.
+const MEASUREMENT_KEYS: [&str; 6] = ["mrtd", "mrconfigid", "rtmr0", "rtmr1", "rtmr2", "rtmr3"];
+const MEASUREMENT_HEX_LEN: usize = 96;
+
+/// Whether `entry` is one measurement set the verifier loads: comma-separated
+/// `key=value` pins, each key a known register (any case, surrounding
+/// whitespace ignored), each value exactly 96 hex characters, no register
+/// twice, and at least one pin. A stray empty segment between commas is
+/// tolerated, as the verifier tolerates it; an entry that is empty or only
+/// whitespace is refused, where the verifier would skip it silently.
+pub fn valid_measurement_entry(entry: &str) -> bool {
+    let mut seen: Vec<String> = Vec::new();
+    for segment in entry.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = segment.split_once('=') else {
+            return false;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if !MEASUREMENT_KEYS.contains(&key.as_str())
+            || value.len() != MEASUREMENT_HEX_LEN
+            || !value.bytes().all(|b| b.is_ascii_hexdigit())
+            || seen.contains(&key)
+        {
+            return false;
+        }
+        seen.push(key);
+    }
+    !seen.is_empty()
 }
 
 /// An absolute `https` URL with a host, no user info, no query and no
@@ -361,6 +516,152 @@ mod tests {
             change(&mut altered);
             assert_eq!(altered.validate(), Err(label));
         }
+    }
+
+    fn kat_witness() -> ConnectionWitnessConfig {
+        ConnectionWitnessConfig {
+            url: "https://witness.example/v1".into(),
+            signing_address: format!("0x{}", "ab".repeat(20)),
+            expected_measurements: vec![
+                format!("mrtd={}", "ab".repeat(48)),
+                format!("rtmr3={}", "cd".repeat(48)),
+            ],
+        }
+    }
+
+    /// Pinned from the server's encoding before it moved here. A change to
+    /// these bytes changes every published digest and revision, so every
+    /// installed selection would stop verifying.
+    #[test]
+    fn digest_encoding_is_pinned() {
+        assert_eq!(
+            config_digest("near-ai", DISCLOSURE_VERSION, &kat_witness(), None),
+            "sha256:cb8908a1d2409158a634f0a576c378ca7cb45f668e7f76e25acc6e394ded902c"
+        );
+        let with_receipt = config_digest(
+            "near-ai",
+            DISCLOSURE_VERSION,
+            &kat_witness(),
+            Some("https://receipt.example/v1"),
+        );
+        assert_eq!(
+            with_receipt,
+            "sha256:383855ed69b5a6c0341f46429c4f9328a3b925d4152d687895e061faccf14d54"
+        );
+        assert_eq!(
+            offer_revision("offer", "near-ai", DISCLOSURE_VERSION, &with_receipt),
+            "sha256:87d8925d318f67e19233fc39dfa2ea82864c5d5951cc1bfa9591badcee93d3d5"
+        );
+    }
+
+    #[test]
+    fn framing_disambiguates_field_boundaries() {
+        let mut left = Vec::new();
+        frame(&mut left, b"ab");
+        frame(&mut left, b"c");
+        let mut right = Vec::new();
+        frame(&mut right, b"a");
+        frame(&mut right, b"bc");
+        assert_ne!(left, right);
+    }
+
+    fn verified_selection() -> SelectedInferenceConnection {
+        let witness = kat_witness();
+        let receipt = Some("https://receipt.example/v1".to_string());
+        let digest = config_digest("near-ai", DISCLOSURE_VERSION, &witness, receipt.as_deref());
+        SelectedInferenceConnection {
+            connection_id: Uuid::new_v4(),
+            state_version: 1,
+            revision: offer_revision("offer", "near-ai", DISCLOSURE_VERSION, &digest),
+            config_digest: digest,
+            disclosure_version: DISCLOSURE_VERSION.into(),
+            witness,
+            inference_receipt_endpoint: receipt,
+        }
+    }
+
+    #[test]
+    fn verify_digests_accepts_exactly_the_published_configuration() {
+        let selected = verified_selection();
+        assert_eq!(selected.verify_digests("offer", "near-ai"), Ok(()));
+        type Change = fn(&mut SelectedInferenceConnection);
+        let tampered: [(Change, &str); 6] = [
+            (
+                |s| s.witness.url = "https://other-witness.example/v1".into(),
+                "config_digest_mismatch",
+            ),
+            (
+                |s| s.witness.signing_address = format!("0x{}", "cd".repeat(20)),
+                "config_digest_mismatch",
+            ),
+            (
+                |s| s.witness.expected_measurements[0] = format!("mrtd={}", "ef".repeat(48)),
+                "config_digest_mismatch",
+            ),
+            (
+                |s| {
+                    s.witness.expected_measurements.pop();
+                },
+                "config_digest_mismatch",
+            ),
+            (
+                |s| s.inference_receipt_endpoint = None,
+                "config_digest_mismatch",
+            ),
+            (
+                |s| s.revision = format!("sha256:{}", "0".repeat(64)),
+                "revision_mismatch",
+            ),
+        ];
+        for (change, label) in tampered {
+            let mut altered = selected.clone();
+            change(&mut altered);
+            assert_eq!(altered.verify_digests("offer", "near-ai"), Err(label));
+        }
+        assert_eq!(
+            selected.verify_digests("offer", "other-provider"),
+            Err("config_digest_mismatch")
+        );
+        assert_eq!(
+            selected.verify_digests("other-offer", "near-ai"),
+            Err("revision_mismatch")
+        );
+    }
+
+    #[test]
+    fn pin_entries_must_parse_as_the_verifier_parses_them() {
+        let pin = |key: &str| format!("{key}={}", "ab".repeat(48));
+        for good in [
+            pin("mrtd"),
+            format!("{} , {}", pin("MRTD"), pin("rtmr3")),
+            format!("{},", pin("mrconfigid")),
+            format!("  {}  ", pin("rtmr0")),
+        ] {
+            assert!(valid_measurement_entry(&good), "{good}");
+        }
+        for bad in [
+            String::new(),
+            "   ".into(),
+            ",".into(),
+            " , ".into(),
+            "mrtd".into(),
+            "=".into(),
+            pin("mrtdd"),
+            pin("compose_hash"),
+            format!("mrtd={}", "ab".repeat(47)),
+            format!("mrtd={}", "zz".repeat(48)),
+            format!("{},{}", pin("mrtd"), pin("MRTD")),
+            format!("{},garbage", pin("mrtd")),
+        ] {
+            assert!(!valid_measurement_entry(&bad), "{bad:?}");
+        }
+        let mut witness = kat_witness();
+        for bad in ["   ", "", "mrtd=short"] {
+            witness.expected_measurements = vec![pin("mrtd"), bad.into()];
+            assert_eq!(witness.validate(), Err("measurements_invalid"), "{bad:?}");
+        }
+        witness.expected_measurements = vec![pin("mrtd"), pin("rtmr3")];
+        assert_eq!(witness.validate(), Ok(()));
     }
 
     #[test]
