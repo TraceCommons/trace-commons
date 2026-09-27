@@ -85,6 +85,7 @@ export function WaitingPage({ status }: { status: CoreStatus | null }) {
           health={status.daemon.health}
           budget={status.daemon.daily_budget}
           routing={status.daemon.routing}
+          witnessCapacity={status.daemon.witness_capacity}
         />
       )}
       <ArmingOffer
