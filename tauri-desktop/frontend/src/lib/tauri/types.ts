@@ -39,6 +39,10 @@ export const coreStatusSchema = z.object({
     // `parseGrantVoids`, which refuses a malformed list rather than letting
     // it fail the whole status payload.
     grant_voids: z.unknown().optional(),
+    // Approved sessions held on a busy privacy witness. Read by
+    // `parseWitnessCapacity`, which refuses a malformed object rather than
+    // letting it fail the whole status payload.
+    witness_capacity: z.unknown().optional(),
   }),
 });
 
