@@ -183,7 +183,10 @@ pub(crate) async fn withdraw_automatic_grant(
 mod tests {
     use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
 
-    fn config(scopes: &[&str], chosen: bool) -> trace_commons_contributor::config::ContributorConfig {
+    fn config(
+        scopes: &[&str],
+        chosen: bool,
+    ) -> trace_commons_contributor::config::ContributorConfig {
         serde_json::from_value(serde_json::json!({
             "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
             "issuer_url": "https://issuer.invalid",
@@ -202,8 +205,8 @@ mod tests {
     /// What an invite enrollment saves: the floor scope `validate_scopes`
     /// adds, with nobody having picked it.
     fn invite_enrolled() -> trace_commons_contributor::config::ContributorConfig {
-        let floor = trace_commons_contributor::consent::validate_scopes(&[])
-            .expect("the floor scope");
+        let floor =
+            trace_commons_contributor::consent::validate_scopes(&[]).expect("the floor scope");
         let floor: Vec<&str> = floor.iter().map(String::as_str).collect();
         config(&floor, false)
     }
