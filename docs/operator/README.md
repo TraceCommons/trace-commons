@@ -49,6 +49,7 @@ the link.
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
 | Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
 | Re-deriving the dedup simhash and reclustering the corpus | [`./dedup-recluster.md`](./dedup-recluster.md) |
+| Measuring how many submissions pass R1 (certified full redaction pipeline) | [`./r1-pipeline-measurement.md`](./r1-pipeline-measurement.md) |
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
 | Recovering a corrupted vector index | [`./vector-replay.md`](./vector-replay.md) |
 | Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
@@ -196,6 +197,10 @@ Every runbook in this directory, with a one-line description.
 - [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) —
   contributor-facing setup flow for invite code, workload JWT, Ironclaw
   opt-in, profile handle registration, and leaderboard expectations.
+- [`./r1-pipeline-measurement.md`](./r1-pipeline-measurement.md) — read-only
+  SQL counting submissions whose stored witness certificate names a pipeline
+  on the R1 allowlist, by version, witness presence and tenant namespace;
+  works on schemas before V76 and says which source it used.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —

@@ -88,6 +88,11 @@ pub enum UploadDecision {
     },
     /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
+    /// The witness is at capacity (`503 witness_saturated`) and judged
+    /// nothing. Nothing was sent. The session keeps its approval and is
+    /// tried again no sooner than `retry_after_secs`, the witness's own
+    /// bounded `Retry-After`.
+    WitnessSaturated { retry_after_secs: u32 },
     /// A daily volume cap is in force.
     CapReached,
 }
@@ -249,8 +254,21 @@ fn hold_for_review(
 
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
 /// fixed label rather than pipeline internals.
-fn decision_for(outcome: SubmitOutcome, receipt: crate::submit::ReceiptShipped) -> UploadDecision {
+fn decision_for(
+    outcome: SubmitOutcome,
+    receipt: crate::submit::ReceiptShipped,
+    witness_retry_after: Option<u32>,
+) -> UploadDecision {
     match outcome {
+        SubmitOutcome::Failed { reason_label }
+            if reason_label == crate::submit::REASON_WITNESS_SATURATED =>
+        {
+            UploadDecision::WitnessSaturated {
+                retry_after_secs: witness_retry_after.unwrap_or(
+                    trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS,
+                ),
+            }
+        }
         SubmitOutcome::Refused { reason_label, .. } | SubmitOutcome::Failed { reason_label }
             if matches!(
                 reason_label.as_str(),
@@ -283,6 +301,7 @@ fn decision_for(outcome: SubmitOutcome, receipt: crate::submit::ReceiptShipped) 
 pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
     match decision {
         UploadDecision::CapReached => Some(LABEL_DAILY_CAP_REACHED),
+        UploadDecision::WitnessSaturated { .. } => Some(super::health::LABEL_WITNESS_SATURATED),
         UploadDecision::Refused { reason_label } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
             LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
@@ -618,7 +637,11 @@ impl Uploader<'_, '_> {
                 *witnessed,
                 *attested_inference,
             ),
-            outcome => decision_for(outcome, self.ctx.last_receipt_shipped()),
+            outcome => decision_for(
+                outcome,
+                self.ctx.last_receipt_shipped(),
+                self.ctx.last_witness_retry_after(),
+            ),
         };
 
         match &decision {

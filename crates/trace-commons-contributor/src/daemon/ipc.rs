@@ -461,6 +461,13 @@ struct RoutingSnapshot {
     derived: bool,
 }
 
+/// `status.witness_capacity`: see [`DaemonShared::witness_capacity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessCapacity {
+    pub waiting_sessions: usize,
+    pub next_retry_at: Option<chrono::DateTime<Utc>>,
+}
+
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
     pub store: ConfigStore,
@@ -1408,6 +1415,26 @@ impl DaemonShared {
         super::uploader::budget_snapshot(&approved, &state, &settings, now)
     }
 
+    /// How many approved sessions are held because the witness is at
+    /// capacity, and the earliest instant one of them will be tried again.
+    ///
+    /// Derived from the queue on every call rather than kept beside it, so
+    /// it cannot disagree with the rows it counts. Approved rows are never on
+    /// `list_pending`, so, like `daily_budget`, this is the only place a
+    /// shell can learn the condition.
+    pub fn witness_capacity(&self) -> WitnessCapacity {
+        let queue = self.queue.lock().expect("queue lock");
+        let waiting: Vec<&super::queue::QueueEntry> = queue
+            .all()
+            .iter()
+            .filter(|e| e.waiting_on_witness_capacity())
+            .collect();
+        WitnessCapacity {
+            waiting_sessions: waiting.len(),
+            next_retry_at: waiting.iter().filter_map(|e| e.retry_after).min(),
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
         let now = Utc::now();
@@ -1424,6 +1451,8 @@ impl DaemonShared {
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
         let grant_voids = self.grant_voids_value();
+        // Before the queue lock: it takes the queue lock itself.
+        let witness_capacity = self.witness_capacity();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1469,6 +1498,15 @@ impl DaemonShared {
             // an outage, nor mask one. An empty list, never absent, so a
             // shell can tell "nothing to show" from a daemon too old to say.
             "grant_voids": grant_voids,
+            // Additive. Approved sessions held because the witness is at
+            // capacity, and when the first of them is tried again. Beside
+            // `health` for the reason `daily_budget` is: the health slot
+            // holds one label, and a busy witness must still be sayable
+            // while something outranks it. Always present, zero when none.
+            "witness_capacity": {
+                "waiting_sessions": witness_capacity.waiting_sessions,
+                "next_retry_at": witness_capacity.next_retry_at,
+            },
         })
     }
 

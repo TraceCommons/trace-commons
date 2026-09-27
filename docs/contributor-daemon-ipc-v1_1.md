@@ -538,11 +538,13 @@ pins. No account token, device key or PKCE verifier is returned to native views.
     "blocked_bytes": 137283584
   },
   "routing": { "state": "not_declared", "last_refresh_at": null },
-  "grant_voids": []
+  "grant_voids": [],
+  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null }
 }
 ```
 
-`grant_voids` is additive; see "Void notices" below.
+`grant_voids` is additive; see "Void notices" below. `witness_capacity` is
+additive; see its section below.
 
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
@@ -578,6 +580,38 @@ a small entry queued behind a large one waits as well.
 
 `blocked` is false when the budget is spent but nothing is approved and
 waiting. No contributor action is pending in that case.
+
+#### `witness_capacity`
+
+Additive. How many approved sessions are held because the privacy witness
+answered `503 witness_saturated` (the pacing contract in
+`trace_commons_protocol::witness_pacing`), and when the first of them is
+tried again. Always present; `waiting_sessions` is `0` and `next_retry_at`
+`null` when nothing is waiting.
+
+| field | meaning |
+| --- | --- |
+| `waiting_sessions` | approved entries whose `reason_label` is `witness-saturated` |
+| `next_retry_at` | the earliest `retry_after` among them (RFC 3339), or `null` |
+
+The upload pass marks its witness requests
+`x-trace-witness-workload: background`; a review a contributor asked for
+sends no header. On a saturation refusal the entry keeps its approval, is
+labelled `witness-saturated`, and is not claimed again before the witness's
+own `Retry-After` (bounded to an hour; an unreadable value is the contract's
+30 seconds), doubling while the witness stays busy, capped at an hour, plus
+up to half the witness's delay of per-session jitter. Every later entry in
+the same pass that would need the witness is held until the same time
+without being sent, so a busy witness is asked once per pass, not once per
+session. There is no attempt limit: a busy witness never costs a session.
+
+It is beside `health` for the reason `daily_budget` is: the daemon also
+sets `witness-saturated` in the health slot, set and retracted from the
+queue on every upload pass, but a higher-precedence label can mask it.
+Render the condition from this object. The words are
+`consent_copy::witness_capacity_notice_for_wire` (`tc_witness_capacity_notice`
+across the ABI); a shell renders `next_retry_at` itself, in local time,
+beside the notice's `next_check` label.
 
 Counts and timestamps only. No entry id, hash, or path appears here.
 
@@ -3611,6 +3645,7 @@ race `list_pending` against the stream at startup. On `resync_required`, call
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
+| `witness-saturated` | approved sessions held because the privacy witness is at capacity; also the `reason_label` on each held entry | yes |
 | `session-too-large` | at least one session on disk is past the byte budget its source will read, so it is not being offered | no |
 | `dismissed-by-contributor` | declined by hand | n/a |
 | `expired-without-decision` | aged out | n/a |
@@ -3633,8 +3668,9 @@ listed highest first:
 5. `claim-mint-failed`
 6. `ingest-unreachable`
 7. `queue-full`
-8. `daily-cap-reached`
-9. `session-too-large`
+8. `witness-saturated`
+9. `daily-cap-reached`
+10. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
