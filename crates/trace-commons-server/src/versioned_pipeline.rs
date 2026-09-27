@@ -808,6 +808,28 @@ impl PgPipelineStore {
         rows.iter().map(phase_outcome_from_row).collect()
     }
 
+    /// Loads the single committed outcome for `phase`, or `None` if the run
+    /// has not reached it yet -- one targeted query instead of listing every
+    /// phase outcome and filtering in memory.
+    pub async fn outcome_for_phase(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        phase: Phase,
+    ) -> Result<Option<PhaseOutcomeRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT * FROM phase_outcomes
+                 WHERE tenant_id = $1 AND run_id = $2 AND phase = $3",
+                &[&tenant_id, &run_id, &phase_as_db(Some(phase))],
+            )
+            .await?;
+        tx.commit().await?;
+        row.as_ref().map(phase_outcome_from_row).transpose()
+    }
+
     /// Claims the next due run for `tenant_id` across every phase, sizing
     /// the lease this claim grants by the claimed row's own `next_phase`
     /// (decision D4, requirement 2): the CASE below picks Review's, Score's,
@@ -4640,12 +4662,13 @@ impl PipelineService {
         // must still agree -- each is stored as an independent JSONB
         // column, so this is a defensive re-check, not a repeat of the
         // `ScoreOutput::new` invariant that already held at commit time.
+        // One query for the Score phase's own row, not a list of every
+        // outcome the run has: the other phases' outcomes are never read
+        // here.
         let score_outcome = self
             .store
-            .list_outcomes(&run.tenant_id, run.run_id)
+            .outcome_for_phase(&run.tenant_id, run.run_id, Phase::Score)
             .await?
-            .into_iter()
-            .find(|outcome| outcome.phase == Phase::Score)
             .ok_or_else(|| anyhow::anyhow!("score_outcome_invalid"))?;
         let score_decision = serde_json::from_value::<ScoreDecision>(score_outcome.decision)
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
@@ -4661,7 +4684,12 @@ impl PipelineService {
 
         // Step 2 (brief 3C, `ensure_operations_match_committed_awards`):
         // the settlement rows Score seeded (decision D5) must still be
-        // exactly one per award.
+        // exactly one per award. Listed once per pass: only the worker
+        // holding the run's lease changes these rows, and nothing between
+        // here and Step 6 below writes to them (Step 4 persists the
+        // selection on `pipeline_runs`, not the settlement rows; Step 5
+        // touches only the index and `index_write_state`), so the list read
+        // here is still current when Step 6 uses it.
         let settlements = self
             .store
             .list_settlements(&run.tenant_id, run.run_id)
@@ -4672,15 +4700,19 @@ impl PipelineService {
             &settlements,
         )?;
 
-        // Step 3: the submission-operability guard, read fresh.
-        let mut guard = self.submission_guard(&run).await?;
-
         // Step 4: reuse a persisted selection on retry; otherwise run the
         // Settle policy once and persist its selection before any external
         // effect.
         let selection = match self.store.load_settle_selection(&run).await? {
             Some(selection) => selection,
             None => {
+                // Step 3: the submission-operability guard, read fresh,
+                // directly before the index-membership decision below that
+                // this branch persists (decision D4). A retry that already
+                // has a persisted selection never reaches this branch, so
+                // it never pays for this read only to see it replaced
+                // before use at Step 5 or Step 6 below.
+                let guard = self.submission_guard(&run).await?;
                 let index_command = self.load_index_command(&run, &score_evidence).await?;
                 let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
                 self.settle_evaluations.fetch_add(1, Ordering::SeqCst);
@@ -4741,9 +4773,12 @@ impl PipelineService {
         };
 
         // Step 5: dispatch to the index only when a prior attempt left it
-        // pending (an include whose entries are not yet all applied).
+        // pending (an include whose entries are not yet all applied). The
+        // guard is read fresh here too, directly before this dispatch --
+        // its own external effect -- rather than trusting whatever Step 3
+        // saw, since a withdrawal can land in the gap between them.
         if run.index_write_state == "pending" {
-            guard = self.submission_guard(&run).await?;
+            let guard = self.submission_guard(&run).await?;
             if !guard.operable {
                 run = self.store.mark_index_write_state(&run, "cancelled").await?;
             } else {
@@ -4789,12 +4824,11 @@ impl PipelineService {
         // retry never repeats a leg that already reached `complete`. Guard
         // is re-checked immediately before any instrument dispatch, the
         // same reason Step 5 re-checks it before its own external effect:
-        // the withdrawal can land in the gap since Step 3's read.
-        guard = self.submission_guard(&run).await?;
-        let settlements = self
-            .store
-            .list_settlements(&run.tenant_id, run.run_id)
-            .await?;
+        // the withdrawal can land in the gap since Step 4's read (or Step
+        // 5's, when that ran). The settlement rows themselves are not
+        // re-listed -- Step 2's list is still current, per the note there --
+        // so this reuses it rather than querying again.
+        let mut guard = self.submission_guard(&run).await?;
         if !guard.operable {
             // The submission stopped being operable: every leg that has not
             // already completed is forfeited without calling its adapter.
