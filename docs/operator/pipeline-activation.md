@@ -131,6 +131,18 @@ or `index_key_conflict`), no leg stays open:
 Find the leg's `operation_ref_hash` in the adapter's records and reconcile
 it by hand. Nothing retries it.
 
+## Receipt staging and the orphan sweep
+
+A pipeline receipt records its envelope object as a `staged` row in
+`pipeline_receipt_artifacts` before it writes the object. The transaction that
+stores the receipt marks the row `committed`. If the receipt fails after the
+write, the row stays `staged`. On each pass, the pipeline worker sweeps every
+listed tenant: for up to 32 `staged` rows whose `cleanup_after` (one hour after
+staging) has passed, it deletes the object and then the row. If a delete
+fails, the row stays for the next pass and the worker logs
+`pipeline_receipt_sweep_delete_failed`. A failed receipt stays counted against
+the quota. A retry with the same submission id is not counted again.
+
 ## Submission quota at switch-over
 
 The pipeline counts only pipeline receipts against the hourly submission

@@ -177,6 +177,11 @@ struct PipelineWorkerHandle {
 /// the same tenant gets another turn on the very next iteration regardless.
 const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 
+/// How many due staged receipt attempts the worker sweeps for one tenant per
+/// pass (`PipelineService::sweep_staged_receipts`), after draining its runs.
+/// The rest wait for the next pass.
+const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
+
 /// How long the worker sleeps between iterations when `stop` does not fire
 /// first.
 const PIPELINE_WORKER_POLL_INTERVAL: StdDuration = StdDuration::from_millis(200);
@@ -262,6 +267,12 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// failure is logged with a label and the tenant's `tenant_storage_ref` --
 /// never the tenant id or the error's own text -- and ends this tenant's
 /// batch for the pass.
+///
+/// Then, whatever the runs did, it sweeps up to
+/// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
+/// attempts that never committed (Task 5, M2): each staged object whose
+/// row's `cleanup_after` has passed is deleted with its row. A sweep failure
+/// is logged the same way.
 async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
         match service.process_one(&tenant_id).await {
@@ -277,6 +288,17 @@ async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String)
                 break;
             }
         }
+    }
+    if let Err(error) = service
+        .sweep_staged_receipts(&tenant_id, PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT)
+        .await
+    {
+        tracing::warn!(
+            error_class = "pipeline_worker_receipt_sweep_failed",
+            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "pipeline worker receipt sweep failed"
+        );
     }
 }
 

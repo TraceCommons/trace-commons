@@ -30,7 +30,7 @@ use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
-    TraceArtifactKind, TraceArtifactStore,
+    PreparedSerializedJsonArtifact, TraceArtifactKind, TraceArtifactStore,
 };
 use trace_commons_server::trace_corpus_storage::{
     TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite, TraceObjectArtifactKind,
@@ -2078,8 +2078,9 @@ async fn count_runs(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
 
 /// `SELECT COUNT(*)` over `pipeline_receipt_artifacts` for `tenant_id`, in
 /// its own tenant-scoped transaction. A refused receipt (tombstoned or
-/// quota-exceeded) never reaches the staging insert, so this is also the
-/// count of receipts that got as far as storing an artifact.
+/// quota-exceeded) never reaches the staging insert, which commits before
+/// the object write, so this is also the count of receipt attempts that got
+/// as far as storing an artifact.
 async fn count_staged_artifacts(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
     let mut client = backend
         .trace_pool_for_test()
@@ -2330,6 +2331,75 @@ async fn receipt_replay_and_conflict_are_exact() {
         PipelineReceiptResult::ContentConflict
     ));
     assert_eq!(count_runs(&backend, &tenant).await, 1);
+}
+
+/// Seeds an unrelated prior submission for `tenant` and a tombstone on it
+/// that matches `redaction_hash`. A tombstone can only reference an
+/// existing submission (its foreign key), and in production it matches a
+/// fresh resubmission by `trace_id` or `redaction_hash`.
+async fn seed_redaction_tombstone(backend: &Arc<PgBackend>, tenant: &str, redaction_hash: &str) {
+    let prior_submission_id = uuid::Uuid::new_v4();
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for tombstone seed");
+    let tx = client.transaction().await.expect("tx for tombstone seed");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("set tenant for tombstone seed");
+    tx.execute(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
+        &[&tenant],
+    )
+    .await
+    .expect("seed trace_tenants");
+    tx.execute(
+        "INSERT INTO trace_submissions (
+            tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+            consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+            status, privacy_risk, redaction_pipeline_version, redaction_hash, redaction_counts
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        &[
+            &tenant,
+            &prior_submission_id,
+            &uuid::Uuid::new_v4(),
+            &"seed-principal",
+            &"ironclaw.trace_contribution.v1",
+            &"v1",
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+            &"retention-default",
+            &"revoked",
+            &"low",
+            &"v1",
+            &dependency_content_hash(b"tombstone-test-prior-submission"),
+            &serde_json::json!({}),
+        ],
+    )
+    .await
+    .expect("seed prior trace_submissions");
+    tx.execute(
+        "INSERT INTO trace_tombstones (
+            tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, reason,
+            effective_at, created_by_principal_ref
+         ) VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7)",
+        &[
+            &tenant,
+            &uuid::Uuid::new_v4(),
+            &prior_submission_id,
+            &Option::<uuid::Uuid>::None,
+            &Some(redaction_hash.to_string()),
+            &"withdrawn",
+            &"seed-principal",
+        ],
+    )
+    .await
+    .expect("seed trace_tombstones");
+    tx.commit().await.expect("commit tombstone seed");
 }
 
 /// A tombstone can only reference a submission that already exists (the
@@ -2601,69 +2671,7 @@ async fn tombstoned_content_is_refused_before_the_store() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-
-    let prior_submission_id = uuid::Uuid::new_v4();
-    let mut client = backend
-        .trace_pool_for_test()
-        .get()
-        .await
-        .expect("client for tombstone seed");
-    let tx = client.transaction().await.expect("tx for tombstone seed");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant],
-    )
-    .await
-    .expect("set tenant for tombstone seed");
-    tx.execute(
-        "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING",
-        &[&tenant],
-    )
-    .await
-    .expect("seed trace_tenants");
-    tx.execute(
-        "INSERT INTO trace_submissions (
-            tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
-            consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
-            status, privacy_risk, redaction_pipeline_version, redaction_hash, redaction_counts
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
-        &[
-            &tenant,
-            &prior_submission_id,
-            &uuid::Uuid::new_v4(),
-            &"seed-principal",
-            &"ironclaw.trace_contribution.v1",
-            &"v1",
-            &serde_json::json!([]),
-            &serde_json::json!([]),
-            &"retention-default",
-            &"revoked",
-            &"low",
-            &"v1",
-            &dependency_content_hash(b"tombstone-test-prior-submission"),
-            &serde_json::json!({}),
-        ],
-    )
-    .await
-    .expect("seed prior trace_submissions");
-    tx.execute(
-        "INSERT INTO trace_tombstones (
-            tenant_id, tombstone_id, submission_id, trace_id, redaction_hash, reason,
-            effective_at, created_by_principal_ref
-         ) VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7)",
-        &[
-            &tenant,
-            &uuid::Uuid::new_v4(),
-            &prior_submission_id,
-            &Option::<uuid::Uuid>::None,
-            &Some(env.privacy.redaction_hash.clone()),
-            &"withdrawn",
-            &"seed-principal",
-        ],
-    )
-    .await
-    .expect("seed trace_tombstones");
-    tx.commit().await.expect("commit tombstone seed");
+    seed_redaction_tombstone(&backend, &tenant, &env.privacy.redaction_hash).await;
 
     let result = service
         .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
@@ -2754,6 +2762,694 @@ async fn pool_size_one_receipt_does_not_nest_checkouts() {
         result.unwrap(),
         PipelineReceiptResult::Created(_) | PipelineReceiptResult::Replayed(_)
     ));
+}
+
+// Task 5 (M2), review comment 4108170543: the receipt's staging row commits
+// in its own transaction before the object write and names that object, so
+// an attempt that fails after the write leaves a `staged` row the sweeper
+// (`PipelineService::sweep_staged_receipts`) consumes.
+
+/// One `pipeline_receipt_artifacts` row of a tenant.
+#[derive(Debug)]
+struct ReceiptArtifactRow {
+    state: String,
+    object_key: String,
+    ciphertext_sha256: Option<String>,
+}
+
+/// Every `pipeline_receipt_artifacts` row of `tenant_id`, oldest first, in
+/// its own tenant-scoped transaction.
+async fn receipt_artifact_rows(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+) -> Vec<ReceiptArtifactRow> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for receipt_artifact_rows");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT state, object_key, ciphertext_sha256
+               FROM pipeline_receipt_artifacts
+              WHERE tenant_id = $1
+              ORDER BY staged_at, object_key",
+            &[&tenant_id],
+        )
+        .await
+        .expect("read receipt artifact rows");
+    tx.commit().await.expect("commit receipt_artifact_rows");
+    rows.iter()
+        .map(|row| ReceiptArtifactRow {
+            state: row.get("state"),
+            object_key: row.get("object_key"),
+            ciphertext_sha256: row.get("ciphertext_sha256"),
+        })
+        .collect()
+}
+
+/// Moves `cleanup_after` of every `state` row of `tenant_id` into the past,
+/// the way an hour passing would.
+async fn make_receipt_artifacts_due(backend: &Arc<PgBackend>, tenant_id: &str, state: &str) {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for make_receipt_artifacts_due");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_receipt_artifacts
+            SET cleanup_after = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND state = $2",
+        &[&tenant_id, &state],
+    )
+    .await
+    .expect("make receipt artifacts due");
+    tx.commit()
+        .await
+        .expect("commit make_receipt_artifacts_due");
+}
+
+/// `SELECT COUNT(*)` over `pipeline_admission_usage` for `tenant_id`.
+async fn count_admission_usage(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for count_admission_usage");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_admission_usage WHERE tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .expect("count admission usage")
+        .get(0);
+    tx.commit().await.expect("commit count_admission_usage");
+    count
+}
+
+/// The SHA-256 (hex) of the ciphertext a local artifact file holds.
+fn stored_ciphertext_sha256(path: &std::path::Path) -> String {
+    let artifact: EncryptedTraceArtifact =
+        serde_json::from_slice(&std::fs::read(path).expect("read artifact file"))
+            .expect("parse artifact file");
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(artifact.ciphertext_base64.as_bytes())
+        .expect("decode ciphertext");
+    hex::encode(Sha256::digest(&ciphertext))
+}
+
+/// The owner's test: a receipt that fails after the object write leaves a
+/// `staged` row that names the object, and the object file exists. Once
+/// `cleanup_after` has passed, the sweeper removes the object and the row.
+#[tokio::test]
+async fn a_receipt_failing_after_the_write_leaves_a_staged_row_the_sweeper_removes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (crashing, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(PipelineCrashPoint::AfterArtifactStorage),
+    )
+    .await;
+    let tenant = format!("receipt-orphan-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let error = crashing
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("the receipt fails after its object write");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+
+    let rows = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(rows.len(), 1, "the failed receipt keeps its staging row");
+    assert_eq!(rows[0].state, "staged");
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let orphan = artifact_file_path(dir.path(), tenant_ref.as_str(), &rows[0].object_key);
+    assert!(orphan.exists(), "the staging row names the stored object");
+    assert_eq!(
+        rows[0].ciphertext_sha256.as_deref(),
+        Some(stored_ciphertext_sha256(&orphan).as_str()),
+        "the staging row names the exact ciphertext"
+    );
+
+    make_receipt_artifacts_due(&backend, &tenant, "staged").await;
+    assert_eq!(
+        crashing.sweep_staged_receipts(&tenant, 10).await.unwrap(),
+        1,
+        "the sweeper removes the due staged attempt"
+    );
+    assert!(!orphan.exists(), "the sweeper deleted the orphaned object");
+    assert!(receipt_artifact_rows(&backend, &tenant).await.is_empty());
+    assert_eq!(count_files_under(dir.path()), 0);
+}
+
+/// The sweeper never touches a committed receipt's object, even when its
+/// row's `cleanup_after` has passed, nor a `staged` row that is not yet
+/// due. A retry of a key whose first attempt failed after the write is
+/// counted once: with a tenant limit of one it still gets through.
+#[tokio::test]
+async fn the_sweeper_keeps_committed_receipts_and_staged_rows_not_yet_due() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (crashing, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(PipelineCrashPoint::AfterArtifactStorage),
+    )
+    .await;
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("receipt-sweep-keep-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let one_per_hour = PipelineAdmissionLimits {
+        max_per_tenant_per_hour: 1,
+        max_per_principal_per_hour: 0,
+    };
+
+    crashing
+        .submit(receipt(&tenant, &key, &raw, &env, one_per_hour))
+        .await
+        .expect_err("the first attempt fails after its object write");
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, one_per_hour))
+        .await
+        .unwrap()
+    else {
+        panic!("the retry of the same key is not refused by its own count")
+    };
+    assert_eq!(count_admission_usage(&backend, &tenant).await, 1);
+
+    let rows = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(rows.len(), 2, "one staged and one committed attempt");
+    let staged = rows.iter().find(|row| row.state == "staged").unwrap();
+    let committed = rows.iter().find(|row| row.state == "committed").unwrap();
+    assert_ne!(staged.object_key, committed.object_key);
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let staged_path = artifact_file_path(dir.path(), tenant_ref.as_str(), &staged.object_key);
+    let committed_path = artifact_file_path(dir.path(), tenant_ref.as_str(), &committed.object_key);
+
+    // The committed row is due; the staged row is not.
+    make_receipt_artifacts_due(&backend, &tenant, "committed").await;
+    assert_eq!(service.sweep_staged_receipts(&tenant, 10).await.unwrap(), 0);
+    assert!(staged_path.exists(), "a staged row not yet due is kept");
+    assert!(committed_path.exists(), "a committed object is never swept");
+    assert_eq!(receipt_artifact_rows(&backend, &tenant).await.len(), 2);
+
+    // The committed run still reads its source object: Review runs over it.
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review reads the committed source object")
+        .expect("the run is claimable");
+    assert_eq!(reviewed.last_error_label, None);
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+}
+
+/// A store that runs `after_write` just after each object write it passes
+/// to `inner` (`put_serialized_json` or `publish_serialized_json`), and
+/// counts the objects it prepares (`prepare_serialized_json`). The receipt
+/// holds no transaction and no lock between its write and its final
+/// transaction, so the hook can drive another receipt, a tombstone, or a
+/// failed sweep to completion in that window.
+struct HookedWriteStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    after_write: Box<dyn Fn() + Send + Sync>,
+    prepares: AtomicUsize,
+}
+
+impl HookedWriteStore {
+    fn new(inner: Arc<dyn TraceArtifactStore>, after_write: Box<dyn Fn() + Send + Sync>) -> Self {
+        Self {
+            inner,
+            after_write,
+            prepares: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl TraceArtifactStore for HookedWriteStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        (self.after_write)();
+        Ok(receipt)
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.prepares.fetch_add(1, Ordering::SeqCst);
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = self.inner.publish_serialized_json(prepared)?;
+        (self.after_write)();
+        Ok(receipt)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// Two concurrent receipts with the same key and content: both are past the
+/// object write together (each under its own attempt's object), one run is
+/// created, the other attempt returns `Replayed` and deletes its own
+/// object, and the one committed object ref's hash matches the stored
+/// ciphertext. The sweeper then finds nothing more to remove.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_receipts_for_one_key_commit_one_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // Hold each write until both attempts are writing (or five seconds
+    // pass, which records a miss).
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let missed = Arc::new(AtomicBool::new(false));
+    let store = HookedWriteStore::new(
+        artifact_store(&dir),
+        Box::new({
+            let arrived = arrived.clone();
+            let missed = missed.clone();
+            move || {
+                arrived.fetch_add(1, Ordering::SeqCst);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while arrived.load(Ordering::SeqCst) < 2 {
+                    if std::time::Instant::now() >= deadline {
+                        missed.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }),
+    );
+    let (service, _, _) = test_service(
+        backend.clone(),
+        Arc::new(store),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("receipt-race-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        let raw = raw.clone();
+        let key = key.clone();
+        tasks.push(tokio::spawn(async move {
+            service
+                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        }));
+    }
+    let mut run_ids = Vec::new();
+    let (mut created, mut replayed) = (0, 0);
+    for task in tasks {
+        match task.await.unwrap() {
+            PipelineReceiptResult::Created(run) => {
+                created += 1;
+                run_ids.push(run.run_id);
+            }
+            PipelineReceiptResult::Replayed(run) => {
+                replayed += 1;
+                run_ids.push(run.run_id);
+            }
+            other => panic!("unexpected receipt result {other:?}"),
+        }
+    }
+    assert!(
+        !missed.load(Ordering::SeqCst),
+        "both attempts reached the object write together: no lock is held across it"
+    );
+    assert_eq!((created, replayed), (1, 1));
+    assert_eq!(run_ids[0], run_ids[1]);
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+
+    let rows = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(rows.len(), 1, "the losing attempt removed its staging row");
+    assert_eq!(rows[0].state, "committed");
+    assert_eq!(
+        count_files_under(dir.path()),
+        1,
+        "the losing attempt deleted its own object"
+    );
+
+    let run = service
+        .store()
+        .get_run(&tenant, run_ids[0])
+        .await
+        .unwrap()
+        .expect("run exists");
+    let (object_key, content_sha256): (String, String) = {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "SELECT object_key, content_sha256 FROM trace_object_refs
+                  WHERE tenant_id = $1 AND object_ref_id = $2",
+                &[&tenant, &run.source_object_ref_id],
+            )
+            .await
+            .expect("the run's source object ref");
+        tx.commit().await.unwrap();
+        (row.get("object_key"), row.get("content_sha256"))
+    };
+    assert_eq!(object_key, rows[0].object_key);
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let path = artifact_file_path(dir.path(), tenant_ref.as_str(), &object_key);
+    assert_eq!(
+        content_sha256,
+        format!("sha256:{}", stored_ciphertext_sha256(&path)),
+        "the committed object ref's hash matches the stored ciphertext"
+    );
+
+    make_receipt_artifacts_due(&backend, &tenant, "staged").await;
+    make_receipt_artifacts_due(&backend, &tenant, "committed").await;
+    assert_eq!(service.sweep_staged_receipts(&tenant, 10).await.unwrap(), 0);
+    assert_eq!(count_files_under(dir.path()), 1);
+}
+
+/// A tombstone that arrives just after the attempt writes its object (after
+/// the staging transaction's check) is caught by the final transaction's
+/// re-check: the receipt is `Tombstoned`, no run is created, and the
+/// attempt deletes its own object and row at once. The quota stays counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tombstone_during_the_write_refuses_the_commit_and_deletes_the_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("receipt-late-tombstone-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let store = HookedWriteStore::new(
+        artifact_store(&dir),
+        Box::new({
+            let backend = backend.clone();
+            let tenant = tenant.clone();
+            let redaction_hash = env.privacy.redaction_hash.clone();
+            move || {
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::block_in_place(|| {
+                    handle.block_on(seed_redaction_tombstone(&backend, &tenant, &redaction_hash))
+                });
+            }
+        }),
+    );
+    let (service, _, _) = test_service(
+        backend.clone(),
+        Arc::new(store),
+        minimal_config(false),
+        None,
+    )
+    .await;
+
+    let result = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(matches!(result, PipelineReceiptResult::Tombstoned));
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    assert!(
+        receipt_artifact_rows(&backend, &tenant).await.is_empty(),
+        "the refused attempt removed its staging row"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        0,
+        "the refused attempt deleted its own object"
+    );
+    assert_eq!(count_admission_usage(&backend, &tenant).await, 1);
+}
+
+/// Fix round 1, F1: a sweep that deletes a due row's object and then fails
+/// before its commit leaves the row `staged`, unlocked, and its object gone.
+/// An attempt that is still alive past `cleanup_after` must then refuse at
+/// its final transaction (`receipt_staging_missing`) instead of committing a
+/// run whose source object ref names a deleted object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attempt_whose_row_is_due_does_not_commit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("receipt-due-attempt-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    // Just after the write: the row is due and its object is gone, the
+    // state a failed sweep leaves behind.
+    let store = HookedWriteStore::new(
+        artifact_store(&dir),
+        Box::new({
+            let backend = backend.clone();
+            let tenant = tenant.clone();
+            let root = dir.path().to_path_buf();
+            move || {
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        make_receipt_artifacts_due(&backend, &tenant, "staged").await;
+                        let rows = receipt_artifact_rows(&backend, &tenant).await;
+                        assert_eq!(rows.len(), 1, "the attempt's row is staged");
+                        let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+                        std::fs::remove_file(artifact_file_path(
+                            &root,
+                            tenant_ref.as_str(),
+                            &rows[0].object_key,
+                        ))
+                        .expect("remove the staged object");
+                    })
+                });
+            }
+        }),
+    );
+    let (service, _, _) = test_service(
+        backend.clone(),
+        Arc::new(store),
+        minimal_config(false),
+        None,
+    )
+    .await;
+
+    let error = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("an attempt whose row is due must not commit");
+    assert_eq!(error.to_string(), "receipt_staging_missing");
+    assert_eq!(count_runs(&backend, &tenant).await, 0, "no run is created");
+    assert!(
+        receipt_artifact_rows(&backend, &tenant).await.is_empty(),
+        "the refused attempt removed its row"
+    );
+    assert_eq!(count_files_under(dir.path()), 0);
+}
+
+/// Fix round 1, F2: the common refusals -- quota, replay, content conflict,
+/// tombstone -- are found by a read-only check before the attempt's object
+/// is encrypted, so a refused receipt costs no encryption and no key wrap.
+#[tokio::test]
+async fn refused_receipts_do_not_prepare_an_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(HookedWriteStore::new(artifact_store(&dir), Box::new(|| {})));
+    let (service, _, _) = test_service(
+        backend.clone(),
+        store.clone() as Arc<dyn TraceArtifactStore>,
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("receipt-early-refusal-{}", uuid::Uuid::new_v4());
+    let one_per_hour = PipelineAdmissionLimits {
+        max_per_tenant_per_hour: 1,
+        max_per_principal_per_hour: 0,
+    };
+
+    let first = envelope(uuid::Uuid::new_v4()).await;
+    let first_raw = serde_json::to_vec(&first).unwrap();
+    let first_key = first.submission_id.to_string();
+    assert!(matches!(
+        service
+            .submit(receipt(
+                &tenant,
+                &first_key,
+                &first_raw,
+                &first,
+                one_per_hour
+            ))
+            .await
+            .unwrap(),
+        PipelineReceiptResult::Created(_)
+    ));
+    assert_eq!(store.prepares.load(Ordering::SeqCst), 1);
+
+    let second = envelope(uuid::Uuid::new_v4()).await;
+    let second_raw = serde_json::to_vec(&second).unwrap();
+    let second_key = second.submission_id.to_string();
+    assert!(matches!(
+        service
+            .submit(receipt(
+                &tenant,
+                &second_key,
+                &second_raw,
+                &second,
+                one_per_hour
+            ))
+            .await
+            .unwrap(),
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant)
+    ));
+    assert_eq!(
+        store.prepares.load(Ordering::SeqCst),
+        1,
+        "a quota refusal prepares nothing"
+    );
+
+    assert!(matches!(
+        service
+            .submit(receipt(
+                &tenant,
+                &first_key,
+                &first_raw,
+                &first,
+                one_per_hour
+            ))
+            .await
+            .unwrap(),
+        PipelineReceiptResult::Replayed(_)
+    ));
+    let mut changed = first_raw.clone();
+    changed.push(b' ');
+    assert!(matches!(
+        service
+            .submit(receipt(&tenant, &first_key, &changed, &first, one_per_hour))
+            .await
+            .unwrap(),
+        PipelineReceiptResult::ContentConflict
+    ));
+    assert_eq!(
+        store.prepares.load(Ordering::SeqCst),
+        1,
+        "a replay and a content conflict prepare nothing"
+    );
+
+    let tombstone_tenant = format!("receipt-early-tombstone-{}", uuid::Uuid::new_v4());
+    let third = envelope(uuid::Uuid::new_v4()).await;
+    let third_raw = serde_json::to_vec(&third).unwrap();
+    let third_key = third.submission_id.to_string();
+    seed_redaction_tombstone(&backend, &tombstone_tenant, &third.privacy.redaction_hash).await;
+    assert!(matches!(
+        service
+            .submit(receipt(
+                &tombstone_tenant,
+                &third_key,
+                &third_raw,
+                &third,
+                NO_LIMITS
+            ))
+            .await
+            .unwrap(),
+        PipelineReceiptResult::Tombstoned
+    ));
+    assert_eq!(
+        store.prepares.load(Ordering::SeqCst),
+        1,
+        "a tombstone refusal prepares nothing"
+    );
+    assert_eq!(count_files_under(dir.path()), 1);
 }
 
 /// Sets a tenant on the given client and opens a transaction for it. A tiny
@@ -4220,6 +4916,28 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
             .expect("withdrawal thread completes");
         }
         Ok(receipt)
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
     }
 
     fn read_artifact(
@@ -6195,9 +6913,11 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
                 crashed.expect_err("service A's receipt must crash at AfterArtifactStorage");
             assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
 
-            // Nothing committed (the receipt transaction never reached its
-            // final commit), so this is a fresh submission from the store's
-            // point of view, not a claim resume -- resubmit the same bytes.
+            // No run committed (the receipt's final transaction never ran;
+            // only its staging row did), so this is a fresh submission from
+            // the store's point of view, not a claim resume -- resubmit the
+            // same bytes. The crashed attempt's object stays staged for the
+            // sweeper.
             let PipelineReceiptResult::Created(created) = service_b
                 .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
                 .await

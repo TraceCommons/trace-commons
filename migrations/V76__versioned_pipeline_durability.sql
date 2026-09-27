@@ -98,30 +98,49 @@ CREATE TABLE pipeline_bundle_policy_status (
         ON DELETE RESTRICT
 );
 
+-- One row per receipt attempt, committed in its own transaction before the
+-- attempt writes its object, and naming that object (key and ciphertext
+-- hash). The receipt's final transaction moves the row to `committed`
+-- together with the object ref; a row still `staged` after `cleanup_after`
+-- names an object no run references, which the sweeper deletes with the
+-- row. Each attempt writes its own object, so a key can have several
+-- attempts but at most one committed one.
 CREATE TABLE pipeline_receipt_artifacts (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     run_id UUID NOT NULL,
+    attempt_id UUID NOT NULL,
     request_idempotency_key TEXT NOT NULL CHECK (
         request_idempotency_key ~ '^sha256:[0-9a-f]{64}$'
     ),
     request_content_hash TEXT NOT NULL CHECK (
         request_content_hash ~ '^sha256:[0-9a-f]{64}$'
     ),
-    object_key TEXT,
-    ciphertext_sha256 TEXT CHECK (
-        ciphertext_sha256 IS NULL OR ciphertext_sha256 ~ '^[0-9a-f]{64}$'
-    ),
+    object_key TEXT NOT NULL CHECK (object_key <> ''),
+    ciphertext_sha256 TEXT NOT NULL CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$'),
     state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed')),
     cleanup_after TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '1 hour',
     staged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     committed_at TIMESTAMPTZ,
-    PRIMARY KEY (tenant_id, run_id),
-    UNIQUE (tenant_id, request_idempotency_key),
+    PRIMARY KEY (tenant_id, run_id, attempt_id),
+    UNIQUE (tenant_id, object_key),
     CHECK (
         (state = 'staged' AND committed_at IS NULL)
         OR (state = 'committed' AND committed_at IS NOT NULL)
     )
 );
+
+-- At most one committed attempt per run: the one whose object the run's
+-- source object ref names.
+CREATE UNIQUE INDEX idx_pipeline_receipt_artifacts_one_committed
+    ON pipeline_receipt_artifacts (tenant_id, run_id)
+    WHERE state = 'committed';
+-- The receipt's content-conflict check reads a key's attempts.
+CREATE INDEX idx_pipeline_receipt_artifacts_key
+    ON pipeline_receipt_artifacts (tenant_id, request_idempotency_key);
+-- The sweeper reads a tenant's staged attempts by due time.
+CREATE INDEX idx_pipeline_receipt_artifacts_due
+    ON pipeline_receipt_artifacts (tenant_id, cleanup_after)
+    WHERE state = 'staged';
 
 CREATE FUNCTION reject_pipeline_bundle_package_mutation()
 RETURNS TRIGGER

@@ -110,6 +110,14 @@ pub const PIPELINE_SETTLEMENT_UNRECONCILED_LABEL: &str = "settlement_unreconcile
 /// records a stale lease as the uncharged `lease_expired`, and a leg-state
 /// refusal is not a lease problem.
 const PIPELINE_SETTLEMENT_LEG_NOT_OPEN_LABEL: &str = "settlement_leg_not_open";
+/// Task 5 (M2): a receipt attempt that reached its final transaction after
+/// its staging row's `cleanup_after`: the sweeper removed the row, or may
+/// have deleted its object. The attempt deletes its own object and fails; a
+/// retry is a new attempt.
+const PIPELINE_RECEIPT_STAGING_MISSING_LABEL: &str = "receipt_staging_missing";
+/// Task 5 (M2): the artifact store wrote a receipt object other than the
+/// one it prepared, so the staging row does not name it. Fails closed.
+const PIPELINE_RECEIPT_OBJECT_MISMATCH_LABEL: &str = "receipt_object_mismatch";
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
 const UNRESOLVED_SETTLEMENT_LEG_SQL: &str = "(s.operation_state NOT IN ('complete', 'forfeited')
@@ -493,8 +501,8 @@ pub struct ApprovedRevision {
 }
 
 /// A run identity not yet persisted: computed deterministically from the
-/// tenant and idempotency key before the receipt transaction opens, and
-/// staged (`PgPipelineStore::stage_receipt_artifact`) before it is created.
+/// tenant and idempotency key before the receipt's transactions open, and
+/// created by the receipt's final transaction.
 #[derive(Debug, Clone)]
 struct NewPipelineRun {
     tenant_id: String,
@@ -505,6 +513,45 @@ struct NewPipelineRun {
     request_idempotency_key: String,
     request_content_hash: String,
     source_object_ref_id: Uuid,
+}
+
+/// One receipt attempt (Task 5, M2): its own random attempt id, and the
+/// object it writes, named -- key and ciphertext hash -- by the prepared
+/// receipt before the write. Its `pipeline_receipt_artifacts` row carries
+/// exactly these fields.
+#[derive(Debug, Clone)]
+struct ReceiptAttempt {
+    tenant_id: String,
+    run_id: Uuid,
+    attempt_id: Uuid,
+    request_idempotency_key: String,
+    request_content_hash: String,
+    receipt: EncryptedTraceArtifactReceipt,
+}
+
+/// The receipt's staging transaction's outcome
+/// (`PipelineService::stage_receipt_attempt`).
+enum ReceiptStage {
+    /// A refusal: nothing was staged and nothing will be stored.
+    Refused(PipelineReceiptResult),
+    /// The attempt's row is committed; its object may now be written.
+    Staged {
+        bundle_id: String,
+        bundle: MinimalPolicyBundle,
+    },
+}
+
+/// The receipt's final transaction's outcome
+/// (`PipelineService::commit_receipt_attempt`).
+enum ReceiptCommit {
+    Created(PipelineRunRecord),
+    /// A refusal found by the final re-checks (a run another attempt
+    /// created, or a tombstone). This attempt's object is not referenced.
+    Refused(PipelineReceiptResult),
+    /// This attempt's row is no longer `staged` (the sweeper removed it) or
+    /// is due (a sweep that failed may have deleted its object), so it
+    /// cannot commit.
+    StagingMissing,
 }
 
 pub struct PgPipelineStore {
@@ -1783,40 +1830,263 @@ impl PgPipelineStore {
         Ok(())
     }
 
-    /// Records (or updates) the receipt-artifact staging row inside the
-    /// caller's tenant transaction, before the object-store write and again
-    /// after it. A crash between the two calls leaves a `staged` row with a
-    /// `NULL` object key/hash, which orphan cleanup (a later task) can find.
+    /// Inserts a receipt attempt's `staged` row inside the receipt's staging
+    /// transaction, which commits before the attempt writes its object. The
+    /// row names that object -- its key and ciphertext hash, fixed when the
+    /// object was prepared -- so whatever happens after the write (an
+    /// Admission error, a failed records insert, a process crash), a
+    /// `staged` row names the object, and `PipelineService::sweep_staged_receipts`
+    /// deletes both once `cleanup_after` passes. The receipt's final
+    /// transaction moves the row to `committed` together with the object ref
+    /// (`insert_receipt_records`).
     async fn stage_receipt_artifact(
         tx: &Transaction<'_>,
-        run: &NewPipelineRun,
-        receipt: Option<&EncryptedTraceArtifactReceipt>,
+        attempt: &ReceiptAttempt,
     ) -> Result<(), DatabaseError> {
-        let object_key = receipt.map(|value| value.object_key.as_str());
-        let ciphertext_sha256 = receipt.map(|value| value.ciphertext_sha256.as_str());
         tx.execute(
             "INSERT INTO pipeline_receipt_artifacts (
-                tenant_id, run_id, request_idempotency_key, request_content_hash,
-                object_key, ciphertext_sha256
-             ) VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (tenant_id, run_id) DO UPDATE
-             SET object_key = COALESCE(EXCLUDED.object_key, pipeline_receipt_artifacts.object_key),
-                 ciphertext_sha256 = COALESCE(
-                    EXCLUDED.ciphertext_sha256,
-                    pipeline_receipt_artifacts.ciphertext_sha256
-                 )",
+                tenant_id, run_id, attempt_id, request_idempotency_key,
+                request_content_hash, object_key, ciphertext_sha256
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7)",
             &[
-                &run.tenant_id,
-                &run.run_id,
-                &run.request_idempotency_key,
-                &run.request_content_hash,
-                &object_key,
-                &ciphertext_sha256,
+                &attempt.tenant_id,
+                &attempt.run_id,
+                &attempt.attempt_id,
+                &attempt.request_idempotency_key,
+                &attempt.request_content_hash,
+                &attempt.receipt.object_key,
+                &attempt.receipt.ciphertext_sha256,
             ],
         )
         .await?;
         Ok(())
     }
+
+    /// Locks a receipt attempt's row inside the receipt's final transaction
+    /// and reports whether the attempt may still commit: the row is
+    /// `staged` and not yet due. The sweeper deletes a due row (and its
+    /// object) while holding the row's lock, and skips a row locked here, so
+    /// an attempt whose row it removed cannot commit, and a row this
+    /// transaction commits is never swept.
+    ///
+    /// Fix round 1, F1: a sweep that deleted a row's object and then failed
+    /// before its commit (a lost connection, a later row's `DELETE`) leaves
+    /// the row `staged` and unlocked with its object gone. Every row a sweep
+    /// locks was due when that sweep read it, so refusing a due row here
+    /// refuses exactly the rows a failed sweep may have emptied. The due
+    /// check is its own statement after the lock is held, against
+    /// `clock_timestamp()`: a condition in the `FOR UPDATE` query is
+    /// evaluated before the lock wait, and `NOW()` is this transaction's
+    /// start.
+    async fn lock_committable_receipt_artifact(
+        tx: &Transaction<'_>,
+        attempt: &ReceiptAttempt,
+    ) -> Result<bool, DatabaseError> {
+        let Some(row) = tx
+            .query_opt(
+                "SELECT cleanup_after FROM pipeline_receipt_artifacts
+                  WHERE tenant_id = $1 AND run_id = $2 AND attempt_id = $3
+                    AND state = 'staged'
+                  FOR UPDATE",
+                &[&attempt.tenant_id, &attempt.run_id, &attempt.attempt_id],
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        let cleanup_after: DateTime<Utc> = row.get("cleanup_after");
+        let due: bool = tx
+            .query_one("SELECT $1 <= clock_timestamp()", &[&cleanup_after])
+            .await?
+            .get(0);
+        Ok(!due)
+    }
+
+    /// Deletes a refused receipt attempt's `staged` row, once its object is
+    /// deleted (`PipelineService::discard_receipt_attempt`).
+    async fn remove_staged_receipt_artifact(
+        &self,
+        attempt: &ReceiptAttempt,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &attempt.tenant_id).await?;
+        tx.execute(
+            "DELETE FROM pipeline_receipt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND attempt_id = $3
+                AND state = 'staged'",
+            &[&attempt.tenant_id, &attempt.run_id, &attempt.attempt_id],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// After a refused receipt attempt's object delete failed: makes its row
+    /// `staged` and due now, inserting it again if the sweeper already
+    /// removed it, so the sweeper retries the delete on its next pass.
+    async fn restage_receipt_artifact_due_now(
+        &self,
+        attempt: &ReceiptAttempt,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &attempt.tenant_id).await?;
+        tx.execute(
+            "INSERT INTO pipeline_receipt_artifacts (
+                tenant_id, run_id, attempt_id, request_idempotency_key,
+                request_content_hash, object_key, ciphertext_sha256, cleanup_after
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+             ON CONFLICT (tenant_id, run_id, attempt_id) DO UPDATE
+                SET cleanup_after = NOW()
+              WHERE pipeline_receipt_artifacts.state = 'staged'",
+            &[
+                &attempt.tenant_id,
+                &attempt.run_id,
+                &attempt.attempt_id,
+                &attempt.request_idempotency_key,
+                &attempt.request_content_hash,
+                &attempt.receipt.object_key,
+                &attempt.receipt.ciphertext_sha256,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+/// The run a receipt's idempotency key already created, if any.
+async fn existing_receipt_run(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    request_idempotency_key: &str,
+) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+    tx.query_opt(
+        "SELECT * FROM pipeline_runs
+          WHERE tenant_id = $1 AND request_idempotency_key = $2",
+        &[&tenant_id, &request_idempotency_key],
+    )
+    .await?
+    .map(|row| pipeline_run_from_row(&row))
+    .transpose()
+}
+
+/// A receipt whose key already has a run: `Replayed` for the same content,
+/// `ContentConflict` for other content.
+fn replay_result(existing: PipelineRunRecord, request_content_hash: &str) -> PipelineReceiptResult {
+    if existing.request_content_hash == request_content_hash {
+        PipelineReceiptResult::Replayed(existing)
+    } else {
+        PipelineReceiptResult::ContentConflict
+    }
+}
+
+/// The refusal a receipt's key alone decides: `Replayed` or
+/// `ContentConflict` when the key already has a run, and `ContentConflict`
+/// when an attempt for the key is staged with other content.
+async fn receipt_key_refusal(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    request_idempotency_key: &str,
+    request_content_hash: &str,
+) -> Result<Option<PipelineReceiptResult>, DatabaseError> {
+    if let Some(existing) = existing_receipt_run(tx, tenant_id, request_idempotency_key).await? {
+        return Ok(Some(replay_result(existing, request_content_hash)));
+    }
+    let staged_with_other_content: bool = tx
+        .query_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM pipeline_receipt_artifacts
+                 WHERE tenant_id = $1 AND request_idempotency_key = $2
+                   AND request_content_hash <> $3
+             )",
+            &[&tenant_id, &request_idempotency_key, &request_content_hash],
+        )
+        .await?
+        .get(0);
+    Ok(staged_with_other_content.then_some(PipelineReceiptResult::ContentConflict))
+}
+
+/// The quota a receipt that counts would exceed, if any. A key that already
+/// has a usage row was counted by an earlier attempt, so it is never refused
+/// for its own count.
+///
+/// Quota counts pipeline receipts only (pipeline_admission_usage). Legacy
+/// submission records are not counted, so in the first hour after a tenant
+/// moves to the pipeline it can receive up to one extra hourly quota. The
+/// owner accepted this on 2026-09-23; see the activation runbook,
+/// "Submission quota at switch-over".
+async fn receipt_quota_refusal(
+    tx: &Transaction<'_>,
+    request: &PipelineReceiptRequest<'_>,
+    request_idempotency_key: &str,
+    principal_ref_hash: &str,
+) -> Result<Option<PipelineQuotaScope>, DatabaseError> {
+    let counts = tx
+        .query_one(
+            "SELECT COUNT(*) FILTER (WHERE counted_at > NOW() - INTERVAL '1 hour') AS tenant_count,
+                    COUNT(*) FILTER (WHERE counted_at > NOW() - INTERVAL '1 hour' AND principal_ref_hash = $2) AS principal_count,
+                    COUNT(*) FILTER (WHERE request_idempotency_key = $3) AS key_count
+               FROM pipeline_admission_usage WHERE tenant_id = $1",
+            &[&request.tenant_id, &principal_ref_hash, &request_idempotency_key],
+        )
+        .await?;
+    if counts.get::<_, i64>("key_count") > 0 {
+        return Ok(None);
+    }
+    let tenant_count: i64 = counts.get("tenant_count");
+    let principal_count: i64 = counts.get("principal_count");
+    if request.limits.max_per_tenant_per_hour != 0
+        && tenant_count >= request.limits.max_per_tenant_per_hour as i64
+    {
+        return Ok(Some(PipelineQuotaScope::Tenant));
+    }
+    if request.limits.max_per_principal_per_hour != 0
+        && principal_count >= request.limits.max_per_principal_per_hour as i64
+    {
+        return Ok(Some(PipelineQuotaScope::Principal));
+    }
+    Ok(None)
+}
+
+/// Whether a receipt's content is refused: its submission is withdrawn, or
+/// a tombstone matches its submission, trace, redaction hash, or request
+/// content hash. Both receipt transactions read it, the second because a
+/// tombstone can arrive while the object is written.
+async fn receipt_is_tombstoned(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    envelope: &TraceContributionEnvelope,
+    request_content_hash: &str,
+) -> Result<bool, DatabaseError> {
+    Ok(tx
+        .query_one(
+            "SELECT
+                EXISTS (
+                    SELECT 1
+                      FROM trace_withdrawals
+                     WHERE tenant_id = $1 AND submission_id = $2
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM trace_tombstones
+                     WHERE tenant_id = $1
+                       AND (
+                            submission_id = $2
+                            OR trace_id = $3
+                            OR redaction_hash = $4
+                            OR redaction_hash = $5
+                       )
+                )",
+            &[
+                &tenant_id,
+                &envelope.submission_id,
+                &envelope.trace_id,
+                &envelope.privacy.redaction_hash,
+                &request_content_hash,
+            ],
+        )
+        .await?
+        .get(0))
 }
 
 /// Task 4 (M1), owner decision 2026-09-27: resolves every open leg of the
@@ -1962,13 +2232,15 @@ async fn insert_outcome(
 
 /// Commits the receipt's durable records inside the caller's tenant
 /// transaction: the submission, its source object ref, the run itself, the
-/// Admission outcome, and the staged-artifact row's transition to
-/// `committed`. Unlike the port, this does not insert a
-/// `pipeline_receipt_ownership` row (PR 5 / cross-pipeline ownership is
+/// Admission outcome, and the attempt's staging row's transition to
+/// `committed` -- which requires the row to be `staged` and to name exactly
+/// the object the object ref records. Unlike the port, this does not insert
+/// a `pipeline_receipt_ownership` row (PR 5 / cross-pipeline ownership is
 /// deferred).
 async fn insert_receipt_records(
     tx: &Transaction<'_>,
     run: &NewPipelineRun,
+    attempt: &ReceiptAttempt,
     submission: &TraceSubmissionWrite,
     object_ref: &TraceObjectRefWrite,
     outcome: StoredPhaseResult,
@@ -2111,15 +2383,16 @@ async fn insert_receipt_records(
         .execute(
             "UPDATE pipeline_receipt_artifacts
              SET state = 'committed', committed_at = NOW()
-             WHERE tenant_id = $1 AND run_id = $2
-               AND request_idempotency_key = $3
-               AND request_content_hash = $4
-               AND object_key = $5
-               AND ciphertext_sha256 = $6
+             WHERE tenant_id = $1 AND run_id = $2 AND attempt_id = $3
+               AND request_idempotency_key = $4
+               AND request_content_hash = $5
+               AND object_key = $6
+               AND ciphertext_sha256 = $7
                AND state = 'staged'",
             &[
                 &run.tenant_id,
                 &run.run_id,
+                &attempt.attempt_id,
                 &run.request_idempotency_key,
                 &run.request_content_hash,
                 &object_ref.object_key,
@@ -2873,12 +3146,42 @@ impl PipelineService {
         self.construct(package)
     }
 
-    /// Accepts a receipt in one tenant transaction: replay, staged-conflict,
-    /// bound-bundle, tombstone, and quota are all checked -- in that order --
-    /// before any content is stored. `ensure_default_bundle` runs before the
-    /// transaction opens (it takes its own pool connections), which is what
-    /// keeps a pool of size one safe: the transaction itself never needs a
-    /// second connection.
+    /// Accepts a receipt as one attempt (Task 5, M2). The attempt's object
+    /// is recorded before it is written, and no lock is held while it is
+    /// written or while Admission runs:
+    ///
+    /// 1. A read-only check with no advisory lock (`precheck_receipt`)
+    ///    refuses the common cases -- replay, content conflict, tombstone,
+    ///    quota -- before any encryption. The staging transaction repeats
+    ///    every check, so this one only saves work.
+    /// 2. The attempt's object -- the server envelope, wrapped per decision
+    ///    P1 -- is encrypted under the attempt's own object id
+    ///    (`pipeline_receipt_object_id`, a fresh random attempt id), which
+    ///    fixes its object key and ciphertext hash. Nothing is stored.
+    /// 3. The staging transaction (`stage_receipt_attempt`) checks replay, an
+    ///    attempt for the key staged with other content, the bound bundle,
+    ///    tombstones, and the quota -- in that order -- counts the quota,
+    ///    and inserts the attempt's `staged` row naming the object. It
+    ///    commits before anything is stored, so every refusal there stores
+    ///    nothing.
+    /// 4. The object is written and Admission runs, with no transaction
+    ///    open. A failure from here on (an error or a crash) leaves the
+    ///    `staged` row naming the object; `sweep_staged_receipts` deletes
+    ///    both once the row's `cleanup_after` passes.
+    /// 5. The final transaction (`commit_receipt_attempt`) re-checks an
+    ///    existing run for the key and the tombstones, requires the
+    ///    attempt's row to be still `staged` and not yet due, and commits
+    ///    the records and the row's move to `committed` together. On a
+    ///    refusal there, the attempt deletes its own object and row
+    ///    (`discard_receipt_attempt`).
+    ///
+    /// Each attempt writes its own object, so two concurrent receipts for
+    /// one key never overwrite each other's object: the one that commits
+    /// second finds the first one's run and returns `Replayed`.
+    /// `ensure_default_bundle` runs before any transaction opens (it takes
+    /// its own pool connections), and each transaction returns its
+    /// connection to the pool before the next step checks one out, which is
+    /// what keeps a pool of size one safe.
     pub async fn submit(
         &self,
         request: PipelineReceiptRequest<'_>,
@@ -2908,17 +3211,220 @@ impl PipelineService {
             format!("tracecommons:pipeline-source-object:{run_id}").as_bytes(),
         );
 
+        // 1. The early, lock-free refusal check.
+        if let Some(refused) = self
+            .precheck_receipt(
+                &request,
+                &request_idempotency_key_hash,
+                &request_content_hash,
+            )
+            .await?
+        {
+            return Ok(refused);
+        }
+
+        // 2. Prepare this attempt's object. Nothing is stored yet.
+        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
+        let server_envelope_bytes = serde_json::to_vec(envelope)?;
+        let wrapper = encode_pipeline_artifact_bytes(&server_envelope_bytes)?;
+        let attempt_id = Uuid::new_v4();
+        let prepared = self.artifact_store.prepare_serialized_json(
+            tenant_storage_ref.as_str(),
+            TraceArtifactKind::ContributionEnvelope,
+            &pipeline_receipt_object_id(run_id, attempt_id),
+            &wrapper,
+        )?;
+        let attempt = ReceiptAttempt {
+            tenant_id: tenant_id.to_string(),
+            run_id,
+            attempt_id,
+            request_idempotency_key: request_idempotency_key_hash.clone(),
+            request_content_hash: request_content_hash.clone(),
+            receipt: prepared.receipt().clone(),
+        };
+
+        // 3. The staging transaction: every refusal, then the attempt's row.
+        let (bundle_id, bundle) = match self.stage_receipt_attempt(&request, &attempt).await? {
+            ReceiptStage::Refused(result) => return Ok(result),
+            ReceiptStage::Staged { bundle_id, bundle } => (bundle_id, bundle),
+        };
+
+        // 4. Write the object the row names, then run Admission.
+        let written = self.artifact_store.publish_serialized_json(&prepared)?;
+        if !written.matches_identity(&attempt.receipt) {
+            // A store that wrote some other object than the one it
+            // prepared: that object is not the one the row names, so delete
+            // it here (best effort) and fail closed. The row's own object,
+            // if the store wrote it too, is the sweeper's.
+            if self
+                .artifact_store
+                .delete_artifact(tenant_storage_ref.as_str(), &written)
+                .is_err()
+            {
+                tracing::warn!(
+                    label = "pipeline_receipt_object_delete_failed",
+                    "best-effort delete of a receipt object the store wrote \
+                     under an unexpected key failed"
+                );
+            }
+            anyhow::bail!(PIPELINE_RECEIPT_OBJECT_MISMATCH_LABEL);
+        }
+        self.inject_crash(PipelineCrashPoint::AfterArtifactStorage)?;
+
+        // `authenticated`/`authority_valid`/`grant_valid` are fixed `true`
+        // in PR 2 (decision D15): the legacy handler already checked them,
+        // and authority is not ported until PR 3.
+        let privacy_risk = match envelope.privacy.residual_pii_risk {
+            ResidualPiiRisk::Low => PrivacyRisk::Low,
+            ResidualPiiRisk::Medium
+                if matches!(
+                    request.residual_risk_basis,
+                    [ResidualRiskCondition::ConsentContentFlag]
+                ) =>
+            {
+                PrivacyRisk::Low
+            }
+            ResidualPiiRisk::Medium => PrivacyRisk::Medium,
+            ResidualPiiRisk::High => PrivacyRisk::High,
+        };
+        let admission_input = AdmissionInput {
+            run_id,
+            tenant_storage_ref: tenant_storage_ref.clone(),
+            trace_id: envelope.trace_id,
+            request_content_hash: request_content_hash.clone(),
+            schema_version: envelope.schema_version.clone(),
+            authenticated: true,
+            authority_valid: true,
+            contribution_path_valid: !envelope.ironclaw.version.trim().is_empty()
+                && !envelope
+                    .privacy
+                    .redaction_pipeline_version
+                    .trim()
+                    .is_empty(),
+            grant_valid: true,
+            consent_valid: envelope.consent.revocable,
+            allowed_uses_valid: true,
+            tombstoned: false,
+            quota_available: true,
+            privacy_risk,
+        };
+        let admission = bundle
+            .admission
+            .execute(&admission_input)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.label().to_string()))?;
+        let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
+
+        // 5. The final transaction.
+        let run = NewPipelineRun {
+            tenant_id: tenant_id.to_string(),
+            run_id,
+            submission_id: envelope.submission_id,
+            trace_id: envelope.trace_id,
+            bundle_id,
+            request_idempotency_key: request_idempotency_key_hash,
+            request_content_hash,
+            source_object_ref_id: object_ref_id,
+        };
+        match self
+            .commit_receipt_attempt(
+                &request,
+                &run,
+                &attempt,
+                server_envelope_bytes.len(),
+                stored,
+                &admission.decision,
+            )
+            .await?
+        {
+            ReceiptCommit::Created(created) => Ok(PipelineReceiptResult::Created(created)),
+            ReceiptCommit::Refused(result) => {
+                self.discard_receipt_attempt(&attempt).await;
+                Ok(result)
+            }
+            ReceiptCommit::StagingMissing => {
+                self.discard_receipt_attempt(&attempt).await;
+                Err(anyhow::anyhow!(PIPELINE_RECEIPT_STAGING_MISSING_LABEL))
+            }
+        }
+    }
+
+    /// The receipt's early refusal check (`submit` step 1, fix round 1
+    /// F2): one short tenant transaction that only reads and takes no
+    /// advisory lock. It refuses the common cases -- an existing run for
+    /// the key, an attempt staged with other content, a tombstone, and the
+    /// quota (for a key not yet counted) -- before the attempt's object is
+    /// encrypted, so a refused receipt costs no encryption and, on a remote
+    /// store, no key-wrap call. It decides nothing on its own: the staging
+    /// transaction repeats every check under its locks, since the state can
+    /// change in between. Its connection returns to the pool before the
+    /// next step checks one out.
+    async fn precheck_receipt(
+        &self,
+        request: &PipelineReceiptRequest<'_>,
+        request_idempotency_key: &str,
+        request_content_hash: &str,
+    ) -> anyhow::Result<Option<PipelineReceiptResult>> {
+        let tenant_id = request.tenant_id;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        let refused = if let Some(refused) = receipt_key_refusal(
+            &tx,
+            tenant_id,
+            request_idempotency_key,
+            request_content_hash,
+        )
+        .await?
+        {
+            Some(refused)
+        } else if receipt_is_tombstoned(
+            &tx,
+            tenant_id,
+            request.server_envelope,
+            request_content_hash,
+        )
+        .await?
+        {
+            Some(PipelineReceiptResult::Tombstoned)
+        } else if request.counts_toward_quota {
+            let principal_ref_hash = sha256_prefixed(request.actor_principal_ref.as_bytes());
+            receipt_quota_refusal(&tx, request, request_idempotency_key, &principal_ref_hash)
+                .await?
+                .map(PipelineReceiptResult::QuotaExceeded)
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok(refused)
+    }
 
-        // 3. Receipt identity lock, then the tenant quota lock. Both are
-        // transaction-scoped advisory locks: they serialize concurrent
-        // receipts for the same key (or tenant) without holding a row lock
-        // that would block unrelated tenants.
-        let receipt_lock = format!("pipeline-receipt:{tenant_id}:{request_idempotency_key_hash}");
+    /// The receipt's staging transaction (`submit` step 3). It takes the
+    /// receipt lock and then the tenant quota lock -- transaction-scoped
+    /// advisory locks that serialize concurrent receipts for one key (or
+    /// one tenant's quota) without a row lock that would block other
+    /// tenants -- and releases both when it commits, before the object is
+    /// written. In order: an existing run for the key (`Replayed` or
+    /// `ContentConflict`); an attempt for the key staged with other content
+    /// (`ContentConflict`); the bound bundle; tombstones (`Tombstoned`); the
+    /// quota (`QuotaExceeded`). The quota is counted here
+    /// (`pipeline_admission_usage`, once per key), so a receipt that fails
+    /// after its write stays counted, and a retry of that key is neither
+    /// counted again nor refused for its own earlier count. Last, the
+    /// attempt's `staged` row.
+    async fn stage_receipt_attempt(
+        &self,
+        request: &PipelineReceiptRequest<'_>,
+        attempt: &ReceiptAttempt,
+    ) -> anyhow::Result<ReceiptStage> {
+        let tenant_id = request.tenant_id;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&receipt_lock],
+            &[&pipeline_receipt_lock(
+                tenant_id,
+                &attempt.request_idempotency_key,
+            )],
         )
         .await?;
         let quota_lock = format!("pipeline-quota:{tenant_id}");
@@ -2928,40 +3434,19 @@ impl PipelineService {
         )
         .await?;
 
-        // 4. Replay / content-conflict checks (already-created run, then a
-        // staged-but-not-yet-committed artifact row from a crashed receipt).
-        if let Some(row) = tx
-            .query_opt(
-                "SELECT * FROM pipeline_runs
-                 WHERE tenant_id = $1 AND request_idempotency_key = $2",
-                &[&tenant_id, &request_idempotency_key_hash],
-            )
-            .await?
-        {
-            let existing = pipeline_run_from_row(&row)?;
-            tx.commit().await?;
-            return if existing.request_content_hash == request_content_hash {
-                Ok(PipelineReceiptResult::Replayed(existing))
-            } else {
-                Ok(PipelineReceiptResult::ContentConflict)
-            };
-        }
-        if let Some(staged_hash) = tx
-            .query_opt(
-                "SELECT request_content_hash
-                 FROM pipeline_receipt_artifacts
-                 WHERE tenant_id = $1 AND request_idempotency_key = $2",
-                &[&tenant_id, &request_idempotency_key_hash],
-            )
-            .await?
-            .map(|row| row.get::<_, String>("request_content_hash"))
-            && staged_hash != request_content_hash
+        if let Some(refused) = receipt_key_refusal(
+            &tx,
+            tenant_id,
+            &attempt.request_idempotency_key,
+            &attempt.request_content_hash,
+        )
+        .await?
         {
             tx.commit().await?;
-            return Ok(PipelineReceiptResult::ContentConflict);
+            return Ok(ReceiptStage::Refused(refused));
         }
 
-        // 5. Bound bundle: the active bundle id (from pipeline_active_bundles
+        // Bound bundle: the active bundle id (from pipeline_active_bundles
         // only -- routing-table lookups are PR 5), then construct it.
         let bundle_id: String = tx
             .query_opt(
@@ -2988,165 +3473,111 @@ impl PipelineService {
             .construct(package)
             .map_err(|error| anyhow::anyhow!(error))?;
 
-        // 6. Tombstone check. A hit is a normal outcome, not an error:
-        // nothing has been stored yet, so committing here leaves no trace.
-        let tombstoned: bool = tx
-            .query_one(
-                "SELECT
-                    EXISTS (
-                        SELECT 1
-                          FROM trace_withdrawals
-                         WHERE tenant_id = $1 AND submission_id = $2
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                          FROM trace_tombstones
-                         WHERE tenant_id = $1
-                           AND (
-                                submission_id = $2
-                                OR trace_id = $3
-                                OR redaction_hash = $4
-                                OR redaction_hash = $5
-                           )
-                    )",
-                &[
-                    &tenant_id,
-                    &envelope.submission_id,
-                    &envelope.trace_id,
-                    &envelope.privacy.redaction_hash,
-                    &request_content_hash,
-                ],
-            )
-            .await?
-            .get(0);
-        if tombstoned {
+        // A tombstone hit is a normal outcome, not an error: nothing has
+        // been staged or stored.
+        if receipt_is_tombstoned(
+            &tx,
+            tenant_id,
+            request.server_envelope,
+            &attempt.request_content_hash,
+        )
+        .await?
+        {
             tx.commit().await?;
-            return Ok(PipelineReceiptResult::Tombstoned);
+            return Ok(ReceiptStage::Refused(PipelineReceiptResult::Tombstoned));
         }
 
-        // 7. Quota, only when the caller wants this receipt counted.
+        // Quota, only when the caller wants this receipt counted.
         if request.counts_toward_quota {
             let principal_ref_hash = sha256_prefixed(request.actor_principal_ref.as_bytes());
-            // Quota counts pipeline receipts only (pipeline_admission_usage). Legacy
-            // submission records are not counted, so in the first hour after a
-            // tenant moves to the pipeline it can receive up to one extra hourly
-            // quota. The owner accepted this on 2026-09-23; see the activation
-            // runbook, "Submission quota at switch-over".
-            let counts = tx
-                .query_one(
-                    "SELECT COUNT(*) FILTER (WHERE counted_at > NOW() - INTERVAL '1 hour') AS tenant_count,
-                            COUNT(*) FILTER (WHERE counted_at > NOW() - INTERVAL '1 hour' AND principal_ref_hash = $2) AS principal_count
-                       FROM pipeline_admission_usage WHERE tenant_id = $1",
-                    &[&tenant_id, &principal_ref_hash],
-                )
-                .await?;
-            let tenant_count: i64 = counts.get("tenant_count");
-            let principal_count: i64 = counts.get("principal_count");
-            if request.limits.max_per_tenant_per_hour != 0
-                && tenant_count >= request.limits.max_per_tenant_per_hour as i64
+            if let Some(scope) = receipt_quota_refusal(
+                &tx,
+                request,
+                &attempt.request_idempotency_key,
+                &principal_ref_hash,
+            )
+            .await?
             {
                 tx.commit().await?;
-                return Ok(PipelineReceiptResult::QuotaExceeded(
-                    PipelineQuotaScope::Tenant,
-                ));
-            }
-            if request.limits.max_per_principal_per_hour != 0
-                && principal_count >= request.limits.max_per_principal_per_hour as i64
-            {
-                tx.commit().await?;
-                return Ok(PipelineReceiptResult::QuotaExceeded(
-                    PipelineQuotaScope::Principal,
-                ));
+                return Ok(ReceiptStage::Refused(PipelineReceiptResult::QuotaExceeded(
+                    scope,
+                )));
             }
             tx.execute(
                 "INSERT INTO pipeline_admission_usage (
                     tenant_id, request_idempotency_key, principal_ref_hash
-                 ) VALUES ($1, $2, $3)",
+                 ) VALUES ($1, $2, $3)
+                 ON CONFLICT (tenant_id, request_idempotency_key) DO NOTHING",
                 &[
                     &tenant_id,
-                    &request_idempotency_key_hash,
+                    &attempt.request_idempotency_key,
                     &principal_ref_hash,
                 ],
             )
             .await?;
         }
 
-        // 8. Stage, then store the server (already-redacted) envelope bytes,
-        // wrapped per decision P1.
-        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
-        let run = NewPipelineRun {
-            tenant_id: tenant_id.to_string(),
-            run_id,
-            submission_id: envelope.submission_id,
-            trace_id: envelope.trace_id,
-            bundle_id,
-            request_idempotency_key: request_idempotency_key_hash,
-            request_content_hash: request_content_hash.clone(),
-            source_object_ref_id: object_ref_id,
-        };
-        PgPipelineStore::stage_receipt_artifact(&tx, &run, None).await?;
-        let server_envelope_bytes = serde_json::to_vec(envelope)?;
-        let wrapper = encode_pipeline_artifact_bytes(&server_envelope_bytes)?;
-        let artifact_receipt = self.artifact_store.put_serialized_json(
-            tenant_storage_ref.as_str(),
-            TraceArtifactKind::ContributionEnvelope,
-            &run_id.to_string(),
-            &wrapper,
-        )?;
-        PgPipelineStore::stage_receipt_artifact(&tx, &run, Some(&artifact_receipt)).await?;
-        self.inject_crash(PipelineCrashPoint::AfterArtifactStorage)?;
+        PgPipelineStore::stage_receipt_artifact(&tx, attempt).await?;
+        tx.commit().await?;
+        Ok(ReceiptStage::Staged { bundle_id, bundle })
+    }
 
-        // 9. Admission. `authenticated`/`authority_valid`/`grant_valid` are
-        // fixed `true` in PR 2 (decision D15): the legacy handler already
-        // checked them, and authority is not ported until PR 3.
-        let privacy_risk = match envelope.privacy.residual_pii_risk {
-            ResidualPiiRisk::Low => PrivacyRisk::Low,
-            ResidualPiiRisk::Medium
-                if matches!(
-                    request.residual_risk_basis,
-                    [ResidualRiskCondition::ConsentContentFlag]
-                ) =>
-            {
-                PrivacyRisk::Low
-            }
-            ResidualPiiRisk::Medium => PrivacyRisk::Medium,
-            ResidualPiiRisk::High => PrivacyRisk::High,
-        };
-        let admission_input = AdmissionInput {
-            run_id,
-            tenant_storage_ref: tenant_storage_ref.clone(),
-            trace_id: envelope.trace_id,
-            request_content_hash,
-            schema_version: envelope.schema_version.clone(),
-            authenticated: true,
-            authority_valid: true,
-            contribution_path_valid: !envelope.ironclaw.version.trim().is_empty()
-                && !envelope
-                    .privacy
-                    .redaction_pipeline_version
-                    .trim()
-                    .is_empty(),
-            grant_valid: true,
-            consent_valid: envelope.consent.revocable,
-            allowed_uses_valid: true,
-            tombstoned: false,
-            quota_available: true,
-            privacy_risk,
-        };
-        let admission = bundle
-            .admission
-            .execute(&admission_input)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.label().to_string()))?;
-        let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
+    /// The receipt's final transaction (`submit` step 5). It takes the
+    /// receipt lock again -- its only advisory lock -- so it commits one
+    /// attempt for the key at a time: the attempt that comes second finds
+    /// the first one's run and returns `Replayed` rather than failing on
+    /// the run's unique key or the submission id. Then it re-checks the
+    /// tombstones (one can arrive while the object is written), locks the
+    /// attempt's row, which must still be `staged` and not due
+    /// (`lock_committable_receipt_artifact`), and inserts the records and
+    /// the row's move to `committed` together.
+    ///
+    /// Retention is derived on the server, as the legacy receipt derives it
+    /// (`retention_policy_for_trace` over the envelope's allowed uses and
+    /// consent; expiry `received_at + max_age_days`), never taken from the
+    /// envelope's own `trace_card.retention_policy`. `received_at` is the
+    /// column default, this transaction's `NOW()`, read here so the expiry
+    /// is anchored to the exact stored receipt time. No
+    /// `pipeline_receipt_ownership` row is inserted (PR 5).
+    async fn commit_receipt_attempt(
+        &self,
+        request: &PipelineReceiptRequest<'_>,
+        run: &NewPipelineRun,
+        attempt: &ReceiptAttempt,
+        size_bytes: usize,
+        stored: StoredPhaseResult,
+        admission: &AdmissionDecision,
+    ) -> anyhow::Result<ReceiptCommit> {
+        let tenant_id = request.tenant_id;
+        let envelope = request.server_envelope;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&pipeline_receipt_lock(
+                tenant_id,
+                &attempt.request_idempotency_key,
+            )],
+        )
+        .await?;
+        if let Some(existing) =
+            existing_receipt_run(&tx, tenant_id, &attempt.request_idempotency_key).await?
+        {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::Refused(replay_result(
+                existing,
+                &attempt.request_content_hash,
+            )));
+        }
+        if receipt_is_tombstoned(&tx, tenant_id, envelope, &attempt.request_content_hash).await? {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::Refused(PipelineReceiptResult::Tombstoned));
+        }
+        if !PgPipelineStore::lock_committable_receipt_artifact(&tx, attempt).await? {
+            tx.commit().await?;
+            return Ok(ReceiptCommit::StagingMissing);
+        }
 
-        // 10. Durable records (no pipeline_receipt_ownership insert -- PR 5).
-        // Retention is derived on the server, as the legacy receipt derives
-        // it (`retention_policy_for_trace` over the envelope's allowed uses
-        // and consent; expiry `received_at + max_age_days`), never taken from
-        // the envelope's own `trace_card.retention_policy`. `received_at` is
-        // the column default, this transaction's `NOW()`, read here so the
-        // expiry is anchored to the exact stored receipt time.
         let retention_policy = retention_policy_for_trace(envelope);
         let received_at: DateTime<Utc> = tx.query_one("SELECT NOW()", &[]).await?.get(0);
         let expires_at = retention_policy
@@ -3176,37 +3607,140 @@ impl PipelineService {
             credit_points_final: None,
             expires_at,
         };
+        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
         let object_ref = TraceObjectRefWrite {
-            object_ref_id,
+            object_ref_id: run.source_object_ref_id,
             tenant_id: tenant_id.to_string(),
             submission_id: envelope.submission_id,
             artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
             object_store: self.object_store_name.clone(),
-            object_key: artifact_receipt.object_key,
-            content_sha256: format!("sha256:{}", artifact_receipt.ciphertext_sha256),
+            object_key: attempt.receipt.object_key.clone(),
+            content_sha256: format!("sha256:{}", attempt.receipt.ciphertext_sha256),
             encryption_key_ref: format!("tenant:{}", tenant_storage_ref.as_str()),
-            size_bytes: i64::try_from(server_envelope_bytes.len()).unwrap_or(i64::MAX),
+            size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
             compression: None,
             created_by_job_id: None,
         };
         insert_receipt_records(
             &tx,
-            &run,
+            run,
+            attempt,
             &submission,
             &object_ref,
             stored,
-            &admission.decision,
+            admission,
         )
         .await?;
         let row = tx
             .query_one(
                 "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
-                &[&tenant_id, &run_id],
+                &[&tenant_id, &run.run_id],
             )
             .await?;
         let created = pipeline_run_from_row(&row)?;
         tx.commit().await?;
-        Ok(PipelineReceiptResult::Created(created))
+        Ok(ReceiptCommit::Created(created))
+    }
+
+    /// Removes an attempt the final transaction refused: its object, then
+    /// its `staged` row. Best effort, with the sweeper as the backstop: when
+    /// the delete fails, the row stays (or is inserted again, if the
+    /// sweeper already removed it) and is made due now, so the next sweep
+    /// retries it. Logs labels only.
+    async fn discard_receipt_attempt(&self, attempt: &ReceiptAttempt) {
+        let tenant_storage_ref = pipeline_tenant_storage_ref(&attempt.tenant_id);
+        let cleanup = match self
+            .artifact_store
+            .delete_artifact(tenant_storage_ref.as_str(), &attempt.receipt)
+        {
+            Ok(_) => self.store.remove_staged_receipt_artifact(attempt).await,
+            Err(_) => {
+                tracing::warn!(
+                    label = "pipeline_receipt_object_delete_failed",
+                    "best-effort delete of a refused receipt attempt's object failed; \
+                     the sweeper retries it"
+                );
+                self.store.restage_receipt_artifact_due_now(attempt).await
+            }
+        };
+        if cleanup.is_err() {
+            tracing::warn!(
+                label = "pipeline_receipt_staging_cleanup_failed",
+                "could not update a refused receipt attempt's staging row"
+            );
+        }
+    }
+
+    /// Deletes the objects of receipt attempts that never committed (Task 5,
+    /// M2): in one tenant transaction, up to `limit` `staged` rows whose
+    /// `cleanup_after` has passed, oldest first, each locked
+    /// (`FOR UPDATE SKIP LOCKED`). For each, it deletes the object the row
+    /// names and then the row. A delete that fails keeps its row for the
+    /// next pass and logs a label only. Returns how many rows it removed.
+    ///
+    /// It never deletes an object a run references: an attempt's row moves
+    /// to `committed` in the same transaction that inserts its object ref,
+    /// under the row lock the sweeper skips, and a row this sweep holds is
+    /// deleted before that transaction can lock it -- which then refuses
+    /// (`ReceiptCommit::StagingMissing`). If this sweep fails after it
+    /// deleted an object but before it commits, the row stays `staged` with
+    /// its object gone; it is due, and the final transaction refuses a due
+    /// row too (`lock_committable_receipt_artifact`). The object keys are
+    /// unique per attempt (`UNIQUE (tenant_id, object_key)`).
+    pub async fn sweep_staged_receipts(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT run_id, attempt_id, object_key, ciphertext_sha256, staged_at
+                   FROM pipeline_receipt_artifacts
+                  WHERE tenant_id = $1 AND state = 'staged' AND cleanup_after <= NOW()
+                  ORDER BY cleanup_after, run_id, attempt_id
+                  LIMIT $2
+                  FOR UPDATE SKIP LOCKED",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        let mut removed = 0;
+        for row in &rows {
+            let run_id: Uuid = row.get("run_id");
+            let attempt_id: Uuid = row.get("attempt_id");
+            let receipt = EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: tenant_storage_ref.as_str().to_string(),
+                artifact_kind: TraceArtifactKind::ContributionEnvelope,
+                object_key: row.get("object_key"),
+                ciphertext_sha256: row.get("ciphertext_sha256"),
+                encrypted_at: row.get("staged_at"),
+            };
+            if self
+                .artifact_store
+                .delete_artifact(tenant_storage_ref.as_str(), &receipt)
+                .is_err()
+            {
+                tracing::warn!(
+                    label = "pipeline_receipt_sweep_delete_failed",
+                    "a staged receipt object could not be deleted; its row is kept \
+                     for the next pass"
+                );
+                continue;
+            }
+            tx.execute(
+                "DELETE FROM pipeline_receipt_artifacts
+                  WHERE tenant_id = $1 AND run_id = $2 AND attempt_id = $3
+                    AND state = 'staged'",
+                &[&tenant_id, &run_id, &attempt_id],
+            )
+            .await?;
+            removed += 1;
+        }
+        tx.commit().await?;
+        Ok(removed)
     }
 
     /// Loads a run's committed outcome for `phase` and decodes its decision.
@@ -5017,10 +5551,28 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
 /// later claim committed, or the committed `content_sha256` would stop
 /// matching the stored object. The database refs a commit records stay
 /// deterministic (the approved object ref id is derived from the run id
-/// alone); only the object key moves per claim. An attempt that crashes
-/// before its commit leaves its objects unreferenced (not tracked in PR 2).
+/// alone); only the object key moves per claim. A phase attempt that
+/// crashes before its commit leaves its objects unreferenced (not tracked
+/// in PR 2). The receipt's source object is tracked: see
+/// `pipeline_receipt_object_id`.
 pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uuid) -> String {
     format!("pipeline-{artifact}-{run_id}-{lease_token}")
+}
+
+/// The object id one receipt attempt stores its source envelope under
+/// (Task 5, M2). As in `pipeline_attempt_object_id` (ruling FR1), the id
+/// carries a per-attempt value -- a random attempt id, since a receipt holds
+/// no lease -- so two attempts for one key never write the same object, and
+/// a committed object ref's hash always matches its object. The attempt's
+/// staging row names the object before it is written.
+fn pipeline_receipt_object_id(run_id: Uuid, attempt_id: Uuid) -> String {
+    pipeline_attempt_object_id("source", run_id, attempt_id)
+}
+
+/// The transaction-scoped advisory lock that serializes a receipt key's
+/// staging and final transactions.
+fn pipeline_receipt_lock(tenant_id: &str, request_idempotency_key: &str) -> String {
+    format!("pipeline-receipt:{tenant_id}:{request_idempotency_key}")
 }
 
 /// Builds the `trace_object_refs` write for the approved content a Review

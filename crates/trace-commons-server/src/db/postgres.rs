@@ -7595,10 +7595,23 @@ mod tests {
             "reject_pipeline_run_identity_mutation",
             "CREATE TABLE pipeline_bundle_packages",
             "CREATE TABLE pipeline_receipt_artifacts",
+            // Task 5 (M2): one staging row per receipt attempt, each naming
+            // its own object, and at most one committed attempt per run.
+            "PRIMARY KEY (tenant_id, run_id, attempt_id)",
+            "UNIQUE (tenant_id, object_key)",
+            "ciphertext_sha256 TEXT NOT NULL",
+            "ON pipeline_receipt_artifacts (tenant_id, run_id)\n    WHERE state = 'committed'",
         ] {
             assert!(durability.contains(required), "V76 is missing `{required}`");
         }
-        for forbidden in ["claim_pipeline_run", "pipeline_claimer", "SECURITY DEFINER"] {
+        for forbidden in [
+            "claim_pipeline_run",
+            "pipeline_claimer",
+            "SECURITY DEFINER",
+            // A per-key unique row would make two attempts for one key
+            // share (and overwrite) one staging record.
+            "UNIQUE (tenant_id, request_idempotency_key)",
+        ] {
             assert!(
                 !durability.contains(forbidden),
                 "V76 must not contain `{forbidden}`"
