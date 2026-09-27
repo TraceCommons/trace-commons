@@ -10290,7 +10290,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
     );
 }
 
-/// D4: an out-of-range or unparsable
+/// An out-of-range or unparsable
 /// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_*` refuses startup with the safe
 /// label `pipeline_lease_config_invalid`, never a raw parse error or a
 /// silently accepted value. Uses the real variable names -- no other test in
@@ -10323,7 +10323,7 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
         parse_pipeline_lease_config_from_env().expect_err("an unparsable Score lease is refused");
     assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
 
-    // Review finding S5: a value that parses as `i64` but overflows
+    // A value that parses as `i64` but overflows
     // `chrono::Duration::seconds` (above `i64::MAX / 1_000`) must refuse
     // with the safe label, not panic.
     unsafe {
@@ -10546,9 +10546,8 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
 
 /// Wraps `ReferencePerplexityScorer` and overrides `production_qualified` to
 /// `true`. Real production scorers are injected by a proprietary assembler
-/// and never live in this tree (task-6-M3 brief, review comment
-/// 4108170553); this exists only so the fail-closed tests below can prove
-/// the check does not block a genuinely qualified runtime.
+/// and never live in this tree; this exists only so the fail-closed tests
+/// below can prove the check does not block a genuinely qualified runtime.
 struct QualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer);
 
 impl trace_commons_gate_api::PerplexityScorer for QualifiedTestScorer {
@@ -10822,9 +10821,9 @@ async fn pipeline_runtime_fail_closed_fixture(
     (connections, configured_store)
 }
 
-/// Task 6 (M3), test 1: routed tenants, an unqualified runtime, no
+/// Routed tenants, an unqualified runtime, no
 /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`, no opt-in -- refused.
-/// Review comment 4108170553: a build that injects an assembler and lists
+/// A build that injects an assembler and lists
 /// tenants in `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` must not run real
 /// receipts through test doubles just because
 /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` was left unset.
@@ -10850,7 +10849,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
     );
 }
 
-/// Task 6 (M3), test 2: the same as above, with the test opt-in set --
+/// The same as above, with the test opt-in set --
 /// starts.
 #[tokio::test]
 async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in() {
@@ -10871,7 +10870,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
     assert!(!pipeline_runtime_is_production_qualified(&service));
 }
 
-/// Task 6 (M3), test 3: the opt-in together with
+/// The opt-in together with
 /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` -- refused, regardless of
 /// tenant routing or dependency qualification.
 #[tokio::test]
@@ -10896,7 +10895,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
     );
 }
 
-/// Task 6 (M3), test 4: a qualified runtime with routed tenants and no
+/// A qualified runtime with routed tenants and no
 /// opt-in -- starts. The fail-closed check must not block a genuinely
 /// production-qualified dependency.
 #[tokio::test]
@@ -10918,7 +10917,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
     assert!(pipeline_runtime_is_production_qualified(&service));
 }
 
-/// Task 6 (M3), test 5: no routed tenants, no required flag, an unqualified
+/// No routed tenants, no required flag, an unqualified
 /// runtime -- starts, because no receipt can reach it.
 #[tokio::test]
 async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_routed() {

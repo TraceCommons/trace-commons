@@ -50,7 +50,9 @@ CREATE TABLE pipeline_runs (
     -- submission delete can reach either branch first. By commit time this
     -- run's own row is already gone whenever the whole submission (or
     -- tenant) is going away together; a source ref deleted on its own, with
-    -- the run still live, is still refused.
+    -- the run still live, is still refused. The check itself runs at
+    -- commit, so one transaction could delete and re-insert the same key;
+    -- no code does that.
     FOREIGN KEY (tenant_id, submission_id, source_object_ref_id)
         REFERENCES trace_object_refs (tenant_id, submission_id, object_ref_id)
         ON DELETE NO ACTION
@@ -101,14 +103,17 @@ CREATE POLICY trace_corpus_tenant_isolation ON phase_outcomes
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
--- Outcomes are append-only: neither an UPDATE nor a direct DELETE is ever
--- allowed. A DELETE reaching this trigger from a cascade (the run it
--- belongs to was deleted, taking the whole submission or tenant with it)
--- is not a direct delete and is let through, so a tenant or a submission
--- with pipeline rows can still be removed; `pg_trigger_depth()` is 1 for a
--- delete issued directly against this table and at least 2 for one that
--- arrived through a foreign key's `ON DELETE CASCADE`, because that cascade
--- runs as a trigger of its own around this one.
+-- An outcome lives exactly as long as its run: `phase_outcomes`'s foreign
+-- key to `pipeline_runs` cascades, so a direct delete of a run also
+-- removes its outcomes. Outcomes are otherwise append-only: neither an
+-- UPDATE nor a direct DELETE is ever allowed. A DELETE reaching this
+-- trigger from a cascade (the run it belongs to was deleted, taking the
+-- whole submission or tenant with it) is not a direct delete and is let
+-- through, so a tenant or a submission with pipeline rows can still be
+-- removed; `pg_trigger_depth()` is 1 for a delete issued directly against
+-- this table and at least 2 for one that arrived through a foreign key's
+-- `ON DELETE CASCADE`, because that cascade runs as a trigger of its own
+-- around this one.
 CREATE FUNCTION reject_phase_outcome_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql

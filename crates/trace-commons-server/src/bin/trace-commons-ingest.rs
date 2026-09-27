@@ -670,7 +670,7 @@ const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RU
 /// `docs/operator/pipeline-activation.md`.
 const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
     "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
-/// Whole-seconds overrides for the per-phase claim lease (decision D4); see
+/// Whole-seconds overrides for the per-phase claim lease; see
 /// `parse_pipeline_lease_config_from_env`. Unset keeps
 /// `PipelineLeaseConfig::default()`'s value for that phase.
 const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW: &str =
@@ -9241,7 +9241,7 @@ fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> 
     }
 }
 
-/// D4: the per-phase claim lease from
+/// The per-phase claim lease from
 /// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_{REVIEW,SCORE,SETTLE}` (whole
 /// seconds each; unset keeps `PipelineLeaseConfig::default()`'s value for
 /// that phase). Fails closed with the single safe label
@@ -9276,7 +9276,7 @@ fn parse_pipeline_lease_seconds_env(
             let seconds: i64 = raw
                 .parse()
                 .map_err(|_| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))?;
-            // review finding S5: `chrono::Duration::seconds` panics above
+            // `chrono::Duration::seconds` panics above
             // `i64::MAX / 1_000`; `try_seconds` reports that the same way
             // every other malformed value is reported here, rather than
             // taking the process down on an operator typo.
@@ -13873,15 +13873,22 @@ async fn submit_trace_handler(
                     PipelineReceiptResult::ContentConflict => {
                         return Err(pipeline_content_conflict());
                     }
-                    // No run under this key: a submission that completed
-                    // admission on the legacy path before this tenant was
-                    // routed to the pipeline. Fall back to the legacy read
-                    // below, unchanged.
+                    // `replay_receipt` only ever builds a `Replayed` or a
+                    // `ContentConflict` result (`replay_result`, over a run
+                    // `existing_receipt_run` already found); a read-only
+                    // replay lookup neither creates a run, stages an
+                    // attempt, checks a tombstone, nor counts a quota, so
+                    // none of these three variants can come from it. Kept
+                    // only so this match stays exhaustive against the
+                    // shared `PipelineReceiptResult` enum.
                     PipelineReceiptResult::Created(_)
                     | PipelineReceiptResult::Tombstoned
                     | PipelineReceiptResult::QuotaExceeded(_) => {}
                 }
             }
+            // No run under this key: a submission that completed admission
+            // on the legacy path before this tenant was routed to the
+            // pipeline. Fall back to the legacy read below, unchanged.
         }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)

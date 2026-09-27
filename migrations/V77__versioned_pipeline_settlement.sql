@@ -177,7 +177,9 @@ CREATE TABLE pipeline_run_settlements (
     -- or tenant delete can reach either branch first. By commit time this
     -- leg's own row is already gone whenever the whole submission (or
     -- tenant) is going away together; a ledger row or batch deleted on its
-    -- own, with a leg still referencing it, is still refused.
+    -- own, with a leg still referencing it, is still refused. Both checks
+    -- run at commit, so one transaction could delete and re-insert the
+    -- same key; no code does that.
     FOREIGN KEY (tenant_id, credit_event_id, instrument_id)
         REFERENCES trace_credit_ledger (
             tenant_id, credit_event_id, instrument_id

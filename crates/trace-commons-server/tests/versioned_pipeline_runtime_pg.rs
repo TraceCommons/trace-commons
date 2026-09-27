@@ -317,7 +317,7 @@ async fn stale_lease_cannot_commit_after_reclaim() {
     );
 }
 
-/// D4: the token-only fence. `record_lease_expired` is fenced by the lease
+/// The token-only fence. `record_lease_expired` is fenced by the lease
 /// token alone, with no expiry predicate (unlike every other lease-checked
 /// write) -- but once another claim has moved the run onto a new token, the
 /// old token no longer matches and this changes nothing, the same as any
@@ -354,10 +354,10 @@ async fn record_lease_expired_on_a_reclaimed_run_changes_nothing() {
     assert_eq!(current.state, PipelineRunState::Leased);
 }
 
-/// D4 / H2 (review comment 4108170518), controller ruling: a Score phase
+/// A Score phase
 /// slower than Review's and Settle's short lease still completes when Score
 /// has its own longer configured lease -- scaled to a couple of seconds,
-/// never a real 30-second sleep. Review finding I2: Review and Settle get 1
+/// never a real 30-second sleep. Review and Settle get 1
 /// second, Score gets a few seconds, and the embedder's delay sits strictly
 /// between the two (1s < 2s < 4s) -- a fixed margin that does not depend on
 /// how many 256-byte chunks the fixture happens to produce (`SlowEmbedder`
@@ -429,12 +429,12 @@ async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
     );
 }
 
-/// D4: a Score phase whose lease expires records the expiry as its own
+/// A Score phase whose lease expires records the expiry as its own
 /// uncharged reason, never as a policy failure -- `record_lease_expired`
 /// always gives back the attempt the claim took, so `attempt_count` never
 /// climbs toward `max_attempts` no matter how many times the phase overruns,
 /// and the run stays retryable rather than ever reaching
-/// `failed`/`attempts_exhausted`. Review finding I2: `SlowEmbedder` sleeps
+/// `failed`/`attempts_exhausted`. `SlowEmbedder` sleeps
 /// once per attempt (`reset_for_next_attempt` between iterations below), so
 /// each of the 8 attempts here costs about 1.5 s of real sleep, not the
 /// fixture's chunk count times 1.5 s.
@@ -493,8 +493,9 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
     assert_eq!(expired.attempt_count, attempt_count_before);
     assert!(expired.next_attempt_at > chrono::Utc::now());
 
-    // max_attempts defaults to 5 (migration V76/V77); loop more times than
-    // that and confirm the run is never failed / attempts_exhausted.
+    // The run's max_attempts defaults to 5 (migration V76); loop more
+    // times than that and confirm the run is never failed /
+    // attempts_exhausted.
     for _ in 0..7 {
         force_due(&backend, &tenant, created.run_id).await;
         embedder.reset_for_next_attempt();
@@ -511,8 +512,9 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
     }
 }
 
-/// D4 case B (review finding I1): the phase itself fails for an ordinary
-/// reason (a transient `PolicyError`, not a lease problem) -- but the
+/// The stale-lease-vs-charged-failure case B: the phase itself fails for
+/// an ordinary reason (a transient `PolicyError`, not a lease problem) --
+/// but the
 /// *follow-up* `mark_transient_retry` call finds the lease already gone,
 /// because the phase ran right up to (and past) its own lease's edge before
 /// it failed. `process_claimed_run`'s bundle-load branch and every
@@ -584,7 +586,7 @@ async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged(
     assert!(expired.next_attempt_at > chrono::Utc::now());
 }
 
-/// D4 (requirement 2): `claim_next` -- the tenant-wide claim `process_one`
+/// `claim_next` -- the tenant-wide claim `process_one`
 /// uses, as opposed to `claim_run`'s explicit-duration claim -- picks the
 /// lease by the claimed row's own `next_phase` in the claiming SQL itself,
 /// so a Score row never gets Review's lease or vice versa. Drives the same
@@ -925,7 +927,7 @@ async fn tamper_stored_bundle_manifest_network(
     tx.commit().await.expect("commit the tampering transaction");
 }
 
-/// I6: the per-tenant descriptor-conflict check in `register_bundle` reads
+/// The per-tenant descriptor-conflict check in `register_bundle` reads
 /// every package already registered for the tenant. #971 round 3 tightened
 /// `BundleManifest`'s deserialize-time validation, so a package registered
 /// before the tightening can stop loading under the new rule. The conflict
@@ -1311,7 +1313,7 @@ async fn age_run(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid, by: c
     tx.commit().await.unwrap();
 }
 
-/// FR3 (I2): `mark_transient_retry` schedules the next attempt after the
+/// Ruling FR3: `mark_transient_retry` schedules the next attempt after the
 /// time the run has spent in its current phase, clamped to [1 s, 1 h]. With
 /// no counter, the delay doubles on each retry (the next retry happens that
 /// much later, so the phase is twice as old) and caps at one retry per hour.
@@ -1782,12 +1784,12 @@ impl IdentifiedEmbedder for FlakyEmbedder {
     }
 }
 
-/// D4: an embedder whose `embed` call blocks for a fixed wall-clock delay
-/// once per simulated attempt -- not once per chunk (review finding I2) --
+/// An embedder whose `embed` call blocks for a fixed wall-clock delay
+/// once per simulated attempt -- not once per chunk --
 /// before delegating to the reference embedder. `Embedder::embed` is
 /// synchronous, so `std::thread::sleep` inside it is a real elapsed delay a
 /// claimed lease's `lease_expires_at` genuinely runs past, without a real
-/// 30-second sleep (the controller's scaled-test ruling) and without the
+/// 30-second sleep (this test is scaled down) and without the
 /// total delay growing with the fixture's chunk count: only the first
 /// `embed` call since construction or since the last
 /// `reset_for_next_attempt` sleeps, so a test driving several simulated
@@ -1837,8 +1839,9 @@ impl IdentifiedEmbedder for SlowEmbedder {
     }
 }
 
-/// D4 case B (review finding I1): sleeps a fixed wall-clock delay and then
-/// fails, every call. `FixedScorePolicy`'s chunk loop aborts on the first
+/// The stale-lease-vs-charged-failure case B's embedder double: sleeps a
+/// fixed wall-clock delay and then fails, every call. `FixedScorePolicy`'s
+/// chunk loop aborts on the first
 /// `embed` error (the same reason `FlakyEmbedder` above needs no per-attempt
 /// reset), so this always sleeps exactly once per simulated attempt without
 /// needing `SlowEmbedder`'s reset bookkeeping. Used to make the *phase*
@@ -1873,7 +1876,7 @@ impl IdentifiedEmbedder for SlowThenFailingEmbedder {
 
 /// Builds a service over `minimal_config(true)` (Score's embedder runs, and
 /// there are no instrument awards, so Settle needs no adapter dispatch) with
-/// `embedder` and the given lease configuration. Shared by the D4
+/// `embedder` and the given lease configuration. Shared by the
 /// lease-expiry tests below; the caller keeps its own `Arc` to the embedder
 /// double so it can call `reset_for_next_attempt` (for `SlowEmbedder`)
 /// between simulated attempts.
@@ -1915,7 +1918,7 @@ async fn score_lease_test_service(
 
 /// P5's mismatching adapter double: always returns a well-formed but wrong
 /// result reference, regardless of what the request expects. Proves Settle
-/// fails the row closed on D4's binding check -- the expected result comes
+/// fails the row closed on its binding check -- the expected result comes
 /// from the persisted selection, never trusted from whatever the adapter
 /// hands back -- rather than accepting a plausible-looking but different
 /// result.
@@ -2522,7 +2525,7 @@ async fn seed_redaction_tombstone(backend: &Arc<PgBackend>, tenant: &str, redact
 /// `submission_id`. This test reproduces that shape: it seeds an unrelated
 /// prior submission, tombstones it by the redaction hash the new envelope
 /// carries, and submits the new envelope under a different submission id.
-/// I6: the receipt derives the submission's retention policy and expiry on
+/// The receipt derives the submission's retention policy and expiry on
 /// the server, as the legacy path does (`retention_policy_for_trace` over
 /// the envelope's allowed uses and consent, and `received_at +
 /// max_age_days`), and never stores the retention policy the envelope
@@ -2666,10 +2669,10 @@ async fn a_rejected_receipt_records_the_decision_and_creates_no_review_work() {
 /// submission as `quarantined` and records the Quarantine decision; Review
 /// cannot resolve it without a human assessment (PR 3), so the one Review
 /// attempt it gets is the uncharged `review_assessment_required` suspension
-/// -- but parked in `awaiting_review`, not retried. Owner decision
-/// (2026-09-27): no claim ever selects that state, so the run does no
-/// further work on its own however far the clock moves; a later task's
-/// review route is the only thing that moves it back to `pending`.
+/// -- but parked in `awaiting_review`, not retried. No claim ever selects
+/// that state, so the run does no further work on its own however far the
+/// clock moves; the route that moves it back to `pending` is not in this
+/// code.
 #[tokio::test]
 async fn a_quarantined_receipt_waits_for_review_without_retrying() {
     let Some(backend) = runtime_backend(4).await else {
@@ -3193,7 +3196,7 @@ async fn a_second_receipt_does_not_wait_on_the_firsts_blocked_object_write() {
     ));
 }
 
-// Task 5 (M2), review comment 4108170543: the receipt's staging row commits
+// The receipt's staging row commits
 // in its own transaction before the object write and names that object, so
 // an attempt that fails after the write leaves a `staged` row the sweeper
 // (`PipelineService::sweep_staged_receipts`) consumes.
@@ -3697,7 +3700,7 @@ async fn a_tombstone_during_the_write_refuses_the_commit_and_deletes_the_object(
     assert_eq!(count_admission_usage(&backend, &tenant).await, 1);
 }
 
-/// Fix round 1, F1: a sweep that deletes a due row's object and then fails
+/// A sweep that deletes a due row's object and then fails
 /// before its commit leaves the row `staged`, unlocked, and its object gone.
 /// An attempt that is still alive past `cleanup_after` must then refuse at
 /// its final transaction (`receipt_staging_missing`) instead of committing a
@@ -3759,7 +3762,7 @@ async fn an_attempt_whose_row_is_due_does_not_commit() {
     assert_eq!(count_files_under(dir.path()), 0);
 }
 
-/// Fix round 1, F2: the common refusals -- quota, replay, content conflict,
+/// The common refusals -- quota, replay, content conflict,
 /// tombstone -- are found by a read-only check before the attempt's object
 /// is encrypted, so a refused receipt costs no encryption and no key wrap.
 #[tokio::test]
@@ -4698,7 +4701,7 @@ async fn settle_retry_reuses_the_persisted_selection() {
     assert_eq!(committed_decision, persisted_decision);
 }
 
-/// FR3 (I1): a Settle index outage (`IndexWriteError::Failed`/`Uncertain`)
+/// Ruling FR3: a Settle index outage (`IndexWriteError::Failed`/`Uncertain`)
 /// is a dependency failure like Score's `index_unavailable`, not the
 /// trace's fault. An outage that lasts more retries than the run's whole
 /// attempt budget leaves the run waiting in retry, uncharged, and the run
@@ -5084,7 +5087,7 @@ async fn withdraw_submission(backend: &PgBackend, tenant_id: &str, submission_id
     tx.commit().await.expect("commit withdrawal insert");
 }
 
-/// Task 1 (H1), review comment 4108170510: a withdrawal that lands while a
+/// A withdrawal that lands while a
 /// run is claimed in Review must never be reversed by the Review commit
 /// racing in behind it. Store level: the run is claimed in Review, the
 /// approved revision is built exactly the way the Review arm builds it, the
@@ -5256,7 +5259,7 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
     assert!(after.approved_content_hash.is_none());
 }
 
-/// Task 1 (H1), service-level race window: withdraws the submission
+/// The service-level race window: withdraws the submission
 /// *after* the approved object is written and *before* `commit_review`
 /// runs. `put_serialized_json` is a synchronous call the Review arm makes
 /// mid-transaction-free (there is no open database transaction while it
@@ -5480,7 +5483,7 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
     );
 }
 
-/// Task 1 (H1), ruling item 4: a submission withdrawn *before* the run is
+/// A submission withdrawn *before* the run is
 /// even claimed for Review must fail the run terminally on the very first
 /// pass -- `load_object_bytes`'s existing operability refusal is permanent
 /// in Review, not a charged retry to burn through `max_attempts` (P2's
@@ -5549,7 +5552,7 @@ async fn withdrawal_before_review_claim_fails_closed_on_the_first_pass() {
     );
 }
 
-/// Fix round 1 (review finding on Task 12): the committed Settle decision
+/// The committed Settle decision
 /// and the `index_membership` column must reflect the submission-
 /// operability guard, not the Settle policy's raw selection. A run whose
 /// submission was withdrawn between Score and Settle must commit `Exclude
@@ -5620,7 +5623,7 @@ async fn withdrawal_between_score_and_settle_excludes_the_index() {
     );
 }
 
-/// Fix round 1, second case: the guard can newly fail *between*
+/// The second case: the guard can newly fail *between*
 /// `persist_settle_selection` and dispatch -- a crash right after the
 /// selection persists (leaving `index_membership = "included"`,
 /// `index_write_state = "pending"`) gives real wall-clock room for a
@@ -5744,7 +5747,7 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
     let tenant = format!("settle-instruments-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
-    // FR3 (I1): an adapter call error is a dependency failure, not the
+    // Ruling FR3: an adapter call error is a dependency failure, not the
     // trace's fault -- an uncharged retry, however many times it repeats,
     // including more times than the run's whole attempt budget.
     let mut retried = None;
@@ -6077,7 +6080,7 @@ async fn settled_credit_stays_when_withdrawal_follows_settlement() {
 /// A hold on the Trace Credit account (the same `TraceCorpusStore` API the
 /// port's `place_credit_hold` uses) keeps that leg pending while every other
 /// instrument still completes: the run retries under `credit_held`, the
-/// held leg's adapter is never called (FR2, I3), and only once the hold is
+/// held leg's adapter is never called (ruling FR2), and only once the hold is
 /// released does the leg settle and the Settle outcome commit.
 #[tokio::test]
 async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complete() {
@@ -6427,7 +6430,7 @@ async fn a_hold_placed_during_the_adapter_call_is_caught_by_the_credit_transacti
     );
 }
 
-/// Task 2 (H3), review comment 4108170527: like `InterruptingCreditAdapter`'s
+/// Like `InterruptingCreditAdapter`'s
 /// `PlaceHold` interruption, but the intervening effect is a real withdrawal
 /// (`record_trace_withdrawal`) rather than a hold, so it must be driven the
 /// way `WithdrawOnApprovedWriteStore` drives one from inside a synchronous
@@ -6487,7 +6490,7 @@ impl SettlementAdapter for WithdrawOnCreditSettleAdapter {
     }
 }
 
-/// Task 2 (H3), review comment 4108170527: `submission_guard` commits and
+/// `submission_guard` commits and
 /// releases its lock as soon as Step 6 reads it, so a withdrawal landing
 /// between that read and the Trace Credit leg's own ledger transaction must
 /// still be caught -- otherwise the leg is credited to an account that has
@@ -6725,7 +6728,7 @@ async fn two_runs_for_one_account_never_share_a_credit_event_across_batches() {
     }
 }
 
-/// D4: the expected result comes from the persisted selection, not from
+/// The expected result comes from the persisted selection, not from
 /// whatever the adapter hands back. An adapter that returns a well-formed
 /// but different result reference fails the row closed rather than being
 /// trusted.
@@ -6999,7 +7002,7 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
     assert_eq!(scored.next_phase, Some(Phase::Settle));
 }
 
-/// R4 (decision D9): a `PolicyError::Transient` raised while a phase runs --
+/// A `PolicyError::Transient` raised while a phase runs (decision D9) --
 /// not only a missing bound dependency at the bundle load, which
 /// `a_run_whose_dependency_is_not_held_waits_without_charging` above already
 /// covers -- releases the run without charging the claim's attempt, so a
@@ -7007,8 +7010,8 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
 /// `FixedScorePolicy` (`versioned_pipeline_bundle.rs`) maps an embedder
 /// failure to `PolicyError::transient("embedder_unavailable")` when the
 /// bundle carries an index (P5). `FlakyEmbedder` fails its first 7 calls;
-/// `max_attempts` defaults to 5 (migration V76/V77), so 7 failures is more
-/// than the run's whole attempt budget, and the run still reaches Score.
+/// the run's `max_attempts` defaults to 5 (migration V76), so 7 failures is
+/// more than the run's whole attempt budget, and the run still reaches Score.
 #[tokio::test]
 async fn transient_policy_errors_do_not_exhaust_the_trace() {
     let Some(backend) = runtime_backend(4).await else {
@@ -7533,7 +7536,7 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
     }
 }
 
-// Task 4 (M1), review comment 4108170534: a Settle failure that is not the
+// A Settle failure that is not the
 // trace's fault is an uncharged suspension, and a Settle run that fails
 // resolves every open settlement leg -- forfeited, completed on a
 // reconciling adapter call, or labeled `settlement_unreconciled`.
@@ -7877,7 +7880,7 @@ impl CompletionFault {
     }
 }
 
-/// R1: a missing per-instrument cap is a configuration gap -- the run
+/// A missing per-instrument cap is a configuration gap -- the run
 /// waits in retry, uncharged, before any adapter call. An amount over a
 /// configured cap is a spend limit that refuses the payment: the leg fails
 /// with `credit_cap_exceeded` and the retry stays charged. A service with
@@ -7995,7 +7998,7 @@ async fn a_missing_cap_waits_uncharged_and_an_amount_over_the_cap_stays_charged(
     assert_credit_settled_once(&backend, &full, &tenant, run.run_id, "after the cap").await;
 }
 
-/// R2: a transient database error during Settle after `adapter.settle`
+/// A transient database error during Settle after `adapter.settle`
 /// returned (here a serialization failure on the leg's completion) is not
 /// the trace's fault: the run waits in retry as `database_unavailable`,
 /// uncharged, and the next attempt repeats the idempotent adapter call and
@@ -8081,7 +8084,7 @@ async fn a_transient_database_error_after_the_adapter_call_is_not_charged() {
     .await;
 }
 
-/// R3 and R4: a stale lease after `adapter.settle` returns is recorded as
+/// A stale lease after `adapter.settle` returns is recorded as
 /// `lease_expired`, uncharged. While the call was in flight the leg was
 /// `leased` under the run's own lease token and expiry, with
 /// `dispatched_at` set; the next attempt dispatches the still-`leased` leg
@@ -8185,7 +8188,7 @@ async fn a_stale_lease_after_the_adapter_call_is_recorded_and_the_leg_settles_on
     .await;
 }
 
-/// M1, the exhausted `mark_retry` path: a Settle run that runs out of
+/// The exhausted `mark_retry` path: a Settle run that runs out of
 /// attempts resolves every open leg before it fails. The leg whose adapter
 /// always returns a different result is charged each attempt; at the end
 /// its reconciling call differs again (`failed`, `settlement_unreconciled`).
@@ -8324,7 +8327,7 @@ async fn a_settle_run_that_exhausts_its_attempts_resolves_every_leg() {
     );
 }
 
-/// M1, the `mark_failed` path: a Settle run failed by its bound bundle (a
+/// The `mark_failed` path: a Settle run failed by its bound bundle (a
 /// tampered package) reconciles its dispatched external leg with one more
 /// adapter call and forfeits its undispatched Trace Credit leg. When the
 /// submission is no longer operable the reconciling call is not made: the
@@ -8441,7 +8444,7 @@ async fn a_settle_run_failed_by_its_bundle_reconciles_dispatched_legs() {
     }
 }
 
-/// M1, the claim sweep: a Settle run whose attempts are exhausted and whose
+/// The claim sweep: a Settle run whose attempts are exhausted and whose
 /// lease expired (its worker is gone) is failed by the next claim, which
 /// resolves its legs in the same transaction without an adapter call: the
 /// dispatched external leg is `failed` / `settlement_unreconciled`, the
@@ -8594,7 +8597,7 @@ impl SettlementAdapter for LeaseExpiringMismatchAdapter {
     }
 }
 
-/// M1 with D4: a stale lease inside the failure path's own resolution --
+/// A stale lease inside the failure path's own resolution --
 /// here the lease expires during the reconciling adapter call of the
 /// attempt that would exhaust the run -- ends as `lease_expired`,
 /// uncharged: the run is not failed and no leg is resolved under the stale
@@ -8686,7 +8689,7 @@ async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
     assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "failed run").await;
 }
 
-/// M1: a `settlement_unreconciled` leg on a run that is still live -- left
+/// A `settlement_unreconciled` leg on a run that is still live -- left
 /// by a failure path that lost its lease before it failed the run -- is
 /// dispatched again by the next Settle attempt, since the run did not
 /// fail; a matching result then completes it.

@@ -16,7 +16,9 @@ ALTER TABLE pipeline_runs
     -- other foreign key to this table, `source_object_ref_id` in V75:
     -- `trace_object_refs` also cascades straight from `trace_submissions`, a
     -- sibling of this row's own cascade through the same parent, so a
-    -- submission delete can reach either branch first.
+    -- submission delete can reach either branch first. The check runs at
+    -- commit, so one transaction could delete and re-insert the same key;
+    -- no code does that.
     ADD CONSTRAINT pipeline_runs_approved_object_ref_fk
         FOREIGN KEY (tenant_id, submission_id, approved_object_ref_id)
         REFERENCES trace_object_refs (tenant_id, submission_id, object_ref_id)

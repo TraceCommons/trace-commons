@@ -46,8 +46,8 @@ pub const MINIMAL_INDEX_CHUNK_BYTES: usize = 256;
 pub const PIPELINE_BUNDLE_INVALID_LABEL: &str = "bundle_package_invalid";
 /// Safe label for a dependency whose descriptor the package does not name.
 pub const PIPELINE_DEPENDENCY_MISSING_LABEL: &str = "bundle_dependency_missing";
-/// Safe label for a Review quarantine with no human assessment yet. Owner
-/// decision (2026-09-27): in the Review phase this label parks the run in
+/// Safe label for a Review quarantine with no human assessment yet. In the
+/// Review phase this label parks the run in
 /// `PipelineRunState::AwaitingReview` instead of retrying it hourly forever.
 pub const PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL: &str = "review_assessment_required";
 

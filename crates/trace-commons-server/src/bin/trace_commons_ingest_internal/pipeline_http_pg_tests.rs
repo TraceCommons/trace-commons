@@ -219,13 +219,14 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
 ///
 /// This suite's `TestAssembler` builds reference dependencies
 /// (`ReferencePerplexityScorer`, `ReferenceEmbedder`, `IsolatedPipelineIndex`,
-/// `RecordingSettlementAdapter`) that are not production-qualified, and its
-/// only test routes `tenant-a` to the pipeline (see
-/// `real_http_receipt_completes_and_resumes_after_restart`), so both new
+/// `RecordingSettlementAdapter`) that are not production-qualified, and more
+/// than one test in this file routes `tenant-a` to the pipeline (see
+/// `real_http_receipt_completes_and_resumes_after_restart` and
+/// `real_http_pipeline_receipt_checks_ownership_on_replay`), so both new
 /// fail-closed arguments are set here explicitly: `tenants_routed = true`
 /// reflects that reality rather than hiding it, and `allow_test_dependencies
 /// = true` is the test-only opt-in that lets the unqualified runtime start
-/// anyway (task-6-M3 brief, review comment 4108170553).
+/// anyway.
 fn assemble_test_pipeline_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
@@ -844,7 +845,7 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 }
 
 // ----------------------------------------------------------------------------
-// O1: a retried upload for a pipeline-routed tenant whose admission ledger
+// A retried upload for a pipeline-routed tenant whose admission ledger
 // already marked it `completed` must replay the pipeline receipt instead of
 // 500ing on the legacy file record the pipeline never writes, and must not
 // hand that receipt to a principal other than the one who made the original
@@ -860,12 +861,12 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 // `provision_second_device_on_the_same_account`) rather than a second copy.
 // ----------------------------------------------------------------------------
 
-/// The same `AdmissionLimits` value for every O1 test that reserves
-/// admission for real (all but the legacy-fallback test): the global budget
-/// row (`trace_admission_global_budget`) is a `PostgreSQL` singleton, not
-/// tenant-scoped, so two tests reserving in the same database must agree on
-/// `global_cost_limit` or the second one's reservation answers
-/// `configuration_changed` instead of `reserved`.
+/// The same `AdmissionLimits` value for every test in this file that
+/// reserves admission for real (all but the legacy-fallback test): the
+/// global budget row (`trace_admission_global_budget`) is a `PostgreSQL`
+/// singleton, not tenant-scoped, so two tests reserving in the same
+/// database must agree on `global_cost_limit` or the second one's
+/// reservation answers `configuration_changed` instead of `reserved`.
 fn o1_admission_limits() -> AdmissionLimits {
     AdmissionLimits {
         window_attempts: 1,
@@ -904,8 +905,8 @@ fn o1_pipeline_service(backend: Arc<PgBackend>, dir: &tempfile::TempDir) -> Arc<
 /// `static_token_principal_refs`) -- computed through a throwaway tenant
 /// before the real one is known, the same trick
 /// `admission_pg_tests::principal_for` uses (not shared with it: this is
-/// six mechanical lines, not the fixture logic O1's review round asked to
-/// stop duplicating).
+/// six mechanical lines, not the larger fixture logic that must not be
+/// duplicated).
 fn o1_principal_for(token: &str) -> String {
     let mut throwaway = BTreeMap::new();
     insert_token(
@@ -923,8 +924,10 @@ fn o1_principal_for(token: &str) -> String {
 /// about), witnesses a fresh contribution against it, and signs a matching
 /// provider-TEE receipt. This is the same construction
 /// `admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`
-/// does inline for its own accepted submission, built here from its
-/// `pub(super)` `FixtureSigner`/`FixtureEnclave` rather than a second copy.
+/// does inline for its own accepted submission, built here from its shared
+/// `pub(super)` `FixtureSigner`/`FixtureEnclave` and provisioning fixtures
+/// -- those are shared, not duplicated, but this upload construction is
+/// its own copy of that inline one.
 ///
 /// Returns the envelope bytes and the evidence/witness request headers ready
 /// to POST to `/v1/traces` (the caller still adds its own auth header), and
@@ -1079,8 +1082,8 @@ async fn evidenced_upload(
 /// the `FixtureSigner`, and the `AdmissionProviderTrust` that trusts it --
 /// the same fixture identity
 /// `admission_pg_tests::actual_postgres_challenge_witness_ingest_and_terminal_retry`
-/// builds for itself, constructed fresh per O1 test so the tests stay
-/// independent of each other.
+/// builds for itself, constructed fresh per test in this file so the tests
+/// stay independent of each other.
 fn o1_evidence_identity() -> (
     ring::signature::Ed25519KeyPair,
     String,
@@ -1108,14 +1111,14 @@ fn o1_evidence_identity() -> (
 /// (it takes `route_pipeline_receipt` and creates the run, via a real,
 /// evidence-verified admission reservation, not a direct
 /// `PipelineService::submit` call), and the second POST of the same bytes
-/// takes the completed-admission branch this task fixes.
+/// takes the completed-admission branch.
 ///
-/// Also covers the brief's second test requirement ("the same key with
-/// different content after completion returns 409"): a third POST, with
-/// fresh evidence for a genuinely different envelope forced to the same
-/// submission id, is refused by `admission::reserve` itself before it can
-/// ever reach the pipeline's own `ContentConflict` branch (S3 finding) --
-/// see the comment on that branch in `submit_trace_handler`.
+/// Also covers the same key with different content after completion
+/// returning 409: a third POST, with fresh evidence for a genuinely
+/// different envelope forced to the same submission id, is refused by
+/// `admission::reserve` itself before it can ever reach the pipeline's own
+/// `ContentConflict` branch -- see the comment on that branch in
+/// `submit_trace_handler`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_http_pipeline_receipt_replays_on_retry() {
     let Some(backend) = runtime_backend(4).await else {
@@ -1220,7 +1223,7 @@ async fn real_http_pipeline_receipt_replays_on_retry() {
         "both retries must return the exact same pipeline receipt"
     );
 
-    // Third POST (S3): a genuinely different, independently witnessed
+    // Third POST: a genuinely different, independently witnessed
     // envelope, forced to the same submission id, with its own fresh
     // evidence. `admission::reserve`'s own completed-lookup is keyed on
     // body_hash, so this never reads as a terminal retry of a `completed`
@@ -1282,7 +1285,7 @@ fn first_receipt_submission_id(envelope_bytes: &[u8]) -> Uuid {
     envelope.submission_id
 }
 
-/// I1: a second device on the same NEAR account shares its admission anchor
+/// A second device on the same NEAR account shares its admission anchor
 /// (V58 keys `trace_near_provisioned_devices` on `(tenant_id,
 /// principal_ref)`; nothing makes `anchor_hash` unique per principal), so
 /// `admission::reserve`'s completed-lookup -- keyed on `(tenant, anchor,

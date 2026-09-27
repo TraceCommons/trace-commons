@@ -85,19 +85,19 @@ const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
 const PIPELINE_SETTLEMENT_RETRY_LABEL: &str = "settlement_operation_retry";
 /// Label for a settlement adapter the service does not hold.
 const PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL: &str = "settlement_adapter_missing";
-/// Task 4 (M1), ruling R1: a leg whose instrument has no configured
-/// per-instrument cap. A configuration gap, not the trace's fault: an
-/// uncharged suspension, raised before the leg's adapter is called. An
-/// amount over a configured cap stays `PIPELINE_CREDIT_CAP_LABEL`.
+/// A leg whose instrument has no configured per-instrument cap is a
+/// configuration gap, not the trace's fault: an uncharged suspension,
+/// raised before the leg's adapter is called. An amount over a configured
+/// cap stays `PIPELINE_CREDIT_CAP_LABEL`.
 pub const PIPELINE_SETTLEMENT_CAP_MISSING_LABEL: &str = "settlement_cap_missing";
-/// Task 4 (M1), ruling R2: a transient database failure
-/// (`is_transient_database_error`) in any phase. An uncharged suspension.
+/// A transient database failure (`is_transient_database_error`) in any
+/// phase. An uncharged suspension.
 pub const PIPELINE_DATABASE_UNAVAILABLE_LABEL: &str = "database_unavailable";
-/// Task 4 (M1): the label on a leg a failed run forfeits -- one that was
+/// The label on a leg a failed run forfeits -- one that was
 /// never dispatched, or a Trace Credit leg (whose only effect is the ledger
 /// row that commits with its completion, so an incomplete one paid nothing).
 pub const PIPELINE_SETTLEMENT_RUN_FAILED_LABEL: &str = "run_failed";
-/// Task 4 (M1): the label on a dispatched external leg of a failed run whose
+/// The label on a dispatched external leg of a failed run whose
 /// outcome was not reconciled -- its reconciling adapter call returned a
 /// different result, errored, or was not made (a missing adapter or cap, an
 /// inoperable submission, or the claim sweep, which has no worker). The
@@ -111,12 +111,12 @@ pub const PIPELINE_SETTLEMENT_UNRECONCILED_LABEL: &str = "settlement_unreconcile
 /// records a stale lease as the uncharged `lease_expired`, and a leg-state
 /// refusal is not a lease problem.
 const PIPELINE_SETTLEMENT_LEG_NOT_OPEN_LABEL: &str = "settlement_leg_not_open";
-/// Task 5 (M2): a receipt attempt that reached its final transaction after
+/// A receipt attempt that reached its final transaction after
 /// its staging row's `cleanup_after`: the sweeper removed the row, or may
 /// have deleted its object. The attempt deletes its own object and fails; a
 /// retry is a new attempt.
 const PIPELINE_RECEIPT_STAGING_MISSING_LABEL: &str = "receipt_staging_missing";
-/// Task 5 (M2): the artifact store wrote a receipt object other than the
+/// The artifact store wrote a receipt object other than the
 /// one it prepared, so the staging row does not name it. Fails closed.
 const PIPELINE_RECEIPT_OBJECT_MISMATCH_LABEL: &str = "receipt_object_mismatch";
 /// The blocking thread a receipt's object-store call was moved onto
@@ -149,7 +149,7 @@ fn settlement_leg_is_unresolved(operation_state: &str, last_error_label: Option<
         _ => true,
     }
 }
-/// D4: an attempt whose own phase lease has already gone stale, discovered
+/// An attempt whose own phase lease has already gone stale, discovered
 /// when *that same attempt* -- the worker still holding its own claim's
 /// lease token -- writes again (the phase's own commit, or a follow-up
 /// `mark_retry`/`mark_transient_retry`/`mark_failed` after the phase failed
@@ -157,8 +157,8 @@ fn settlement_leg_is_unresolved(operation_state: &str, last_error_label: Option<
 /// `PgPipelineStore::record_lease_expired` and never charged as
 /// `PIPELINE_OPERATIONAL_ERROR_LABEL` or any other P2 label.
 ///
-/// This is *not* what happens to a worker that crashes mid-phase (review
-/// finding I3): a crashed worker never comes back to write anything, so
+/// This is *not* what happens to a worker that crashes mid-phase: a crashed
+/// worker never comes back to write anything, so
 /// nothing is recorded for it. Its run stays `leased` until
 /// `lease_expires_at` passes, then the next claim -- by any worker --
 /// reclaims it as an ordinary charged attempt (`attempt_count += 1`,
@@ -182,7 +182,7 @@ const PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS: i64 = 5 * 60;
 const PIPELINE_LEASE_DEFAULT_SCORE_SECONDS: i64 = 30 * 60;
 const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
 
-/// Owner decision D4 (review comment 4108170518): each pipeline phase gets
+/// Each pipeline phase gets
 /// its own claim-lease length, sized for how long that phase can actually
 /// run rather than one fixed lease every phase shared. Score, in
 /// particular, runs the injected scorer and the embedder inside the lease
@@ -235,9 +235,8 @@ impl PipelineLeaseConfig {
 }
 
 impl Default for PipelineLeaseConfig {
-    /// Review 5 minutes, Score 30 minutes, Settle 5 minutes (owner decision
-    /// D4, 2026-09-27): defaults that fit a slow Score without operator
-    /// configuration.
+    /// Review 5 minutes, Score 30 minutes, Settle 5 minutes: defaults that
+    /// fit a slow Score without operator configuration.
     fn default() -> Self {
         Self {
             review: Duration::seconds(PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS),
@@ -290,9 +289,9 @@ pub enum PipelineRunState {
     /// A run Review quarantined with no human assessment yet
     /// (`PgPipelineStore::mark_awaiting_review`, label
     /// `review_assessment_required`). No claim query selects this state, so
-    /// the run does not retry hourly forever while it waits. Moving it back
-    /// to `Pending` once an assessment lands is a later task's route, not
-    /// this one's.
+    /// the run does not retry hourly forever while it waits. The route that
+    /// moves it back to `Pending` once an assessment lands is not in this
+    /// code.
     AwaitingReview,
     Complete,
     Failed,
@@ -417,22 +416,23 @@ pub struct PipelineSettlementRecord {
     /// run's own attempt budget governs retries.
     pub attempt_count: u32,
     pub last_error_label: Option<String>,
-    /// When the leg was first leased for an adapter call (ruling R4); never
+    /// When the leg was first leased for an adapter call; never
     /// cleared. A failed run reconciles a dispatched external leg rather
     /// than forfeiting it.
     pub dispatched_at: Option<DateTime<Utc>>,
 }
 
-/// The result of `PipelineService::settle_internal_credit`: either the
-/// Trace Credit leg settled (its ledger row, the finalized batch that
-/// carries it, and the completed settlement row committed together), or a
-/// hold on the account, found under the account lock, rolled the credit
-/// transaction back -- the caller then records the row as `held` and no
-/// ledger row is written.
+/// The result of `PipelineService::settle_internal_credit`: the Trace Credit
+/// leg settled (its ledger row, the finalized batch that carries it, and
+/// the completed settlement row committed together), or a hold on the
+/// account, found under the account lock, rolled the credit transaction
+/// back -- the caller then records the row as `held` and no ledger row is
+/// written -- or the submission stopped being operable under that same
+/// lock, which also rolls the transaction back with nothing written.
 enum InternalCreditResult {
     Complete,
     Held,
-    /// Task 2 (H3): the submission-operability re-check taken under the
+    /// The submission-operability re-check taken under the
     /// submission row's own lock, inside this same transaction, found the
     /// submission no longer operable (withdrawn, revoked, purged, expired,
     /// or no longer `accepted`). The transaction rolled back with nothing
@@ -467,7 +467,7 @@ struct SettlementUpdate<'a> {
     error_label: Option<&'a str>,
 }
 
-/// Also the shape `settle_selection` persists (decision D4): the Settle
+/// Also the shape `settle_selection` persists: the Settle
 /// policy's raw result, durable before any external effect, so a retry can
 /// reload it (`PgPipelineStore::load_settle_selection`) instead of running
 /// the policy again.
@@ -530,7 +530,7 @@ struct NewPipelineRun {
     source_object_ref_id: Uuid,
 }
 
-/// One receipt attempt (Task 5, M2): its own random attempt id, and the
+/// One receipt attempt: its own random attempt id, and the
 /// object it writes, named -- key and ciphertext hash -- by the prepared
 /// receipt before the write. Its `pipeline_receipt_artifacts` row carries
 /// exactly these fields.
@@ -841,15 +841,15 @@ impl PgPipelineStore {
     }
 
     /// Claims the next due run for `tenant_id` across every phase, sizing
-    /// the lease this claim grants by the claimed row's own `next_phase`
-    /// (decision D4, requirement 2): the CASE below picks Review's, Score's,
-    /// or Settle's configured lease for the one row the candidate CTE
-    /// selects, in the same statement that claims it, so a Score run never
-    /// gets Review's shorter lease or vice versa.
+    /// the lease this claim grants by the claimed row's own `next_phase`:
+    /// the CASE below picks Review's, Score's, or Settle's configured lease
+    /// for the one row the candidate CTE selects, in the same statement
+    /// that claims it, so a Score run never gets Review's shorter lease or
+    /// vice versa.
     ///
     /// First it sweeps: a run still `leased` after its lease expired with
     /// its attempts exhausted (its worker is gone) is failed as
-    /// `attempts_exhausted`. Task 4 (M1): in the same transaction, every open
+    /// `attempts_exhausted`. In the same transaction, every open
     /// leg of a swept Settle run is resolved without an adapter call
     /// (`resolve_open_settlement_legs_on_tx`) -- there is no worker to make
     /// one.
@@ -933,7 +933,7 @@ impl PgPipelineStore {
     /// directly with `chrono::Duration::seconds(30)`).
     /// `PipelineService::process_run` uses `claim_run_with_lease_config`
     /// instead, so it never has to read the run's phase before claiming it.
-    /// The bound was 5 minutes; decision D4 raises it to 2 hours so a caller
+    /// The bound was 5 minutes; it is now 2 hours so a caller
     /// can hand this the same lease `PipelineLeaseConfig` allows.
     pub async fn claim_run(
         &self,
@@ -975,8 +975,8 @@ impl PgPipelineStore {
     }
 
     /// Claims a specific run, picking the granted lease by its own
-    /// `next_phase` in the claiming SQL itself (decision D4, requirement 2)
-    /// -- the same `CASE` `claim_next` uses, scoped to one `run_id` instead
+    /// `next_phase` in the claiming SQL itself -- the same `CASE`
+    /// `claim_next` uses, scoped to one `run_id` instead
     /// of scanning the whole tenant queue. `PipelineService::process_run`
     /// uses this rather than reading the run's phase first and handing
     /// `claim_run` an explicit duration: a phase commit landing between an
@@ -1064,7 +1064,7 @@ impl PgPipelineStore {
     /// `approved_*` columns stay NULL, satisfying
     /// `pipeline_runs_approved_content_shape`.
     ///
-    /// Task 1 (H1), review comment 4108170510: the submission-operability
+    /// The submission-operability
     /// guard that gated the source read at the start of Review
     /// (`load_object_bytes`) was checked in an earlier, already-committed
     /// transaction. A withdrawal (or an expiry/purge) landing after that
@@ -1173,7 +1173,7 @@ impl PgPipelineStore {
                     ],
                 )
                 .await?;
-                // Ruling item 2 (defense in depth): the status update stays
+                // Defense in depth: the status update stays
                 // conditional on the same pre-review states the gate above
                 // just re-checked, and must touch exactly one row. The
                 // whole transaction has not committed yet, so refusing here
@@ -1366,8 +1366,8 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
-    /// Persists the Settle policy's raw result before any external effect
-    /// (decision D4): `settle_selection`, its hash, the decided
+    /// Persists the Settle policy's raw result before any external effect:
+    /// `settle_selection`, its hash, the decided
     /// `index_membership`, and -- only for an include -- `index_write_state
     /// = 'pending'`, all in one transaction, and only the first time (the
     /// `settle_selection IS NULL` guard). A later call for the same run
@@ -1531,7 +1531,7 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
-    /// Fails the run terminally under its live lease. Task 4 (M1): when the
+    /// Fails the run terminally under its live lease. When the
     /// run is in Settle, every open leg is resolved in this same
     /// transaction (`resolve_open_settlement_legs_on_tx`). A worker calls
     /// this through `PipelineService::fail_run`, which reconciles the
@@ -1565,7 +1565,7 @@ impl PgPipelineStore {
 
     /// A charged retry: the attempt the claim took stays charged. When the
     /// run has no attempt left, the run is failed as `attempts_exhausted`
-    /// instead, and -- Task 4 (M1) -- a Settle run's open legs are resolved
+    /// instead, and a Settle run's open legs are resolved
     /// in this same transaction (`resolve_open_settlement_legs_on_tx`). A
     /// worker calls this through `PipelineService::charged_retry`, which
     /// first reconciles the dispatched external legs of a run this retry
@@ -1623,17 +1623,19 @@ impl PgPipelineStore {
 
     /// The one suspension path (ruling FR3): a failure that is not the
     /// trace's fault -- a dependency outage, a missing or not-runnable bound
-    /// dependency, a credit hold, pending human review -- releases the claim
-    /// and schedules a retry without charging the attempt the claim took.
+    /// dependency, a credit hold -- releases the claim and schedules a
+    /// retry without charging the attempt the claim took. A quarantined run
+    /// awaiting human review is parked instead (`mark_awaiting_review`),
+    /// not retried here.
     ///
     /// The delay is `clamp(NOW() - phase_started_at, 1 second, 1 hour)`:
     /// the time the run has spent in its current phase. `phase_started_at`
     /// is set at receipt and reset by every phase commit, and nothing else
     /// moves it, so without a retry counter each retry lands when the phase
     /// is twice as old as at the previous one -- the delay doubles -- and it
-    /// caps at one retry per hour. There is no terminal bound: a hold or a
-    /// pending review must stay retryable ("suspension leaves work
-    /// retryable"), so the bound is on work per hour, not on attempts.
+    /// caps at one retry per hour. There is no terminal bound: a hold must
+    /// stay retryable ("suspension leaves work retryable"), so the bound is
+    /// on work per hour, not on attempts.
     pub async fn mark_transient_retry(
         &self,
         run: &PipelineRunRecord,
@@ -1664,13 +1666,16 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
-    /// Owner decision (2026-09-27): parks a run Review quarantined with no
+    /// Parks a run Review quarantined with no
     /// human assessment yet (`PipelineRunState::AwaitingReview`, always the
     /// label `review_assessment_required`) instead of retrying it under
     /// `mark_transient_retry`'s hourly backoff forever. No claim query
     /// selects `awaiting_review`, so a parked run does no further work on
-    /// its own; a later task's review route is the only thing that moves it
-    /// back to `pending` once an assessment lands.
+    /// its own; the route that moves it back to `pending` once an
+    /// assessment lands is not in this code. A parked run whose submission
+    /// is later withdrawn, expired, or purged stays parked -- nothing here
+    /// moves it -- so that route must itself handle an inoperable
+    /// submission when it runs.
     ///
     /// Fenced by the lease exactly like `mark_transient_retry`: the lease
     /// is cleared and the claim's attempt is given back
@@ -1704,7 +1709,7 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
-    /// D4: records that `run`'s own phase lease went stale before the phase
+    /// Records that `run`'s own phase lease went stale before the phase
     /// finished, as its own uncharged reason (`PIPELINE_LEASE_EXPIRED_LABEL`)
     /// with the same FR3 backoff `mark_transient_retry` uses -- never a
     /// charged policy failure, even though the lease has already gone stale
@@ -1716,8 +1721,8 @@ impl PgPipelineStore {
     /// exists to act past. `state = 'leased' AND lease_token = $token` still
     /// guards it -- once a phase transition, a terminal write, or another
     /// worker's claim has moved the row off this token, this changes
-    /// nothing and reports that as `Ok(None)` (decision D4's token-only
-    /// fence) rather than disturbing whatever holds the run now.
+    /// nothing and reports that as `Ok(None)` (a token-only fence) rather
+    /// than disturbing whatever holds the run now.
     pub async fn record_lease_expired(
         &self,
         run: &PipelineRunRecord,
@@ -1808,7 +1813,7 @@ impl PgPipelineStore {
         Ok(settlement)
     }
 
-    /// Ruling R4: moves one leg to `leased` under the run's own lease token
+    /// Moves one leg to `leased` under the run's own lease token
     /// and expiry immediately before its adapter call, and records the first
     /// dispatch (`dispatched_at`, set once and never cleared). It accepts
     /// exactly the legs Step 6 dispatches -- any leg not `complete` or
@@ -1853,7 +1858,7 @@ impl PgPipelineStore {
         Ok(())
     }
 
-    /// Task 4 (M1): records the reconciling adapter call a worker makes for
+    /// Records the reconciling adapter call a worker makes for
     /// an open, dispatched, external leg before it fails the run
     /// (`PipelineService::reconcile_dispatched_settlement_legs`).
     /// `Some(result)` -- equal to the selection's result reference --
@@ -1946,15 +1951,16 @@ impl PgPipelineStore {
     /// an attempt whose row it removed cannot commit, and a row this
     /// transaction commits is never swept.
     ///
-    /// Fix round 1, F1: a sweep that deleted a row's object and then failed
+    /// A sweep that deleted a row's object and then failed
     /// before its commit (a lost connection, a later row's `DELETE`) leaves
     /// the row `staged` and unlocked with its object gone. Every row a sweep
     /// locks was due when that sweep read it, so refusing a due row here
-    /// refuses exactly the rows a failed sweep may have emptied. The due
-    /// check is its own statement after the lock is held, against
-    /// `clock_timestamp()`: a condition in the `FOR UPDATE` query is
-    /// evaluated before the lock wait, and `NOW()` is this transaction's
-    /// start.
+    /// refuses a superset of the rows a failed sweep may have emptied -- it
+    /// also refuses a live attempt whose own commit is simply slower than
+    /// `cleanup_after`. The due check is its own statement after the lock
+    /// is held, against `clock_timestamp()`: a condition in the `FOR
+    /// UPDATE` query is evaluated before the lock wait, and `NOW()` is this
+    /// transaction's start.
     async fn lock_committable_receipt_artifact(
         tx: &Transaction<'_>,
         attempt: &ReceiptAttempt,
@@ -2166,7 +2172,7 @@ async fn receipt_is_tombstoned(
         .get(0))
 }
 
-/// Task 4 (M1), owner decision 2026-09-27: resolves every open leg of the
+/// Resolves every open leg of the
 /// failed Settle runs `run_ids`, inside the caller's transaction -- the one
 /// that fails them (`mark_failed`, a `mark_retry` that exhausts the
 /// attempts, or the claim sweep in `claim_next`). No adapter is called
@@ -2513,8 +2519,8 @@ async fn load_bundle_from_transaction(
     Ok(Some(package))
 }
 
-/// The safe label for a store error while loading a run's bound bundle
-/// (M3). Only a stored package that fails its own validation -- the one
+/// The safe label for a store error while loading a run's bound bundle.
+/// Only a stored package that fails its own validation -- the one
 /// error `load_bundle_from_transaction` raises as
 /// `bundle_package_invalid` -- is permanent; any other database error means
 /// the store could not answer, `bundle_store_unavailable`, which
@@ -2581,7 +2587,7 @@ fn is_stale_lease_db_error(error: &DatabaseError) -> bool {
     matches!(error, DatabaseError::Constraint(message) if message == "pipeline lease is stale")
 }
 
-/// D4: one helper for both shapes a stale lease reaches `process_claimed_run`
+/// One helper for both shapes a stale lease reaches `process_claimed_run`
 /// in -- a `DatabaseError::Constraint` from any mark_*/commit_* call (case
 /// A, when the phase's own commit already found the lease gone, and case B,
 /// when the phase failed for another reason and the follow-up mark_* call
@@ -2599,14 +2605,14 @@ fn is_stale_lease_error(error: &anyhow::Error) -> bool {
     }
 }
 
-/// Task 4 (M1): a leg write under a live lease that found the leg in a
+/// A leg write under a live lease that found the leg in a
 /// state it may not change (or missing). Its own error, so it is never
 /// recorded as `lease_expired`.
 fn settlement_leg_not_open_error() -> DatabaseError {
     DatabaseError::Constraint(PIPELINE_SETTLEMENT_LEG_NOT_OPEN_LABEL.to_string())
 }
 
-/// Task 4 (M1), ruling R2: the SQLSTATEs that mean the database could not
+/// The SQLSTATEs that mean the database could not
 /// serve the statement right now, not that the statement or its data was
 /// wrong: class 08 (connection exception), 40001 (serialization failure),
 /// 40P01 (deadlock detected), 57P01 to 57P03 (shutdown, crash shutdown,
@@ -2620,7 +2626,7 @@ fn is_transient_sqlstate(code: &tokio_postgres::error::SqlState) -> bool {
         )
 }
 
-/// Ruling R2 for one driver error: a SQLSTATE in `is_transient_sqlstate`,
+/// For one driver error: a SQLSTATE in `is_transient_sqlstate`,
 /// or no SQLSTATE because the server never answered -- the connection is
 /// closed, or the cause is an I/O error (sending, receiving, connecting).
 /// A driver error with no SQLSTATE and no I/O cause (a row-count mismatch,
@@ -2637,7 +2643,7 @@ fn is_transient_postgres_error(error: &tokio_postgres::Error) -> bool {
     }
 }
 
-/// Task 4 (M1), ruling R2: whether `error` is a transient database failure,
+/// Whether `error` is a transient database failure,
 /// which is never the trace's fault in any phase. Classified by downcast,
 /// along the whole error chain, because store code returns `DatabaseError`
 /// while service code wraps raw driver and pool errors with `?`: the pool
@@ -2947,8 +2953,8 @@ impl PipelineServiceBuilder {
         self
     }
 
-    /// The per-phase claim lease `process_one`/`process_run` use (decision
-    /// D4). Defaults to `PipelineLeaseConfig::default()` when not called.
+    /// The per-phase claim lease `process_one`/`process_run` use.
+    /// Defaults to `PipelineLeaseConfig::default()` when not called.
     pub fn with_lease_config(mut self, lease_config: PipelineLeaseConfig) -> Self {
         self.lease_config = lease_config;
         self
@@ -3035,7 +3041,7 @@ impl PipelineService {
     }
 
     /// The per-phase claim lease this service's `process_one`/`process_run`
-    /// use (decision D4).
+    /// use.
     pub fn lease_config(&self) -> PipelineLeaseConfig {
         self.lease_config
     }
@@ -3241,7 +3247,7 @@ impl PipelineService {
         self.construct(package)
     }
 
-    /// Accepts a receipt as one attempt (Task 5, M2). The attempt's object
+    /// Accepts a receipt as one attempt. The attempt's object
     /// is recorded before it is written, and no lock is held while it is
     /// written or while Admission runs:
     ///
@@ -3496,13 +3502,12 @@ impl PipelineService {
     /// Also reads the run's `trace_submissions.auth_principal_ref` (the
     /// principal `submit` recorded when it first created the run --
     /// `PipelineRunRecord` itself carries only `submission_id`, not who
-    /// submitted it) in the same transaction, so the caller can apply its
-    /// own ownership check before handing back either outcome. A caller that
-    /// only reached this because its own reservation already bound the
-    /// retry to one principal still needs this: an admission anchor can
+    /// submitted it) in the same transaction. The caller must check
+    /// ownership against it before handing back either outcome: nothing
+    /// upstream of this call proves the retrying principal is the one that
+    /// made the original submission -- an admission anchor, for one, can
     /// cover more than one principal (one per device on the same account),
-    /// so a completed reservation alone does not prove the retrying
-    /// principal is the one that made the original submission.
+    /// so even a completed reservation does not prove it on its own.
     pub async fn replay_receipt(
         &self,
         tenant_id: &str,
@@ -3535,8 +3540,8 @@ impl PipelineService {
         }))
     }
 
-    /// The receipt's early refusal check (`submit` step 1, fix round 1
-    /// F2): one short tenant transaction that only reads and takes no
+    /// The receipt's early refusal check (`submit` step 1): one short
+    /// tenant transaction that only reads and takes no
     /// advisory lock. It refuses the common cases -- an existing run for
     /// the key, an attempt staged with other content, a tombstone, and the
     /// quota (for a key not yet counted) -- before the attempt's object is
@@ -3861,8 +3866,8 @@ impl PipelineService {
         }
     }
 
-    /// Deletes the objects of receipt attempts that never committed (Task 5,
-    /// M2): in one tenant transaction, up to `limit` `staged` rows whose
+    /// Deletes the objects of receipt attempts that never committed: in one
+    /// tenant transaction, up to `limit` `staged` rows whose
     /// `cleanup_after` has passed, oldest first, each locked
     /// (`FOR UPDATE SKIP LOCKED`). For each, it deletes the object the row
     /// names and then the row. A delete that fails keeps its row for the
@@ -4079,7 +4084,7 @@ impl PipelineService {
 
     /// Claims the next due run for `tenant_id` and advances it one phase.
     /// The claim itself picks the lease by the claimed row's own
-    /// `next_phase` (decision D4); see `PgPipelineStore::claim_next`.
+    /// `next_phase`; see `PgPipelineStore::claim_next`.
     pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
         let Some(run) = self.store.claim_next(tenant_id, self.lease_config).await? else {
             return Ok(None);
@@ -4088,9 +4093,9 @@ impl PipelineService {
     }
 
     /// Claims a specific run and advances it one phase. The claim itself
-    /// picks the lease by the row's own `next_phase` in SQL (decision D4,
-    /// requirement 2, review finding S4) -- there is no separate read of the
-    /// run before the claim, so a phase commit that lands concurrently can
+    /// picks the lease by the row's own `next_phase` in SQL -- there is no
+    /// separate read of the run before the claim, so a phase commit that
+    /// lands concurrently can
     /// never hand out a lease sized for a phase the row is no longer in.
     pub async fn process_run(
         &self,
@@ -4120,7 +4125,7 @@ impl PipelineService {
             Ok(bundle) => bundle,
             // D9 / FR3: a dependency the service does not hold, a bundle
             // whose operator-controlled runnable flag is off, or a store that
-            // could not load the bound bundle (M3) is not this run's fault --
+            // could not load the bound bundle is not this run's fault --
             // it waits in retry without the claim's attempt being charged,
             // with `mark_transient_retry`'s backoff.
             Err(label)
@@ -4139,7 +4144,7 @@ impl PipelineService {
         match self.process_claimed(&run, &bundle).await {
             Ok(updated) => Ok(Some(updated)),
             Err(error) if error.to_string() == INJECTED_PIPELINE_CRASH => Err(error),
-            // D4 (H2), review comment 4108170518: the phase itself found its
+            // The phase itself found its
             // own lease already gone -- from a commit's `ensure_current_lease`
             // re-check, from a commit's plain `WHERE ... lease_token = $t AND
             // lease_expires_at > NOW()` finding no row, or from
@@ -4155,7 +4160,7 @@ impl PipelineService {
             Err(error) if is_stale_lease_error(&error) => {
                 Ok(self.store.record_lease_expired(&run).await?)
             }
-            // Task 4 (M1), ruling R2: a transient database failure (the pool
+            // A transient database failure (the pool
             // could not give a connection, the connection failed, or a
             // serialization failure or deadlock) is not the trace's fault in
             // any phase -- the uncharged suspension, ahead of every charged
@@ -4179,7 +4184,7 @@ impl PipelineService {
                         .mark_failed_or_record_lease_expired(&run, PIPELINE_INDEX_CONFLICT_LABEL)
                         .await;
                 }
-                // Task 1 (H1), controller ruling: in Review, an inoperable
+                // In Review, an inoperable
                 // submission (withdrawn, expired, or purged) is permanent --
                 // the condition that caused it can never reverse -- so the
                 // run ends terminally here rather than waiting out P2's
@@ -4199,7 +4204,7 @@ impl PipelineService {
                         )
                         .await;
                 }
-                // D9 (Task 15) / FR3: a typed `PolicyError` raised while a
+                // D9 / FR3: a typed `PolicyError` raised while a
                 // phase runs is budgeted by kind, ahead of the P2 string
                 // allowlist below -- a transient failure (an outage, a
                 // timeout, a quarantine awaiting human review) is the
@@ -4208,7 +4213,7 @@ impl PipelineService {
                 // like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
                     return if policy.is_transient() {
-                        // Owner decision (2026-09-27): a Review quarantine
+                        // A Review quarantine
                         // waiting on a human assessment parks the run
                         // instead of joining `mark_transient_retry`'s
                         // hourly backoff -- the condition never resolves on
@@ -4232,8 +4237,8 @@ impl PipelineService {
                 }
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
-                // uncharged suspension as a missing bound dependency. Task 4
-                // (M1), ruling R1: so is a missing per-instrument cap.
+                // uncharged suspension as a missing bound dependency. So is
+                // a missing per-instrument cap.
                 if let Some(gap) = [
                     PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
                     PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
@@ -4266,12 +4271,12 @@ impl PipelineService {
         }
     }
 
-    /// Case B (D4): the phase failed for `error_label`, a reason
+    /// The phase failed for `error_label`, a reason
     /// `process_claimed_run` charges as a terminal `mark_failed` -- unless
     /// the lease itself has gone stale between the phase's own failure and
     /// this call (the phase ran right up to its lease's edge), in which case
     /// the expiry is recorded instead and `error_label` is never charged.
-    /// Task 4 (M1): a Settle run resolves its open legs first (`fail_run`);
+    /// A Settle run resolves its open legs first (`fail_run`);
     /// a stale lease anywhere in that resolution is recorded the same way.
     async fn mark_failed_or_record_lease_expired(
         &self,
@@ -4291,8 +4296,9 @@ impl PipelineService {
         }
     }
 
-    /// Case B (D4), the `mark_retry` shape -- see
-    /// `mark_failed_or_record_lease_expired` and `charged_retry`.
+    /// The `mark_retry` shape of the same stale-lease-vs-charged-failure
+    /// case -- see `mark_failed_or_record_lease_expired` and
+    /// `charged_retry`.
     async fn mark_retry_or_record_lease_expired(
         &self,
         run: &PipelineRunRecord,
@@ -4307,7 +4313,7 @@ impl PipelineService {
         }
     }
 
-    /// P2's terminal failure with a worker present. Task 4 (M1): a Settle
+    /// P2's terminal failure with a worker present. A Settle
     /// run first reconciles its dispatched external legs
     /// (`reconcile_dispatched_settlement_legs`); `mark_failed` then forfeits
     /// every other open leg in the transaction that fails the run.
@@ -4320,7 +4326,7 @@ impl PipelineService {
     /// P2's charged retry with a worker present. When this retry exhausts
     /// the run's attempts -- `mark_retry` then fails the run as
     /// `attempts_exhausted` -- a Settle run first reconciles its dispatched
-    /// external legs (Task 4, M1), and `mark_retry` forfeits every other
+    /// external legs, and `mark_retry` forfeits every other
     /// open leg in the transaction that fails the run. The claim holds the
     /// lease, so no other writer moves `attempt_count` under it: the claimed
     /// record predicts the outcome `mark_retry`'s SQL decides.
@@ -4335,7 +4341,7 @@ impl PipelineService {
         Ok(self.store.mark_retry(run, error_label).await?)
     }
 
-    /// Task 4 (M1), owner decision 2026-09-27: before a worker fails a
+    /// Before a worker fails a
     /// Settle run, each open, dispatched, external leg gets one more call to
     /// its idempotent adapter with the request Step 6 made. A result equal
     /// to the persisted selection's result reference completes the leg with
@@ -4459,7 +4465,8 @@ impl PipelineService {
         })
     }
 
-    /// Case B (D4), the `mark_transient_retry` shape -- see
+    /// The `mark_transient_retry` shape of the same
+    /// stale-lease-vs-charged-failure case -- see
     /// `mark_failed_or_record_lease_expired`.
     async fn mark_transient_retry_or_record_lease_expired(
         &self,
@@ -4475,7 +4482,8 @@ impl PipelineService {
         }
     }
 
-    /// Case B (D4), the `mark_awaiting_review` shape -- see
+    /// The `mark_awaiting_review` shape of the same
+    /// stale-lease-vs-charged-failure case -- see
     /// `mark_failed_or_record_lease_expired`.
     async fn mark_awaiting_review_or_record_lease_expired(
         &self,
@@ -4573,7 +4581,7 @@ impl PipelineService {
                     .await;
                 let updated = match commit_result {
                     Ok(updated) => updated,
-                    // Task 1 (H1): the submission became inoperable (a
+                    // The submission became inoperable (a
                     // withdrawal, expiry, or purge) in the window between
                     // this attempt's artifact write and the commit above.
                     // The store's `Display` prefixes every `Constraint`
@@ -4722,7 +4730,7 @@ impl PipelineService {
     /// Settle's first half (brief 3B/3C, port 4547 to 4723 under the #971
     /// settlement shape): validates the committed Score outcome and its
     /// seeded settlement operations, persists the Settle selection before
-    /// any external effect (decision D4), and applies the stored index
+    /// any external effect, and applies the stored index
     /// command to the index without re-querying it (ruling P1). For a run
     /// with no settlement operations at all, this also completes the run --
     /// Task 13 extends the final commit for the case with real per-
@@ -4787,7 +4795,7 @@ impl PipelineService {
             None => {
                 // Step 3: the submission-operability guard, read fresh,
                 // directly before the index-membership decision below that
-                // this branch persists (decision D4). A retry that already
+                // this branch persists. A retry that already
                 // has a persisted selection never reaches this branch, so
                 // it never pays for this read only to see it replaced
                 // before use at Step 5 or Step 6 below.
@@ -4875,7 +4883,7 @@ impl PipelineService {
                     {
                         Ok(_) => {}
                         Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
-                            // Ruling FR3 (I1): an index outage is a
+                            // Ruling FR3: an index outage is a
                             // dependency failure, like Score's own
                             // `index_unavailable` -- an uncharged
                             // suspension, which the Settle code records
@@ -4903,9 +4911,11 @@ impl PipelineService {
         // retry never repeats a leg that already reached `complete`. Guard
         // is re-checked immediately before any instrument dispatch, the
         // same reason Step 5 re-checks it before its own external effect:
-        // the withdrawal can land in the gap since Step 4's read (or Step
-        // 5's, when that ran). The settlement rows themselves are not
-        // re-listed -- Step 2's list is still current, per the note there --
+        // the withdrawal can land in the gap since Step 3's read (when this
+        // pass took it -- it does not run on the persisted-selection
+        // branch) or Step 5's, when that ran. The settlement rows
+        // themselves are not re-listed -- Step 2's list is still current,
+        // per the note there --
         // so this reuses it rather than querying again.
         let mut guard = self.submission_guard(&run).await?;
         if !guard.operable {
@@ -4933,7 +4943,7 @@ impl PipelineService {
                 }
             }
         } else {
-            // D4: the expected result comes from the persisted selection,
+            // The expected result comes from the persisted selection,
             // not from the row -- the row's own `result_ref_hash` column
             // holds `NULL` until the leg actually completes.
             let selection_decision =
@@ -4955,7 +4965,7 @@ impl PipelineService {
                 }
                 let instrument_id = InstrumentId::new(settlement.instrument_id.clone())
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
-                // Task 2 (H3): the Trace Credit leg's own ledger transaction
+                // The Trace Credit leg's own ledger transaction
                 // can discover, partway through this pass, that the
                 // submission stopped being operable (a withdrawal landed
                 // after this pass's guard read but before that transaction).
@@ -4986,7 +4996,7 @@ impl PipelineService {
                     .settlement_adapters
                     .get(&instrument_id)
                     .ok_or_else(|| anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL))?;
-                // Task 4 (M1), ruling R1: no configured cap for the
+                // No configured cap for the
                 // instrument is a configuration gap, an uncharged suspension
                 // (`process_claimed_run`), raised before the leg's adapter
                 // is called. An amount over a configured cap is a spend
@@ -5046,11 +5056,11 @@ impl PipelineService {
                 } else {
                     None
                 };
-                // FR2, step 2 (I4): every adapter dispatch is fenced by the
+                // FR2, step 2: every adapter dispatch is fenced by the
                 // lease this attempt still holds, the same check Step 5 runs
                 // before the index write.
                 self.ensure_live_lease(&run).await?;
-                // Ruling R4: the leg is `leased` under this attempt's lease
+                // The leg is `leased` under this attempt's lease
                 // while its adapter call is in flight, and `dispatched_at`
                 // records that it was dispatched -- a failed run reconciles
                 // such a leg against its adapter instead of forfeiting it.
@@ -5131,7 +5141,7 @@ impl PipelineService {
                             held = true;
                             continue;
                         }
-                        // Task 2 (H3): the ledger transaction's own
+                        // The ledger transaction's own
                         // submission re-check found the submission
                         // inoperable (a withdrawal landed during this leg's
                         // adapter call, between Step 6's guard read and this
@@ -5139,9 +5149,12 @@ impl PipelineService {
                         // top-level inoperable branch does -- no result, no
                         // event, no batch -- and treat the submission as
                         // inoperable for the rest of this pass, so every
-                        // remaining non-terminal leg is forfeited too and
-                        // the committed Settle outcome records
-                        // `submission_inoperable`.
+                        // remaining non-terminal leg is forfeited too. When
+                        // no earlier leg in this same pass blocked, the
+                        // committed Settle outcome records
+                        // `submission_inoperable`; when one did, this
+                        // attempt retries instead, and the next pass's guard
+                        // read forfeits every leg before any adapter call.
                         InternalCreditResult::Inoperable => {
                             self.store
                                 .update_settlement(
@@ -5186,7 +5199,7 @@ impl PipelineService {
             // blocker fails closed and is charged, whatever else happened;
             // otherwise a hold or an adapter call error is an uncharged
             // suspension (ruling FR3), labeled by the hold when there is one.
-            // Task 4 (M1): the charged retry that exhausts the attempts
+            // The charged retry that exhausts the attempts
             // resolves every open leg before the run fails (`charged_retry`).
             if settlement_blocked {
                 return self
@@ -5387,7 +5400,7 @@ impl PipelineService {
     /// 4. locks the submission row (`FOR SHARE`) and, in a later statement,
     ///    re-checks it is still operable -- an inoperable submission returns
     ///    `Inoperable` and rolls the transaction back with nothing written
-    ///    (Task 2, H3: the guard Step 6 read before this leg's adapter call
+    ///    (the guard Step 6 read before this leg's adapter call
     ///    is only a snapshot; a withdrawal can land in the gap between that
     ///    read and this transaction, and must forfeit the pending award
     ///    rather than let it be paid);
@@ -5448,7 +5461,7 @@ impl PipelineService {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Held);
         }
-        // Task 2 (H3), review comment 4108170527: the submission-operability
+        // The submission-operability
         // guard Step 6 read before this leg's adapter call is only a
         // snapshot -- `submission_guard` commits and releases its lock
         // immediately. A withdrawal can land in the gap between that read
@@ -5789,8 +5802,8 @@ pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uui
     format!("pipeline-{artifact}-{run_id}-{lease_token}")
 }
 
-/// The object id one receipt attempt stores its source envelope under
-/// (Task 5, M2). As in `pipeline_attempt_object_id` (ruling FR1), the id
+/// The object id one receipt attempt stores its source envelope under.
+/// As in `pipeline_attempt_object_id` (ruling FR1), the id
 /// carries a per-attempt value -- a random attempt id, since a receipt holds
 /// no lease -- so two attempts for one key never write the same object, and
 /// a committed object ref's hash always matches its object. The attempt's
@@ -5898,7 +5911,7 @@ mod tests {
         );
     }
 
-    /// D4: the default configuration is Review 5 minutes, Score 30 minutes,
+    /// The default configuration is Review 5 minutes, Score 30 minutes,
     /// Settle 5 minutes, and Score's default is longer than the old fixed
     /// 30-second lease every phase used to share.
     #[test]
@@ -5910,7 +5923,7 @@ mod tests {
         assert!(config.score() > Duration::seconds(30));
     }
 
-    /// D4: each phase's lease must fall in [1 second, 2 hours] inclusive.
+    /// Each phase's lease must fall in [1 second, 2 hours] inclusive.
     #[test]
     fn lease_config_refuses_a_value_outside_one_second_to_two_hours() {
         let one_second = Duration::seconds(1);
@@ -5935,7 +5948,7 @@ mod tests {
         assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
     }
 
-    /// D4: `is_stale_lease_error` must recognize the stale-lease condition
+    /// `is_stale_lease_error` must recognize the stale-lease condition
     /// both as a `DatabaseError::Constraint` (every mark_*/commit_* method's
     /// `stale_lease_error()`) and as `ensure_live_lease`'s bare `anyhow!` --
     /// and must not mistake an unrelated `DatabaseError::Constraint` (a
@@ -5956,7 +5969,7 @@ mod tests {
         assert!(!is_stale_lease_error(&anyhow::anyhow!(
             PIPELINE_INDEX_CONFLICT_LABEL
         )));
-        // Task 4 (M1): a leg write refused because the leg is not open has
+        // A leg write refused because the leg is not open has
         // its own error, never the stale-lease one -- recorded as
         // `lease_expired` it would be uncharged with no terminal bound.
         assert!(!is_stale_lease_db_error(&settlement_leg_not_open_error()));
@@ -5965,7 +5978,7 @@ mod tests {
         ));
     }
 
-    /// Task 4 (M1): a failure path still resolves a leg unless it is
+    /// A failure path still resolves a leg unless it is
     /// `complete`, `forfeited`, or already `failed` as
     /// `settlement_unreconciled`. A leg `failed` for any other reason (a
     /// result mismatch, an amount over the cap) is retried by Step 6 and so
@@ -5999,7 +6012,7 @@ mod tests {
         );
     }
 
-    /// Task 4 (M1), ruling R2: a transient database failure -- the pool
+    /// A transient database failure -- the pool
     /// could not give a connection, or a SQLSTATE in class 08, 40001,
     /// 40P01, 57P01 to 57P03, or 53300 -- is `database_unavailable`, found by
     /// downcast however service code wrapped it. Any other database error
@@ -6073,7 +6086,7 @@ mod tests {
         }
     }
 
-    /// Task 4 (M1), ruling R2: a driver error with no SQLSTATE whose cause
+    /// A driver error with no SQLSTATE whose cause
     /// is I/O is transient, whether service code raised it bare or the
     /// store wrapped it as `DatabaseError::Postgres`. Nothing listens on
     /// port 1, so the connection is refused locally.

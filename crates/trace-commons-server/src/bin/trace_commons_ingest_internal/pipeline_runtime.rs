@@ -6,7 +6,7 @@ use super::*;
 /// What a proprietary production pipeline assembly needs from ingest: the
 /// PostgreSQL backend the pipeline's own tables live on, the artifact store
 /// envelopes and pipeline artifacts are written to, that store's name, and
-/// the per-phase claim lease (decision D4). All four come from the
+/// the per-phase claim lease. All four come from the
 /// connections and configuration
 /// `AppState::from_env_with_pipeline_runtime_assembler` already holds.
 /// An assembly passes `object_store_name` to
@@ -41,7 +41,7 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// this resolves the PostgreSQL backend and artifact store it needs from the
 /// DB-mirror and artifact-store configuration ingest already loaded.
 ///
-/// Fail-closed dependency qualification (review comment 4108170553): a
+/// Fail-closed dependency qualification: a
 /// non-production-qualified dependency (the Reference scorer, the in-memory
 /// `IsolatedPipelineIndex`, `RecordingSettlementAdapter`, or the like) refuses
 /// startup with `pipeline_runtime_dependencies_not_production_qualified`
@@ -93,7 +93,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.object_store_name() == object_store_name,
         "pipeline_runtime_object_store_mismatch"
     );
-    // D4: the same shape as M11's store-name check -- an assembly that
+    // The same shape as M11's store-name check -- an assembly that
     // ignores the configured lease lengths would silently run every phase
     // under whatever lease lengths its own construction happened to pick.
     anyhow::ensure!(
@@ -215,7 +215,7 @@ const PIPELINE_WORKER_POLL_INTERVAL: StdDuration = StdDuration::from_millis(200)
 /// One worker pass: probe readiness, then drain each rollout tenant's queue
 /// in turn with `drain`, checking `stop` between tenants.
 ///
-/// Supervision (I5): the probe and every tenant's batch each run as their
+/// Supervision: the probe and every tenant's batch each run as their
 /// own tokio task, so a panic in a policy, an adapter, or a row decode ends
 /// only that task. The pass logs a fixed label (never the panic's own
 /// text), reports not ready, and goes on to the next tenant; the loop
@@ -296,7 +296,7 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 ///
 /// Then, whatever the runs did, it sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
-/// attempts that never committed (Task 5, M2): each staged object whose
+/// attempts that never committed: each staged object whose
 /// row's `cleanup_after` has passed is deleted with its row. A sweep failure
 /// is logged the same way.
 async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {

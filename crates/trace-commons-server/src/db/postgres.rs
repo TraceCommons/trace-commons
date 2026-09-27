@@ -7595,7 +7595,7 @@ mod tests {
             "reject_pipeline_run_identity_mutation",
             "CREATE TABLE pipeline_bundle_packages",
             "CREATE TABLE pipeline_receipt_artifacts",
-            // Task 5 (M2): one staging row per receipt attempt, each naming
+            // One staging row per receipt attempt, each naming
             // its own object, and at most one committed attempt per run.
             "PRIMARY KEY (tenant_id, run_id, attempt_id)",
             "UNIQUE (tenant_id, object_key)",

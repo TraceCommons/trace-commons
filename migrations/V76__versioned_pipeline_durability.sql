@@ -124,6 +124,16 @@ CREATE TABLE pipeline_bundle_policy_status (
 -- names an object no run references, which the sweeper deletes with the
 -- row. Each attempt writes its own object, so a key can have several
 -- attempts but at most one committed one.
+--
+-- Only `tenant_id` has a foreign key here, to `trace_tenants` -- there is
+-- no foreign key from this table to `pipeline_runs`, because a staged row
+-- is written before the run it will eventually name exists. Deleting a
+-- single submission (rather than its whole tenant) therefore leaves its
+-- committed row behind: a later re-submission of the same key then gets a
+-- content-conflict 409 (different content) or an error on
+-- `idx_pipeline_receipt_artifacts_one_committed` (same content, a second
+-- committed row for the same key). No product path deletes a single
+-- submission.
 CREATE TABLE pipeline_receipt_artifacts (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     run_id UUID NOT NULL,
