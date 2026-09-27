@@ -428,7 +428,8 @@ stores no object.
 
 ### BND-001: Bundle identity
 
-- The manifest MUST include its format version.
+- The manifest MUST include its format version. The current format version
+  is 2.
 - A manifest that names another format version MUST be refused as an
   unsupported version, not as a manifest with a missing field. The version
   check MUST happen before the rule that `instruments` must be present.
