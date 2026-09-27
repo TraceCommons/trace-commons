@@ -8770,12 +8770,10 @@ async fn run_with_every_pipeline_row_kind(
     settled
 }
 
-/// Review minor 3: V75's trigger that rejected every delete on
-/// `phase_outcomes` sat behind `pipeline_runs`' `ON DELETE CASCADE` from
-/// `trace_submissions`, so a submission with pipeline rows could never be
-/// deleted -- the cascade always hit the trigger first. Deleting the
-/// submission that a fully-settled run belongs to must succeed and take
-/// every pipeline row for it along.
+/// Deleting the submission that a fully-settled run belongs to must succeed
+/// and take every pipeline row for it along, not stop partway at an
+/// immutability trigger or a foreign key that has not yet seen its sibling
+/// cascade finish.
 #[tokio::test]
 async fn deleting_a_submission_with_pipeline_rows_succeeds() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8809,10 +8807,11 @@ async fn deleting_a_submission_with_pipeline_rows_succeeds() {
     );
 }
 
-/// Review minor 3, the tenant-delete half: the same cascade chain runs from
-/// `trace_tenants`, and the tenant also owns `pipeline_bundle_packages` /
-/// `pipeline_active_bundles` / `pipeline_bundle_policy_status` /
-/// `pipeline_admission_usage` rows directly (not through a submission).
+/// The tenant-delete half of the same requirement: the cascade chain runs
+/// from `trace_tenants` instead of `trace_submissions`, and the tenant also
+/// owns `pipeline_bundle_packages` / `pipeline_active_bundles` /
+/// `pipeline_bundle_policy_status` / `pipeline_admission_usage` rows
+/// directly (not through a submission).
 #[tokio::test]
 async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
     let Some(backend) = runtime_backend(4).await else {
