@@ -8,6 +8,7 @@ import { settingsKeys } from "../../settings/public";
 import {
   acknowledgeNearAiNotice,
   enrollWithInvite,
+  getAutomaticGrant,
   getConsentOptions,
   grantAutomatic,
   setConsentScopes,
@@ -15,66 +16,22 @@ import {
 } from "../api/onboarding-api";
 import { onboardingKeys } from "../api/query-keys";
 import {
+  acknowledgeWitnessDisclosure as withWitnessRead,
+  afterPrivacy,
   type ContributionPath,
+  decideLater,
   type Flow1Progress,
+  goBack,
   grantBlockers,
   initialFlow1Progress,
+  type OnboardingStep,
   requestGrant,
+  withdrawAndConfirm,
 } from "../flow1";
 import { rootsContinueError, rootsReadiness } from "../roots-readiness";
 import type { ConsentOption } from "../types";
 
-// The order is the spec's (connect-and-forget design, R7): source roots are
-// settled before connect, the scope picker runs immediately after connect
-// and before the path question, and the automatic path reaches the grant
-// only through both disclosure screens.
-export type OnboardingStep =
-  | "welcome"
-  | "roots"
-  | "connect"
-  | "consent"
-  | "path"
-  | "privacy"
-  | "disclosure_scrub"
-  | "disclosure_witness"
-  | "grant"
-  | "projects"
-  | "done";
-
-function afterPrivacy(path: ContributionPath | null): OnboardingStep {
-  return path === "automatic" ? "disclosure_scrub" : "projects";
-}
-
-function previousStep(
-  current: OnboardingStep,
-  privacyIncluded: boolean,
-  path: ContributionPath | null,
-  scopesChosen: boolean,
-): OnboardingStep {
-  switch (current) {
-    case "roots":
-      return "welcome";
-    case "connect":
-      return "roots";
-    case "consent":
-      return "connect";
-    case "path":
-      return "consent";
-    case "privacy":
-      return scopesChosen ? "path" : "consent";
-    case "disclosure_scrub":
-      return privacyIncluded ? "privacy" : "path";
-    case "disclosure_witness":
-      return "disclosure_scrub";
-    case "grant":
-      return "disclosure_witness";
-    case "projects":
-      if (privacyIncluded) return "privacy";
-      return scopesChosen && path !== null ? "path" : "consent";
-    default:
-      return current;
-  }
-}
+export type { OnboardingStep } from "../flow1";
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Onboarding hook coordinates resumable steps and safety-gated mutations.
 export function useOnboarding(alreadyEnrolled: boolean) {
@@ -134,15 +91,24 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     },
     onSuccess: invalidateAccount,
   });
+  const invalidateGrant = () =>
+    queryClient.invalidateQueries({
+      queryKey: onboardingKeys.automaticGrant(core.scope),
+    });
   const grantMutation = useMutation({
-    mutationFn: (current: Flow1Progress) => requestGrant(current, grantAutomatic),
-    onSuccess: invalidateAccount,
-  });
-  const withdrawMutation = useMutation({
-    mutationFn: withdrawAutomaticGrant,
+    mutationFn: (current: Flow1Progress) =>
+      requestGrant(current, grantAutomatic),
     onSuccess: async () => {
-      grantMutation.reset();
-      await invalidateAccount();
+      await Promise.all([invalidateAccount(), invalidateGrant()]);
+    },
+  });
+  // Confirmed from the daemon's status after the withdraw, not from the
+  // withdraw call's answer (`withdrawAndConfirm`).
+  const withdrawMutation = useMutation({
+    mutationFn: () =>
+      withdrawAndConfirm(withdrawAutomaticGrant, getAutomaticGrant),
+    onSettled: async () => {
+      await Promise.all([invalidateAccount(), invalidateGrant()]);
     },
   });
   // Enrollment needs a running daemon. Continue waits for it rather than
@@ -205,8 +171,10 @@ export function useOnboarding(alreadyEnrolled: boolean) {
           : grantMutation.isError
             ? "Automatic contributing was not turned on. Nothing changed."
             : withdrawMutation.isError
-              ? "Automatic contributing was not turned off. Try again from Settings."
-              : null;
+              ? "Automatic contributing was not turned off. Try again here or from Settings, under Automatic contributing."
+              : withdrawMutation.data === "still_granted"
+                ? "Automatic contributing is still on. Try again here or from Settings, under Automatic contributing."
+                : null;
   const startRoots = () => {
     startMutation.reset();
     setStep("roots");
@@ -226,14 +194,9 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     }
   };
   const back = () => {
-    setStep((current) =>
-      previousStep(
-        current,
-        privacyIncluded,
-        progress.path,
-        progress.scopesSaved !== null,
-      ),
-    );
+    const next = goBack(progress, step, privacyIncluded);
+    setProgress(next.progress);
+    setStep(next.step);
   };
   const enroll = async (invite: string) => {
     try {
@@ -262,6 +225,7 @@ export function useOnboarding(alreadyEnrolled: boolean) {
         path: null,
         scrubDisclosureSeen: false,
         witnessDisclosureSeen: false,
+        witnessShown: null,
       }));
       setStep("path");
     } catch {
@@ -271,9 +235,10 @@ export function useOnboarding(alreadyEnrolled: boolean) {
   // R7: declining to choose is not a floor-scope grant. Nothing is saved,
   // no grant is possible, and the contributor lands on Flow 2.
   const declineScopes = (showPrivacy: boolean) => {
-    setProgress({ ...initialFlow1Progress, path: "ask_first" });
-    setPrivacyIncluded(showPrivacy);
-    setStep(showPrivacy ? "privacy" : "projects");
+    const next = decideLater(showPrivacy);
+    setProgress(next.progress);
+    setPrivacyIncluded(next.privacyIncluded);
+    setStep(next.step);
   };
   const choosePath = (path: ContributionPath, showPrivacy: boolean) => {
     setProgress((current) => ({
@@ -281,6 +246,7 @@ export function useOnboarding(alreadyEnrolled: boolean) {
       path,
       scrubDisclosureSeen: false,
       witnessDisclosureSeen: false,
+      witnessShown: null,
     }));
     setPrivacyIncluded(showPrivacy);
     setStep(showPrivacy ? "privacy" : afterPrivacy(path));
@@ -297,8 +263,10 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     setProgress((current) => ({ ...current, scrubDisclosureSeen: true }));
     setStep("disclosure_witness");
   };
-  const acknowledgeWitnessDisclosure = () => {
-    setProgress((current) => ({ ...current, witnessDisclosureSeen: true }));
+  // `signingAddress` is the witness the screen showed, `null` for none; the
+  // grant is given under it or refused.
+  const acknowledgeWitnessDisclosure = (signingAddress: string | null) => {
+    setProgress((current) => withWitnessRead(current, signingAddress));
     setStep("grant");
   };
   const grant = async () => {
@@ -351,7 +319,7 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     granted: grantMutation.data?.granted === true,
     skipGrant,
     withdrawGrant,
-    withdrawn: withdrawMutation.data === true,
+    withdrawn: withdrawMutation.data === "withdrawn",
     finishProjects,
     progress: flow1,
     setStep,

@@ -176,11 +176,18 @@ export async function getAutomaticGrant(): Promise<AutomaticGrant> {
 /**
  * The Flow 1 grant. Reached only through `requestGrant` in `flow1.ts`, which
  * refuses until every step before it is done; Rust refuses again without
- * the confirmation, an enrollment, or a saved scope.
+ * the confirmation, an enrollment, or scopes chosen in the picker, and the
+ * daemon refuses when the configured witness is not `witnessSigningAddress`,
+ * the one the witness screen showed (`null` for none).
  */
-export async function grantAutomatic(): Promise<AutomaticGrant> {
+export async function grantAutomatic(
+  witnessSigningAddress: string | null,
+): Promise<AutomaticGrant> {
   return parseAutomaticGrant(
-    await invokeTauri("grant_automatic", { confirmed: true }),
+    await invokeTauri("grant_automatic", {
+      confirmed: true,
+      witnessSigningAddress,
+    }),
   );
 }
 

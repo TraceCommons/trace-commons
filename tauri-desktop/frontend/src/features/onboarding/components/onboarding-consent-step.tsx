@@ -24,6 +24,10 @@ export function OnboardingConsentStep({
   const copy = grantCopy.data;
   const [selected, setSelected] = useState<string[]>(initialScopeSelection);
   const choice = scopeChoice(onboarding.options, selected);
+  // Nothing is marked invalid until the contributor tries to continue: an
+  // unticked required scope is the starting state, not a mistake.
+  const [attempted, setAttempted] = useState(false);
+  const showMissing = attempted && choice.missingRequired.length > 0;
   const toggle = (name: string) => {
     setSelected((current) =>
       current.includes(name)
@@ -39,11 +43,17 @@ export function OnboardingConsentStep({
       </span>
       <h2>How may your traces be used?</h2>
       {copy ? (
-        <p className="m-0 text-[12px] leading-[1.55] text-muted-foreground">
+        <p
+          className="m-0 text-[12px] leading-[1.55] text-muted-foreground"
+          id="onboarding-scope-required"
+        >
           {copy.scope_required}
         </p>
       ) : (
-        <p className="m-0 text-[12px] text-destructive" role="alert">
+        <p
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          role={grantCopy.isError ? "alert" : "status"}
+        >
           {grantCopy.isError
             ? "Consent copy unavailable. Continue is disabled."
             : "Loading consent copy…"}
@@ -52,6 +62,7 @@ export function OnboardingConsentStep({
       <form
         onSubmit={(event) => {
           event.preventDefault();
+          setAttempted(true);
           if (choice.canContinue && copy && privacyKnown)
             void onboarding.saveConsent(selected);
         }}
@@ -66,7 +77,14 @@ export function OnboardingConsentStep({
                 checked={selected.includes(option.name)}
                 onCheckedChange={() => toggle(option.name)}
                 disabled={busy}
-                aria-invalid={choice.missingRequired.includes(option.name)}
+                aria-invalid={
+                  showMissing && choice.missingRequired.includes(option.name)
+                }
+                aria-describedby={
+                  showMissing
+                    ? "onboarding-scope-required onboarding-scope-missing"
+                    : "onboarding-scope-required"
+                }
               />
               <span>
                 <strong>
@@ -82,8 +100,20 @@ export function OnboardingConsentStep({
             </label>
           ))}
         </div>
+        {showMissing && (
+          <p
+            className="m-0 text-xs text-destructive"
+            id="onboarding-scope-missing"
+            role="alert"
+          >
+            Tick every required scope to continue, or choose Decide later.
+          </p>
+        )}
         {onboarding.state === "loading" && (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p
+            className="mt-[30px] mb-1 text-[13px] text-muted-foreground"
+            role="status"
+          >
             Loading consent options…
           </p>
         )}
@@ -123,11 +153,7 @@ export function OnboardingConsentStep({
             className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
             type="submit"
             disabled={
-              busy ||
-              !copy ||
-              !choice.canContinue ||
-              settings.state === "loading" ||
-              !privacyKnown
+              busy || !copy || settings.state === "loading" || !privacyKnown
             }
           >
             Continue

@@ -21,6 +21,7 @@ export function OnboardingWitnessDisclosureStep({
   const rawSend = status?.state === "pinned";
   const hasWitness = status?.url !== null && status?.url !== undefined;
   const ready = Boolean(copy && status && witness.state === "ready");
+  const failed = grantCopy.isError || witness.state === "error";
   return (
     <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
       <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
@@ -50,8 +51,11 @@ export function OnboardingWitnessDisclosureStep({
           )}
         </div>
       ) : (
-        <p className="m-0 text-[12px] text-destructive" role="alert">
-          {grantCopy.isError || witness.state === "error"
+        <p
+          className={`m-0 text-[12px] ${failed ? "text-destructive" : "text-muted-foreground"}`}
+          role={failed ? "alert" : "status"}
+        >
+          {failed
             ? "Witness status could not be read. Continue is disabled."
             : "Reading witness status…"}
         </p>
@@ -68,7 +72,11 @@ export function OnboardingWitnessDisclosureStep({
         <Button
           className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
           type="button"
-          onClick={onboarding.acknowledgeWitnessDisclosure}
+          onClick={() =>
+            onboarding.acknowledgeWitnessDisclosure(
+              status?.signing_address ?? null,
+            )
+          }
           disabled={busy || !ready}
         >
           Continue

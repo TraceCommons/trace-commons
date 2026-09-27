@@ -83,6 +83,12 @@ export function OnboardingDoneStep({
       ) : (
         <p role="alert">Shared onboarding copy unavailable. Retry loading it.</p>
       )}
+      {onboarding.withdrawn && (
+        <p className="m-0 mb-3 text-sm" role="status">
+          Automatic contributing is off. No automatic grant is in force. Settings
+          shows this under Automatic contributing.
+        </p>
+      )}
       {onboarding.granted && !onboarding.withdrawn && (
         <Button
           className="mb-3 mr-2.5"

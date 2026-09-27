@@ -31,7 +31,10 @@ export function OnboardingScrubDisclosureStep({
           ))}
         </div>
       ) : (
-        <p className="m-0 text-[12px] text-destructive" role="alert">
+        <p
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          role={grantCopy.isError ? "alert" : "status"}
+        >
           {grantCopy.isError
             ? "The disclosure could not be loaded. Continue is disabled."
             : "Loading disclosure…"}

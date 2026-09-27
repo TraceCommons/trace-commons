@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "../../components/page-header";
 import { useProjects, useSettings, useSourceRoots } from "../settings/public";
 import { OnboardingStepContent } from "./components/onboarding-step-content";
@@ -26,6 +26,19 @@ export function OnboardingPage({
       ? settings.data?.near_ai_configured === true
       : null;
   const scrubber = useScrubberPatterns(showScrubDisclosure);
+  // On a step change, move focus to the new step's heading, so keyboard and
+  // screen-reader users land on the step rather than on the page body. Not
+  // on the first render: the page opening is not a step change.
+  const stepRef = useRef<HTMLDivElement>(null);
+  const renderedStep = useRef(onboarding.step);
+  useEffect(() => {
+    if (renderedStep.current === onboarding.step) return;
+    renderedStep.current = onboarding.step;
+    const heading = stepRef.current?.querySelector<HTMLElement>("h2");
+    if (!heading) return;
+    heading.tabIndex = -1;
+    heading.focus();
+  }, [onboarding.step]);
   const pageTitles = {
     welcome: "Welcome to Trace Commons",
     roots: "Choose source roots",
@@ -68,19 +81,21 @@ export function OnboardingPage({
           {onboarding.error}
         </p>
       )}
-      <OnboardingStepContent
-        step={onboarding.step}
-        onboarding={onboarding}
-        settings={settings}
-        projects={projects}
-        roots={roots}
-        alreadyEnrolled={alreadyEnrolled}
-        initialInvite={initialInvite}
-        busy={busy}
-        showPrivacy={showPrivacy}
-        onOpenScrubDisclosure={() => setShowScrubDisclosure(true)}
-        onComplete={onComplete}
-      />
+      <div ref={stepRef}>
+        <OnboardingStepContent
+          step={onboarding.step}
+          onboarding={onboarding}
+          settings={settings}
+          projects={projects}
+          roots={roots}
+          alreadyEnrolled={alreadyEnrolled}
+          initialInvite={initialInvite}
+          busy={busy}
+          showPrivacy={showPrivacy}
+          onOpenScrubDisclosure={() => setShowScrubDisclosure(true)}
+          onComplete={onComplete}
+        />
+      </div>
       {onboarding.step !== "welcome" && onboarding.step !== "done" && (
         <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
           This flow is resumable. A failed daemon call does not advance the

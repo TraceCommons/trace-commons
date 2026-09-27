@@ -22,15 +22,19 @@ export function OnboardingPathStep({
       <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
         PATH
       </span>
-      <h2>How should contributing work?</h2>
+      <h2 id="onboarding-path-heading">How should contributing work?</h2>
       {!copy && (
-        <p className="m-0 text-[12px] text-destructive" role="alert">
+        <p
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          role={grantCopy.isError ? "alert" : "status"}
+        >
           {grantCopy.isError
             ? "Path copy unavailable. Continue is disabled."
             : "Loading path copy…"}
         </p>
       )}
       <RadioGroup
+        aria-labelledby="onboarding-path-heading"
         className="my-[18px] gap-px border-t border-border"
         value={path ?? ""}
         onValueChange={(value) => setPath(value as ContributionPath)}

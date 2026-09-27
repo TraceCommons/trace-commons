@@ -123,13 +123,16 @@ fn tauri_commands_project_shared_contributor_copy() {
     assert!(wrapper.contains("automatic_contribution_value"));
 
     // The Flow 1 grant is reached through named commands, and the grant
-    // itself refuses before the daemon is asked without a confirmation and a
-    // chosen scope.
+    // itself refuses before the daemon is asked without a confirmation and
+    // scopes chosen in the picker -- not merely saved, since enrollment
+    // saves the floor scope. It passes the daemon the witness the
+    // disclosure screen showed, which the daemon checks.
     let consent = read(&root, "tauri-desktop/src-tauri/src/commands/consent.rs");
     let grant = rust_function(&consent, "fn grant_automatic");
     assert!(grant.contains("grant_precondition(confirmed"));
+    assert!(grant.contains("witness_signing_address"));
     let precondition = rust_function(&consent, "fn grant_precondition");
-    assert!(precondition.contains("consent_scopes.is_empty()"));
+    assert!(precondition.contains("consent_scopes_chosen"));
 
     let witness = rust_function(&native_flows, "fn witness_review_copy");
     assert!(witness.contains("witness_copy::witness_copy"));
@@ -552,7 +555,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     );
     assert!(consent_step.contains("useState<string[]>(initialScopeSelection)"));
     assert!(consent_step.contains("copy.scope_required"));
-    assert!(consent_step.contains("!choice.canContinue"));
+    // Continue saves only a complete choice; a try without one marks the
+    // missing scope and saves nothing.
+    assert!(consent_step.contains("if (choice.canContinue && copy && privacyKnown)"));
+    assert!(consent_step.contains("aria-describedby"));
     let grant_step = read(
         &root,
         &format!("{onboarding_dir}/components/onboarding-grant-step.tsx"),
@@ -570,8 +576,21 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         skip < give,
         "declining the grant must come before giving it"
     );
+    assert!(
+        witness_step.contains("acknowledgeWitnessDisclosure(")
+            && witness_step.contains("status?.signing_address ?? null"),
+        "the witness screen records the witness it showed"
+    );
     let hook = read(&root, &format!("{onboarding_dir}/hooks/use-onboarding.ts"));
     assert!(hook.contains("requestGrant(current, grantAutomatic)"));
+    // A withdraw is confirmed by re-reading the grant, here and in Settings.
+    assert!(hook.contains("withdrawAndConfirm(withdrawAutomaticGrant, getAutomaticGrant)"));
+    let settings_grant = read(
+        &root,
+        "tauri-desktop/frontend/src/features/settings/hooks/use-automatic-grant.ts",
+    );
+    assert!(settings_grant.contains("withdrawAndConfirm(withdrawAutomaticGrant"));
+    assert!(settings_grant.contains("getAutomaticGrant"));
     let grant_calls = hook.matches("grantAutomatic").count();
     assert_eq!(
         grant_calls, 2,

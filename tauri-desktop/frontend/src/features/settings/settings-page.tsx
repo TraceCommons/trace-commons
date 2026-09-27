@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "../../components/page-header";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
 import { AuditPanel } from "./components/audit-panel";
+import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
 import { BehaviorSettingsPanel } from "./components/behavior-settings-panel";
 import { ConnectionPanel } from "./components/connection-panel";
 import { ConsentSettingsPanel } from "./components/consent-settings-panel";
@@ -13,6 +14,7 @@ import { SettingRow } from "./components/setting-row";
 import { SourceRootsPanel } from "./components/source-roots-panel";
 import { WitnessPanel } from "./components/witness-panel";
 import { useAudit } from "./hooks/use-audit";
+import { useAutomaticGrant } from "./hooks/use-automatic-grant";
 import { useBehaviorSettings } from "./hooks/use-behavior-settings";
 import { useConsentSettings } from "./hooks/use-consent-settings";
 import { useDaemonControl } from "./hooks/use-daemon-control";
@@ -44,6 +46,7 @@ export function SettingsPage() {
   const witness = useWitness();
   const consent = useConsentSettings();
   const routing = useRouting();
+  const automaticGrant = useAutomaticGrant();
   const snapshot = settings.data;
   return (
     <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
@@ -156,6 +159,14 @@ export function SettingsPage() {
             error={consent.error}
             onRefresh={consent.refresh}
             onToggle={consent.toggle}
+          />
+          <AutomaticGrantPanel
+            grant={automaticGrant.grant}
+            state={automaticGrant.state}
+            error={automaticGrant.error}
+            withdrawn={automaticGrant.withdrawn}
+            onRefresh={automaticGrant.refresh}
+            onWithdraw={automaticGrant.withdraw}
           />
           <ProjectsPanel
             projects={projects.projects}
