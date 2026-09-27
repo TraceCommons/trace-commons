@@ -20,7 +20,7 @@ use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
     InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult,
     ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence,
-    SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
+    SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     Embedder, IdentifiedEmbedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder,
@@ -11793,6 +11793,8 @@ async fn compatibility_credit_matches_main_gate_path() {
     assert_eq!(run_zero.state, PipelineRunState::Complete);
     assert_eq!(run_positive.state, PipelineRunState::Complete);
 
+    let product = PipelineProductStore::new(backend.clone());
+
     // Delta 0: no award, so Score seeds no settlement operations and Settle
     // writes no ledger row.
     let zero_settlements = service
@@ -11809,6 +11811,47 @@ async fn compatibility_credit_matches_main_gate_path() {
         0,
         "a zero-delta compatibility run writes no ledger row"
     );
+
+    // Finding I2: the brief requires "the Score awards are empty" for delta
+    // 0 -- assert the *stored Score decision* directly, not only its
+    // downstream effects, so a Score that somehow recorded a zero-unit
+    // `trace_credit` award (which settlement seeding might still skip)
+    // would be caught here.
+    let zero_score_outcome = service
+        .store()
+        .list_outcomes(&tenant_zero, run_zero.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Score)
+        .expect("the zero-delta run has a committed Score outcome");
+    // A stored Score decision loads unverified; verify it against the run's
+    // bound manifest, as Settle does, before reading its awards.
+    let zero_bound_package = service
+        .store()
+        .load_bundle(&tenant_zero, &run_zero.bundle_id)
+        .await
+        .unwrap()
+        .expect("the zero-delta run's bound package is on file");
+    let zero_score_decision =
+        serde_json::from_value::<UnverifiedScoreDecision>(zero_score_outcome.decision)
+            .unwrap()
+            .verify(&zero_bound_package.manifest)
+            .expect("the stored Score decision verifies against the run's bound manifest");
+    assert!(
+        zero_score_decision.awards().is_empty(),
+        "a zero-delta compatibility run's Score decision has no awards"
+    );
+
+    // And the product status agrees: Zero, not Unscored or Pending.
+    let zero_status = product
+        .contributor_statuses(&tenant_zero, principal, &[run_zero.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(zero_status.credit, PipelineCreditStatus::Zero);
+    assert_eq!(zero_status.score_microcredits, Some(0));
 
     // Delta 2_500_000: one complete `trace_credit` settlement row, with no
     // settlement batch (Ruling S8).
@@ -11862,7 +11905,6 @@ async fn compatibility_credit_matches_main_gate_path() {
 
     // Product read (Ruling S11): the contributor status reports this leg as
     // not_settlement_eligible, never pending forever.
-    let product = PipelineProductStore::new(backend.clone());
     let status = product
         .contributor_statuses(&tenant_positive, principal, &[run_positive.submission_id])
         .await

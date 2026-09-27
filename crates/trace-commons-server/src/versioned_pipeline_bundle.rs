@@ -1154,4 +1154,75 @@ mod tests {
         .expect("an invalid config artifact must not build a bundle");
         assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
     }
+
+    /// Ruling S4 / Finding I1: the compatibility arm refuses at bind time, not
+    /// at the first positive award, a package whose manifest does not pin
+    /// `trace_credit` to this config's own instrument descriptor. Covers both
+    /// ways a manifest can fail to pin it correctly: a different (but still
+    /// individually valid) `nep141` descriptor, and no `trace_credit` pin at
+    /// all. Neither mutation is caught earlier -- `BundlePackage::validate`
+    /// never reads `instruments` at all (only the four policy refs'
+    /// configuration/data-artifact hashes), and `BundleManifest::canonical_bytes`
+    /// accepts an empty or a differently-valued `instruments` map so long as
+    /// each present descriptor is individually well-formed -- so both
+    /// mutations reach the compatibility arm and are refused there.
+    #[test]
+    fn compatibility_manifest_must_pin_trace_credit_to_the_config_descriptor() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let config = CompatibilityBundleConfig::local_reference();
+
+        // Case 1: a different, but still individually valid, nep141
+        // descriptor for trace_credit (same kind and decimals, different
+        // contract).
+        let mismatched_descriptor = InstrumentDescriptor {
+            kind: InstrumentKind::Nep141,
+            network: "testnet".to_string(),
+            contract: "different-trace-credit.testnet".to_string(),
+            decimals: TRACE_CREDIT_DECIMALS,
+        };
+        assert_ne!(mismatched_descriptor, config.instrument.descriptor);
+        let mut mismatched_package =
+            MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+                .expect("build compatibility bundle package");
+        mismatched_package
+            .manifest
+            .instruments
+            .insert(InstrumentId::trace_credit(), mismatched_descriptor);
+        mismatched_package.bundle_id = mismatched_package
+            .manifest
+            .bundle_id()
+            .expect("recompute bundle id after mutating the pinned descriptor");
+        let error = MinimalPolicyBundle::from_package_with_runtime(
+            mismatched_package,
+            Arc::new(ReferencePerplexityScorer::new()),
+            Arc::new(ReferenceEmbedder::new()),
+            IsolatedPipelineIndex::new(),
+        )
+        .err()
+        .expect("a mismatched trace_credit descriptor must not build a bundle");
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+
+        // Case 2: no trace_credit pin at all.
+        let mut unpinned_package =
+            MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+                .expect("build compatibility bundle package");
+        unpinned_package
+            .manifest
+            .instruments
+            .remove(&InstrumentId::trace_credit());
+        unpinned_package.bundle_id = unpinned_package
+            .manifest
+            .bundle_id()
+            .expect("recompute bundle id after removing the pinned instrument");
+        let error = MinimalPolicyBundle::from_package_with_runtime(
+            unpinned_package,
+            Arc::new(scorer),
+            Arc::new(embedder),
+            IsolatedPipelineIndex::new(),
+        )
+        .err()
+        .expect("a package with no trace_credit pin must not build a bundle");
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+    }
 }
