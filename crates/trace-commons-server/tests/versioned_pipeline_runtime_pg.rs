@@ -1279,6 +1279,14 @@ async fn attempts_exhaust_to_failed_but_transient_retries_do_not_charge() {
 /// `next_attempt_at` both move `by` into the past, as if that much time had
 /// passed since the last transient retry was scheduled. A time shortcut in
 /// the test, never a processor call.
+///
+/// Ages by whole microseconds, not milliseconds: the database stores
+/// timestamps with microsecond resolution, and a backoff delay read back
+/// from the database can carry a sub-millisecond remainder. Rounding `by`
+/// down to the nearest millisecond would throw that remainder away and
+/// leave `next_attempt_at` a fraction of a millisecond later than intended,
+/// which can still read as due in the future depending on how much real
+/// time passes before the next claim.
 async fn age_run(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid, by: chrono::Duration) {
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = client.transaction().await.unwrap();
@@ -1288,13 +1296,15 @@ async fn age_run(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid, by: c
     )
     .await
     .unwrap();
-    let milliseconds = by.num_milliseconds();
+    let microseconds = by
+        .num_microseconds()
+        .expect("age_run: duration does not fit in microseconds");
     tx.execute(
         "UPDATE pipeline_runs
-            SET phase_started_at = phase_started_at - ($3::bigint * INTERVAL '1 millisecond'),
-                next_attempt_at = next_attempt_at - ($3::bigint * INTERVAL '1 millisecond')
+            SET phase_started_at = phase_started_at - ($3::bigint * INTERVAL '1 microsecond'),
+                next_attempt_at = next_attempt_at - ($3::bigint * INTERVAL '1 microsecond')
           WHERE tenant_id = $1 AND run_id = $2",
-        &[&tenant_id, &run_id, &milliseconds],
+        &[&tenant_id, &run_id, &microseconds],
     )
     .await
     .unwrap();
