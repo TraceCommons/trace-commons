@@ -375,6 +375,34 @@ pub fn build_pipeline_app(state: Arc<AppState>) -> Router {
     app(state)
 }
 
+/// Registers and activates the injected pipeline runtime's default bundle
+/// once for every `PipelineReceipts` rollout tenant, so none of them reaches
+/// its first receipt without an active bundle already on file. `None` when
+/// no runtime is injected -- there is nothing to register.
+///
+/// Called from `run_pipeline_app`, after the runtime this process holds was
+/// assembled and checked (`assemble_ingest_pipeline_runtime`) and before the
+/// worker or the HTTP listener starts: a receipt no longer registers
+/// anything itself (`PipelineService::submit` assumes an active bundle
+/// already exists), so a tenant this call never reaches would refuse every
+/// receipt with a missing-bundle error instead. A registration failure
+/// refuses startup rather than let that happen silently.
+async fn register_default_bundles_for_rollout_tenants(state: &AppState) -> anyhow::Result<()> {
+    let Some(service) = state.pipeline_service.as_ref() else {
+        return Ok(());
+    };
+    for tenant_id in state
+        .tenant_rollout_gates
+        .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts)
+    {
+        service
+            .register_default_bundle(&tenant_id)
+            .await
+            .map_err(|_| anyhow::anyhow!("pipeline_default_bundle_registration_failed"))?;
+    }
+    Ok(())
+}
+
 /// Serves ingest and, when a pipeline runtime is injected, runs the owned
 /// worker loop alongside it. `shutdown` stops HTTP first, through
 /// `serve_ingest_with_graceful_shutdown`'s own grace period; once that
@@ -387,6 +415,7 @@ pub async fn run_pipeline_app(
     listener: TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    register_default_bundles_for_rollout_tenants(&state).await?;
     let worker = spawn_pipeline_worker(state.clone());
     let grace = parse_usize_env(
         TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,

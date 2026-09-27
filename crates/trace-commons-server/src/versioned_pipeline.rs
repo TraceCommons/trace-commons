@@ -118,6 +118,11 @@ const PIPELINE_RECEIPT_STAGING_MISSING_LABEL: &str = "receipt_staging_missing";
 /// Task 5 (M2): the artifact store wrote a receipt object other than the
 /// one it prepared, so the staging row does not name it. Fails closed.
 const PIPELINE_RECEIPT_OBJECT_MISMATCH_LABEL: &str = "receipt_object_mismatch";
+/// The blocking thread a receipt's object-store call was moved onto
+/// (`tokio::task::spawn_blocking`) panicked or was cancelled before it
+/// returned. Fails closed rather than treating a lost result as success or
+/// as an ordinary store error.
+const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_failed";
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
 const UNRESOLVED_SETTLEMENT_LEG_SQL: &str = "(s.operation_state NOT IN ('complete', 'forfeited')
@@ -3035,7 +3040,16 @@ impl PipelineService {
         &self.store
     }
 
-    async fn ensure_default_bundle(&self, tenant_id: &str) -> anyhow::Result<()> {
+    /// Registers this service's default bundle for `tenant_id` and, if the
+    /// tenant has no active bundle yet, activates it. Idempotent: calling it
+    /// again for a tenant that already has an active bundle changes
+    /// nothing.
+    ///
+    /// Ingest startup calls this once for every rollout tenant before it
+    /// starts taking receipts, so a receipt never has to. A test that calls
+    /// `submit` directly, on a tenant startup never touched, must call this
+    /// first for the same reason.
+    pub async fn register_default_bundle(&self, tenant_id: &str) -> anyhow::Result<()> {
         self.store
             .register_bundle(tenant_id, &self.default_package)
             .await?;
@@ -3186,9 +3200,13 @@ impl PipelineService {
     ///
     /// Each attempt writes its own object, so two concurrent receipts for
     /// one key never overwrite each other's object: the one that commits
-    /// second finds the first one's run and returns `Replayed`.
-    /// `ensure_default_bundle` runs before any transaction opens (it takes
-    /// its own pool connections), and each transaction returns its
+    /// second finds the first one's run and returns `Replayed`. A tenant
+    /// with no active bundle is not registered here -- that happens once,
+    /// at startup (`register_default_bundle`), and a tenant this call finds
+    /// without one fails closed with `PIPELINE_BUNDLE_MISSING_LABEL`. Every
+    /// synchronous object-store call (the encrypt-and-prepare in step 2, the
+    /// write in step 4, and a discarded attempt's delete) runs on a blocking
+    /// thread rather than this task, and each transaction returns its
     /// connection to the pool before the next step checks one out, which is
     /// what keeps a pool of size one safe.
     pub async fn submit(
@@ -3206,7 +3224,6 @@ impl PipelineService {
         let request_idempotency_key_hash =
             sha256_prefixed(request.request_idempotency_key.as_bytes());
 
-        self.ensure_default_bundle(tenant_id).await?;
         let run_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
@@ -3232,17 +3249,29 @@ impl PipelineService {
             return Ok(refused);
         }
 
-        // 2. Prepare this attempt's object. Nothing is stored yet.
+        // 2. Prepare this attempt's object. Nothing is stored yet. The
+        // store's encrypt call is synchronous (it may reach a remote
+        // key-wrap service), so it runs on a blocking thread rather than
+        // this task.
         let tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id);
         let server_envelope_bytes = serde_json::to_vec(envelope)?;
         let wrapper = encode_pipeline_artifact_bytes(&server_envelope_bytes)?;
         let attempt_id = Uuid::new_v4();
-        let prepared = self.artifact_store.prepare_serialized_json(
-            tenant_storage_ref.as_str(),
-            TraceArtifactKind::ContributionEnvelope,
-            &pipeline_receipt_object_id(run_id, attempt_id),
-            &wrapper,
-        )?;
+        let object_id = pipeline_receipt_object_id(run_id, attempt_id);
+        let prepared = {
+            let store = self.artifact_store.clone();
+            let tenant_storage_ref = tenant_storage_ref.clone();
+            tokio::task::spawn_blocking(move || {
+                store.prepare_serialized_json(
+                    tenant_storage_ref.as_str(),
+                    TraceArtifactKind::ContributionEnvelope,
+                    &object_id,
+                    &wrapper,
+                )
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL))??
+        };
         let attempt = ReceiptAttempt {
             tenant_id: tenant_id.to_string(),
             run_id,
@@ -3258,18 +3287,33 @@ impl PipelineService {
             ReceiptStage::Staged { bundle_id, bundle } => (bundle_id, bundle),
         };
 
-        // 4. Write the object the row names, then run Admission.
-        let written = self.artifact_store.publish_serialized_json(&prepared)?;
+        // 4. Write the object the row names, then run Admission. The write
+        // is synchronous file or network I/O, so it also runs on a blocking
+        // thread -- with no transaction open and no advisory lock held (the
+        // staging transaction above already committed and released both
+        // locks it took).
+        let written = {
+            let store = self.artifact_store.clone();
+            tokio::task::spawn_blocking(move || store.publish_serialized_json(&prepared))
+                .await
+                .map_err(|_| anyhow::anyhow!(PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL))??
+        };
         if !written.matches_identity(&attempt.receipt) {
             // A store that wrote some other object than the one it
             // prepared: that object is not the one the row names, so delete
             // it here (best effort) and fail closed. The row's own object,
             // if the store wrote it too, is the sweeper's.
-            if self
-                .artifact_store
-                .delete_artifact(tenant_storage_ref.as_str(), &written)
-                .is_err()
+            let store = self.artifact_store.clone();
+            let delete_tenant_storage_ref = tenant_storage_ref.clone();
+            let delete_failed = match tokio::task::spawn_blocking(move || {
+                store.delete_artifact(delete_tenant_storage_ref.as_str(), &written)
+            })
+            .await
             {
+                Ok(result) => result.is_err(),
+                Err(_) => true,
+            };
+            if delete_failed {
                 tracing::warn!(
                     label = "pipeline_receipt_object_delete_failed",
                     "best-effort delete of a receipt object the store wrote \
@@ -3716,15 +3760,19 @@ impl PipelineService {
     /// its `staged` row. Best effort, with the sweeper as the backstop: when
     /// the delete fails, the row stays (or is inserted again, if the
     /// sweeper already removed it) and is made due now, so the next sweep
-    /// retries it. Logs labels only.
+    /// retries it. Logs labels only. The delete is synchronous I/O, so it
+    /// runs on a blocking thread rather than this task.
     async fn discard_receipt_attempt(&self, attempt: &ReceiptAttempt) {
         let tenant_storage_ref = pipeline_tenant_storage_ref(&attempt.tenant_id);
-        let cleanup = match self
-            .artifact_store
-            .delete_artifact(tenant_storage_ref.as_str(), &attempt.receipt)
-        {
-            Ok(_) => self.store.remove_staged_receipt_artifact(attempt).await,
-            Err(_) => {
+        let store = self.artifact_store.clone();
+        let receipt = attempt.receipt.clone();
+        let deleted = tokio::task::spawn_blocking(move || {
+            store.delete_artifact(tenant_storage_ref.as_str(), &receipt)
+        })
+        .await;
+        let cleanup = match deleted {
+            Ok(Ok(_)) => self.store.remove_staged_receipt_artifact(attempt).await,
+            Ok(Err(_)) | Err(_) => {
                 tracing::warn!(
                     label = "pipeline_receipt_object_delete_failed",
                     "best-effort delete of a refused receipt attempt's object failed; \

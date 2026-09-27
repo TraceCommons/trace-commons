@@ -497,6 +497,101 @@ async fn join_within(
         .unwrap_or_else(|error| panic!("{label} did not shut down cleanly: {error}"));
 }
 
+/// `run_pipeline_app` -- this suite's own entry point, the one `main` calls
+/// too -- registers and activates the default bundle for every
+/// `PipelineReceipts` rollout tenant before it starts the worker or the
+/// HTTP listener. A tenant that has never submitted anything still has an
+/// active bundle the moment the server comes up, with no receipt required
+/// to put one there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_registers_the_default_bundle_for_rollout_tenants() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tenant = format!("startup-bundle-{}", uuid::Uuid::new_v4());
+    cleanup_pg_trace_tenant(&backend, &tenant).await;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let index = IsolatedPipelineIndex::new();
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_startup_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_startup_test_only",
+        "none",
+    );
+    let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+        storage_rebate as Arc<dyn SettlementAdapter>,
+        trace_credit as Arc<dyn SettlementAdapter>,
+    ];
+    let service =
+        assemble_test_pipeline_service(backend.clone(), artifacts.clone(), index, adapters, None);
+
+    assert!(
+        service
+            .store()
+            .active_bundle_id(&tenant)
+            .await
+            .expect("query the tenant's active bundle before startup")
+            .is_none(),
+        "a tenant `run_pipeline_app` has not started for yet has no active bundle"
+    );
+
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        Some(artifacts.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+
+    let (_base, stop, server) = serve_pipeline_app(state).await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if service
+            .store()
+            .active_bundle_id(&tenant)
+            .await
+            .expect("query the tenant's active bundle after startup")
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "startup never registered and activated the default bundle for the rollout tenant"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let active = service
+        .store()
+        .active_bundle_id(&tenant)
+        .await
+        .unwrap()
+        .expect("checked above");
+    assert_eq!(
+        active,
+        service.bundle_id(),
+        "the tenant's active bundle is the service's own default bundle"
+    );
+
+    stop.send(()).unwrap();
+    join_within(server, 15, "startup bundle registration test").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_http_receipt_completes_and_resumes_after_restart() {
     let Some(backend) = runtime_backend(4).await else {

@@ -387,10 +387,10 @@ async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -463,10 +463,10 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -547,10 +547,10 @@ async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged(
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -2049,6 +2049,20 @@ const NO_LIMITS: PipelineAdmissionLimits = PipelineAdmissionLimits {
     max_per_principal_per_hour: 0,
 };
 
+/// `submit`, but registering the request's tenant for the default bundle
+/// first. Startup owns that registration now, not `submit` itself, so a
+/// tenant this suite invents -- one startup never touched -- still needs an
+/// active bundle before its first receipt. Every direct call this suite
+/// makes to `submit` goes through this instead of calling
+/// `register_default_bundle` inline at each call site.
+async fn submit_registered(
+    service: &PipelineService,
+    request: PipelineReceiptRequest<'_>,
+) -> anyhow::Result<PipelineReceiptResult> {
+    service.register_default_bundle(request.tenant_id).await?;
+    service.submit(request).await
+}
+
 /// `SELECT COUNT(*)` over `pipeline_runs` for `tenant_id`, in its own
 /// tenant-scoped transaction.
 async fn count_runs(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
@@ -2306,17 +2320,17 @@ async fn receipt_replay_and_conflict_are_exact() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("first receipt creates a run")
     };
-    let PipelineReceiptResult::Replayed(replayed) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Replayed(replayed) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("identical bytes replay")
     };
@@ -2324,8 +2338,7 @@ async fn receipt_replay_and_conflict_are_exact() {
     let mut changed = raw.clone();
     changed.push(b' ');
     assert!(matches!(
-        service
-            .submit(receipt(&tenant, &key, &changed, &env, NO_LIMITS))
+        submit_registered(&service, receipt(&tenant, &key, &changed, &env, NO_LIMITS))
             .await
             .unwrap(),
         PipelineReceiptResult::ContentConflict
@@ -2371,10 +2384,10 @@ async fn replay_receipt_reads_without_writing() {
     );
     assert_eq!(count_runs(&backend, &tenant).await, 0);
 
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("first receipt creates a run")
     };
@@ -2527,10 +2540,10 @@ async fn receipt_derives_retention_and_expiry_on_the_server() {
         .expect("the fixture's allowed uses carry a bounded retention policy");
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(_) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(_) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -2598,10 +2611,10 @@ async fn a_rejected_receipt_records_the_decision_and_creates_no_review_work() {
     env.privacy.residual_pii_risk = ResidualPiiRisk::High;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("a rejected receipt still creates its run record")
     };
@@ -2662,10 +2675,10 @@ async fn a_quarantined_receipt_waits_for_review_with_backoff() {
     env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -2763,8 +2776,7 @@ async fn tombstoned_content_is_refused_before_the_store() {
     let key = env.submission_id.to_string();
     seed_redaction_tombstone(&backend, &tenant, &env.privacy.redaction_hash).await;
 
-    let result = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
         .await
         .unwrap();
     assert!(matches!(result, PipelineReceiptResult::Tombstoned));
@@ -2807,8 +2819,7 @@ async fn quota_is_counted_before_the_store_under_concurrency() {
             let env = envelope(uuid::Uuid::new_v4()).await;
             let raw = serde_json::to_vec(&env).unwrap();
             let key = env.submission_id.to_string();
-            service
-                .submit(receipt(&tenant, &key, &raw, &env, limits))
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, limits))
                 .await
                 .unwrap()
         }));
@@ -2844,13 +2855,330 @@ async fn pool_size_one_receipt_does_not_nest_checkouts() {
     let key = env.submission_id.to_string();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        service.submit(receipt("pool-one", &key, &raw, &env, NO_LIMITS)),
+        submit_registered(&service, receipt("pool-one", &key, &raw, &env, NO_LIMITS)),
     )
     .await
     .expect("a receipt with one pool connection must not wait on itself");
     assert!(matches!(
         result.unwrap(),
         PipelineReceiptResult::Created(_) | PipelineReceiptResult::Replayed(_)
+    ));
+}
+
+/// A tenant `register_default_bundle` has never touched has no active
+/// bundle; calling it once registers the service's default package and
+/// activates it, so the tenant is ready for its first receipt without
+/// `submit` having to do any of that work itself.
+#[tokio::test]
+async fn register_default_bundle_activates_it_for_a_fresh_tenant() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) =
+        test_service(backend, artifact_store(&dir), minimal_config(false), None).await;
+    let tenant = format!("register-default-{}", uuid::Uuid::new_v4());
+
+    assert!(
+        service
+            .store()
+            .active_bundle_id(&tenant)
+            .await
+            .unwrap()
+            .is_none(),
+        "a fresh tenant has no active bundle before registration"
+    );
+
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register and activate the default bundle");
+
+    let active = service
+        .store()
+        .active_bundle_id(&tenant)
+        .await
+        .unwrap()
+        .expect("the tenant has an active bundle after registration");
+    assert_eq!(active, service.bundle_id());
+
+    // Idempotent: calling it again for a tenant that already has an active
+    // bundle changes nothing and still succeeds.
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register_default_bundle is idempotent");
+    assert_eq!(
+        service.store().active_bundle_id(&tenant).await.unwrap(),
+        Some(service.bundle_id().to_string())
+    );
+}
+
+/// `submit` never asks the bundle registry to register anything -- that is
+/// startup's job now (`register_default_bundle`), called once per rollout
+/// tenant before any receipt. Proven here by putting the registry into a
+/// state where registering this service's own default bundle for the
+/// tenant would be refused, then showing `submit` still succeeds because it
+/// never makes that call.
+#[tokio::test]
+async fn submit_does_not_register_the_bundle_registry() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("submit-no-register-{}", uuid::Uuid::new_v4());
+    let scorer = ReferencePerplexityScorer::new();
+    let embedder = ReferenceEmbedder::new();
+
+    // The bundle already active for this tenant -- standing in for what
+    // ingest startup registers before any receipt.
+    let active_package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: false,
+            variant: None,
+        },
+        &scorer,
+        &embedder,
+    )
+    .expect("build the active package");
+    store
+        .register_bundle(&tenant, &active_package)
+        .await
+        .expect("register the active package");
+    store
+        .activate_bundle_if_none(&tenant, &active_package.bundle_id)
+        .await
+        .expect("activate the active package");
+
+    // A service whose own default bundle names the same instrument with a
+    // different descriptor: the registry refuses to register this one for a
+    // tenant that already has the first descriptor on file.
+    let mut conflicting_descriptor = storage_rebate_descriptor();
+    conflicting_descriptor.decimals = 3;
+    let conflicting_config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: "storage_rebate".into(),
+            atomic_units: AtomicUnits::from_raw(5),
+            descriptor: conflicting_descriptor,
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (conflicting_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        conflicting_config.clone(),
+        None,
+    )
+    .await;
+
+    // Confirm the registry really would refuse this service's own bundle
+    // for the tenant right now, so the receipt below proves something.
+    let conflicting_package =
+        MinimalPolicyBundle::minimal_package(&conflicting_config, &scorer, &embedder)
+            .expect("build the conflicting package");
+    let registration_error = store
+        .register_bundle(&tenant, &conflicting_package)
+        .await
+        .expect_err("the registry refuses a descriptor conflict for this tenant");
+    assert!(
+        registration_error
+            .to_string()
+            .contains("bundle_instrument_conflict")
+    );
+
+    // A receipt against the conflicting service still succeeds: `submit`
+    // never asks the registry to register its own bundle, so a tenant whose
+    // registry state would refuse it is unaffected.
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let result = conflicting_service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect("submit succeeds without touching the bundle registry");
+    assert!(matches!(result, PipelineReceiptResult::Created(_)));
+}
+
+/// A store whose `publish_serialized_json` blocks the first call it
+/// receives until the test releases it; every other call, and every call
+/// after the first, goes straight to the real store underneath. Lets a test
+/// prove nothing is held across a receipt's object write: if the tenant
+/// quota lock were still held there, a second receipt for the same tenant
+/// could never pass its own staging transaction while the first one's write
+/// is still blocked.
+struct BlockFirstPublishArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    should_block: AtomicBool,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl TraceArtifactStore for BlockFirstPublishArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        if self.should_block.swap(false, Ordering::SeqCst) {
+            let receiver = self
+                .release
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the blocked call fires at most once");
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("the test released the blocked write within the bound");
+        }
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_receipt_does_not_wait_on_the_firsts_blocked_object_write() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(BlockFirstPublishArtifactStore {
+        inner: artifact_store(&dir),
+        should_block: AtomicBool::new(true),
+        release: std::sync::Mutex::new(Some(receiver)),
+    });
+    let (service, _, _) = test_service(backend.clone(), store, minimal_config(false), None).await;
+    let tenant = format!("quota-lock-write-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+
+    let env_a = envelope(uuid::Uuid::new_v4()).await;
+    let raw_a = serde_json::to_vec(&env_a).unwrap();
+    let key_a = env_a.submission_id.to_string();
+    let service_a = service.clone();
+    let tenant_a = tenant.clone();
+    let receipt_a = tokio::spawn(async move {
+        service_a
+            .submit(receipt(&tenant_a, &key_a, &raw_a, &env_a, NO_LIMITS))
+            .await
+    });
+
+    // Receipt A's staging transaction always runs, and commits, before the
+    // object write it is now blocked in -- wait for its `staged` row rather
+    // than guessing at a sleep.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if !receipt_artifact_rows(&backend, &tenant).await.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receipt A's staging transaction never committed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Receipt B, same tenant, a different key: if the quota lock were still
+    // held while A's write is blocked, B's own staging transaction (which
+    // takes the same lock) would hang here too. Bound the wait so a
+    // regression fails the test instead of hanging it.
+    let env_b = envelope(uuid::Uuid::new_v4()).await;
+    let raw_b = serde_json::to_vec(&env_b).unwrap();
+    let key_b = env_b.submission_id.to_string();
+    let result_b = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.submit(receipt(&tenant, &key_b, &raw_b, &env_b, NO_LIMITS)),
+    )
+    .await
+    .expect("receipt B must not wait on receipt A's blocked object write");
+    assert!(matches!(
+        result_b.unwrap(),
+        PipelineReceiptResult::Created(_)
+    ));
+
+    // Release A and confirm it still completes.
+    sender.send(()).unwrap();
+    let result_a = tokio::time::timeout(std::time::Duration::from_secs(10), receipt_a)
+        .await
+        .expect("receipt A must finish once released")
+        .expect("receipt A's task did not panic");
+    assert!(matches!(
+        result_a.unwrap(),
+        PipelineReceiptResult::Created(_)
     ));
 }
 
@@ -2973,8 +3301,7 @@ async fn a_receipt_failing_after_the_write_leaves_a_staged_row_the_sweeper_remov
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
 
-    let error = crashing
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+    let error = submit_registered(&crashing, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
         .await
         .expect_err("the receipt fails after its object write");
     assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
@@ -3036,14 +3363,13 @@ async fn the_sweeper_keeps_committed_receipts_and_staged_rows_not_yet_due() {
         max_per_principal_per_hour: 0,
     };
 
-    crashing
-        .submit(receipt(&tenant, &key, &raw, &env, one_per_hour))
+    submit_registered(&crashing, receipt(&tenant, &key, &raw, &env, one_per_hour))
         .await
         .expect_err("the first attempt fails after its object write");
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, one_per_hour))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, one_per_hour))
+            .await
+            .unwrap()
     else {
         panic!("the retry of the same key is not refused by its own count")
     };
@@ -3235,8 +3561,7 @@ async fn concurrent_receipts_for_one_key_commit_one_object() {
         let raw = raw.clone();
         let key = key.clone();
         tasks.push(tokio::spawn(async move {
-            service
-                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
                 .await
                 .unwrap()
         }));
@@ -3344,8 +3669,7 @@ async fn a_tombstone_during_the_write_refuses_the_commit_and_deletes_the_object(
     )
     .await;
 
-    let result = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
         .await
         .unwrap();
     assert!(matches!(result, PipelineReceiptResult::Tombstoned));
@@ -3412,8 +3736,7 @@ async fn an_attempt_whose_row_is_due_does_not_commit() {
     )
     .await;
 
-    let error = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+    let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
         .await
         .expect_err("an attempt whose row is due must not commit");
     assert_eq!(error.to_string(), "receipt_staging_missing");
@@ -3452,16 +3775,12 @@ async fn refused_receipts_do_not_prepare_an_object() {
     let first_raw = serde_json::to_vec(&first).unwrap();
     let first_key = first.submission_id.to_string();
     assert!(matches!(
-        service
-            .submit(receipt(
-                &tenant,
-                &first_key,
-                &first_raw,
-                &first,
-                one_per_hour
-            ))
-            .await
-            .unwrap(),
+        submit_registered(
+            &service,
+            receipt(&tenant, &first_key, &first_raw, &first, one_per_hour)
+        )
+        .await
+        .unwrap(),
         PipelineReceiptResult::Created(_)
     ));
     assert_eq!(store.prepares.load(Ordering::SeqCst), 1);
@@ -3470,16 +3789,12 @@ async fn refused_receipts_do_not_prepare_an_object() {
     let second_raw = serde_json::to_vec(&second).unwrap();
     let second_key = second.submission_id.to_string();
     assert!(matches!(
-        service
-            .submit(receipt(
-                &tenant,
-                &second_key,
-                &second_raw,
-                &second,
-                one_per_hour
-            ))
-            .await
-            .unwrap(),
+        submit_registered(
+            &service,
+            receipt(&tenant, &second_key, &second_raw, &second, one_per_hour)
+        )
+        .await
+        .unwrap(),
         PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant)
     ));
     assert_eq!(
@@ -3489,25 +3804,23 @@ async fn refused_receipts_do_not_prepare_an_object() {
     );
 
     assert!(matches!(
-        service
-            .submit(receipt(
-                &tenant,
-                &first_key,
-                &first_raw,
-                &first,
-                one_per_hour
-            ))
-            .await
-            .unwrap(),
+        submit_registered(
+            &service,
+            receipt(&tenant, &first_key, &first_raw, &first, one_per_hour)
+        )
+        .await
+        .unwrap(),
         PipelineReceiptResult::Replayed(_)
     ));
     let mut changed = first_raw.clone();
     changed.push(b' ');
     assert!(matches!(
-        service
-            .submit(receipt(&tenant, &first_key, &changed, &first, one_per_hour))
-            .await
-            .unwrap(),
+        submit_registered(
+            &service,
+            receipt(&tenant, &first_key, &changed, &first, one_per_hour)
+        )
+        .await
+        .unwrap(),
         PipelineReceiptResult::ContentConflict
     ));
     assert_eq!(
@@ -3522,16 +3835,12 @@ async fn refused_receipts_do_not_prepare_an_object() {
     let third_key = third.submission_id.to_string();
     seed_redaction_tombstone(&backend, &tombstone_tenant, &third.privacy.redaction_hash).await;
     assert!(matches!(
-        service
-            .submit(receipt(
-                &tombstone_tenant,
-                &third_key,
-                &third_raw,
-                &third,
-                NO_LIMITS
-            ))
-            .await
-            .unwrap(),
+        submit_registered(
+            &service,
+            receipt(&tombstone_tenant, &third_key, &third_raw, &third, NO_LIMITS)
+        )
+        .await
+        .unwrap(),
         PipelineReceiptResult::Tombstoned
     ));
     assert_eq!(
@@ -3579,10 +3888,10 @@ async fn review_commits_approved_revision_provenance_and_transition_together() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -3668,10 +3977,10 @@ async fn review_crash_after_artifact_storage_reuses_one_revision() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -3775,10 +4084,10 @@ async fn a_stale_worker_cannot_overwrite_committed_artifacts() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -3893,10 +4202,10 @@ async fn score_commit_seeds_one_operation_per_award_and_keeps_every_chunk() {
     let env = large_envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -4026,10 +4335,10 @@ async fn empty_awards_still_continue_to_settle() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -4078,10 +4387,10 @@ async fn score_crash_after_command_storage_keeps_one_command() {
     let env = large_envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -4155,10 +4464,10 @@ async fn run_to_settle_ready(
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -4467,10 +4776,10 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = full
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&full, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -5109,10 +5418,10 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
     let env = envelope(submission_id).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -5185,10 +5494,10 @@ async fn withdrawal_before_review_claim_fails_closed_on_the_first_pass() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -6227,10 +6536,10 @@ async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award(
     let env = envelope(submission_id).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -6501,10 +6810,10 @@ async fn activation_does_not_rebind_an_existing_run() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -6589,17 +6898,12 @@ async fn activation_does_not_rebind_an_existing_run() {
     let env_second = envelope(uuid::Uuid::new_v4()).await;
     let raw_second = serde_json::to_vec(&env_second).unwrap();
     let key_second = env_second.submission_id.to_string();
-    let PipelineReceiptResult::Created(created_second) = service
-        .submit(receipt(
-            &tenant,
-            &key_second,
-            &raw_second,
-            &env_second,
-            NO_LIMITS,
-        ))
-        .await
-        .unwrap()
-    else {
+    let PipelineReceiptResult::Created(created_second) = submit_registered(
+        &service,
+        receipt(&tenant, &key_second, &raw_second, &env_second, NO_LIMITS),
+    )
+    .await
+    .unwrap() else {
         panic!("second receipt creates a run")
     };
     assert_eq!(created_second.bundle_id, package_b.bundle_id);
@@ -6640,10 +6944,10 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service_one
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service_one, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -6715,10 +7019,10 @@ async fn transient_policy_errors_do_not_exhaust_the_trace() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -6804,10 +7108,10 @@ async fn a_tampered_stored_package_fails_closed() {
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) = service
-        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-        .await
-        .unwrap()
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
     else {
         panic!("receipt creates a run")
     };
@@ -6859,17 +7163,18 @@ async fn a_tampered_stored_package_fails_closed() {
     let manifest_env = envelope(uuid::Uuid::new_v4()).await;
     let manifest_raw = serde_json::to_vec(&manifest_env).unwrap();
     let manifest_key = manifest_env.submission_id.to_string();
-    let PipelineReceiptResult::Created(manifest_created) = manifest_service
-        .submit(receipt(
+    let PipelineReceiptResult::Created(manifest_created) = submit_registered(
+        &manifest_service,
+        receipt(
             &manifest_tenant,
             &manifest_key,
             &manifest_raw,
             &manifest_env,
             NO_LIMITS,
-        ))
-        .await
-        .unwrap()
-    else {
+        ),
+    )
+    .await
+    .unwrap() else {
         panic!("receipt creates a run")
     };
 
@@ -6996,9 +7301,8 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
         let key = env.submission_id.to_string();
 
         let run_id = if point == PipelineCrashPoint::AfterArtifactStorage {
-            let crashed = service_a
-                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                .await;
+            let crashed =
+                submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS)).await;
             let error =
                 crashed.expect_err("service A's receipt must crash at AfterArtifactStorage");
             assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
@@ -7008,19 +7312,19 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
             // the store's point of view, not a claim resume -- resubmit the
             // same bytes. The crashed attempt's object stays staged for the
             // sweeper.
-            let PipelineReceiptResult::Created(created) = service_b
-                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                .await
-                .unwrap()
+            let PipelineReceiptResult::Created(created) =
+                submit_registered(&service_b, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                    .await
+                    .unwrap()
             else {
                 panic!("resubmission after the crash must create the run (point {point:?})")
             };
             created.run_id
         } else {
-            let PipelineReceiptResult::Created(created) = service_a
-                .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-                .await
-                .unwrap()
+            let PipelineReceiptResult::Created(created) =
+                submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                    .await
+                    .unwrap()
             else {
                 panic!("receipt creates a run (point {point:?})")
             };
