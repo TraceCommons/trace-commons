@@ -211,11 +211,10 @@ pub const ANCHOR_NAMESPACES: [&str; 2] = ["near-", "nearai-"];
 /// passes through legacy admission. Shared so the server's check and the
 /// client's expectation of it are one rule.
 ///
-/// Caveat: when a server enables account admission
-/// (`TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`), a tenant outside these
-/// namespaces is refused with `account_identity_unlinked` instead of taking
-/// the invite-free path. That switch is global, default-off, and refuses to
-/// start while unlinked identities remain.
+/// Account admission (`TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`) governs only
+/// these namespaces: since V81 a tenant outside them keeps the path it had
+/// with the switch off, linked to a NEAR account or not. The server's account
+/// status route still answers such a tenant with `account_identity_unlinked`.
 pub fn is_anchored_tenant(tenant_id: &str) -> bool {
     ANCHOR_NAMESPACES
         .iter()
