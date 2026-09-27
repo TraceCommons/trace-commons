@@ -3079,6 +3079,45 @@ pub unsafe extern "C" fn tc_grant_void_notice(void_json: *const c_char) -> *mut 
     })
 }
 
+/// The notice for approved sessions held because the privacy witness is
+/// busy, from `status`'s `witness_capacity` object, passed as the JSON the
+/// daemon sent.
+///
+/// Returns an owned JSON object whose keys are `WitnessCapacityCopy`'s
+/// fields -- `title`, `body` (counted, and agreeing in number), and
+/// `next_check`, the label a shell puts beside `next_retry_at` rendered in
+/// local time -- free it with [`tc_string_free`].
+///
+/// NULL when nothing is waiting (`waiting_sessions` absent, not a
+/// non-negative integer, or zero), for a NULL, non-UTF-8 or unparseable
+/// argument, and on a caught panic: a shell shows nothing then, and never
+/// writes its own sentence.
+///
+/// # Safety
+/// `capacity_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_capacity_notice(capacity_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if capacity_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(capacity_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) =
+            trace_commons_contributor::consent_copy::witness_capacity_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// The sentence for one `private_inference_state` label.
 ///
 /// `state` is the `state` field of `get_settings`/`status`'s
