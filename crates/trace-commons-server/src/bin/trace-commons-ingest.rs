@@ -13505,11 +13505,21 @@ async fn submit_trace_handler(
                     state.near_settlement_mode,
                     gate_decision.as_ref(),
                 );
-                append_audit_event(
-                    &state.root,
-                    tenant.tenant_id(),
+                // Mirrored like every other audit event: a file-only event
+                // would advance the file chain past the DB's, and the next
+                // mirrored append would be refused as stale.
+                append_audit_event_mirrored(
+                    state.as_ref(),
+                    tenant.auth(),
                     tenant.idempotent_submit_audit_event(envelope.submission_id),
+                    AuditRowMirror {
+                        action: StorageTraceAuditAction::Submit,
+                        metadata: StorageTraceAuditSafeMetadata::Empty,
+                        object_ref_id: None,
+                    },
+                    "idempotent submit audit event",
                 )
+                .await
                 .map_err(internal_error)?;
                 return Ok(Json(receipt));
             }
@@ -13712,11 +13722,16 @@ async fn submit_trace_handler(
         } else {
             SubmissionMirrorKind::Submission
         };
-        let audit_event = if remediating_prior.is_some() {
+        let mut audit_event = if remediating_prior.is_some() {
             tenant.quarantine_remediated_audit_event(&record)
         } else {
             tenant.submitted_audit_event(&record)
         };
+        audit_event.decision_inputs_hash = Some(derived_record.canonical_summary_hash.clone());
+        // The file audit log is canonical; the DB submit row mirrors this event
+        // (same id, same chain fields), appended once both submission writes
+        // below are done.
+        let audit_row = submission_audit_row_mirror(&record).map_err(internal_error)?;
         if state.require_db_mirror_writes || state.account_admission.is_some() {
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
@@ -13743,13 +13758,9 @@ async fn submit_trace_handler(
                 .map_err(internal_error)?;
             write_submission_record(&state.root, &record).map_err(internal_error)?;
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
-                .map_err(internal_error)?;
         } else {
             write_submission_record(&state.root, &record).map_err(internal_error)?;
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
-                .map_err(internal_error)?;
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
                 tenant.auth(),
@@ -13772,6 +13783,15 @@ async fn submit_trace_handler(
             enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
                 .map_err(internal_error)?;
         }
+        append_audit_event_mirrored(
+            state.as_ref(),
+            tenant.auth(),
+            audit_event,
+            audit_row,
+            "submission audit event",
+        )
+        .await
+        .map_err(internal_error)?;
 
         if let Some((account_id, digest)) = source_claim {
             let db = state
@@ -13973,21 +13993,23 @@ async fn revoke_submission(
     });
     let audit_event = tenant.revoked_audit_event(submission_id, &revocation_reason);
     let audit_metadata = trace_revocation_audit_metadata(&revocation_reason);
+    // The DB audit rows for a revocation are the file log's own events --
+    // `revoked`, then `revocation_artifact_invalidation` when anything was
+    // invalidated -- mirrored through `append_audit_event_mirrored`. The
+    // store writes no audit rows of its own for this change.
+    let mirror_input = || TraceRevocationDbMirrorInput {
+        tenant: tenant.auth(),
+        submission_id,
+        record: mirrored_record.as_ref(),
+        db_record: db_record.as_ref(),
+        revocation_reason: &revocation_reason,
+        retention_ledger: None,
+        prepared_tombstone: Some(&tombstone),
+    };
 
+    let mut invalidation_counts = BTreeMap::new();
     if state.require_db_mirror_writes {
-        let mirror_result = mirror_revocation_to_db(
-            state,
-            TraceRevocationDbMirrorInput {
-                tenant: tenant.auth(),
-                submission_id,
-                record: mirrored_record.as_ref(),
-                db_record: db_record.as_ref(),
-                revocation_reason: &revocation_reason,
-                retention_ledger: None,
-                prepared_tombstone: Some(&tombstone),
-            },
-        )
-        .await;
+        let mirror_result = mirror_revocation_to_db_for_file_audit(state, mirror_input()).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -13995,25 +14017,8 @@ async fn revoke_submission(
                 "Trace Commons DB dual-write revocation mirror failed"
             );
         }
+        let mirror_result = mirror_result.map(|counts| invalidation_counts = counts);
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
-            .map_err(internal_error)?;
-
-        let audit_mirror_result = mirror_audit_event_to_db(
-            state,
-            tenant.auth(),
-            &audit_event,
-            StorageTraceAuditAction::Revoke,
-            audit_metadata.clone(),
-        )
-        .await;
-        if let Err(error) = &audit_mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                %submission_id,
-                "Trace Commons DB dual-write revocation audit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "revocation audit event", audit_mirror_result)
             .map_err(internal_error)?;
     }
 
@@ -14043,31 +14048,21 @@ async fn revoke_submission(
     .await
     .map_err(internal_error)?;
 
-    if state.require_db_mirror_writes {
-        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
-    } else {
-        append_audit_event_with_db_mirror(
-            state,
-            tenant.auth(),
-            audit_event,
-            StorageTraceAuditAction::Revoke,
-            audit_metadata,
-        )
-        .await
-        .map_err(internal_error)?;
-        let mirror_result = mirror_revocation_to_db(
-            state,
-            TraceRevocationDbMirrorInput {
-                tenant: tenant.auth(),
-                submission_id,
-                record: mirrored_record.as_ref(),
-                db_record: db_record.as_ref(),
-                revocation_reason: &revocation_reason,
-                retention_ledger: None,
-                prepared_tombstone: Some(&tombstone),
-            },
-        )
-        .await;
+    append_audit_event_mirrored(
+        state,
+        tenant.auth(),
+        audit_event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Revoke,
+            metadata: audit_metadata,
+            object_ref_id: None,
+        },
+        "revocation audit event",
+    )
+    .await
+    .map_err(internal_error)?;
+    if !state.require_db_mirror_writes {
+        let mirror_result = mirror_revocation_to_db_for_file_audit(state, mirror_input()).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -14075,8 +14070,35 @@ async fn revoke_submission(
                 "Trace Commons DB dual-write revocation mirror failed"
             );
         }
+        let mirror_result = mirror_result.map(|counts| invalidation_counts = counts);
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+    if !invalidation_counts.is_empty() {
+        let purpose_hash = sha256_prefixed(&revocation_reason);
+        append_audit_event_mirrored(
+            state,
+            tenant.auth(),
+            TraceCommonsAuditEvent::revocation_artifact_invalidation(
+                tenant.auth(),
+                submission_id,
+                &purpose_hash,
+                &invalidation_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Revoke,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash),
+                    dry_run: false,
+                    action_counts: invalidation_counts,
+                },
+                object_ref_id: None,
+            },
+            "revocation artifact invalidation audit event",
+        )
+        .await
+        .map_err(internal_error)?;
     }
 
     // Revoked means the content is gone, not merely relabelled. This runs last,
@@ -20767,17 +20789,6 @@ async fn operator_rescrub_quarantined_submission(
 
     write_submission_record(&state.root, &record).map_err(internal_error)?;
     write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-    append_audit_event(
-        &state.root,
-        &auth.tenant_id,
-        TraceCommonsAuditEvent::quarantine_operator_rescrub(
-            auth,
-            submission_id,
-            record.status,
-            Some(reason),
-        ),
-    )
-    .map_err(internal_error)?;
 
     if !state.require_db_mirror_writes {
         let mirror_result =
@@ -20792,6 +20803,27 @@ async fn operator_rescrub_quarantined_submission(
         enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
             .map_err(internal_error)?;
     }
+
+    // Mirrored by its own file event, so a second re-scrub of the same
+    // submission records a row of its own. The operator's reason is free
+    // text; the event carries only its hash, in the file log and so in the
+    // DB row and its canonical payload.
+    let mut audit_event = TraceCommonsAuditEvent::quarantine_operator_rescrub(
+        auth,
+        submission_id,
+        record.status,
+        Some(&trace_free_text_audit_reason(reason)),
+    );
+    audit_event.decision_inputs_hash = Some(derived_record.canonical_summary_hash.clone());
+    append_audit_event_mirrored(
+        state,
+        auth,
+        audit_event,
+        submission_audit_row_mirror(&record).map_err(internal_error)?,
+        "quarantine operator rescrub audit event",
+    )
+    .await
+    .map_err(internal_error)?;
 
     let object_moved = prior_object_key != record.object_key
         || prior_artifact.as_ref().map(|r| &r.object_key)
@@ -20972,10 +21004,22 @@ fn trace_maintenance_audit_metadata_from_reason(
     })
 }
 
+/// File audit kinds besides `submitted` that are mirrored as `Submit` rows.
+const SUBMIT_FAMILY_AUDIT_KINDS: [&str; 3] = [
+    "quarantine_remediated",
+    "quarantine_operator_rescrub",
+    "idempotent_submit",
+];
+
+/// The file audit event recording a contributor revocation's artifact
+/// invalidation counts.
+const REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND: &str = "revocation_artifact_invalidation";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "maintenance"
+        REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND
+            | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
             | "benchmark_registry_outbox_submit"
@@ -20983,6 +21027,12 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | "revocation_propagation"
             | "vector_index"
     )
+}
+
+/// An audit reason for operator- or reviewer-supplied free text: its hash,
+/// never the text.
+fn trace_free_text_audit_reason(reason: &str) -> String {
+    format!("reason_hash={}", sha256_prefixed(reason))
 }
 
 fn trace_maintenance_audit_reason(
@@ -39166,8 +39216,13 @@ async fn apply_review_decision(
     } else {
         None
     };
-    let audit_event =
-        TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason));
+    // The reviewer's reason is free text; the audit event carries its hash.
+    let audit_event = TraceCommonsAuditEvent::review_decision(
+        tenant,
+        submission_id,
+        record.status,
+        Some(&trace_free_text_audit_reason(reason)),
+    );
 
     if state.require_db_mirror_writes || state.account_admission.is_some() {
         let mirror_result = mirror_review_decision_to_db(
@@ -39202,7 +39257,24 @@ async fn apply_review_decision(
     if let Some(derived) = reviewed_derived.as_ref() {
         write_derived_record(&state.root, derived).map_err(internal_error)?;
     }
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    let review_status = storage_corpus_status(record.status);
+    append_audit_event_mirrored(
+        state,
+        tenant,
+        audit_event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Review,
+            metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
+                decision: serde_storage_string(&review_status).map_err(internal_error)?,
+                resulting_status: review_status,
+                reason_code: None,
+            },
+            object_ref_id: None,
+        },
+        "review decision audit event",
+    )
+    .await
+    .map_err(internal_error)?;
 
     if !state.require_db_mirror_writes && state.account_admission.is_none() {
         let mirror_result =
@@ -43019,6 +43091,9 @@ struct TraceRollbackDrillResponse {
     db_audit_event_count: usize,
     file_tombstone_count: usize,
     db_tombstone_count: usize,
+    /// Submit audit rows in the pre-file-event shape, left out of the audit
+    /// gap counts. Not blocking.
+    legacy_submit_audit_row_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -45572,13 +45647,18 @@ async fn run_rollback_drill(
         .iter()
         .map(|record| record.submission_id)
         .collect::<BTreeSet<_>>();
+    // Legacy submit rows and the file events they stand for are counted
+    // apart, not as rollback gaps; see `legacy_submit_audit_rows`.
+    let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
     let file_audit_event_ids = file_audit_events
         .iter()
         .map(|event| event.event_id)
+        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
         .collect::<BTreeSet<_>>();
     let db_audit_event_ids = db_audit_events
         .iter()
         .map(|event| event.audit_event_id)
+        .filter(|event_id| !legacy_submit_audit.db_row_ids.contains(event_id))
         .collect::<BTreeSet<_>>();
     let file_tombstone_submission_ids = file_tombstones
         .iter()
@@ -45651,6 +45731,7 @@ async fn run_rollback_drill(
         db_audit_event_count: db_audit_events.len(),
         file_tombstone_count: file_tombstones.len(),
         db_tombstone_count: db_tombstones.len(),
+        legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
         blocking_gaps,
         recorded_evidence: None,
     };
@@ -57645,6 +57726,15 @@ fn trace_commons_audit_event_from_storage(
         "DB audit event tenant mismatch"
     );
     ensure_db_audit_canonical_projection_matches(&event)?;
+    // A row mirrored from the file log carries the file event as its
+    // canonical payload, and the projection check above has tied every row
+    // column to it: that payload is the event, exactly as the file holds it.
+    if let Some(canonical_event_json) = event.canonical_event_json.as_deref() {
+        let mut canonical: TraceCommonsAuditEvent = serde_json::from_str(canonical_event_json)
+            .context("failed to parse canonical audit payload")?;
+        canonical.event_hash = event.event_hash.clone();
+        return Ok(canonical);
+    }
     let mut kind = storage_audit_event_kind(event.action, &event.metadata);
     if event.action == StorageTraceAuditAction::Read
         && event.submission_id.is_some()
@@ -58022,6 +58112,61 @@ fn collect_db_audit_submission_metadata_mismatches(
         .collect()
 }
 
+/// Submit audit rows written before the DB row mirrored the file event, and
+/// the file events they stood for.
+#[derive(Debug, Default)]
+struct LegacySubmitAuditRows {
+    db_row_ids: BTreeSet<Uuid>,
+    file_event_ids: BTreeSet<Uuid>,
+}
+
+/// Finds submit audit rows in the old shape -- action `submit`, no canonical
+/// payload, and the id `deterministic_trace_uuid_for("submit-audit", ..)`
+/// derives from the submission -- and pairs each with its submission's first
+/// file `submitted` event that has no DB row. The audit table is insert-only,
+/// so these rows stay; reconciliation counts them rather than reporting the
+/// pair as drift.
+fn legacy_submit_audit_rows(
+    file_events: &[TraceCommonsAuditEvent],
+    db_events: &[StorageTraceAuditEventRecord],
+) -> LegacySubmitAuditRows {
+    let db_ids = db_events
+        .iter()
+        .map(|event| event.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let legacy_by_submission = db_events
+        .iter()
+        .filter(|event| {
+            event.action == StorageTraceAuditAction::Submit
+                && event.canonical_event_json.is_none()
+                && event.submission_id.is_some_and(|submission_id| {
+                    event.audit_event_id
+                        == deterministic_trace_uuid_for(
+                            "submit-audit",
+                            &event.tenant_id,
+                            submission_id,
+                        )
+                })
+        })
+        .filter_map(|event| Some((event.submission_id?, event.audit_event_id)))
+        .collect::<BTreeMap<_, _>>();
+    let mut legacy = LegacySubmitAuditRows {
+        db_row_ids: legacy_by_submission.values().copied().collect(),
+        file_event_ids: BTreeSet::new(),
+    };
+    let mut paired = BTreeSet::new();
+    for event in file_events {
+        if event.kind == "submitted"
+            && legacy_by_submission.contains_key(&event.submission_id)
+            && !db_ids.contains(&event.event_id)
+            && paired.insert(event.submission_id)
+        {
+            legacy.file_event_ids.insert(event.event_id);
+        }
+    }
+    legacy
+}
+
 fn collect_db_audit_hash_chain_failures(
     events: &[StorageTraceAuditEventRecord],
 ) -> Vec<TraceDbAuditHashChainFailure> {
@@ -58030,9 +58175,11 @@ fn collect_db_audit_hash_chain_failures(
     for (index, event) in events.iter().enumerate() {
         let row_number = index + 1;
         let Some(event_hash) = event.event_hash.as_deref() else {
-            // Legacy unhashed rows break the verifiable chain; restart from genesis
-            // so the next hashed row must prove its own chain root.
-            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+            // A row without chain fields is not part of the chain: rows the
+            // store writes for itself, and rows mirrored before the DB carried
+            // the file log's chain. The chain is the hashed rows, in order --
+            // the same rule the append-time stale-previous-hash check applies
+            // -- so an unhashed row neither breaks nor restarts it.
             continue;
         };
         let mut event_failures = Vec::new();
@@ -59279,15 +59426,30 @@ enum SubmissionMirrorKind {
     /// Quarantine remediation (#214) replaced the submitted body under the
     /// same submission id. Evidence stored for the prior body of a quarantined
     /// submission is replaced by the offered evidence, or removed when the
-    /// remediation is unwitnessed. The submit audit row gets an id of its own:
-    /// the first landing already holds the submission-derived one, and the
-    /// audit table is append-only.
+    /// remediation is unwitnessed.
     QuarantineRemediation,
     /// Replays an already-stored file submission into the database. It
-    /// appends no submit audit row: the submission was audited when it landed.
+    /// appends no submit audit row here: the backfill's audit pass mirrors the
+    /// file log's own `submitted` event, with its id and hash-chain fields.
     Backfill,
 }
 
+/// The DB row a submit-path audit event mirrors as: `Submit`, with the
+/// submission's status and risk, pointing at its submitted-envelope object ref.
+fn submission_audit_row_mirror(
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<AuditRowMirror> {
+    Ok(AuditRowMirror {
+        action: StorageTraceAuditAction::Submit,
+        metadata: StorageTraceAuditSafeMetadata::Submission {
+            status: storage_corpus_status(record.status),
+            privacy_risk: serde_storage_string(&record.privacy_risk)?,
+        },
+        object_ref_id: Some(deterministic_trace_uuid("submitted-envelope", record)),
+    })
+}
+
+/// Operator re-scrub's submission mirror.
 async fn mirror_submission_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -59308,9 +59470,11 @@ async fn mirror_submission_to_db(
     .await
 }
 
+/// Mirrors a submission's rows. The audit event for the write is appended
+/// separately, through [`append_audit_event_mirrored`].
 async fn mirror_submission_to_db_with_options(
     state: &AppState,
-    tenant: &TenantAuth,
+    _tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
     derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
@@ -59328,20 +59492,6 @@ async fn mirror_submission_to_db_with_options(
         envelope,
     )?;
     let object_ref_id = object_ref.object_ref_id;
-    let submit_audit_event_id = match mirror_kind {
-        SubmissionMirrorKind::Backfill => None,
-        SubmissionMirrorKind::Submission => Some(deterministic_trace_uuid("submit-audit", record)),
-        // Keyed on the freshly stored object, so each remediation of the same
-        // submission records its own row.
-        SubmissionMirrorKind::QuarantineRemediation => {
-            Some(deterministic_trace_uuid_for_external_ref(
-                "submit-audit-remediation",
-                &record.tenant_id,
-                record.submission_id,
-                &content_sha256,
-            ))
-        }
-    };
     let derived_id = deterministic_trace_uuid("derived-precheck", record);
     let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
@@ -59422,31 +59572,6 @@ async fn mirror_submission_to_db_with_options(
     .await
     .context("failed to mirror trace derived metadata")?;
 
-    if let Some(submit_audit_event_id) = submit_audit_event_id {
-        db.append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: submit_audit_event_id,
-            tenant_id: record.tenant_id.clone(),
-            actor_principal_ref: record.auth_principal_ref.clone(),
-            actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
-            action: StorageTraceAuditAction::Submit,
-            reason: Some(format!("auth_method={}", tenant.auth_method.storage_name())),
-            request_id: None,
-            submission_id: Some(record.submission_id),
-            object_ref_id: Some(object_ref_id),
-            export_manifest_id: None,
-            decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Submission {
-                status: storage_corpus_status(record.status),
-                privacy_risk: privacy_risk.clone(),
-            },
-        })
-        .await
-        .context("failed to mirror trace audit event")?;
-    }
-
     if record.status == TraceCorpusStatus::Accepted && record.credit_points_pending > 0.0 {
         db.append_trace_credit_event(StorageTraceCreditEventWrite {
             credit_event_id: deterministic_trace_uuid("accepted-credit", record),
@@ -59479,10 +59604,34 @@ struct TraceRevocationDbMirrorInput<'a> {
     prepared_tombstone: Option<&'a TraceCommonsRevocation>,
 }
 
+/// Mirrors a revocation with the store's own audit rows: a status row and,
+/// when anything was invalidated, an artifact-invalidation row. Neither is in
+/// the file audit log. Used by retention and backfill replays.
 async fn mirror_revocation_to_db(
     state: &AppState,
     input: TraceRevocationDbMirrorInput<'_>,
 ) -> anyhow::Result<()> {
+    mirror_revocation_to_db_inner(state, input, false)
+        .await
+        .map(|_| ())
+}
+
+/// Mirrors a revocation whose audit trail is the file log's own events: no
+/// store audit rows. Returns the artifact-invalidation action counts, empty
+/// when nothing was invalidated, for the caller's
+/// `revocation_artifact_invalidation` file event.
+async fn mirror_revocation_to_db_for_file_audit(
+    state: &AppState,
+    input: TraceRevocationDbMirrorInput<'_>,
+) -> anyhow::Result<BTreeMap<String, u32>> {
+    mirror_revocation_to_db_inner(state, input, true).await
+}
+
+async fn mirror_revocation_to_db_inner(
+    state: &AppState,
+    input: TraceRevocationDbMirrorInput<'_>,
+    file_audit: bool,
+) -> anyhow::Result<BTreeMap<String, u32>> {
     let TraceRevocationDbMirrorInput {
         tenant,
         submission_id,
@@ -59493,7 +59642,7 @@ async fn mirror_revocation_to_db(
         prepared_tombstone,
     } = input;
     let Some(db) = state.db_mirror.as_ref() else {
-        return Ok(());
+        return Ok(BTreeMap::new());
     };
 
     if let Some(record) = record {
@@ -59560,14 +59709,25 @@ async fn mirror_revocation_to_db(
         .context("failed to mirror DB-only trace revocation tombstone")?;
     }
 
-    db.update_trace_submission_status(
-        &tenant.tenant_id,
-        submission_id,
-        StorageTraceCorpusStatus::Revoked,
-        &tenant.principal_ref,
-        Some(revocation_reason),
-    )
-    .await
+    if file_audit {
+        db.update_trace_submission_status_without_audit(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceCorpusStatus::Revoked,
+            &tenant.principal_ref,
+            Some(revocation_reason),
+        )
+        .await
+    } else {
+        db.update_trace_submission_status(
+            &tenant.tenant_id,
+            submission_id,
+            StorageTraceCorpusStatus::Revoked,
+            &tenant.principal_ref,
+            Some(revocation_reason),
+        )
+        .await
+    }
     .context("failed to mirror trace revocation status")?;
 
     let invalidation_counts = db
@@ -59690,6 +59850,11 @@ async fn mirror_revocation_to_db(
                 "records_marked_revoked",
             );
         }
+        if file_audit {
+            // The caller records these in the file log's
+            // `revocation_artifact_invalidation` event, mirrored from there.
+            return Ok(action_counts);
+        }
         db.append_trace_audit_event(StorageTraceAuditEventWrite {
             audit_event_id,
             tenant_id: audit_tenant_id,
@@ -59719,7 +59884,7 @@ async fn mirror_revocation_to_db(
         .context("failed to mirror trace artifact invalidation audit")?;
     }
 
-    Ok(())
+    Ok(BTreeMap::new())
 }
 
 fn trace_revocation_worker_queue_invalidation_targets(
@@ -61586,7 +61751,9 @@ async fn mirror_review_decision_to_db(
     db.append_trace_object_ref(object_ref)
         .await
         .context("failed to mirror reviewed trace object ref")?;
-    db.update_trace_submission_status(
+    // The review's audit row is the file log's `review_decision` event,
+    // mirrored by the caller; the store appends none of its own.
+    db.update_trace_submission_status_without_audit(
         &record.tenant_id,
         record.submission_id,
         storage_corpus_status(record.status),
@@ -65016,7 +65183,27 @@ fn read_revocation(
     Ok(Some(revocation))
 }
 
-fn append_audit_event(
+/// The per-tenant audit append lock. Every production audit append holds it
+/// from computing the event's chain fields until the event is in the file log
+/// and, when mirrored, in the DB: one order decides the chain in both logs.
+fn audit_append_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(audit_events_path(root, tenant_id))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Sets `event`'s chain fields from the file log's latest event. The caller
+/// holds [`audit_append_lock`], so the file's latest event is still the
+/// latest when [`write_chained_audit_event`] appends this one.
+fn chain_audit_event(
     root: &Path,
     tenant_id: &str,
     mut event: TraceCommonsAuditEvent,
@@ -65028,6 +65215,26 @@ fn append_audit_event(
     event.previous_event_hash = Some(previous_event_hash.clone());
     event.event_hash = None;
     event.event_hash = Some(compute_audit_event_hash(&previous_event_hash, &event)?);
+    Ok(event)
+}
+
+/// Appends an event [`chain_audit_event`] chained, verbatim. It refuses when
+/// the file's latest event is no longer the one the event chains from, so a
+/// writer outside the lock cannot fork the file chain.
+fn write_chained_audit_event(
+    root: &Path,
+    tenant_id: &str,
+    event: &TraceCommonsAuditEvent,
+) -> anyhow::Result<()> {
+    ensure_audit_event_tenant(event, tenant_id)?;
+    let path = audit_events_path(root, tenant_id);
+    let latest = latest_audit_event_hash(&path, tenant_id)?
+        .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
+    anyhow::ensure!(
+        event.previous_event_hash.as_deref() == Some(latest.as_str()) && event.event_hash.is_some(),
+        "audit event {} does not chain from the file log's latest event",
+        event.event_id
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create audit dir {}", parent.display()))?;
@@ -65037,9 +65244,105 @@ fn append_audit_event(
         .append(true)
         .open(&path)
         .with_context(|| format!("failed to open audit log {}", path.display()))?;
-    let line = serde_json::to_string(&event).context("failed to serialize audit event")?;
+    let line = serde_json::to_string(event).context("failed to serialize audit event")?;
     writeln!(file, "{line}")
         .with_context(|| format!("failed to append audit log {}", path.display()))?;
+    Ok(())
+}
+
+/// Chains and appends a file-only event: for a deployment without a DB
+/// mirror, and for tests. Production paths go through
+/// [`append_audit_event_mirrored`], which holds the append lock.
+#[cfg(test)]
+fn append_audit_event(
+    root: &Path,
+    tenant_id: &str,
+    event: TraceCommonsAuditEvent,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let event = chain_audit_event(root, tenant_id, event)?;
+    write_chained_audit_event(root, tenant_id, &event)?;
+    Ok(event)
+}
+
+/// The DB row an audit event is mirrored as.
+struct AuditRowMirror {
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+    object_ref_id: Option<Uuid>,
+}
+
+/// Appends `event` to the file audit log and mirrors it to the DB, with its
+/// chain fields computed once, under [`audit_append_lock`], and carried by
+/// both: the file log is canonical and the DB row is an exact mirror of it.
+///
+/// With `require_db_mirror_writes` the DB row is written first and a DB
+/// failure leaves the file untouched; otherwise the file is appended first
+/// and a mirror failure follows `enforce_db_mirror_write_result`. Either way
+/// the lock is held until both are written, so the DB's stale-previous-hash
+/// check and the file chain see the same order.
+async fn append_audit_event_mirrored(
+    state: &AppState,
+    tenant: &TenantAuth,
+    mut event: TraceCommonsAuditEvent,
+    row: AuditRowMirror,
+    label: &'static str,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let lock = audit_append_lock(&state.root, &tenant.tenant_id);
+    let _guard = lock.lock().await;
+    // Stamped under the lock, so the log's time order is its chain order:
+    // readers sort by `created_at`, and an event built before a concurrent
+    // one could otherwise sort ahead of the event it chains from.
+    event.created_at = Utc::now().max(latest_audit_event_created_at(
+        &audit_events_path(&state.root, &tenant.tenant_id),
+        &tenant.tenant_id,
+    )?);
+    let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
+    let AuditRowMirror {
+        action,
+        metadata,
+        object_ref_id,
+    } = row;
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_audit_event_to_db_with_object_ref(
+            state,
+            tenant,
+            &event,
+            action,
+            metadata,
+            object_ref_id,
+        )
+        .await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                event_id = %event.event_id,
+                "Trace Commons DB dual-write audit mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, label, mirror_result)?;
+        write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
+        return Ok(event);
+    }
+
+    write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
+    let mirror_result = mirror_audit_event_to_db_with_object_ref(
+        state,
+        tenant,
+        &event,
+        action,
+        metadata,
+        object_ref_id,
+    )
+    .await;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            event_id = %event.event_id,
+            "Trace Commons DB dual-write audit mirror failed"
+        );
+    }
+    enforce_db_mirror_write_result(state, label, mirror_result)?;
+    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
     Ok(event)
 }
 
@@ -65059,6 +65362,19 @@ fn is_audit_chain_previous_hash(value: &str) -> bool {
 }
 
 fn latest_audit_event_hash(path: &Path, tenant_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(latest_audit_event(path, tenant_id)?.and_then(|event| event.event_hash))
+}
+
+fn latest_audit_event_created_at(path: &Path, tenant_id: &str) -> anyhow::Result<DateTime<Utc>> {
+    Ok(latest_audit_event(path, tenant_id)?
+        .map(|event| event.created_at)
+        .unwrap_or(DateTime::<Utc>::MIN_UTC))
+}
+
+fn latest_audit_event(
+    path: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Option<TraceCommonsAuditEvent>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -65079,7 +65395,7 @@ fn latest_audit_event_hash(path: &Path, tenant_id: &str) -> anyhow::Result<Optio
         )
     })?;
     ensure_audit_event_tenant(&event, tenant_id)?;
-    Ok(event.event_hash)
+    Ok(Some(event))
 }
 
 fn compute_audit_event_hash(
@@ -65119,31 +65435,18 @@ async fn append_audit_event_with_db_mirror(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<()> {
-    if state.require_db_mirror_writes {
-        let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_display_error_hash(error),
-                event_id = %event.event_id,
-                "Trace Commons DB dual-write audit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
-        append_audit_event(&state.root, &tenant.tenant_id, event)?;
-        return Ok(());
-    }
-
-    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
-    let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            event_id = %event.event_id,
-            "Trace Commons DB dual-write audit mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
-    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
+    append_audit_event_mirrored(
+        state,
+        tenant,
+        event,
+        AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+        },
+        "audit event",
+    )
+    .await?;
     Ok(())
 }
 
@@ -65155,9 +65458,8 @@ async fn verify_mirrored_audit_event_after_file_append(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    // Verification only applies when the file append already produced a
-    // canonical hash. The require_db_mirror_writes=true branch writes DB
-    // before file, so event.event_hash may be None there; skip in that case.
+    // Every appended event carries a canonical hash; an event without one was
+    // never chained and has nothing to verify.
     if event.event_hash.is_none() {
         return Ok(());
     }
@@ -65265,47 +65567,18 @@ async fn append_single_trace_content_read_audit_row(
 ) -> anyhow::Result<()> {
     let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
     let metadata = trace_content_read_audit_metadata(surface, purpose);
-    if state.require_db_mirror_writes {
-        let mirror_result = mirror_audit_event_to_db_with_object_ref(
-            state,
-            tenant,
-            &event,
-            StorageTraceAuditAction::Read,
-            metadata,
-            object_ref_id,
-        )
-        .await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_display_error_hash(error),
-                event_id = %event.event_id,
-                "Trace Commons DB dual-write audit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
-        append_audit_event(&state.root, &tenant.tenant_id, event)?;
-        return Ok(());
-    }
-
-    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
-    let mirror_result = mirror_audit_event_to_db_with_object_ref(
+    append_audit_event_mirrored(
         state,
         tenant,
-        &event,
-        StorageTraceAuditAction::Read,
-        metadata,
-        object_ref_id,
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Read,
+            metadata,
+            object_ref_id,
+        },
+        "trace content read audit event",
     )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            event_id = %event.event_id,
-            "Trace Commons DB dual-write audit mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
-    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
+    .await?;
     Ok(())
 }
 
@@ -66905,7 +67178,15 @@ fn verify_db_audit_projection(
             "db row {row_number} event {event_ref}: canonical submission_id mismatch"
         ));
     }
-    if canonical_event.kind != storage_audit_canonical_kind(event) {
+    let projected_kind = storage_audit_canonical_kind(event);
+    // A quarantine remediation re-POST, an operator re-scrub, and an
+    // idempotent retry are mirrored as `Submit` rows, the same row shape as a
+    // first landing; their file events, the canonical payload, keep their own
+    // kinds.
+    let submit_family_row = event.action == StorageTraceAuditAction::Submit
+        && projected_kind == "submitted"
+        && SUBMIT_FAMILY_AUDIT_KINDS.contains(&canonical_event.kind.as_str());
+    if canonical_event.kind != projected_kind && !submit_family_row {
         report.failures.push(format!(
             "db row {row_number} event {event_ref}: canonical kind/action mismatch"
         ));
@@ -67800,7 +68081,10 @@ fn audit_backfill_storage_projection(
     event: &TraceCommonsAuditEvent,
 ) -> (StorageTraceAuditAction, StorageTraceAuditSafeMetadata) {
     let action = match event.kind.as_str() {
-        "submitted" => StorageTraceAuditAction::Submit,
+        "submitted"
+        | "quarantine_remediated"
+        | "quarantine_operator_rescrub"
+        | "idempotent_submit" => StorageTraceAuditAction::Submit,
         "read" | "trace_content_read" => StorageTraceAuditAction::Read,
         "review_decision" | "review_lease" => StorageTraceAuditAction::Review,
         "credit_mutate"
@@ -67809,7 +68093,9 @@ fn audit_backfill_storage_projection(
         | "credit_hold_release"
         | "near_credit_outbox_status" => StorageTraceAuditAction::CreditMutate,
         "benchmark_registry_outbox_status" => StorageTraceAuditAction::BenchmarkConvert,
-        "revoked" | "revocation_propagation" => StorageTraceAuditAction::Revoke,
+        "revoked" | "revocation_propagation" | REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND => {
+            StorageTraceAuditAction::Revoke
+        }
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
         }
@@ -67835,7 +68121,7 @@ fn audit_backfill_storage_projection(
         _ => StorageTraceAuditAction::Read,
     };
     let metadata = match event.kind.as_str() {
-        "submitted" => event
+        "submitted" | "quarantine_remediated" | "quarantine_operator_rescrub" => event
             .status
             .map(|status| StorageTraceAuditSafeMetadata::Submission {
                 status: storage_corpus_status(status),
@@ -67929,6 +68215,7 @@ fn audit_backfill_storage_projection(
         | "benchmark_registry_outbox_submit"
         | "benchmark_registry_outbox_confirm"
         | "revocation_propagation"
+        | REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -67943,8 +68230,10 @@ fn audit_backfill_storage_projection_for_records(
     records_by_submission: &BTreeMap<Uuid, &TraceCommonsSubmissionRecord>,
 ) -> (StorageTraceAuditAction, StorageTraceAuditSafeMetadata) {
     let (action, metadata) = audit_backfill_storage_projection(event);
-    if event.kind == "submitted"
-        && let Some(record) = records_by_submission.get(&event.submission_id)
+    if matches!(
+        event.kind.as_str(),
+        "submitted" | "quarantine_remediated" | "quarantine_operator_rescrub"
+    ) && let Some(record) = records_by_submission.get(&event.submission_id)
     {
         return (
             action,
@@ -69157,8 +69446,13 @@ async fn reconcile_db_mirror(
         .filter(|event| event.canonical_event_json.is_some())
         .map(|event| event.audit_event_id)
         .collect::<BTreeSet<_>>();
+    // Submit rows mirrored before the DB row took the file event's id stay (the
+    // table is insert-only). Each is counted as legacy, with its submission's
+    // file `submitted` event, and neither is reported as drift.
+    let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
     let missing_audit_event_ids_in_db = file_audit_event_ids
         .difference(&db_audit_event_ids)
+        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
         .copied()
         .collect::<Vec<_>>();
     let missing_audit_event_ids_in_files = db_file_projected_audit_event_ids
@@ -69623,6 +69917,7 @@ async fn reconcile_db_mirror(
         db_audit_event_count: db_audit_events.len(),
         missing_audit_event_ids_in_db,
         missing_audit_event_ids_in_files,
+        legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
         db_audit_hash_chain_failures,
         db_audit_canonical_projection_failures,
         db_audit_submission_metadata_mismatches,
@@ -72423,6 +72718,9 @@ struct TraceDbReconciliationReport {
     db_audit_event_count: usize,
     missing_audit_event_ids_in_db: Vec<Uuid>,
     missing_audit_event_ids_in_files: Vec<Uuid>,
+    /// Submit audit rows in the pre-file-event shape: an id derived from the
+    /// submission, no canonical payload. Reported, not blocking.
+    legacy_submit_audit_row_count: usize,
     db_audit_hash_chain_failures: Vec<TraceDbAuditHashChainFailure>,
     db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
     db_audit_submission_metadata_mismatches: Vec<TraceDbAuditSubmissionMetadataMismatch>,
@@ -73332,6 +73630,36 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(reason.to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// What a contributor revocation invalidated and enqueued, by count.
+    /// Hash-only: the revocation reason is carried as `purpose_hash`.
+    fn revocation_artifact_invalidation(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        purpose_hash: &str,
+        action_counts: &BTreeMap<String, u32>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(purpose_hash),
+                false,
+                action_counts,
+            )),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
