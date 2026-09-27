@@ -167,16 +167,29 @@ CREATE TABLE pipeline_run_settlements (
     FOREIGN KEY (tenant_id, run_id)
         REFERENCES pipeline_runs (tenant_id, run_id)
         ON DELETE CASCADE,
+    -- `NO ACTION`, not `RESTRICT`, on both -- PostgreSQL never defers a
+    -- `RESTRICT` action no matter what the `DEFERRABLE` clause says;
+    -- `NO ACTION` is the same check, deferrable. Both deferred to end of
+    -- transaction because `trace_credit_ledger` cascades straight from
+    -- `trace_submissions`, and `trace_credit_settlement_batches` straight
+    -- from `trace_tenants` -- both siblings of this row's own cascade
+    -- (through `pipeline_runs`) up the same parent chain, so a submission
+    -- or tenant delete can reach either branch first. By commit time this
+    -- leg's own row is already gone whenever the whole submission (or
+    -- tenant) is going away together; a ledger row or batch deleted on its
+    -- own, with a leg still referencing it, is still refused.
     FOREIGN KEY (tenant_id, credit_event_id, instrument_id)
         REFERENCES trace_credit_ledger (
             tenant_id, credit_event_id, instrument_id
         )
-        ON DELETE RESTRICT,
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (tenant_id, settlement_batch_id, instrument_id)
         REFERENCES trace_credit_settlement_batches (
             tenant_id, settlement_batch_id, instrument_id
         )
-        ON DELETE RESTRICT,
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
     -- NUMERIC(39,0) also holds values above u128::MAX, which AtomicUnits
     -- refuses to load; a row above it could be stored and never settled.
     CONSTRAINT pipeline_run_settlements_atomic_units_bound CHECK (

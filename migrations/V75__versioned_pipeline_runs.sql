@@ -42,9 +42,19 @@ CREATE TABLE pipeline_runs (
     FOREIGN KEY (tenant_id, submission_id)
         REFERENCES trace_submissions (tenant_id, submission_id)
         ON DELETE CASCADE,
+    -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
+    -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
+    -- same check, deferrable. Deferred to end of transaction because
+    -- `trace_object_refs` also cascades straight from `trace_submissions`,
+    -- a sibling of this row's own cascade through the same parent, so a
+    -- submission delete can reach either branch first. By commit time this
+    -- run's own row is already gone whenever the whole submission (or
+    -- tenant) is going away together; a source ref deleted on its own, with
+    -- the run still live, is still refused.
     FOREIGN KEY (tenant_id, submission_id, source_object_ref_id)
         REFERENCES trace_object_refs (tenant_id, submission_id, object_ref_id)
-        ON DELETE RESTRICT
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE INDEX idx_pipeline_runs_work
@@ -91,11 +101,22 @@ CREATE POLICY trace_corpus_tenant_isolation ON phase_outcomes
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
+-- Outcomes are append-only: neither an UPDATE nor a direct DELETE is ever
+-- allowed. A DELETE reaching this trigger from a cascade (the run it
+-- belongs to was deleted, taking the whole submission or tenant with it)
+-- is not a direct delete and is let through, so a tenant or a submission
+-- with pipeline rows can still be removed; `pg_trigger_depth()` is 1 for a
+-- delete issued directly against this table and at least 2 for one that
+-- arrived through a foreign key's `ON DELETE CASCADE`, because that cascade
+-- runs as a trigger of its own around this one.
 CREATE FUNCTION reject_phase_outcome_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'phase outcomes are immutable';
 END;
 $$;

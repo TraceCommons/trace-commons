@@ -10,10 +10,18 @@ ALTER TABLE pipeline_runs
         (approved_object_ref_id IS NULL) = (approved_content_hash IS NULL)
         AND (approved_object_ref_id IS NULL) = (approved_revision_id IS NULL)
     ),
+    -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
+    -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
+    -- same check, deferrable. Deferred for the same reason as `pipeline_runs`'
+    -- other foreign key to this table, `source_object_ref_id` in V75:
+    -- `trace_object_refs` also cascades straight from `trace_submissions`, a
+    -- sibling of this row's own cascade through the same parent, so a
+    -- submission delete can reach either branch first.
     ADD CONSTRAINT pipeline_runs_approved_object_ref_fk
         FOREIGN KEY (tenant_id, submission_id, approved_object_ref_id)
         REFERENCES trace_object_refs (tenant_id, submission_id, object_ref_id)
-        ON DELETE RESTRICT;
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pipeline_admission_usage (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,

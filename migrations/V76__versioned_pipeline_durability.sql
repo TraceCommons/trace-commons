@@ -76,9 +76,19 @@ CREATE TABLE pipeline_active_bundles (
     bundle_id TEXT NOT NULL,
     selected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id),
+    -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
+    -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
+    -- same check, deferrable. Deferred to end of transaction because this
+    -- row also cascades straight from `trace_tenants` on its own
+    -- `tenant_id` column above, a sibling of `pipeline_bundle_packages`'
+    -- cascade through the same parent, so a tenant delete can reach either
+    -- branch first. By commit time this row is already gone whenever the
+    -- whole tenant is going away; a package deleted on its own, while still
+    -- the tenant's active selection, is still refused.
     FOREIGN KEY (tenant_id, bundle_id)
         REFERENCES pipeline_bundle_packages (tenant_id, bundle_id)
-        ON DELETE RESTRICT
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE pipeline_bundle_policy_status (
@@ -93,9 +103,15 @@ CREATE TABLE pipeline_bundle_policy_status (
     ),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, bundle_id, phase),
+    -- Cascade, not restrict: unlike `pipeline_active_bundles` above, this
+    -- table has no foreign key of its own straight to `trace_tenants`, so a
+    -- package's per-phase status rows have no other path out when their
+    -- package goes away. `register_bundle` seeds one row per phase for
+    -- every registered package (never a partial set), so this table only
+    -- ever holds rows a live package owns.
     FOREIGN KEY (tenant_id, bundle_id)
         REFERENCES pipeline_bundle_packages (tenant_id, bundle_id)
-        ON DELETE RESTRICT
+        ON DELETE CASCADE
 );
 
 -- One row per receipt attempt, committed in its own transaction before the
@@ -142,11 +158,20 @@ CREATE INDEX idx_pipeline_receipt_artifacts_due
     ON pipeline_receipt_artifacts (tenant_id, cleanup_after)
     WHERE state = 'staged';
 
+-- Bundle packages are append-only, the same append-only shape as phase
+-- outcomes (`reject_phase_outcome_mutation` above): neither an UPDATE nor a
+-- direct DELETE is ever allowed, but a DELETE arriving through a cascade
+-- (the tenant that owns this package was deleted) is let through so a
+-- tenant with registered bundles can still be removed. See that function's
+-- comment for why `pg_trigger_depth() > 1` is the direct/cascade boundary.
 CREATE FUNCTION reject_pipeline_bundle_package_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'pipeline bundle packages are immutable';
 END;
 $$;

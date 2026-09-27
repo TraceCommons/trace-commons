@@ -8744,3 +8744,141 @@ async fn an_unreconciled_leg_on_a_live_run_is_dispatched_again() {
     assert_eq!(leg_state(&rows, "storage_rebate"), "complete");
     assert_eq!(leg_label(&rows, "storage_rebate"), None);
 }
+
+/// Drives one run through every phase to completion with both a Trace
+/// Credit leg and a second-instrument leg, so its tenant ends up with a
+/// pipeline row of every kind the versioned-pipeline migrations add: a
+/// `pipeline_runs` row and its four `phase_outcomes`, two settled
+/// `pipeline_run_settlements` legs (and the `trace_credit_ledger` /
+/// `trace_credit_settlement_batches` rows the Trace Credit leg creates),
+/// the tenant's `pipeline_bundle_packages` / `pipeline_active_bundles` /
+/// `pipeline_bundle_policy_status` rows (`register_default_bundle`, inside
+/// `submit_registered`), its committed `pipeline_receipt_artifacts` row,
+/// and its `pipeline_admission_usage` row.
+async fn run_with_every_pipeline_row_kind(
+    service: &PipelineService,
+    tenant: &str,
+) -> PipelineRunRecord {
+    let (run, _evidence) = run_to_settle_ready(service, tenant).await;
+    let settled = service
+        .process_run(tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs to completion");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    settled
+}
+
+/// Review minor 3: V75's trigger that rejected every delete on
+/// `phase_outcomes` sat behind `pipeline_runs`' `ON DELETE CASCADE` from
+/// `trace_submissions`, so a submission with pipeline rows could never be
+/// deleted -- the cascade always hit the trigger first. Deleting the
+/// submission that a fully-settled run belongs to must succeed and take
+/// every pipeline row for it along.
+#[tokio::test]
+async fn deleting_a_submission_with_pipeline_rows_succeeds() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("delete-submission-{}", uuid::Uuid::new_v4());
+    let run = run_with_every_pipeline_row_kind(&service, &tenant).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "DELETE FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .expect("a submission with pipeline rows of every kind can be deleted");
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        count_runs(&backend, &tenant).await,
+        0,
+        "the run cascaded away with its submission"
+    );
+}
+
+/// Review minor 3, the tenant-delete half: the same cascade chain runs from
+/// `trace_tenants`, and the tenant also owns `pipeline_bundle_packages` /
+/// `pipeline_active_bundles` / `pipeline_bundle_policy_status` /
+/// `pipeline_admission_usage` rows directly (not through a submission).
+#[tokio::test]
+async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("delete-tenant-{}", uuid::Uuid::new_v4());
+    let _run = run_with_every_pipeline_row_kind(&service, &tenant).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .expect("a tenant with pipeline rows of every kind can be deleted");
+    tx.commit().await.unwrap();
+
+    let mut check_client = backend.trace_pool_for_test().get().await.unwrap();
+    let check_tx = tenant_tx(&mut check_client, &tenant).await;
+    let remaining: i64 = check_tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    check_tx.commit().await.unwrap();
+    assert_eq!(remaining, 0, "the tenant row itself is gone");
+}
+
+/// The append-only property the trigger exists for stays exactly as strict
+/// as before: an outcome cannot be deleted out from under a run that is
+/// still live, only cascaded away with it.
+#[tokio::test]
+async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("outcome-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM phase_outcomes WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect_err("an outcome delete is refused while its run still exists");
+    assert!(
+        db_error_message(&error).contains("phase outcomes are immutable"),
+        "unexpected error: {error:?}"
+    );
+}
