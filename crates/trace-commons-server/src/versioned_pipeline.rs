@@ -3941,10 +3941,8 @@ impl PipelineService {
     ) -> anyhow::Result<T> {
         let outcome = self
             .store
-            .list_outcomes(&run.tenant_id, run.run_id)
+            .outcome_for_phase(&run.tenant_id, run.run_id, phase)
             .await?
-            .into_iter()
-            .find(|outcome| outcome.phase == phase)
             .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
         serde_json::from_value(outcome.decision)
             .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
@@ -5205,7 +5203,7 @@ impl PipelineService {
             }
         }
 
-        self.commit_settle_from_progress(&run, &selection, guard)
+        self.commit_settle_from_progress(&run, &selection, guard, &score_decision)
             .await
     }
 
@@ -5214,16 +5212,15 @@ impl PipelineService {
     /// time this runs, either through completion or through the guard's
     /// forfeiture pass. Builds the final decision from what actually
     /// happened to each leg (amendments-971 A9), never from the selection's
-    /// own proposed operations.
+    /// own proposed operations. `score_decision` is the same value Step 1 of
+    /// `complete_settle_phase` already decoded; this does not re-read it.
     async fn commit_settle_from_progress(
         &self,
         run: &PipelineRunRecord,
         selection: &StoredPhaseResult,
         guard: SubmissionGuard,
+        score_decision: &ScoreDecision,
     ) -> anyhow::Result<PipelineRunRecord> {
-        let score_decision = self
-            .committed_decision::<ScoreDecision>(run, Phase::Score)
-            .await?;
         let stored_decision = serde_json::from_value::<SettleDecision>(selection.decision.clone())
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
         // The committed decision records what actually happened, not what
@@ -5307,7 +5304,7 @@ impl PipelineService {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let final_decision =
-            SettleDecision::new(final_index_membership, &score_decision, operations)?;
+            SettleDecision::new(final_index_membership, score_decision, operations)?;
         let mut evidence = serde_json::from_value::<SettleEvidence>(selection.evidence.clone())
             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
         evidence.index_command_hash = run.index_command_hash.clone();
