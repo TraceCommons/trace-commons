@@ -68,9 +68,11 @@ Before enabling, record read-only counts of legacy invite tenants, wallet
 accounts, NEAR AI accounts, ambiguous links, and unlinked devices. Those counts
 are **unknown** until measured on the target deployment. Verify control of
 both identities before migrating a legacy link; never infer a merge from a
-name or invite. The switch is global and has no supported per-tenant fallback.
-Enable it only after every affected legacy identity has verified linkage or a
-separate reviewed coexistence design is deployed. Verify the client
+name or invite. The switch is global. Since V81 it governs only the
+`near-`/`nearai-` namespaces: legacy `tenant-…` invite identities coexist,
+linked or not, on the path they always used, and pooled tenants never link.
+See [legacy invite migration](./legacy-invite-migration.md) for the link
+endpoint, the pooled-tenant marker, and conflict resolution. Verify the client
 holds/retries safe refusals without disarming
 folders, the Z4 withdrawal/source-session guard and Z5 capacity pacing are
 ready, and the R1–R7 witness and consent copy is approved. This code does not
@@ -79,22 +81,29 @@ prove production admission, scoring, or settlement.
 Cutover readiness is checked at every process start. Ingest refuses to start
 with `account_admission_permissions_or_linkage_not_ready` if its login lacks
 an admission privilege, owns a protected table, is superuser/BYPASSRLS, can
-assume a guard role, or the durable fleet inventory contains an open legacy
-account or an active device without supported, live account linkage. The
+assume a guard role, or the durable fleet inventory contains an ambiguous
+identity. Since V81 that means: an active `near-`/`nearai-` device without
+supported, live account linkage; an active legacy-namespace device that is not
+invite-onboarded; an open legacy account whose tenant is neither pooled nor
+backed by any invite-onboarded device; or an unresolved claim of a non-pooled
+legacy tenant by a second account. Invite-onboarded legacy devices and their
+tenants' accounts, linked or not, and pooled tenants coexist and do not
+block. The
 cross-tenant check is a boolean-only function owned by a NOLOGIN/NOBYPASSRLS
 role with read-only RLS policies; the runtime cannot enumerate identities.
 Static contributor credentials on that replica must also resolve to a live
-account. A legacy namespace request after startup receives the distinct safe
-403 label `account_identity_unlinked`. There is no automatic migration or
-legacy fallback. Closing or revoking old credentials without verified identity
+account. A legacy namespace contribution after startup takes the legacy path, as it
+did with admission off; the account status route still answers such a
+session with the safe 403 label `account_identity_unlinked`. There is no
+automatic migration. Closing or revoking old credentials without verified identity
 migration is not a substitute for the linkage review.
 
 Readiness covers durable accounts/devices and local static contributor tokens;
 it does not attest every replica's external signed-token issuer, invite file,
 or future onboarding configuration. Before activation, operators must inventory
 those sources, prevent new legacy identities, and verify all replicas' settings.
-The switch remains blocked until that inventory is complete and a reviewed
-migration or coexistence implementation handles existing identities.
+The switch remains blocked until that inventory is complete; V81's
+coexistence rules are the reviewed handling of existing invite identities.
 
 Configure offered-evidence verification independently with
 `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_PROVIDER_SIGNERS`,
