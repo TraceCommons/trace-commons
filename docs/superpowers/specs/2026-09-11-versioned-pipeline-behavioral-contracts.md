@@ -616,12 +616,20 @@ and shadow comparison. No active index mutation can occur.
   string: ASCII digits only, with no sign, no leading zero, and no value above
   `u128::MAX`. A JSON number MUST be refused.
 - The award-set identity MUST encode each amount as 16 big-endian bytes.
-- Each award MUST name an instrument that the bound bundle pins. The runner
-  MUST refuse an award for an unpinned instrument before the Score outcome
-  commits.
-- A Score decision MUST be built only through a constructor that takes the
-  bundle manifest and refuses an award for an unpinned instrument. A stored
-  Score decision MUST load without a manifest.
+- Each award MUST name an instrument that the bound bundle pins. Before the
+  Score outcome commits, the runner MUST check the Score decision against the
+  run's bound manifest. The check requires an equal bundle identifier and a
+  pin for every award.
+- A usable Score decision MUST be built only through the constructor that
+  takes the bundle manifest. The constructor MUST refuse an award for an
+  unpinned instrument, and it MUST record the bundle identifier.
+- A stored Score decision MUST load without a manifest, but only as an
+  unverified decision.
+- Settle MUST accept only a Score decision that was checked against the run's
+  bound manifest. The check requires an equal bundle identifier and a pin for
+  every award.
+- The constructor rule gives way at load. The check against the bound
+  manifest restores it.
 - An empty collection MUST remain distinct from an incomplete Score phase.
 - Trace Credit MUST use the `trace_credit` instrument.
 - One Trace Credit MUST equal 1,000,000 microcredits.
@@ -633,7 +641,12 @@ deterministic ordering, duplicate identifiers, maximum values, overflow,
 negative source input, and excess-precision Trace Credit conversion. Load
 amounts above `u64::MAX`, and refuse a signed, zero-padded, or numeric amount.
 Build a Score decision with an award for an unpinned instrument. It must be
-refused.
+refused. Load a stored Score decision without a manifest. It must load only
+as an unverified decision, and a malformed bundle identifier must fail to
+load. Verify a stored decision whose award names an unpinned instrument. It
+must be refused. Check a decision against a bound manifest with another
+bundle identifier, including a decision that a caller-built manifest
+allowed. It must be refused.
 
 ### SCR-004: Score persistence and instrument operations
 

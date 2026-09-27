@@ -698,10 +698,13 @@ impl BundleManifest {
     }
 
     /// Refuses an award set that names an instrument this bundle does not
-    /// pin. `ScoreDecision::for_bundle` applies it, so no Score decision is
-    /// built with an unpinned award. A policy chooses the manifest that it
-    /// passes, so a runner also applies this with the run's bound manifest
-    /// before it commits the Score outcome.
+    /// pin. `ScoreDecision::for_bundle` applies it with the manifest that the
+    /// policy passes. A caller can build that manifest, so this check alone
+    /// does not bind the decision to the run. `ScoreDecision::require_bound`
+    /// applies it with the run's bound manifest, after it compares bundle
+    /// identifiers. The runner calls `require_bound` before the Score outcome
+    /// commits, and `UnverifiedScoreDecision::verify` calls it for a stored
+    /// decision.
     pub fn require_pinned(&self, awards: &InstrumentAwards) -> Result<(), ContractError> {
         if awards
             .iter()
@@ -934,6 +937,8 @@ pub enum ContractError {
     TraceCreditDecimals,
     #[error("an award names an instrument that the bundle does not pin")]
     UnpinnedInstrument,
+    #[error("the Score decision was built under another bundle")]
+    ScoreBundleMismatch,
     #[error("the award does not use the Trace Credit instrument")]
     NotTraceCredit,
     #[error("a Trace Credit award exceeds the credit ledger's signed 64-bit range")]
@@ -971,37 +976,145 @@ pub enum ReviewDecision {
     Rejected { reason: ReasonCode },
 }
 
-/// Score's award set. It has no public field, so a policy builds it only
-/// through `for_bundle`, which refuses an award for an instrument that the
-/// bundle does not pin.
+/// Score's award set and the bundle it was built under. Settle takes only
+/// this type. It has no public field, so a policy builds it only through
+/// `for_bundle`, which refuses an award for an instrument that the manifest
+/// does not pin and records the manifest's bundle identifier.
 ///
 /// ```compile_fail
 /// use trace_commons_gate_api::pipeline::{InstrumentAwards, ScoreDecision};
 ///
 /// let decision = ScoreDecision {
+///     bundle_id: String::new(),
 ///     awards: InstrumentAwards::default(),
 /// };
 /// ```
 ///
-/// Loading a stored decision does not check pins, because a committed Score
-/// outcome is loaded without its manifest. Its awards were checked when it
-/// was built.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// `for_bundle` accepts any manifest that the caller builds, so a built
+/// decision is not yet checked against the run. The runner applies
+/// `require_bound` with the run's bound manifest before the Score outcome
+/// commits.
+///
+/// A stored decision does not load as a `ScoreDecision`. It loads as an
+/// `UnverifiedScoreDecision`, and `UnverifiedScoreDecision::verify` checks it
+/// against the run's bound manifest.
+///
+/// ```compile_fail
+/// use trace_commons_gate_api::pipeline::ScoreDecision;
+///
+/// let stored = format!(r#"{{"bundle_id":"sha256:{}","awards":[]}}"#, "0".repeat(64));
+/// let _ = serde_json::from_str::<ScoreDecision>(&stored);
+/// ```
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ScoreDecision {
+    bundle_id: String,
     awards: InstrumentAwards,
 }
 
 impl ScoreDecision {
     /// Builds Score's decision under a bundle. Every award must name an
-    /// instrument that `manifest` pins.
+    /// instrument that `manifest` pins. The decision records the manifest's
+    /// bundle identifier, so a malformed manifest is refused.
     pub fn for_bundle(
         manifest: &BundleManifest,
         awards: InstrumentAwards,
     ) -> Result<Self, ContractError> {
         manifest.require_pinned(&awards)?;
-        Ok(Self { awards })
+        Ok(Self {
+            bundle_id: manifest.bundle_id()?,
+            awards,
+        })
     }
 
+    /// Refuses this decision unless `bound`, the run's bound manifest, has
+    /// the bundle identifier that the decision records and pins every award.
+    /// The runner applies this before the Score outcome commits.
+    pub fn require_bound(&self, bound: &BundleManifest) -> Result<(), ContractError> {
+        if bound.bundle_id()? != self.bundle_id {
+            return Err(ContractError::ScoreBundleMismatch);
+        }
+        bound.require_pinned(&self.awards)
+    }
+
+    /// The bundle identifier of the manifest that built this decision.
+    pub fn bundle_id(&self) -> &str {
+        &self.bundle_id
+    }
+
+    pub fn awards(&self) -> &InstrumentAwards {
+        &self.awards
+    }
+}
+
+/// A stored Score decision that no bound manifest has checked. A committed
+/// Score outcome loads without its manifest, so it loads as this type.
+/// Loading checks only what needs no manifest: the bundle identifier is a
+/// lowercase SHA-256 reference, and the awards load as `InstrumentAwards`.
+///
+/// A reader can show a stored award with `awards()` without settling it.
+/// The load that does not compile for `ScoreDecision` compiles for this
+/// type:
+///
+/// ```
+/// use trace_commons_gate_api::pipeline::UnverifiedScoreDecision;
+///
+/// let stored = format!(r#"{{"bundle_id":"sha256:{}","awards":[]}}"#, "0".repeat(64));
+/// let _ = serde_json::from_str::<UnverifiedScoreDecision>(&stored);
+/// ```
+///
+/// Settle takes only a `ScoreDecision`. `verify` is the only way to get one
+/// from a stored decision, and it checks the decision against the run's
+/// bound manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "UnverifiedScoreDecisionFields")]
+pub struct UnverifiedScoreDecision {
+    bundle_id: String,
+    awards: InstrumentAwards,
+}
+
+/// Loaded `UnverifiedScoreDecision` fields. Loading checks the form of the
+/// bundle identifier. `verify` checks the rest against the bound manifest.
+#[derive(Deserialize)]
+struct UnverifiedScoreDecisionFields {
+    bundle_id: String,
+    awards: InstrumentAwards,
+}
+
+impl TryFrom<UnverifiedScoreDecisionFields> for UnverifiedScoreDecision {
+    type Error = ContractError;
+
+    fn try_from(fields: UnverifiedScoreDecisionFields) -> Result<Self, Self::Error> {
+        if !is_sha256(&fields.bundle_id) {
+            return Err(ContractError::MalformedHash);
+        }
+        Ok(Self {
+            bundle_id: fields.bundle_id,
+            awards: fields.awards,
+        })
+    }
+}
+
+impl UnverifiedScoreDecision {
+    /// Checks the stored decision against `bound`, the run's bound manifest,
+    /// with `ScoreDecision::require_bound`. It refuses a decision built under
+    /// another bundle and an award for an instrument that `bound` does not
+    /// pin.
+    pub fn verify(self, bound: &BundleManifest) -> Result<ScoreDecision, ContractError> {
+        let decision = ScoreDecision {
+            bundle_id: self.bundle_id,
+            awards: self.awards,
+        };
+        decision.require_bound(bound)?;
+        Ok(decision)
+    }
+
+    /// The bundle identifier that the stored decision records. No manifest
+    /// has checked it.
+    pub fn bundle_id(&self) -> &str {
+        &self.bundle_id
+    }
+
+    /// The stored awards. No manifest has checked them.
     pub fn awards(&self) -> &InstrumentAwards {
         &self.awards
     }
@@ -2229,6 +2342,9 @@ pub struct SettleInput {
     pub trace_id: Uuid,
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
+    /// The committed Score decision. A stored decision reaches Settle only
+    /// through `UnverifiedScoreDecision::verify` with the run's bound
+    /// manifest.
     pub score: ScoreDecision,
     pub score_evidence: ScoreEvidence,
     /// The command stored at Score, loaded and checked against
@@ -2511,9 +2627,7 @@ mod tests {
             IndexMembershipDecision::Exclude {
                 reason: ReasonCode::new("not_selected").unwrap(),
             },
-            &ScoreDecision {
-                awards: awards.clone(),
-            },
+            &score_decision(awards.clone()),
             vec![trace_credit, storage_rebate],
         )
         .unwrap();
@@ -2540,7 +2654,7 @@ mod tests {
                 IndexMembershipDecision::Exclude {
                     reason: ReasonCode::new("not_selected").unwrap(),
                 },
-                &ScoreDecision { awards },
+                &score_decision(awards),
                 vec![missing_operation],
             ),
             Err(ContractError::SettlementOperationMismatch)
@@ -2642,9 +2756,7 @@ mod tests {
         evidence.projection_id = Some("projection-v1".to_string());
         evidence.embedder_model_id = Some("embedder-v1".to_string());
         PhaseResult {
-            decision: ScoreDecision {
-                awards: InstrumentAwards::default(),
-            },
+            decision: score_decision(InstrumentAwards::default()),
             evidence,
             evaluation: ScoreEvaluation {
                 rule_id: "score_rule".to_string(),
@@ -2775,9 +2887,7 @@ mod tests {
                     command_hash: upper.clone(),
                     entry_count: 1,
                 },
-                &ScoreDecision {
-                    awards: InstrumentAwards::default(),
-                },
+                &score_decision(InstrumentAwards::default()),
                 Vec::new(),
             ),
             Err(ContractError::MalformedHash)
@@ -3073,7 +3183,7 @@ mod tests {
             (credit.clone(), other.clone()),
         ] {
             let mut result = score_result(None, false);
-            result.decision.awards = credit.clone();
+            result.decision = score_decision(credit.clone());
             result.evidence.fixed_awards = evidence_awards;
             result.evaluation.awards = evaluation_awards;
             assert_eq!(
@@ -3092,17 +3202,11 @@ mod tests {
         let exclude = IndexMembershipDecision::Exclude {
             reason: ReasonCode::new("not_selected").unwrap(),
         };
-        let score = ScoreDecision { awards: credit };
+        let score = score_decision(credit);
         let decision =
             SettleDecision::new(exclude.clone(), &score, vec![operation.clone()]).unwrap();
         assert_eq!(
-            SettleDecision::new(
-                exclude,
-                &ScoreDecision {
-                    awards: other.clone()
-                },
-                vec![operation]
-            ),
+            SettleDecision::new(exclude, &score_decision(other.clone()), vec![operation]),
             Err(ContractError::SettlementOperationMismatch)
         );
 
@@ -3111,7 +3215,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&decision).unwrap()).unwrap();
         assert_eq!(loaded.matches_score(&score), Ok(()));
         assert_eq!(
-            loaded.matches_score(&ScoreDecision { awards: other }),
+            loaded.matches_score(&score_decision(other)),
             Err(ContractError::SettlementOperationMismatch)
         );
     }
@@ -3279,9 +3383,7 @@ mod tests {
             trace_id: Uuid::nil(),
             registry_revision_id: Uuid::nil(),
             source_content_hash: hash(b"source"),
-            score: ScoreDecision {
-                awards: InstrumentAwards::default(),
-            },
+            score: score_decision(InstrumentAwards::default()),
             score_evidence: score_result(None, false).evidence,
             index_command: Some(command),
         };
@@ -3314,6 +3416,28 @@ mod tests {
             settle: policy("settle"),
             instruments: pinned_instruments(),
         }
+    }
+
+    /// `golden_manifest()` with a pin for `storage_rebate` added. Its bundle
+    /// identifier differs from the golden one.
+    fn manifest_pinning_storage_rebate() -> BundleManifest {
+        let mut manifest = golden_manifest();
+        manifest.instruments.insert(
+            InstrumentId::new("storage_rebate").unwrap(),
+            InstrumentDescriptor {
+                kind: InstrumentKind::CreditAccount,
+                network: "storage_ledger".to_string(),
+                contract: "storage_rebate".to_string(),
+                decimals: 0,
+            },
+        );
+        manifest
+    }
+
+    /// A Score decision built the way a policy builds one, under a manifest
+    /// that pins every instrument the Settle tests award.
+    fn score_decision(awards: InstrumentAwards) -> ScoreDecision {
+        ScoreDecision::for_bundle(&manifest_pinning_storage_rebate(), awards).unwrap()
     }
 
     #[test]
@@ -3463,9 +3587,7 @@ mod tests {
             );
         }
 
-        let score = ScoreDecision {
-            awards: InstrumentAwards::new(vec![award("trace_credit", 3)]).unwrap(),
-        };
+        let score = score_decision(InstrumentAwards::new(vec![award("trace_credit", 3)]).unwrap());
         let wrong_amount = InstrumentSettlement::new(
             InstrumentId::trace_credit(),
             AtomicUnits::from_raw(4),
@@ -3514,7 +3636,7 @@ mod tests {
             IndexMembershipDecision::Exclude {
                 reason: ReasonCode::new("withdrawn").unwrap(),
             },
-            &ScoreDecision { awards },
+            &score_decision(awards),
             vec![forfeited, completed],
         )
         .unwrap();
@@ -4019,6 +4141,7 @@ mod tests {
 
         let decision = ScoreDecision::for_bundle(&manifest, pinned.clone()).unwrap();
         assert_eq!(decision.awards(), &pinned);
+        assert_eq!(decision.bundle_id(), manifest.bundle_id().unwrap());
         assert!(
             ScoreDecision::for_bundle(&manifest, InstrumentAwards::default())
                 .unwrap()
@@ -4026,18 +4149,150 @@ mod tests {
                 .is_empty()
         );
 
-        // A committed decision loads without its manifest.
+        // A malformed caller-built manifest has no bundle identifier to record.
+        let mut malformed = golden_manifest();
+        malformed.format_version = BUNDLE_MANIFEST_FORMAT_VERSION + 1;
+        assert_eq!(
+            ScoreDecision::for_bundle(&malformed, pinned.clone()),
+            Err(ContractError::UnsupportedManifestVersion)
+        );
+
+        // A committed decision records its bundle. It loads without a
+        // manifest, but only as an unverified decision.
         let stored = serde_json::to_value(&decision).unwrap();
         assert_eq!(
             stored,
-            serde_json::json!({"awards": [
-                {"instrument_id": "bat", "atomic_units": "1000000000000000000"},
-                {"instrument_id": "trace_credit", "atomic_units": "3"},
-            ]})
+            serde_json::json!({
+                "bundle_id": manifest.bundle_id().unwrap(),
+                "awards": [
+                    {"instrument_id": "bat", "atomic_units": "1000000000000000000"},
+                    {"instrument_id": "trace_credit", "atomic_units": "3"},
+                ],
+            })
+        );
+        assert!(
+            serde_json::to_string(&decision)
+                .unwrap()
+                .starts_with(r#"{"bundle_id":"sha256:"#)
+        );
+        let loaded = serde_json::from_value::<UnverifiedScoreDecision>(stored).unwrap();
+        assert_eq!(loaded.verify(&manifest), Ok(decision));
+    }
+
+    #[test]
+    fn stored_score_decision_loads_unverified() {
+        use serde_json::{from_value, json, to_value};
+
+        let manifest = golden_manifest();
+        let bundle_id = manifest.bundle_id().unwrap();
+        let awards = InstrumentAwards::new(vec![award("trace_credit", 3)]).unwrap();
+        let stored =
+            to_value(ScoreDecision::for_bundle(&manifest, awards.clone()).unwrap()).unwrap();
+
+        // No manifest is needed to load it or to read its award.
+        let loaded = from_value::<UnverifiedScoreDecision>(stored.clone()).unwrap();
+        assert_eq!(loaded.bundle_id(), bundle_id);
+        assert_eq!(loaded.awards(), &awards);
+        assert_eq!(to_value(&loaded).unwrap(), stored);
+
+        // The bundle identifier must be a lowercase SHA-256 reference.
+        let digest = bundle_id.strip_prefix("sha256:").unwrap();
+        let upper = format!("sha256:{}", digest.to_uppercase());
+        assert_ne!(upper, bundle_id);
+        for malformed in [
+            json!(upper),
+            json!(digest),
+            json!("sha256:short"),
+            json!(""),
+        ] {
+            let mut refused = stored.clone();
+            refused["bundle_id"] = malformed;
+            let error = from_value::<UnverifiedScoreDecision>(refused).unwrap_err();
+            assert_eq!(error.to_string(), ContractError::MalformedHash.to_string());
+        }
+        let mut missing = stored.clone();
+        missing.as_object_mut().unwrap().remove("bundle_id");
+        assert!(from_value::<UnverifiedScoreDecision>(missing).is_err());
+
+        // The awards load as `InstrumentAwards`, so a repeated instrument fails.
+        let mut repeated = stored;
+        repeated["awards"] = json!([
+            {"instrument_id": "trace_credit", "atomic_units": "3"},
+            {"instrument_id": "trace_credit", "atomic_units": "4"},
+        ]);
+        let error = from_value::<UnverifiedScoreDecision>(repeated).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            ContractError::DuplicateInstrumentId.to_string()
+        );
+    }
+
+    #[test]
+    fn stored_score_decision_with_an_unpinned_award_is_refused_at_verify() {
+        let manifest = golden_manifest();
+        // `for_bundle` cannot build this decision under the golden manifest,
+        // but storage can hold it.
+        let stored = serde_json::json!({
+            "bundle_id": manifest.bundle_id().unwrap(),
+            "awards": [{"instrument_id": "storage_rebate", "atomic_units": "7"}],
+        });
+        let loaded = serde_json::from_value::<UnverifiedScoreDecision>(stored).unwrap();
+        assert_eq!(
+            loaded.awards(),
+            &InstrumentAwards::new(vec![award("storage_rebate", 7)]).unwrap()
         );
         assert_eq!(
-            serde_json::from_value::<ScoreDecision>(stored).unwrap(),
-            decision
+            loaded.verify(&manifest),
+            Err(ContractError::UnpinnedInstrument)
+        );
+    }
+
+    #[test]
+    fn score_decision_checked_against_another_bundle_is_refused() {
+        let golden = golden_manifest();
+        // The other manifest pins the same instruments under another bundle.
+        let mut other = golden_manifest();
+        other.score.implementation_id = "trace_commons.score.golden.v2".to_string();
+        assert_eq!(other.instruments, golden.instruments);
+        assert_ne!(other.bundle_id().unwrap(), golden.bundle_id().unwrap());
+
+        let awards = InstrumentAwards::new(vec![award("trace_credit", 3)]).unwrap();
+        let decision = ScoreDecision::for_bundle(&golden, awards).unwrap();
+        assert_eq!(decision.require_bound(&golden), Ok(()));
+        assert_eq!(
+            decision.require_bound(&other),
+            Err(ContractError::ScoreBundleMismatch)
+        );
+
+        let stored = serde_json::to_value(&decision).unwrap();
+        let loaded = serde_json::from_value::<UnverifiedScoreDecision>(stored).unwrap();
+        assert_eq!(
+            loaded.clone().verify(&other),
+            Err(ContractError::ScoreBundleMismatch)
+        );
+        assert_eq!(loaded.verify(&golden), Ok(decision.clone()));
+
+        // A malformed bound manifest refuses every decision.
+        let mut malformed = golden_manifest();
+        malformed.format_version = BUNDLE_MANIFEST_FORMAT_VERSION + 1;
+        assert_eq!(
+            decision.require_bound(&malformed),
+            Err(ContractError::UnsupportedManifestVersion)
+        );
+
+        // A caller can build a manifest that pins any instrument, so
+        // `for_bundle` alone does not show that the run's bundle pins an
+        // award. The bound manifest check refuses the decision.
+        let widened = manifest_pinning_storage_rebate();
+        let rebate = ScoreDecision::for_bundle(
+            &widened,
+            InstrumentAwards::new(vec![award("storage_rebate", 7)]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rebate.require_bound(&widened), Ok(()));
+        assert_eq!(
+            rebate.require_bound(&golden_manifest()),
+            Err(ContractError::ScoreBundleMismatch)
         );
     }
 }

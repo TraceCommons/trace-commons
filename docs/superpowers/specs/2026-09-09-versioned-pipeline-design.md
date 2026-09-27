@@ -96,6 +96,7 @@ enum ReviewDecision {
 }
 
 struct ScoreDecision {
+    bundle_id: BundleId,      // the bundle that it was built under
     awards: InstrumentAwards, // built only by ScoreDecision::for_bundle
 }
 
@@ -298,12 +299,29 @@ gets only valid descriptors.
 An award for an instrument that the bound bundle does not pin is refused.
 `ScoreDecision` has no public field. A Score policy builds it with
 `ScoreDecision::for_bundle(&manifest, awards)`, which refuses an award for an
-instrument that the manifest does not pin, and `SettleDecision::new` takes
-only a `ScoreDecision`. A stored decision loads without a manifest, because a
-committed Score outcome was checked when it was built. A policy chooses the
-manifest that it passes, so the runner also checks Score's awards against the
-run's bound manifest with `BundleManifest::require_pinned` before the Score
-outcome commits. No settlement starts for an unpinned instrument.
+instrument that the manifest does not pin and records the manifest's bundle
+identifier in the decision. `SettleDecision::new` and `SettleInput` take only
+a `ScoreDecision`.
+
+A caller can build any manifest, so `for_bundle` alone does not bind the
+decision to the run. The runner calls `ScoreDecision::require_bound` with the
+run's bound manifest before the Score outcome commits. `require_bound` refuses
+a decision whose bundle identifier differs from the bound manifest's, and
+then applies `BundleManifest::require_pinned` to the awards. The decision
+carries the bundle identifier that it was built under. The run row records
+the bound bundle identifier, and the runner passes the manifest with that
+identifier. The check compares the two identifiers, so a decision built
+under any other manifest, a caller-built one included, is refused.
+
+A committed Score outcome loads without its manifest, so a stored decision
+does not load as a `ScoreDecision`. It loads as an `UnverifiedScoreDecision`.
+Loading checks only that the bundle identifier is a lowercase SHA-256
+reference and that the awards are a valid award set. A reader can show the
+stored awards, but Settle cannot take them.
+`UnverifiedScoreDecision::verify(&bound)` is the only way to a
+`ScoreDecision`. It applies `require_bound` with the run's bound manifest. No
+settlement starts for an unpinned instrument or for a decision built under
+another bundle.
 
 A descriptor never changes for an instrument identifier in a tenant. A change
 of contract, network, kind, or `decimals` is a new instrument with a new
