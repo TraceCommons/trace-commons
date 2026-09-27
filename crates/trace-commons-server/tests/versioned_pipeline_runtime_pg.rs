@@ -4787,6 +4787,248 @@ async fn a_hold_placed_during_the_adapter_call_is_caught_by_the_credit_transacti
     );
 }
 
+/// Task 2 (H3), review comment 4108170527: like `InterruptingCreditAdapter`'s
+/// `PlaceHold` interruption, but the intervening effect is a real withdrawal
+/// (`record_trace_withdrawal`) rather than a hold, so it must be driven the
+/// way `WithdrawOnApprovedWriteStore` drives one from inside a synchronous
+/// callback: on a dedicated thread with its own Tokio runtime and its own
+/// single-connection `PgBackend`, never the shared pool the rest of the test
+/// drives from inside the test's own runtime.
+struct WithdrawOnCreditSettleAdapter {
+    inner: Arc<RecordingSettlementAdapter>,
+    runtime_url: String,
+    tenant_id: String,
+    submission_id: uuid::Uuid,
+    triggered: AtomicBool,
+}
+
+impl SettlementAdapter for WithdrawOnCreditSettleAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        self.inner.instrument_id()
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "withdraw_on_credit_settle_test_only"
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
+        let result = self.inner.settle(request)?;
+        if !self.triggered.swap(true, Ordering::SeqCst) {
+            let runtime_url = self.runtime_url.clone();
+            let tenant_id = self.tenant_id.clone();
+            let submission_id = self.submission_id;
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().expect("build withdrawal runtime");
+                runtime.block_on(async move {
+                    let withdrawal_backend =
+                        PgBackend::new(&DatabaseConfig::from_postgres_url(&runtime_url, 1))
+                            .await
+                            .expect("connect a dedicated withdrawal connection");
+                    withdrawal_backend
+                        .record_trace_withdrawal(
+                            &tenant_id,
+                            submission_id,
+                            chrono::Utc::now(),
+                            "accepted",
+                            "not_distributed",
+                        )
+                        .await
+                        .expect("record the race-window withdrawal");
+                });
+            })
+            .join()
+            .expect("withdrawal thread completes");
+        }
+        Ok(result)
+    }
+}
+
+/// Task 2 (H3), review comment 4108170527: `submission_guard` commits and
+/// releases its lock as soon as Step 6 reads it, so a withdrawal landing
+/// between that read and the Trace Credit leg's own ledger transaction must
+/// still be caught -- otherwise the leg is credited to an account that has
+/// already been withdrawn. `settle_internal_credit` re-checks
+/// `trace_withdrawals`/`revoked_at` under the submission row's own `FOR
+/// SHARE` lock, inside the transaction that would otherwise insert the
+/// ledger row and finalize the batch, so the withdrawal here forfeits the
+/// pending award instead of paying it.
+///
+/// The withdrawal lands from inside the Trace Credit adapter's own `settle`
+/// call -- the seam
+/// `a_hold_placed_during_the_adapter_call_is_caught_by_the_credit_transaction`
+/// uses, but with a real withdrawal instead of a hold. `scored_config` also
+/// awards `storage_rebate`, which sorts before `trace_credit` and so
+/// completes earlier in the same pass: reusing it here doubles as the "a leg
+/// completed earlier in the pass stays complete" case (A9), so a second,
+/// dedicated test for that is not needed.
+#[tokio::test]
+async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner_url =
+        std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("settle-credit-withdraw-race-{}", uuid::Uuid::new_v4());
+    let submission_id = uuid::Uuid::new_v4();
+
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let withdrawing = Arc::new(WithdrawOnCreditSettleAdapter {
+        inner: trace_credit.clone(),
+        runtime_url: runtime_role_url(&owner_url),
+        tenant_id: tenant.clone(),
+        submission_id,
+        triggered: AtomicBool::new(false),
+    });
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            withdrawing as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+
+    let env = envelope(submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the mid-pass withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the credit adapter is still called once -- the race is caught after the \
+         adapter call returns, inside the ledger transaction"
+    );
+    assert_eq!(
+        storage_rebate.requests().len(),
+        1,
+        "the earlier leg in the pass still completes (A9: no leg reverses another)"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0,
+        "no ledger row for the withdrawn submission's pending award"
+    );
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let credit_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row present");
+    assert_eq!(credit_row.operation_state, "forfeited");
+    assert_eq!(
+        credit_row.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(credit_row.result_ref_hash, None);
+    assert_eq!(credit_row.credit_event_id, None);
+    assert_eq!(
+        credit_row.settlement_batch_id, None,
+        "no finalized batch carries the run's event"
+    );
+
+    let rebate_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == "storage_rebate")
+        .expect("storage_rebate row present");
+    assert_eq!(
+        rebate_row.operation_state, "complete",
+        "a leg completed earlier in the pass stays complete"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(
+        evidence.submission_operable,
+        Some(false),
+        "the run's Settle outcome records the inoperable guard"
+    );
+
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    let operations = decision.settlement_operations();
+    assert_eq!(operations.len(), 2);
+    for operation in operations {
+        match operation.instrument_id().as_str() {
+            "trace_credit" => match operation.outcome() {
+                InstrumentSettlementOutcome::Forfeited { reason } => {
+                    assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+                }
+                InstrumentSettlementOutcome::Completed { .. } => {
+                    panic!("the withdrawn Trace Credit leg must not commit as completed")
+                }
+            },
+            "storage_rebate" => match operation.outcome() {
+                InstrumentSettlementOutcome::Completed { result_ref_hash } => {
+                    assert!(!result_ref_hash.is_empty());
+                }
+                InstrumentSettlementOutcome::Forfeited { .. } => {
+                    panic!("a leg completed earlier in the pass must stay complete")
+                }
+            },
+            other => panic!("unexpected instrument: {other}"),
+        }
+    }
+
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "revoked",
+        "the submission stays revoked"
+    );
+}
+
 /// FR2: two runs for one credit account that settle at the same time never
 /// place one credit event in two finalized batches. The per-account advisory
 /// lock in the credit transaction serializes the pending-event selection and

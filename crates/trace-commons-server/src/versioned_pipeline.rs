@@ -257,6 +257,12 @@ pub struct PipelineSettlementRecord {
 enum InternalCreditResult {
     Complete,
     Held,
+    /// Task 2 (H3): the submission-operability re-check taken under the
+    /// submission row's own lock, inside this same transaction, found the
+    /// submission no longer operable (withdrawn, revoked, purged, expired,
+    /// or no longer `accepted`). The transaction rolled back with nothing
+    /// written -- no ledger row, no batch.
+    Inoperable,
 }
 
 /// The settlement-row update for a leg an active credit hold keeps waiting.
@@ -3374,6 +3380,33 @@ impl PipelineService {
                 }
                 let instrument_id = InstrumentId::new(settlement.instrument_id.clone())
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                // Task 2 (H3): the Trace Credit leg's own ledger transaction
+                // can discover, partway through this pass, that the
+                // submission stopped being operable (a withdrawal landed
+                // after this pass's guard read but before that transaction).
+                // From that point on this pass treats every remaining
+                // non-terminal leg the way Step 6's top-level inoperable
+                // branch treats a submission already known inoperable:
+                // forfeited without calling its adapter. A leg that already
+                // completed earlier in this pass is untouched (A9: no leg
+                // reverses another).
+                if !guard.operable {
+                    self.store
+                        .update_settlement(
+                            &run,
+                            instrument_id.as_str(),
+                            SettlementUpdate {
+                                operation_state: "forfeited",
+                                result_ref_hash: None,
+                                credit_event_id: None,
+                                settlement_batch_id: None,
+                                payout_state: None,
+                                error_label: Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
                 let adapter = self
                     .settlement_adapters
                     .get(&instrument_id)
@@ -3508,6 +3541,35 @@ impl PipelineService {
                                 )
                                 .await?;
                             held = true;
+                            continue;
+                        }
+                        // Task 2 (H3): the ledger transaction's own
+                        // submission re-check found the submission
+                        // inoperable (a withdrawal landed during this leg's
+                        // adapter call, between Step 6's guard read and this
+                        // transaction). Forfeit this leg the same way the
+                        // top-level inoperable branch does -- no result, no
+                        // event, no batch -- and treat the submission as
+                        // inoperable for the rest of this pass, so every
+                        // remaining non-terminal leg is forfeited too and
+                        // the committed Settle outcome records
+                        // `submission_inoperable`.
+                        InternalCreditResult::Inoperable => {
+                            self.store
+                                .update_settlement(
+                                    &run,
+                                    instrument_id.as_str(),
+                                    SettlementUpdate {
+                                        operation_state: "forfeited",
+                                        result_ref_hash: None,
+                                        credit_event_id: None,
+                                        settlement_batch_id: None,
+                                        payout_state: None,
+                                        error_label: Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+                                    },
+                                )
+                                .await?;
+                            guard.operable = false;
                             continue;
                         }
                     },
@@ -3734,13 +3796,20 @@ impl PipelineService {
     ///    never select the same pending event into two batches;
     /// 3. re-checks the hold under that lock -- a hold returns `Held` and
     ///    rolls the transaction back with nothing written;
-    /// 4. inserts the ledger row idempotently (the event id is derived from
+    /// 4. locks the submission row (`FOR SHARE`) and, in a later statement,
+    ///    re-checks it is still operable -- an inoperable submission returns
+    ///    `Inoperable` and rolls the transaction back with nothing written
+    ///    (Task 2, H3: the guard Step 6 read before this leg's adapter call
+    ///    is only a snapshot; a withdrawal can land in the gap between that
+    ///    read and this transaction, and must forfeit the pending award
+    ///    rather than let it be paid);
+    /// 5. inserts the ledger row idempotently (the event id is derived from
     ///    the run and its Score outcome);
-    /// 5. if that event is already final, reuses the one finalized batch that
+    /// 6. if that event is already final, reuses the one finalized batch that
     ///    carries it; otherwise composes the batch from the account's pending
     ///    events, writes it finalized, sets its `instrument_id`, and marks
     ///    those events final;
-    /// 6. completes the settlement row with the result, the event, and the
+    /// 7. completes the settlement row with the result, the event, and the
     ///    batch.
     ///
     /// Everything commits together or nothing does, so a crash or a stale
@@ -3790,6 +3859,49 @@ impl PipelineService {
         {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Held);
+        }
+        // Task 2 (H3), review comment 4108170527: the submission-operability
+        // guard Step 6 read before this leg's adapter call is only a
+        // snapshot -- `submission_guard` commits and releases its lock
+        // immediately. A withdrawal can land in the gap between that read
+        // and this transaction, so re-check under this transaction's own
+        // lock, before the ledger row is inserted and the batch finalized,
+        // and roll back rather than pay a forfeited award.
+        //
+        // Two statements: lock first, read second. Under READ COMMITTED a
+        // later statement in the same transaction is guaranteed to see a
+        // withdrawal that committed while the first statement waited for
+        // the row lock; relying on a single combined lock-and-read statement
+        // for that is not the same guarantee. The `FOR SHARE` lock also
+        // makes a withdrawal that has not yet reached its own row update
+        // wait until this transaction commits -- the payment then happens
+        // before the withdrawal, and withdrawal is not a clawback.
+        tx.query_opt(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR SHARE",
+            &[&run.tenant_id, &run.submission_id],
+        )
+        .await?;
+        let submission_operable = tx
+            .query_opt(
+                "SELECT s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                        AND s.withdrawn_at IS NULL
+                        AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                        AND NOT EXISTS (
+                            SELECT 1 FROM trace_withdrawals w
+                             WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+                        )
+                   FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .map(|row| row.get::<_, bool>(0))
+            .unwrap_or(false);
+        if !submission_operable {
+            // Dropping the transaction rolls it back: nothing was written.
+            return Ok(InternalCreditResult::Inoperable);
         }
         tx.execute(
             "INSERT INTO trace_credit_ledger (
