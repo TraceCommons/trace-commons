@@ -5,7 +5,7 @@
 //!
 //! [`SettlementAdapter`] is the trait object a proprietary backend
 //! implements to perform one instrument's external effect for a settlement
-//! operation. A settle policy holds it as a trait object, never a concrete
+//! operation. The runner holds it as a trait object, never a concrete
 //! type, so a substituted backend can slot in at this seam.
 
 use async_trait::async_trait;
@@ -19,6 +19,8 @@ use crate::pipeline::{AtomicUnits, InstrumentId, TenantStorageRef};
 ///
 /// `tenant_storage_ref` is the tenant's derived storage reference, not the
 /// raw tenant identifier — a gate-api seam never carries the raw tenant id.
+/// `operation_ref_hash` and `expected_result_ref_hash` are lowercase
+/// SHA-256 references.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementRequest {
     pub tenant_storage_ref: TenantStorageRef,
@@ -33,9 +35,11 @@ pub struct SettlementRequest {
 #[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum SettlementError {
     /// The adapter could not complete the effect now, or cannot say whether
-    /// it completed. The runner MUST retry with the same request; the
+    /// it completed. The effect may or may not have happened. Any later
+    /// attempt for this operation MUST reuse the same request; the
     /// adapter's idempotency contract on [`SettlementAdapter::settle`] is
-    /// what makes that safe.
+    /// what makes that safe. Whether the runner retries or forfeits the leg
+    /// (for example after a withdrawal) is runtime policy.
     #[error("settlement adapter is unavailable")]
     Unavailable,
     /// The operation reference was used before with different request
@@ -61,14 +65,23 @@ impl SettlementError {
 }
 
 /// Performs one instrument's external settlement effect. A proprietary
-/// backend implements this; the pipeline runner holds it as a trait object.
+/// backend implements this; the runner holds it as a trait object.
 #[async_trait]
 pub trait SettlementAdapter: Send + Sync {
+    /// The one instrument this adapter settles.
     fn instrument_id(&self) -> &InstrumentId;
+
+    /// A safe label (`^[a-z0-9_]{1,64}$`) that names the implementation in
+    /// hash-only reports.
     fn adapter_identity(&self) -> &str;
+
+    /// `false` by default. Readiness fails closed on `false`.
     fn production_qualified(&self) -> bool {
         false
     }
+
+    /// A safe label for the external payout rail, for example `near`, or
+    /// `none` when there is no external payout.
     fn payout_rail(&self) -> &str;
 
     /// Performs the instrument's external effect for one settlement
@@ -83,8 +96,8 @@ pub trait SettlementAdapter: Send + Sync {
     /// from the first one's outcome. A repeated `operation_ref_hash` with
     /// different request content is an error, never a second effect.
     ///
-    /// The returned string is the result reference. The runner compares it
-    /// with `request.expected_result_ref_hash`.
+    /// On success, `settle` returns `request.expected_result_ref_hash`. Any
+    /// other value fails the leg closed, and the runner does not retry it.
     async fn settle(&self, request: &SettlementRequest) -> Result<String, SettlementError>;
 }
 
@@ -158,8 +171,12 @@ mod tests {
             run_id: Uuid::nil(),
             instrument_id: InstrumentId::trace_credit(),
             atomic_units: AtomicUnits::from_raw(1),
-            operation_ref_hash: "sha256:abc".to_string(),
-            expected_result_ref_hash: "sha256:def".to_string(),
+            operation_ref_hash:
+                "sha256:af1bf43fd32181119472618d89802ba083b6a025b41aef9f60e71593b0b9117e"
+                    .to_string(),
+            expected_result_ref_hash:
+                "sha256:3c101340d8a3b60c110d1bb23eab041c04ec9c9ab0ad3df00629fb443b67ed30"
+                    .to_string(),
         }
     }
 

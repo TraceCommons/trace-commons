@@ -492,7 +492,10 @@ the resolved bundle.
 ### BND-004: Policy interfaces
 
 - Phase traits, result types, and decision types MUST live in
-  `trace-commons-gate-api`.
+  `trace-commons-gate-api`. The dependency traits
+  (`IdentifiedPerplexityScorer`, `IdentifiedEmbedder`,
+  `IdentifiedIndexReader`, `IdentifiedIndexWriter`) and `SettlementAdapter`
+  are gate-api seams too.
 - Client DTOs MUST live in `trace-commons-protocol`.
 - Runners MUST hold policies as trait objects.
 - Policies MUST hold scorers, embedders, indexes, and credit adapters as

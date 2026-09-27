@@ -607,10 +607,12 @@ implements them:
   `IdentifiedIndexWriter` — each extends its base trait with the identity a
   bundle package names by content descriptor. `production_qualified`
   defaults to `false`, and readiness fails closed on it.
-- `SettlementAdapter` — an async `settle`, a typed `SettlementError`
-  (`Unavailable` is safe to retry; `Conflict` and `Rejected` are not, and
-  never followed by a second effect), and the idempotency contract: the
-  same result for a repeated `operation_ref_hash`, no repeated effect.
+- `SettlementAdapter` — an async `settle`, a typed `SettlementError`: after
+  `Unavailable`, the effect may or may not have happened, and a later
+  attempt for the same operation reuses the same request; after `Conflict`
+  or `Rejected`, no effect happened and the runner never retries. The
+  idempotency contract: the same result for a repeated `operation_ref_hash`,
+  no repeated effect.
 
 Every phase input carries the tenant's `TenantStorageRef`, the derived key that
 ingest uses for every index and storage write. A policy queries an index with
