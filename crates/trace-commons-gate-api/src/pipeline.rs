@@ -2000,20 +2000,26 @@ impl SealedIndexCommand {
         &self.entries
     }
 
-    /// The index key for one of this command's entries.
-    pub fn entry_key(
-        &self,
-        tenant: &TenantStorageRef,
-        entry: &SealedIndexEntry,
-    ) -> crate::vector_index::IndexEntryKey {
-        crate::vector_index::IndexEntryKey {
-            tenant_storage_ref: tenant.clone(),
-            index_id: self.index_id.clone(),
-            revision_id: self.revision_id,
-            projection_id: self.projection_id.clone(),
-            model_id: self.model_id.clone(),
-            chunk: entry.chunk,
-        }
+    /// Pairs each of this command's entries with its own index key, so a
+    /// caller cannot combine one entry with another entry's key.
+    pub fn keyed_entries<'a>(
+        &'a self,
+        tenant: &'a TenantStorageRef,
+    ) -> impl ExactSizeIterator<Item = (crate::vector_index::IndexEntryKey, &'a SealedIndexEntry)> + 'a
+    {
+        self.entries.iter().map(move |entry| {
+            (
+                crate::vector_index::IndexEntryKey {
+                    tenant_storage_ref: tenant.clone(),
+                    index_id: self.index_id.clone(),
+                    revision_id: self.revision_id,
+                    projection_id: self.projection_id.clone(),
+                    model_id: self.model_id.clone(),
+                    chunk: entry.chunk,
+                },
+                entry,
+            )
+        })
     }
 }
 
@@ -3832,7 +3838,7 @@ mod tests {
     }
 
     #[test]
-    fn sealed_command_entry_keys_carry_the_tenant_reference_and_chunk() {
+    fn keyed_entries_pair_each_entry_with_its_own_key() {
         let tenant =
             TenantStorageRef::new("tenant_sha256:00112233445566778899aabbccddeeff").unwrap();
         let entry = |chunk| SealedIndexEntry {
@@ -3845,23 +3851,26 @@ mod tests {
             Uuid::nil(),
             "pipeline-test-projection-v1",
             "reference-embedder-v1",
-            vec![entry(7), entry(3)],
+            vec![entry(3), entry(0)],
         )
         .unwrap();
-        let keys: Vec<_> = command
-            .entries()
-            .iter()
-            .map(|entry| command.entry_key(&tenant, entry))
-            .collect();
+        let pairs: Vec<_> = command.keyed_entries(&tenant).collect();
+        assert_eq!(pairs.len(), command.entries().len());
         assert_eq!(
-            keys.iter().map(|key| key.chunk).collect::<Vec<_>>(),
-            vec![3, 7]
+            pairs
+                .iter()
+                .map(|(_, entry)| entry.chunk)
+                .collect::<Vec<_>>(),
+            vec![0, 3]
         );
-        assert!(keys.iter().all(|key| key.tenant_storage_ref == tenant));
-        assert!(
-            keys.iter()
-                .all(|key| key.model_id == "reference-embedder-v1")
-        );
+        for (key, entry) in &pairs {
+            assert_eq!(key.index_id, command.index_id());
+            assert_eq!(key.revision_id, command.revision_id());
+            assert_eq!(key.projection_id, command.projection_id());
+            assert_eq!(key.model_id, command.model_id());
+            assert_eq!(key.tenant_storage_ref, tenant);
+            assert_eq!(key.chunk, entry.chunk);
+        }
     }
 
     #[test]
