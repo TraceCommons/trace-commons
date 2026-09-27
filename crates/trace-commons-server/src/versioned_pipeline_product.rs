@@ -5,16 +5,14 @@
 //!
 //! This module does not persist contributor status projections. Each status
 //! response is derived from the run, immutable outcomes, credit ledger,
-//! settlement batch, and payout state at read time (P3-D13: no mutable
-//! status table).
+//! settlement batch, and payout state at read time: there is no mutable
+//! status table to fall out of sync with them.
 //!
 //! Withdrawal (`withdraw_submission`) is not read through this module --
-//! Task 7 owns it on `PgPipelineStore`. The forensic trace and the
-//! operational summary are not implemented here yet; their record types and
-//! a few private helpers below are already ported ahead of Task 13, which
-//! adds the reads that use them. Export-snapshot-only items (Task 12) are
-//! not ported here -- they have no caller in this task or in Task 13's port
-//! range.
+//! `PgPipelineStore` owns it. Export-snapshot lifecycle operations (create,
+//! complete, invalidate, load one snapshot's items) are not ported here
+//! either -- this module only reads the aggregate counts those snapshots
+//! contribute to `lifecycle_summary` and `operational_summary`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,9 +30,9 @@ use crate::versioned_pipeline::{PipelineRunState, phase_from_db, sha256_prefixed
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
 
-/// T11-5 (P3-D13): amounts cross the API as decimal strings, because a
-/// JavaScript client (the Tauri app) cannot hold an integer above `2^53`
-/// exactly. `AtomicUnits` already serializes this way on its own; these two
+/// Amounts cross the API as decimal strings, because a JavaScript client
+/// (the Tauri app) cannot hold an integer above `2^53` exactly. `AtomicUnits`
+/// already serializes this way on its own; these two
 /// helpers give the same wire shape to the plain-`u64` amount fields in this
 /// module's product record types (`score_microcredits`, `credit_microcredits`,
 /// and `PipelineContributorCredit`'s totals) via `#[serde(with = "...")]`.
@@ -147,12 +145,12 @@ pub struct PipelineScoreAttestationEntry {
     pub decision: serde_json::Value,
 }
 
-// T11-5: checked every `u64` field below against the decimal-string amount
-// rule. None of them is an amount -- `PipelineLifecycleSummary`,
+// Every `u64` field below is checked against the decimal-string amount rule.
+// None of them is an amount -- `PipelineLifecycleSummary`,
 // `PipelineWorkSummary`, and `PipelineOperationalSummary`'s fields are all
-// counts or durations (of invalidations, snapshots, policies, errors,
-// commands, credit events, outbox rows -- never a credit or token amount),
-// and `PipelinePhaseTrace`'s are hashes and an outcome version. None gets
+// counts or durations (of invalidations, snapshots, errors, commands, credit
+// events, outbox rows -- never a credit or token amount), and
+// `PipelinePhaseTrace`'s are hashes and an outcome version. None gets
 // `decimal_amount`. `PipelineForensicTrace`'s only amount-bearing field is
 // `instruments: Vec<PipelineInstrumentStatus>`, whose own `atomic_units` is
 // already `AtomicUnits` (decimal-string on its own), so it needs no
@@ -177,7 +175,6 @@ pub struct PipelineWorkSummary {
 pub struct PipelineOperationalSummary {
     pub generated_at: DateTime<Utc>,
     pub work: Vec<PipelineWorkSummary>,
-    pub suspended_policy_count: u64,
     pub retryable_error_count: u64,
     pub terminal_error_count: u64,
     pub pending_index_command_count: u64,
@@ -216,7 +213,6 @@ pub struct PipelineForensicTrace {
     pub settlement_batch_id: Option<Uuid>,
     pub payout_state: String,
     pub instruments: Vec<PipelineInstrumentStatus>,
-    pub intervention_evidence_hashes: Vec<String>,
     pub index_invalidation_state: String,
 }
 
@@ -546,6 +542,293 @@ impl PipelineProductStore {
         tx.commit().await?;
         rows.iter().map(attestation_from_row).collect()
     }
+
+    pub async fn lifecycle_summary(
+        &self,
+        tenant_id: &str,
+    ) -> Result<PipelineLifecycleSummary, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_one(
+                "SELECT
+                    (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND state = 'pending') AS pending_index,
+                    (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND state = 'failed') AS failed_index,
+                    (SELECT COUNT(*) FROM pipeline_export_snapshots
+                      WHERE tenant_id = $1 AND state IN ('ready','complete')) AS active_exports,
+                    (SELECT COUNT(*) FROM pipeline_export_snapshots
+                      WHERE tenant_id = $1 AND state = 'invalidated') AS invalidated_exports",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(PipelineLifecycleSummary {
+            pending_index_invalidations: count_from_row(&row, "pending_index")?,
+            terminal_index_invalidation_failures: count_from_row(&row, "failed_index")?,
+            active_export_snapshots: count_from_row(&row, "active_exports")?,
+            invalidated_export_snapshots: count_from_row(&row, "invalidated_exports")?,
+        })
+    }
+
+    /// The tenant-isolation and audit-immutability booleans below are a live
+    /// health signal, not a cache: every versioned-pipeline table this
+    /// codebase defines must carry `FORCE ROW LEVEL SECURITY`, and
+    /// `phase_outcomes` must still carry both of its immutability triggers.
+    /// The relation list below names each such table by hand -- it does not
+    /// discover them from the catalog -- so a future migration that adds one
+    /// must extend this list too, or the check silently stops covering it.
+    pub async fn operational_summary(
+        &self,
+        tenant_id: &str,
+    ) -> Result<PipelineOperationalSummary, DatabaseError> {
+        let generated_at = Utc::now();
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let work_rows = tx
+            .query(
+                "SELECT next_phase, state, COUNT(*) AS item_count,
+                        GREATEST(
+                            0,
+                            EXTRACT(EPOCH FROM (NOW() - MIN(phase_started_at)))::bigint
+                        ) AS oldest_age_seconds
+                   FROM pipeline_runs
+                  WHERE tenant_id = $1
+                  GROUP BY next_phase, state
+                  ORDER BY next_phase, state",
+                &[&tenant_id],
+            )
+            .await?;
+        let summary = tx
+            .query_one(
+                "SELECT
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND state = 'retry') AS retryable_errors,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND state = 'failed') AS terminal_errors,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND index_write_state = 'pending')
+                        AS pending_index,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND index_write_state = 'failed')
+                        AS failed_index,
+                    (SELECT COUNT(*) FROM pipeline_run_settlements
+                      WHERE tenant_id = $1 AND operation_state = 'held')
+                        AS held_credit,
+                    (SELECT COUNT(*) FROM pipeline_run_settlements
+                      WHERE tenant_id = $1
+                        AND operation_state IN ('pending', 'retry', 'leased'))
+                        AS delayed_credit,
+                    (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND state = 'pending')
+                        AS pending_invalidation,
+                    (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND state = 'failed')
+                        AS failed_invalidation,
+                    (SELECT COUNT(*) FROM pipeline_export_snapshots
+                      WHERE tenant_id = $1 AND state = 'ready')
+                        AS incomplete_exports,
+                    (
+                        SELECT COUNT(*) = 0
+                          FROM pg_class c
+                          JOIN pg_namespace n ON n.oid = c.relnamespace
+                         WHERE n.nspname = current_schema()
+                           AND c.relname = ANY($2)
+                           AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+                    ) AS tenant_isolation_passed,
+                    (
+                        SELECT COUNT(*) = 2
+                          FROM pg_trigger t
+                          JOIN pg_class c ON c.oid = t.tgrelid
+                         WHERE c.relname = 'phase_outcomes'
+                           AND NOT t.tgisinternal
+                           AND t.tgname = ANY($3)
+                    ) AS audit_immutability_passed",
+                &[
+                    &tenant_id,
+                    &vec![
+                        "pipeline_runs",
+                        "phase_outcomes",
+                        "pipeline_bundle_packages",
+                        "pipeline_active_bundles",
+                        "pipeline_bundle_policy_status",
+                        "pipeline_receipt_artifacts",
+                        "pipeline_run_settlements",
+                        "pipeline_admission_usage",
+                        "pipeline_review_claims",
+                        "pipeline_review_assessments",
+                        "pipeline_index_invalidations",
+                        "pipeline_export_snapshots",
+                        "pipeline_export_snapshot_items",
+                    ],
+                    &vec![
+                        "phase_outcomes_reject_update",
+                        "phase_outcomes_reject_delete",
+                    ],
+                ],
+            )
+            .await?;
+        let near_rows = tx
+            .query(
+                "SELECT status, COUNT(*) AS item_count
+                   FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1
+                  GROUP BY status
+                  ORDER BY status",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        let work = work_rows
+            .iter()
+            .map(|row| {
+                Ok(PipelineWorkSummary {
+                    phase: row.get("next_phase"),
+                    state: row.get("state"),
+                    count: count_from_row(row, "item_count")?,
+                    oldest_age_seconds: u64::try_from(row.get::<_, i64>("oldest_age_seconds"))
+                        .map_err(|_| {
+                            DatabaseError::Serialization(
+                                "pipeline work age is outside the supported range".to_string(),
+                            )
+                        })?,
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        let near_outbox_by_state = near_rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.get::<_, String>("status"),
+                    count_from_row(row, "item_count")?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, DatabaseError>>()?;
+        Ok(PipelineOperationalSummary {
+            generated_at,
+            work,
+            retryable_error_count: count_from_row(&summary, "retryable_errors")?,
+            terminal_error_count: count_from_row(&summary, "terminal_errors")?,
+            pending_index_command_count: count_from_row(&summary, "pending_index")?,
+            failed_index_command_count: count_from_row(&summary, "failed_index")?,
+            held_credit_count: count_from_row(&summary, "held_credit")?,
+            delayed_credit_count: count_from_row(&summary, "delayed_credit")?,
+            near_outbox_by_state,
+            pending_invalidation_count: count_from_row(&summary, "pending_invalidation")?,
+            failed_invalidation_count: count_from_row(&summary, "failed_invalidation")?,
+            incomplete_export_count: count_from_row(&summary, "incomplete_exports")?,
+            tenant_isolation_control_passed: summary.get("tenant_isolation_passed"),
+            audit_immutability_control_passed: summary.get("audit_immutability_passed"),
+        })
+    }
+
+    pub async fn forensic_trace(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<PipelineForensicTrace>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let Some(run) = tx
+            .query_opt(
+                "SELECT run_id, submission_id, bundle_id, index_command_hash,
+                        index_write_state, index_invalidation_state
+                   FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant_id, &run_id],
+            )
+            .await?
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let phase_rows = tx
+            .query(
+                "SELECT phase, outcome_id, outcome_schema_id,
+                        outcome_schema_version, decision, evidence, evaluation
+                   FROM phase_outcomes
+                  WHERE tenant_id = $1 AND run_id = $2
+                  ORDER BY CASE phase
+                    WHEN 'admission' THEN 1 WHEN 'review' THEN 2
+                    WHEN 'score' THEN 3 WHEN 'settle' THEN 4 END",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        let settlement_rows = tx
+            .query(
+                "SELECT settlement.instrument_id,
+                        settlement.atomic_units::TEXT AS atomic_units_text,
+                        settlement.operation_state,
+                        CASE
+                            WHEN settlement.instrument_id <> 'trace_credit'
+                                THEN 'not_applicable'
+                            WHEN batch.status IS NOT NULL THEN batch.status
+                            WHEN settlement.credit_event_id IS NOT NULL THEN 'pending'
+                            ELSE settlement.operation_state
+                        END AS internal_settlement_state,
+                        settlement.credit_event_id, settlement.settlement_batch_id,
+                        settlement.payout_rail, settlement.payout_state,
+                        settlement.last_error_label
+                   FROM pipeline_run_settlements settlement
+                   LEFT JOIN trace_credit_settlement_batches batch
+                     ON batch.tenant_id = settlement.tenant_id
+                    AND batch.settlement_batch_id = settlement.settlement_batch_id
+                    AND batch.instrument_id = settlement.instrument_id
+                  WHERE settlement.tenant_id = $1 AND settlement.run_id = $2
+                  ORDER BY settlement.instrument_id",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        tx.commit().await?;
+        let phases = phase_rows
+            .iter()
+            .map(|row| {
+                let version =
+                    u32::try_from(row.get::<_, i32>("outcome_schema_version")).map_err(|_| {
+                        DatabaseError::Serialization(
+                            "outcome schema version is outside the supported range".to_string(),
+                        )
+                    })?;
+                Ok(PipelinePhaseTrace {
+                    phase: row.get("phase"),
+                    outcome_id: row.get("outcome_id"),
+                    outcome_schema_id: row.get("outcome_schema_id"),
+                    outcome_schema_version: version,
+                    decision_hash: json_hash(row.get("decision"))?,
+                    evidence_hash: json_hash(row.get("evidence"))?,
+                    evaluation_hash: json_hash(row.get("evaluation"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        let score_outcome_id = phases
+            .iter()
+            .find(|phase| phase.phase == "score")
+            .map(|phase| phase.outcome_id);
+        let instruments = settlement_rows
+            .iter()
+            .map(instrument_status_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let trace_credit = instruments
+            .iter()
+            .find(|instrument| instrument.instrument_id == "trace_credit");
+        Ok(Some(PipelineForensicTrace {
+            run_id: run.get("run_id"),
+            submission_id: run.get("submission_id"),
+            bundle_id: run.get("bundle_id"),
+            phases,
+            index_command_hash: run.get("index_command_hash"),
+            index_write_state: run.get("index_write_state"),
+            score_outcome_id,
+            credit_event_id: trace_credit.and_then(|instrument| instrument.credit_event_id),
+            settlement_batch_id: trace_credit.and_then(|instrument| instrument.settlement_batch_id),
+            payout_state: trace_credit
+                .map(|instrument| instrument.payout_state.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            instruments,
+            index_invalidation_state: run.get("index_invalidation_state"),
+        }))
+    }
 }
 
 /// Sums `trace_credit` amounts across `statuses`' instruments matching
@@ -578,9 +861,9 @@ fn sum_trace_credit_atomic_units(
         })
 }
 
-/// Used by Task 13's forensic trace read (not implemented in this module
-/// yet), ported ahead of time per plan.
-#[allow(dead_code)]
+/// Hashes a JSON value for a hash-only operational surface: the forensic
+/// trace stores this digest instead of the phase outcome's raw decision,
+/// evidence, or evaluation payload.
 fn json_hash(value: serde_json::Value) -> Result<String, DatabaseError> {
     serde_json::to_vec(&value)
         .map(|bytes| sha256_prefixed(&bytes))
@@ -676,7 +959,7 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
         bundle_id: row.get("bundle_id"),
         processing,
         current_phase,
-        // T11-4: the phase "responsible" for the run's current state is the
+        // The phase "responsible" for the run's current state is the
         // one whose own attempt set `last_error_label` (e.g. Review's
         // `review_assessment_required` on a quarantine wait) -- not
         // unconditionally the latest phase to have committed an outcome,
@@ -706,9 +989,10 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
     })
 }
 
-/// Used by Task 13's forensic trace read (not implemented in this module
-/// yet), ported ahead of time per plan.
-#[allow(dead_code)]
+/// Reads one settlement row as an instrument status. The caller selects
+/// `atomic_units::TEXT AS atomic_units_text` so this never parses a raw
+/// numeric column directly (`AtomicUnits` is a `u128`, and Postgres `NUMERIC`
+/// does not fit any integer type `tokio_postgres` decodes natively).
 fn instrument_status_from_row(row: &Row) -> Result<PipelineInstrumentStatus, DatabaseError> {
     let atomic_units = row
         .get::<_, String>("atomic_units_text")
@@ -780,9 +1064,8 @@ fn score_microcredits(decision: &serde_json::Value) -> Option<u64> {
         .and_then(|units| u64::try_from(units.get()).ok())
 }
 
-/// Used by Task 13's summary reads (not implemented in this module yet),
-/// ported ahead of time per plan.
-#[allow(dead_code)]
+/// Reads a `COUNT(*)` column (always `bigint`/`i64` in Postgres) as the
+/// unsigned count it actually represents.
 fn count_from_row(row: &Row, column: &str) -> Result<u64, DatabaseError> {
     let count: i64 = row.get(column);
     u64::try_from(count)

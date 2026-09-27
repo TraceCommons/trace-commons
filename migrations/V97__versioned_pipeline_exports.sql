@@ -185,3 +185,7 @@ DO $$ BEGIN
         RAISE EXCEPTION 'V97: trace_ingest_runtime is missing; V90 creates it';
     END IF;
 END $$;
+
+-- pipeline_export_snapshots: the lifecycle and operational summaries count
+-- the tenant's snapshots by state.
+GRANT SELECT ON pipeline_export_snapshots TO trace_ingest_runtime;

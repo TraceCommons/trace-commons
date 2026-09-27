@@ -177,6 +177,10 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     ("pipeline_admission_usage", "SELECT", &[]),
     ("pipeline_admission_usage", "INSERT", &[]),
+    // V96
+    ("pipeline_index_invalidations", "SELECT", &[]),
+    // V97
+    ("pipeline_export_snapshots", "SELECT", &[]),
 ];
 
 /// The privileges non-owner roles hold on the pipeline tables, table-wide and

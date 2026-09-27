@@ -11333,3 +11333,252 @@ async fn zero_credit_runs_read_as_zero_not_pending() {
     );
     assert_eq!(entries[0].credit_microcredits, 0);
 }
+
+/// Task 13: `operational_summary` counts runs per (phase, state) bucket
+/// across every state a tenant's runs can be in -- including a run parked
+/// awaiting a human assessment (`review_assessment_required`) and a retry
+/// run -- and separately rolls up the retryable- and terminal-error counts.
+#[tokio::test]
+async fn operational_summary_counts_runs_by_state_and_label() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let tenant = format!("operational-summary-{}", uuid::Uuid::new_v4());
+    let store = PgPipelineStore::new(backend.clone());
+
+    // Pending: an admitted run waiting for Review to claim it.
+    let pending_run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    // Awaiting review, labeled `review_assessment_required`: Review
+    // quarantines the run and parks it for a human assessment. A parked run
+    // is not a retry.
+    let dir_quarantine = tempfile::tempdir().unwrap();
+    let (quarantine_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_quarantine),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let principal_quarantine = "principal_sha256:operational-summary-quarantine";
+    let mut env_quarantine = envelope(uuid::Uuid::new_v4()).await;
+    env_quarantine.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw_quarantine = serde_json::to_vec(&env_quarantine).unwrap();
+    let key_quarantine = env_quarantine.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
+        &quarantine_service,
+        PipelineReceiptRequest {
+            tenant_id: &tenant,
+            actor_principal_ref: principal_quarantine,
+            counts_toward_quota: true,
+            request_idempotency_key: &key_quarantine,
+            request_bytes: &raw_quarantine,
+            server_envelope: &env_quarantine,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    quarantine_service
+        .process_run(&tenant, created_quarantine.run_id)
+        .await
+        .unwrap()
+        .expect("Review waits for a human assessment");
+
+    // Retry: an uncharged transient failure, labeled `embedder_unavailable`,
+    // same technique as
+    // `attempts_exhaust_to_failed_but_transient_retries_do_not_charge`.
+    let retry_run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed_retry = store
+        .claim_run(&tenant, retry_run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .mark_transient_retry(&claimed_retry, "embedder_unavailable")
+        .await
+        .unwrap();
+
+    // Complete: a full admission-review-score-settle run.
+    let dir_complete = tempfile::tempdir().unwrap();
+    let (complete_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_complete),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let complete_run = submit_and_complete(
+        &complete_service,
+        &tenant,
+        "principal_sha256:operational-summary-complete",
+    )
+    .await;
+    assert_eq!(complete_run.state, PipelineRunState::Complete);
+
+    // Failed: attempts exhausted, same technique as
+    // `attempts_exhaust_to_failed_but_transient_retries_do_not_charge`.
+    let failed_run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    for _ in 0..3 {
+        let claimed = store
+            .claim_run(&tenant, failed_run.run_id, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .mark_transient_retry(&claimed, "embedder_unavailable")
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, failed_run.run_id).await;
+    }
+    for _ in 1..=5 {
+        let claimed = store
+            .claim_run(&tenant, failed_run.run_id, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .mark_retry(&claimed, "minimal_policy_failed")
+            .await
+            .unwrap();
+        force_due(&backend, &tenant, failed_run.run_id).await;
+    }
+    let failed = store
+        .get_run(&tenant, failed_run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, PipelineRunState::Failed);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let summary = product.operational_summary(&tenant).await.unwrap();
+
+    let count_for_state = |state: &str| -> u64 {
+        summary
+            .work
+            .iter()
+            .filter(|bucket| bucket.state == state)
+            .map(|bucket| bucket.count)
+            .sum()
+    };
+    assert_eq!(count_for_state("pending"), 1, "the seeded run is pending");
+    assert_eq!(
+        count_for_state("awaiting_review"),
+        1,
+        "the quarantined run is parked awaiting review with review_assessment_required"
+    );
+    assert_eq!(
+        count_for_state("retry"),
+        1,
+        "the transient failure is retrying with embedder_unavailable"
+    );
+    assert_eq!(count_for_state("complete"), 1);
+    assert_eq!(count_for_state("failed"), 1);
+    assert_eq!(summary.retryable_error_count, 1);
+    assert_eq!(summary.terminal_error_count, 1);
+
+    let serialized = serde_json::to_string(&summary).unwrap();
+    assert!(
+        !serialized.contains(&tenant),
+        "operational summary must not carry the raw tenant id"
+    );
+    assert!(
+        !serialized.contains(&pending_run.submission_id.to_string()),
+        "operational summary must not carry a raw submission id"
+    );
+}
+
+/// Task 13: a forensic trace read is hash-only -- it carries phase outcome
+/// hashes, the bundle id, and instrument/payout labels, never the tenant id,
+/// principal, request bytes, or trace text those hashes were computed over.
+#[tokio::test]
+async fn forensic_trace_is_hash_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("forensic-hash-only-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:forensic-hash-only";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let trace = product
+        .forensic_trace(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("a completed run has a forensic trace");
+    assert_eq!(trace.run_id, run.run_id);
+    assert_eq!(trace.bundle_id, run.bundle_id);
+    assert!(
+        !trace.phases.is_empty(),
+        "a completed run has committed phase outcomes"
+    );
+    for phase in &trace.phases {
+        assert!(phase.decision_hash.starts_with("sha256:"));
+        assert!(phase.evidence_hash.starts_with("sha256:"));
+        assert!(phase.evaluation_hash.starts_with("sha256:"));
+    }
+
+    let serialized = serde_json::to_string(&trace).unwrap();
+    assert!(
+        !serialized.contains(&tenant),
+        "forensic trace must not carry the raw tenant id"
+    );
+    assert!(
+        !serialized.contains(principal),
+        "forensic trace must not carry the raw principal ref"
+    );
+    assert!(
+        !serialized.contains("Inspect the bounded runtime fixture"),
+        "forensic trace must not carry raw trace text"
+    );
+}
+
+/// Review Focus 4: a forensic trace read never crosses tenants -- asking
+/// tenant B for tenant A's run id returns `None`, not tenant A's row.
+#[tokio::test]
+async fn forensic_trace_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant_a = format!("forensic-scope-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("forensic-scope-b-{}", uuid::Uuid::new_v4());
+    let run_a = submit_and_complete(&service, &tenant_a, "principal_sha256:forensic-scope-a").await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let cross_tenant = product
+        .forensic_trace(&tenant_b, run_a.run_id)
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_none(),
+        "tenant B must not see tenant A's run through its run id"
+    );
+
+    let own = product
+        .forensic_trace(&tenant_a, run_a.run_id)
+        .await
+        .unwrap();
+    assert!(
+        own.is_some(),
+        "tenant A can read its own run's forensic trace"
+    );
+}

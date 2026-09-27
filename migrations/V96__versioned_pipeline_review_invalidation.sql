@@ -128,3 +128,7 @@ DO $$ BEGIN
         RAISE EXCEPTION 'V96: trace_ingest_runtime is missing; V90 creates it';
     END IF;
 END $$;
+
+-- pipeline_index_invalidations: the lifecycle and operational summaries
+-- count the tenant's pending and failed invalidations.
+GRANT SELECT ON pipeline_index_invalidations TO trace_ingest_runtime;
