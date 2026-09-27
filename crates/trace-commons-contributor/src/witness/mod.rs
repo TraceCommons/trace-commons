@@ -208,6 +208,15 @@ pub enum WitnessTrustError {
     /// able to notice. Refused whatever the certificate says.
     #[error("the witness returned an artifact still carrying the raw bodies")]
     WitnessBodyNotStripped,
+    /// The witness is at capacity and certified nothing: the exact
+    /// `503 witness_saturated` pair of the pacing contract
+    /// (`trace_commons_protocol::witness_pacing`).
+    ///
+    /// The only retryable witness refusal. Nothing about the session was
+    /// judged, so it is held and tried again after `retry_after_secs` --
+    /// the witness's own `Retry-After`, bounded -- never refused.
+    #[error("the witness is busy")]
+    WitnessSaturated { retry_after_secs: u32 },
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -249,6 +258,10 @@ impl WitnessTrustError {
             Self::WitnessResponseMalformed => "witness_response_malformed",
             Self::WitnessClaimUnavailable => "witness_claim_unavailable",
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
+            // The wire label itself, like the admission refusal below.
+            Self::WitnessSaturated { .. } => {
+                trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
+            }
             // The server's own spelling, passed through: one refusal, one
             // name, wherever a contributor meets it.
             Self::WitnessAdmissionEvidenceRefused => {
@@ -264,7 +277,7 @@ impl WitnessTrustError {
     /// derivation would have to construct a variant to read it.
     /// `every_refusal_label_is_recognised` walks the enum and fails if this
     /// list falls behind.
-    pub const ALL_REFUSAL_LABELS: [&'static str; 14] = [
+    pub const ALL_REFUSAL_LABELS: [&'static str; 15] = [
         "witness_host_not_allowed",
         "witness_attestation_unavailable",
         "witness_collateral_unavailable",
@@ -279,6 +292,7 @@ impl WitnessTrustError {
         "witness_claim_unavailable",
         "witness_body_not_stripped",
         "admission_evidence_refused",
+        trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
     ];
 
     /// Recognise a refusal label that has been through a `String`.

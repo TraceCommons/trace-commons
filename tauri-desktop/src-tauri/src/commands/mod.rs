@@ -62,6 +62,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         consent::set_consent_scopes,
         consent::acknowledge_near_ai_notice,
         consent::grant_void_notice,
+        consent::witness_capacity_notice,
         consent::acknowledge_grant_voids,
         privacy::set_private_inference,
         privacy::set_inference_evidence,

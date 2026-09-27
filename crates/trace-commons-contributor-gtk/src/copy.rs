@@ -509,8 +509,9 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // two render the shared one.
 pub use trace_commons_contributor::consent_copy::{
     AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, GATE_NOT_PINNED_HELP, GATE_READY_HELP,
-    GATE_STATEMENT, VoidNoticeCopy, gate_help, void_notice_for_wire,
+    GATE_STATEMENT, VoidNoticeCopy, gate_help, void_notice_for_wire, witness_capacity_notice,
 };
+pub use trace_commons_contributor::daemon::health::LABEL_WITNESS_SATURATED as WITNESS_SATURATED_LABEL;
 // COPY-MIGRATED-END
 
 // Outcome and correction copy now lives in the contributor core so every

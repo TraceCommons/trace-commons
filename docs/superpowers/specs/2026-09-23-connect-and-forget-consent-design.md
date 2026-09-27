@@ -1,6 +1,6 @@
 # Connect-and-Forget Contribution Consent — Design
 
-Date: 2026-09-23 (rev 8, 2026-09-25)
+Date: 2026-09-23 (rev 8, 2026-09-25; Flow 3 amended 2026-09-27)
 Status: draft for review
 Extends: [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507)
 Source: [`../../contributor-ux-review.md`](../../contributor-ux-review.md)
@@ -9,6 +9,13 @@ Scope: `trace-commons-contributor` (`daemon/policy.rs`, `daemon/watcher.rs`,
 surface in the Tauri client, named the main client for the MVP in #1003 and
 merged in #963. No production code in this PR.
 
+> **Amended 2026-09-27** (decision 6 of
+> [`2026-09-26-earned-account-trust-design.md`](2026-09-26-earned-account-trust-design.md)):
+> Flow 3 earns **allowance**, not project mode. The rev-7 rule "whatever is
+> earned is expressed as project mode" is withdrawn, and "nothing is earned
+> silently" now means a tier-change notice. See "The three paths". Nothing
+> else in this spec changes.
+>
 > **Rev 8** adopts the trust model set out in review on #991 (2026-09-25):
 > every contributor has a NEAR AI login, an invite is full trust, and trust
 > otherwise lives on the account and is enforced on the server. The consent
@@ -676,25 +683,44 @@ single decision at connect, covering everything after it.
 from trust signals gathered during and after onboarding, rather than in one
 act at connect. It is not a lesser Flow 1 and not a staging area for it: it is
 the path for a contributor who will not make a blanket grant at connect and
-should not have to approve every session forever.
+should not have to approve every session forever. Since the 2026-09-27
+amendment, what is granted incrementally is **how much** the contributor's
+armed folders may send (the account's allowance), not the arming itself,
+which is the contributor's act.
 
 The requirements do not weaken for it. R1–R7 still bind whatever becomes
 automatic, because the gates attach to the `AutoUpload` mode rather than to the
 onboarding path that reached it. What differs is *when* and *how much* becomes
 automatic, not what automatic means.
 
-**Where the mechanism lives is now settled; its details are not.** Under the
-trust model, earned trust is a property of the **account**, enforced on the
-**server** as the limit on how much an armed folder may send. It is not a
-client-side counter. Which signals count, what they accumulate toward and where
-thresholds sit remain deliberately unfixed. Two structural properties are
-fixed, because the rest of this spec depends on them:
+**The mechanism is specified in
+[`2026-09-26-earned-account-trust-design.md`](2026-09-26-earned-account-trust-design.md).**
+Under the trust model, earned trust is a property of the **account**, enforced
+on the **server** as the limit on how much an armed folder may send. It is not
+a client-side counter. What it earns is **allowance**: a tier that multiplies
+the account's `bounded` allowance, up to a finite ceiling. The signals, the
+tiers and what loses trust are set out there. Two structural properties
+follow, and the rest of this spec depends on them:
 
-- **Whatever is earned is expressed as project mode**, so that exclusion,
-  retraction, the void rule and the logout rule all reach it unchanged.
-- **Nothing is earned silently.** A folder that becomes automatic is announced
-  in the same way the first-contribution notice is, since the contributor did
-  not make a decision at the moment it changed.
+- **What is earned is allowance, never project mode.** A folder's mode is
+  only ever set by the contributor, as under rev 8: any contributor may arm any
+  folder, and earned trust only lets an armed folder send more. Exclusion,
+  retraction, the void rule and the logout rule reach earned trust unchanged
+  because none of them depends on it: they act on folder mode and on entries,
+  and a tier change touches neither. (Rev 7's rule, "whatever is earned is
+  expressed as project mode", is withdrawn: it described earning the arming
+  itself, which rev 8 made the contributor's act.)
+- **Nothing is earned silently: every tier change is announced.** When the
+  account's tier changes, in either direction, the contributor is told, in
+  the same way the first-contribution notice is, since they made no decision
+  at the moment it changed. The server records the change as a hash-only
+  `account_trust_tier_changed` account-audit row and reports the current tier
+  on `/v1/account/contribution-status` as an optional `allowance_tier`; each
+  shell shows a notice when that value changes between full polls. The notice
+  states what changed (how much the account may now send) and never claims
+  anything about redaction, which trust does not affect. The notice in the
+  Tauri client is a switch-on condition for earned trust; its wording is not
+  yet written.
 
 This is also where connected inference sits. It supplies a witness and
 receipts, which satisfy R1 and feed R4 -- so it is **one route toward
@@ -872,9 +898,10 @@ approving").
   folder without a witness may be armed, and its copy must not claim a model
   scrubs it. That wording is not yet written, and it needs the same pinning and
   cross-shell treatment as the `AUTO_*` constants (pending in #1008).
-- **Earned-trust signals and thresholds.** Where the mechanism lives is
-  settled; which signals count, what they accumulate toward and where the
-  limits sit are not.
+- **Earned-trust signals and thresholds.** Settled on 2026-09-27 in
+  [`2026-09-26-earned-account-trust-design.md`](2026-09-26-earned-account-trust-design.md),
+  except for the numeric thresholds, which are set by calibration. The
+  tier-change notice's wording is still to be written.
 - **Witness capacity and back-pressure.** Automatic sessions, including
   pre-grant backlogs, through a shared witness with bounded slots (#1014).
 - **Telling the contributor: the copy and the shells.** A void and a hold are

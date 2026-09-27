@@ -697,6 +697,20 @@ public sealed class DaemonStatus
     public List<JsonElement>? GrantVoids { get; set; }
 
     /// <summary>
+    /// Approved sessions held because the privacy witness is busy, and when
+    /// the first is tried again.
+    /// </summary>
+    /// <remarks>
+    /// Read independently of <see cref="Health"/> for the reason
+    /// <see cref="DailyBudget"/> is: the daemon sets a
+    /// <c>witness-saturated</c> label too, but a higher label can hold the
+    /// single slot while these sessions are still waiting. Null from a daemon
+    /// that predates the field, which holds nothing on the witness.
+    /// </remarks>
+    [JsonPropertyName("witness_capacity")]
+    public WitnessCapacity? WitnessCapacity { get; set; }
+
+    /// <summary>
     /// Whether there is nothing to report.
     /// </summary>
     /// <remarks>
@@ -781,6 +795,44 @@ public sealed class DailyBudget
     public DateTimeOffset? ResetsAtUtc =>
         DateTimeOffset.TryParse(
             ResetsAt,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed
+            : null;
+}
+
+/// <summary>
+/// <c>status.witness_capacity</c>: approved sessions held on a busy privacy
+/// witness. A count and one timestamp; nothing identifying can appear here.
+/// </summary>
+public sealed class WitnessCapacity
+{
+    [JsonPropertyName("waiting_sessions")]
+    public long WaitingSessions { get; set; }
+
+    /// <summary>When the first held session is tried again, as the daemon reported it.</summary>
+    [JsonPropertyName("next_retry_at")]
+    public string? NextRetryAt { get; set; }
+
+    /// <summary>Whether any approved session is waiting on the witness.</summary>
+    public bool Waiting => WaitingSessions > 0;
+
+    /// <summary>
+    /// The object handed to the Rust, which words the notice. The count is
+    /// all the words depend on, so it is all that crosses.
+    /// </summary>
+    public string WireJson =>
+        JsonSerializer.Serialize(new Dictionary<string, long>
+        {
+            ["waiting_sessions"] = Math.Max(0, WaitingSessions),
+        });
+
+    /// <summary><see cref="NextRetryAt"/> parsed, or null when absent or unreadable.</summary>
+    public DateTimeOffset? NextRetryAtUtc =>
+        DateTimeOffset.TryParse(
+            NextRetryAt,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AdjustToUniversal
                 | System.Globalization.DateTimeStyles.AssumeUniversal,

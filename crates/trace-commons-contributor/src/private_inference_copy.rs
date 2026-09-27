@@ -2538,6 +2538,7 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         }
         health::LABEL_PII_FILTER_UNAVAILABLE => "Waiting for the privacy scan",
         health::LABEL_CANARY_FAILED => "Privacy scan failed its self-test",
+        health::LABEL_WITNESS_SATURATED => "Waiting for the privacy witness; not sent yet",
         _ => "Status unavailable",
     }
 }
@@ -2684,6 +2685,7 @@ mod tests {
             health::LABEL_CLAIM_MINT_FAILED,
             health::LABEL_PII_FILTER_UNAVAILABLE,
             health::LABEL_CANARY_FAILED,
+            health::LABEL_WITNESS_SATURATED,
         ] {
             let line = queue_outcome_line(label);
             assert_ne!(line, "Status unavailable", "{label}");

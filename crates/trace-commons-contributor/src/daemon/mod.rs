@@ -43,6 +43,7 @@ pub mod grant_terms;
 pub mod harness;
 pub mod health;
 pub mod history;
+pub mod inference_connection;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
@@ -616,6 +617,11 @@ async fn drain_approved(
     now: chrono::DateTime<Utc>,
     tick_started: std::time::Instant,
 ) -> Result<()> {
+    // Read off the queue before anything can return early: every pass sees
+    // the whole queue, so every pass can say whether sessions are still
+    // waiting on the witness, including one that sends nothing because all
+    // of them are waiting.
+    sync_witness_capacity_health(shared, now);
     // Pause used to be checked only inside `watcher::tick`, so a pause
     // stopped *discovery* and nothing else: everything already `Approved`
     // -- including everything an armed project had auto-approved before the
@@ -800,6 +806,10 @@ async fn drain_approved(
     let store =
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
     let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
+    // Nobody is waiting on this pass, so its witness requests say so, and a
+    // witness that keeps a slot for a person's review turns these away
+    // first (#1014).
+    ctx.witness_as_background();
 
     let sources = crate::source::all_sources(&source_roots);
     let mut changed = false;
@@ -814,8 +824,24 @@ async fn drain_approved(
     // `?` threw all of that away, including the very label that suspends
     // expiry.
     let mut aborted: Option<anyhow::Error> = None;
+    // Set when the witness answers that it is at capacity: the instant,
+    // before jitter, it asked not to be asked again before, and the delay
+    // it gave. Every later entry in this pass that would need the witness
+    // is held until then instead of being sent, so a busy witness is asked
+    // once per pass rather than once per waiting session.
+    let mut witness_busy_until: Option<(chrono::DateTime<Utc>, u32)> = None;
 
     for entry in approved {
+        if let Some((until, retry_after_secs)) = witness_busy_until
+            && !entry.holds_witness_certificate()
+        {
+            let mut q = shared.queue.lock().expect("queue lock");
+            let held_until = until + witness_capacity_jitter(entry.entry_id, retry_after_secs);
+            if q.defer_for_witness_capacity(entry.entry_id, held_until) {
+                changed = true;
+            }
+            continue;
+        }
         // Claim the entry, atomically, before anything is read or sent. A
         // `cancel` that landed between the snapshot above and here wins and
         // the entry is skipped; from this point `cancel` is refused,
@@ -1069,6 +1095,31 @@ async fn drain_approved(
                     );
                 }
             }
+            uploader::UploadDecision::WitnessSaturated { retry_after_secs } => {
+                // Nothing was judged, so nothing is refused: the entry keeps
+                // its approval and is not claimable again until the witness
+                // has had the time it asked for, doubling while it stays
+                // busy. Never a per-session attempt limit, for the reason
+                // the transient classifier retry has none.
+                let attempt = q
+                    .get(entry.entry_id)
+                    .map(|e| e.attempts.saturating_add(1))
+                    .unwrap_or(1);
+                let observed_at = now
+                    + chrono::Duration::from_std(tick_started.elapsed())
+                        .expect("daemon pass elapsed time fits chrono duration");
+                let until = observed_at + witness_capacity_retry_delay(retry_after_secs, attempt);
+                q.record_attempt(
+                    entry.entry_id,
+                    Some(until + witness_capacity_jitter(entry.entry_id, retry_after_secs)),
+                );
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(crate::submit::REASON_WITNESS_SATURATED.to_string()),
+                );
+                witness_busy_until = Some((until, retry_after_secs));
+            }
             uploader::UploadDecision::CapReached => {
                 // Leave it approved: the cap lifts when the day rolls over.
                 break;
@@ -1120,10 +1171,47 @@ async fn drain_approved(
         shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
 
+    // After the queue is final for this pass: a successful upload clears the
+    // health slot wholesale, and sessions this pass held are still waiting.
+    sync_witness_capacity_health(shared, now);
+
     if let Some(e) = aborted {
         return Err(e);
     }
     Ok(())
+}
+
+/// Set or retract `witness-saturated` from what the queue says, so the
+/// condition is exactly "some approved session is waiting on witness
+/// capacity" and never outlives the last of them.
+fn sync_witness_capacity_health(shared: &ipc::DaemonShared, now: chrono::DateTime<Utc>) {
+    let waiting = shared.witness_capacity().waiting_sessions;
+    let mut health = shared.health.lock().expect("health lock");
+    if waiting > 0 {
+        health.fail(health::LABEL_WITNESS_SATURATED, now);
+    } else {
+        health.resolve(health::LABEL_WITNESS_SATURATED);
+    }
+}
+
+/// How long to leave a saturated witness alone after the `attempts`-th time
+/// it refused: its own `Retry-After`, doubling per consecutive refusal and
+/// capped at an hour. The witness's delay is the floor, never shortened.
+fn witness_capacity_retry_delay(retry_after_secs: u32, attempts: u32) -> chrono::Duration {
+    let base = i64::from(retry_after_secs.max(1));
+    let exponent = attempts.saturating_sub(1).min(7);
+    let cap = i64::from(crate::witness::transport::MAX_WITNESS_RETRY_AFTER_SECS).max(base);
+    chrono::Duration::seconds((base * (1_i64 << exponent)).min(cap))
+}
+
+/// A per-session spread of up to half the witness's delay, so every
+/// contributor refused in the same second does not come back in the same
+/// second. Derived from the entry id rather than drawn at random: ids differ
+/// across contributors and sessions, which is all the spread needs, and it
+/// keeps the schedule reproducible.
+fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chrono::Duration {
+    let span = u128::from(retry_after_secs.max(1) / 2) + 1;
+    chrono::Duration::seconds((entry_id.as_u128() % span) as i64)
 }
 
 /// One minute, doubling per failed attempt and capped at one hour. There is
@@ -1610,6 +1698,11 @@ mod tests {
         uploads: Arc<AtomicUsize>,
         /// What ingest answers an upload with instead of accepting it.
         ingest_reply: Arc<std::sync::Mutex<Option<(StatusCode, serde_json::Value)>>>,
+        /// `Some(retry_after)` makes `/v1/witness` answer the pacing
+        /// contract's `503 witness_saturated`; `None` certifies.
+        witness_saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
+        /// The workload header of every `/v1/witness` request, in order.
+        witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
     }
 
     impl TransientRetryHarness {
@@ -1621,6 +1714,18 @@ mod tests {
         }
 
         async fn new() -> Self {
+            Self::build(false).await
+        }
+
+        /// The harness with the contributor pointed at its witness from the
+        /// start, pinned to the fixture signer and measurement. From the
+        /// start because the configuration is part of what an approval
+        /// covers: changing it afterwards re-offers the session.
+        async fn with_witness() -> Self {
+            Self::build(true).await
+        }
+
+        async fn build(witness: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
             cloud_credential_test_support::install(&store);
@@ -1685,7 +1790,15 @@ mod tests {
                 }),
             ))
             .await;
-            let ingest = Self::spawn(Router::new().route(
+            let witness_saturated = Arc::new(std::sync::Mutex::new(None::<&'static str>));
+            let witness_calls = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+            let quote_guards = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let witness_routes = Self::witness_routes(
+                witness_saturated.clone(),
+                witness_calls.clone(),
+                quote_guards,
+            );
+            let ingest = Self::spawn(witness_routes.route(
                 "/v1/traces",
                 post({
                     let uploads = uploads.clone();
@@ -1715,7 +1828,7 @@ mod tests {
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                     issuer_url: issuer,
-                    ingest_url: ingest,
+                    ingest_url: ingest.clone(),
                     audience: "trace-commons-upload".into(),
                     tenant_id: "tenant-abc".into(),
                     instance_id: "instance-1".into(),
@@ -1727,7 +1840,12 @@ mod tests {
                     display_handle: None,
                     public_bio: None,
                     public_since: None,
-                    witness: None,
+                    witness: witness.then(|| crate::config::WitnessSettings {
+                        url: ingest.clone(),
+                        signing_address: crate::witness::transport::signed_fixture(Vec::new()).1,
+                        expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+                        admission_evidence: false,
+                    }),
                 })
                 .unwrap();
             let claude_root = dir.path().join("projects");
@@ -1792,7 +1910,158 @@ mod tests {
                 classifier_delay_ms,
                 uploads,
                 ingest_reply,
+                witness_saturated,
+                witness_calls,
             }
+        }
+
+        /// A witness on the ingest server: attestation bound to the
+        /// caller's nonce through the one-shot quote fixture, collateral,
+        /// and `/v1/witness`, which either answers saturated or redacts
+        /// and certifies what it was sent.
+        fn witness_routes(
+            saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
+            calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+            guards: Arc<std::sync::Mutex<Vec<crate::witness::verify::QuoteFixture>>>,
+        ) -> Router {
+            use axum::extract::Query;
+            use std::collections::HashMap;
+            let (_, signer) = crate::witness::transport::signed_fixture(Vec::new());
+            Router::new()
+                .route(
+                    "/v1/attestation",
+                    axum::routing::get(move |Query(query): Query<HashMap<String, String>>| {
+                        let guards = guards.clone();
+                        let signer = signer.clone();
+                        async move {
+                            let mut report_data = vec![0u8; 64];
+                            report_data[..8].copy_from_slice(crate::witness::WITNESS_QUOTE_DOMAIN);
+                            report_data[8..28].copy_from_slice(
+                                &trace_commons_attestation::address::decode_address(&signer)
+                                    .unwrap(),
+                            );
+                            report_data[28..60]
+                                .copy_from_slice(&hex::decode(&query["nonce"]).unwrap());
+                            let quote = trace_commons_attestation::quote::VerifiedQuote {
+                                report_data,
+                                mrtd: "aa".repeat(48),
+                                mr_config_id: "00".repeat(48),
+                                rtmr: std::array::from_fn(|_| "00".repeat(48)),
+                                tcb_status: "UpToDate".into(),
+                                advisory_ids: Vec::new(),
+                            };
+                            let guard = crate::witness::verify::register_quote_fixture(quote);
+                            let quote_hex = hex::encode(&guard.0);
+                            guards.lock().unwrap().push(guard);
+                            Json(serde_json::json!({
+                                "quote_hex": quote_hex, "signing_address": signer
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/attestation-collateral",
+                    post(|| async {
+                        include_str!(
+                            "../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json"
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/witness",
+                    post(
+                        move |headers: axum::http::HeaderMap, Json(request): Json<serde_json::Value>| {
+                            let saturated = *saturated.lock().unwrap();
+                            calls.lock().unwrap().push(
+                                headers
+                                    .get(
+                                        trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER,
+                                    )
+                                    .map(|v| v.to_str().unwrap().to_string()),
+                            );
+                            async move {
+                                if let Some(retry_after) = saturated {
+                                    return (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        [(axum::http::header::RETRY_AFTER, retry_after)],
+                                        Json(serde_json::json!({"error": "witness_saturated"})),
+                                    )
+                                        .into_response();
+                                }
+                                let raw = serde_json::from_value(request["raw_contribution"].clone())
+                                    .unwrap();
+                                let cfg = crate::commands::unenrolled_preview_config();
+                                let redactor =
+                                    crate::envelope::build_redactor_with(&cfg, None, None).unwrap();
+                                let mut envelope =
+                                    crate::envelope::redact_to_envelope(&redactor, raw)
+                                        .await
+                                        .unwrap();
+                                crate::envelope::apply_granted_scopes(
+                                    &mut envelope,
+                                    &serde_json::from_value::<Vec<_>>(
+                                        request["granted_scopes"].clone(),
+                                    )
+                                    .unwrap(),
+                                    &serde_json::from_value::<Vec<_>>(
+                                        request["granted_uses"].clone(),
+                                    )
+                                    .unwrap(),
+                                );
+                                let mut bytes = serde_json::to_vec_pretty(&envelope).unwrap();
+                                bytes.push(b'\n');
+                                let (response, _) =
+                                    crate::witness::transport::signed_fixture(bytes);
+                                (
+                                    [
+                                        (
+                                            crate::witness::transport::WITNESS_CERTIFICATE_HEADER,
+                                            response.certificate_json,
+                                        ),
+                                        (
+                                            crate::witness::transport::WITNESS_SIGNATURE_HEADER,
+                                            response.signature_hex,
+                                        ),
+                                    ],
+                                    response.envelope_bytes,
+                                )
+                                    .into_response()
+                            }
+                        },
+                    ),
+                )
+        }
+
+        /// A second settled session in the same armed project.
+        async fn add_session(&self, session_id: &str, text: &str) {
+            let path = self
+                .session_path
+                .parent()
+                .unwrap()
+                .join(format!("{session_id}.jsonl"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "user",
+                        "message": {"role": "user", "content": text},
+                        "cwd": self.project_cwd,
+                        "timestamp": "2026-08-08T10:00:00Z",
+                        "version": "2.0.1",
+                        "sessionId": session_id,
+                        "uuid": "b1"
+                    })
+                ),
+            )
+            .unwrap();
+            for _ in 0..2 {
+                watcher::tick(&self.shared, Self::now()).await.unwrap();
+            }
+        }
+
+        fn entries(&self) -> Vec<queue::QueueEntry> {
+            self.shared.queue.lock().unwrap().all().to_vec()
         }
 
         fn now() -> chrono::DateTime<Utc> {
@@ -2305,6 +2574,139 @@ mod tests {
         assert_eq!(h.entry().session_hash, original.session_hash);
         assert_eq!(std::fs::read(&h.session_path).unwrap(), original_bytes);
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// Z5, end to end through a real witness exchange: a witness at capacity
+    /// holds every session that needs it, is asked once rather than once per
+    /// session, is not asked again before its `Retry-After`, and the sessions
+    /// go out when it has room. Before this, `503 witness_saturated` read as
+    /// a malformed response and the session was refused for good.
+    #[tokio::test]
+    async fn a_saturated_witness_holds_sessions_and_is_asked_again_only_when_due() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.add_session("8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d", "tidy the lexer too")
+            .await;
+        assert_eq!(h.entries().len(), 2);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved)
+        );
+        *h.witness_saturated.lock().unwrap() = Some("45");
+        let now = TransientRetryHarness::now();
+
+        // The retry is scheduled from when the refusal arrived, which is
+        // `now` plus however long the pass took to get there; bound by the
+        // measured duration rather than a guess at it.
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        // Asked once, as background work, and nothing uploaded.
+        assert_eq!(
+            *h.witness_calls.lock().unwrap(),
+            vec![Some("background".to_string())]
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        // Both sessions held, approved, waiting on capacity; neither refused.
+        for entry in h.entries() {
+            assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+            assert_eq!(
+                entry.reason_label.as_deref(),
+                Some(crate::submit::REASON_WITNESS_SATURATED)
+            );
+            let due = entry.retry_after.expect("a retry time");
+            assert!(
+                due >= now + chrono::Duration::seconds(45)
+                    && due <= now + pass_took + chrono::Duration::seconds(45 + 22),
+                "the witness's delay plus bounded jitter: {due}"
+            );
+        }
+        assert_eq!(
+            h.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_WITNESS_SATURATED)
+        );
+        let status = h.shared.status_value();
+        assert_eq!(status["witness_capacity"]["waiting_sessions"], 2);
+        let earliest = h.entries().iter().filter_map(|e| e.retry_after).min();
+        assert_eq!(
+            status["witness_capacity"]["next_retry_at"],
+            serde_json::json!(earliest)
+        );
+
+        // Not before it is due.
+        h.pass(now + chrono::Duration::seconds(44)).await;
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 1);
+
+        // Room again: both go out, and the condition clears.
+        *h.witness_saturated.lock().unwrap() = None;
+        h.pass(now + chrono::Duration::seconds(120)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Uploaded)
+        );
+        assert_eq!(h.shared.health.lock().unwrap().last_error_label, None);
+        let status = h.shared.status_value();
+        assert_eq!(status["witness_capacity"]["waiting_sessions"], 0);
+        assert_eq!(
+            status["witness_capacity"]["next_retry_at"],
+            serde_json::Value::Null
+        );
+    }
+
+    /// A witness that stays saturated is asked less and less often, never
+    /// more than hourly apart, and never gives up on the session.
+    #[tokio::test]
+    async fn a_witness_that_stays_saturated_is_backed_off_and_the_session_kept() {
+        let h = TransientRetryHarness::with_witness().await;
+        *h.witness_saturated.lock().unwrap() = Some("30");
+        let mut now = TransientRetryHarness::now();
+        let mut delays = Vec::new();
+        for _ in 0..8 {
+            // Measured, not guessed: the retry is scheduled from when the
+            // refusal arrived, which is up to one pass after `now`.
+            let started = std::time::Instant::now();
+            h.pass(now).await;
+            let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+            let entry = h.entry();
+            assert_eq!(entry.state, queue::QueueState::Approved);
+            assert_eq!(
+                entry.reason_label.as_deref(),
+                Some(crate::submit::REASON_WITNESS_SATURATED)
+            );
+            let due = entry.retry_after.unwrap();
+            delays.push((due - now - pass_took, due - now));
+            now = due;
+        }
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 8);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        // The witness's 30 seconds doubling per refusal (jitter from this
+        // entry id is at most 15 seconds, so each floor is the bare delay).
+        let floors = [30, 60, 120, 240, 480, 960, 1_920, 3_600];
+        for ((lower, upper), floor) in delays.iter().zip(floors) {
+            assert!(
+                *upper >= chrono::Duration::seconds(floor)
+                    && *lower <= chrono::Duration::seconds(floor + 15),
+                "expected {floor}s plus at most 15s of jitter: {delays:?}"
+            );
+        }
+    }
+
+    /// Nothing a contributor can do moves a busy witness, so like an outage
+    /// it stops pending sessions aging out -- and it never hides one.
+    #[test]
+    fn witness_saturated_is_a_waiting_condition_that_suspends_expiry() {
+        let mut h = health::HealthState::default();
+        h.fail(health::LABEL_WITNESS_SATURATED, at("2030-01-01T00:00:00Z"));
+        assert!(h.blocks_expiry());
+        // An outage the contributor must hear about is never masked by it.
+        h.fail(health::LABEL_INGEST_UNREACHABLE, at("2030-01-01T00:01:00Z"));
+        assert_eq!(
+            h.last_error_label.as_deref(),
+            Some(health::LABEL_INGEST_UNREACHABLE)
+        );
     }
 
     /// Rule 3 through the upload pass itself: ingest turns the upload away

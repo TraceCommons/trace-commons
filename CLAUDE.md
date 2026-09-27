@@ -90,8 +90,7 @@ cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=
 Without the resolver URL, about 74 account, passkey and login tests fail with
 `redeem succeeds: left 400 right 303`. CI runs the same thing in the
 `ingest-bin-postgres` job (`trace-commons-ingest tests, whole bin, against
-PostgreSQL (advisory)`), which is not a required check yet: it becomes one
-once it is green on `main`.
+PostgreSQL`), which is a required status check, in the merge queue too.
 
 CI applies `RUSTFLAGS=-D warnings` to check + test, so plain `cargo check`
 will not catch what CI catches. Always use the `RUSTFLAGS` form locally
@@ -132,7 +131,7 @@ churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
 reason: a cancelled job saves no cache, and merges to `main` land close
 together.
 
-Running is not the same as blocking. **Ten** of the seventeen are required
+Running is not the same as blocking. **Eleven** of the seventeen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never
@@ -161,6 +160,12 @@ receives them times out of the queue instead of merging.
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
   exercising the JSONL loader path.
 - `operator-binaries smoke`.
+- `database suites against a real PostgreSQL` and `trace-commons-ingest
+  tests, whole bin, against PostgreSQL` — the only jobs that point the
+  PostgreSQL-backed tests at a real database; everywhere else they self-skip.
+  Both are required, and both end by refusing a run whose database shows no
+  committed transactions, because a pass count alone does not prove the
+  tests reached PostgreSQL.
 - `builds at the declared MSRV floor` — the only job that does NOT use
   `dtolnay/rust-toolchain@stable`. It reads `rust-version` out of `cargo
   metadata` (never a literal in the workflow) for both the root workspace and

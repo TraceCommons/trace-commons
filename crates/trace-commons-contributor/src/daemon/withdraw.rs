@@ -41,7 +41,7 @@ pub const ERR_ACCOUNT_SESSION_REQUIRED: &str = "account-session-required";
 /// be): the caller must then report [`ERR_ACCOUNT_SESSION_REQUIRED`] rather
 /// than fall back to the device key, which is deliberately not accepted for
 /// withdrawal.
-fn account_session(
+pub(super) fn account_session(
     shared: &DaemonShared,
 ) -> anyhow::Result<Option<crate::account_auth::LoadedAccountSession>> {
     super::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(&shared.store))
@@ -52,7 +52,7 @@ fn account_session(
 /// grace after a rotation, so dropping this signs the contributor out.
 ///
 /// `false` when a rotation came back and could not be stored.
-fn keep_rotated_token(
+pub(super) fn keep_rotated_token(
     shared: &DaemonShared,
     session: &mut crate::account_auth::LoadedAccountSession,
     rotated_token: Option<String>,

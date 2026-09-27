@@ -328,6 +328,11 @@ pub const METHODS: &[&str] = &[
     "hello",
     "history_detail",
     "history_rollup",
+    "inference_connection_offers",
+    "inference_connection_current",
+    "inference_connection_select",
+    "inference_connection_install",
+    "inference_connection_disconnect",
     "list_audit",
     "list_history",
     "list_pending",
@@ -456,6 +461,13 @@ struct RoutingSnapshot {
     derived: bool,
 }
 
+/// `status.witness_capacity`: see [`DaemonShared::witness_capacity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessCapacity {
+    pub waiting_sessions: usize,
+    pub next_retry_at: Option<chrono::DateTime<Utc>>,
+}
+
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
     pub store: ConfigStore,
@@ -535,6 +547,10 @@ pub struct DaemonShared {
     private_inference_terminating: AtomicBool,
     private_inference_generation: std::sync::atomic::AtomicU64,
     token_review_generation: std::sync::atomic::AtomicU64,
+    /// Serializes the inference-connection handlers' read-modify-write of the
+    /// config and `daemon-inference-connection.json` after their network
+    /// calls. A `std` mutex: it is never held across an await.
+    pub(crate) inference_connection_lock: Mutex<()>,
     /// The credential-change count this daemon has already absorbed.
     ///
     /// See [`super::nearai_credential::ceremony::change_count`] for what the
@@ -713,6 +729,7 @@ impl DaemonShared {
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
+            inference_connection_lock: Mutex::new(()),
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
             private_inference_changed: tokio::sync::Notify::new(),
@@ -1403,6 +1420,26 @@ impl DaemonShared {
         super::uploader::budget_snapshot(&approved, &state, &settings, now)
     }
 
+    /// How many approved sessions are held because the witness is at
+    /// capacity, and the earliest instant one of them will be tried again.
+    ///
+    /// Derived from the queue on every call rather than kept beside it, so
+    /// it cannot disagree with the rows it counts. Approved rows are never on
+    /// `list_pending`, so, like `daily_budget`, this is the only place a
+    /// shell can learn the condition.
+    pub fn witness_capacity(&self) -> WitnessCapacity {
+        let queue = self.queue.lock().expect("queue lock");
+        let waiting: Vec<&super::queue::QueueEntry> = queue
+            .all()
+            .iter()
+            .filter(|e| e.waiting_on_witness_capacity())
+            .collect();
+        WitnessCapacity {
+            waiting_sessions: waiting.len(),
+            next_retry_at: waiting.iter().filter_map(|e| e.retry_after).min(),
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
         let now = Utc::now();
@@ -1419,6 +1456,8 @@ impl DaemonShared {
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
         let grant_voids = self.grant_voids_value();
+        // Before the queue lock: it takes the queue lock itself.
+        let witness_capacity = self.witness_capacity();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1464,6 +1503,15 @@ impl DaemonShared {
             // an outage, nor mask one. An empty list, never absent, so a
             // shell can tell "nothing to show" from a daemon too old to say.
             "grant_voids": grant_voids,
+            // Additive. Approved sessions held because the witness is at
+            // capacity, and when the first of them is tried again. Beside
+            // `health` for the reason `daily_budget` is: the health slot
+            // holds one label, and a busy witness must still be sayable
+            // while something outranks it. Always present, zero when none.
+            "witness_capacity": {
+                "waiting_sessions": witness_capacity.waiting_sessions,
+                "next_retry_at": witness_capacity.next_retry_at,
+            },
         })
     }
 
@@ -1995,6 +2043,26 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("enroll", "enroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
+    (
+        "inference_connection_offers",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_current",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_select",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_install",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_disconnect",
+        "inference-connection-requires-async",
+    ),
     ("history_detail", "session-detail-requires-async"),
     ("skill_candidate", "skill-candidate-requires-async"),
     ("skill_evaluate", "skill-evaluation-requires-async"),
@@ -3220,6 +3288,21 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "inference_connection_offers" => {
+            super::inference_connection::handle_offers(shared, req).await
+        }
+        "inference_connection_current" => {
+            super::inference_connection::handle_current(shared, req).await
+        }
+        "inference_connection_select" => {
+            super::inference_connection::handle_select(shared, req).await
+        }
+        "inference_connection_install" => {
+            super::inference_connection::handle_install(shared, req).await
+        }
+        "inference_connection_disconnect" => {
+            super::inference_connection::handle_disconnect(shared, req).await
+        }
         "history_detail" => super::public_run::handle_detail(shared, req).await,
         "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
         "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
@@ -11048,10 +11131,65 @@ mod tests {
         }
     }
 
+    /// Through the real dispatcher, as a shell reaches them: with no account
+    /// session every inference-connection method refuses with the same label
+    /// withdrawal uses, before any network call and whatever its params.
+    /// Disconnect is the one that answers: it removes the local witness
+    /// first, and reports the server step as waiting on that same label.
+    #[tokio::test]
+    async fn inference_connection_methods_require_an_account_session() {
+        let s = shared();
+        let id = uuid::Uuid::new_v4().to_string();
+        for (method, params) in [
+            ("inference_connection_offers", serde_json::json!({})),
+            ("inference_connection_current", serde_json::json!({})),
+            (
+                "inference_connection_select",
+                serde_json::json!({
+                    "offer_id": "near-ai",
+                    "provider_id": "near-ai",
+                    "revision": format!("sha256:{}", "a".repeat(64)),
+                    "config_digest": format!("sha256:{}", "b".repeat(64)),
+                    "disclosure_version":
+                        trace_commons_protocol::inference_connection::DISCLOSURE_VERSION,
+                }),
+            ),
+            (
+                "inference_connection_install",
+                serde_json::json!({
+                    "connection_id": id,
+                    "config_digest": format!("sha256:{}", "b".repeat(64)),
+                }),
+            ),
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+            let response = handle_request_async(&s, &req(method, params)).await;
+            let error = response.error.expect("refused without a session");
+            assert_eq!(error.code, ERR_UNAVAILABLE, "{method}");
+            assert_eq!(
+                error.message,
+                super::super::withdraw::ERR_ACCOUNT_SESSION_REQUIRED,
+                "{method}"
+            );
+        }
+        let method = "inference_connection_disconnect";
+        assert!(METHODS.contains(&method));
+        let response =
+            handle_request_async(&s, &req(method, serde_json::json!({ "connection_id": id })))
+                .await;
+        let result = response.result.expect("disconnect reports its local step");
+        assert_eq!(result["disconnected"], false);
+        assert_eq!(result["server_disconnect"], "pending");
+        assert_eq!(
+            result["server_refusal"],
+            super::super::withdraw::ERR_ACCOUNT_SESSION_REQUIRED
+        );
+    }
+
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 27);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 32);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -11481,7 +11619,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

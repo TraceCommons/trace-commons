@@ -426,10 +426,11 @@ jobs:
       - uses: ./.github/actions/trim-cargo-cache
 
   ingest-bin-postgres:
-    name: trace-commons-ingest tests, whole bin, against PostgreSQL (advisory)
-    # ADVISORY. Not a required status check, and deliberately left out of
-    # branch protection: it becomes required once it is green on `main`.
-    # Until then a red run here blocks nothing, so read it.
+    name: trace-commons-ingest tests, whole bin, against PostgreSQL
+    # A required status check on `main`, matched by the `name:` above -- the
+    # string branch protection lists. Renaming it drops it from the required
+    # set until protection is updated to the new name, so change both
+    # together.
     #
     # The `trace-commons-ingest` bin carries well over a thousand unit tests,
     # and every PostgreSQL-backed one self-skips without
@@ -440,9 +441,10 @@ jobs:
     # five, and one more found while repairing the rest. This job runs all
     # of them.
     #
-    # Not run in the merge queue: it is not required, so a queued batch would
-    # only spend a runner on a result nobody waits for.
-    if: ${{ github.event_name != 'merge_group' }}
+    # No `if:` and no path filter, the same as `postgres-suites`: it runs on
+    # every push to main, every pull request, and every merge-queue batch. A
+    # required check that is skipped in the queue never reports there, and
+    # the queue times the entry out instead of merging it.
     runs-on: ubuntu-latest
     timeout-minutes: 40
     services:

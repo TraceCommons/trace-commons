@@ -416,12 +416,30 @@ impl QueueEntry {
                 .is_some_and(|reason| REASONS_NEEDING_A_PERSON.contains(&reason))
     }
 
-    /// A transient classifier retry stays approved, but cannot be claimed
-    /// before its persisted deadline. A missing deadline fails closed.
+    /// A paced retry -- a transient classifier outage, or a witness at
+    /// capacity -- stays approved, but cannot be claimed before its
+    /// persisted deadline. A missing deadline fails closed.
     pub(crate) fn ready_for_upload(&self, now: DateTime<Utc>) -> bool {
         self.state == QueueState::Approved
-            && (self.reason_label.as_deref() != Some(crate::submit::REASON_TRANSIENT_REDACTION)
-                || self.retry_after.is_some_and(|due| due <= now))
+            && (!self.waiting_on_a_retry() || self.retry_after.is_some_and(|due| due <= now))
+    }
+
+    /// Whether this entry is approved and paced behind a deadline rather
+    /// than free to go on the next pass.
+    fn waiting_on_a_retry(&self) -> bool {
+        matches!(
+            self.reason_label.as_deref(),
+            Some(
+                crate::submit::REASON_TRANSIENT_REDACTION | crate::submit::REASON_WITNESS_SATURATED
+            )
+        )
+    }
+
+    /// Whether this entry is approved and held because the witness is at
+    /// capacity. What `status.witness_capacity` counts.
+    pub(crate) fn waiting_on_witness_capacity(&self) -> bool {
+        self.state == QueueState::Approved
+            && self.reason_label.as_deref() == Some(crate::submit::REASON_WITNESS_SATURATED)
     }
 
     /// Whether a witness certificate is held for the bytes this entry was
@@ -1449,6 +1467,22 @@ impl Queue {
     pub fn set_submission_id(&mut self, entry_id: Uuid, submission_id: Uuid) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             e.submission_id = Some(submission_id);
+        }
+    }
+
+    /// Hold an approved entry until `until` because the witness is at
+    /// capacity, without counting an attempt: this entry was never sent, it
+    /// is held because another one just learned the witness is busy.
+    /// Returns whether it was held. Anything no longer `Approved` -- the
+    /// contributor cancelled or withdrew it meanwhile -- is left alone.
+    pub fn defer_for_witness_capacity(&mut self, entry_id: Uuid, until: DateTime<Utc>) -> bool {
+        match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            Some(e) if e.state == QueueState::Approved => {
+                e.reason_label = Some(crate::submit::REASON_WITNESS_SATURATED.to_string());
+                e.retry_after = Some(until);
+                true
+            }
+            _ => false,
         }
     }
 
