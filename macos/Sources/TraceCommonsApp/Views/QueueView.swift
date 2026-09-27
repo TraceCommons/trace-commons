@@ -452,7 +452,7 @@ struct QueueRow: View {
             .map(PrivateInferenceIndicator.palette)
     }
 
-    // MARK: - Whether this session carries proof of the call it came from
+    // MARK: - Whether this session carries proof of its last model call
 
     /// The mark on the row, or none.
     ///

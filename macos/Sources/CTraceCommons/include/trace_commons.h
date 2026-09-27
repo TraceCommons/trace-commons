@@ -966,8 +966,8 @@ char*       tc_contribution_eligibility_reason_line(const char* reason);
  * tc_contribution_eligibility_line, which must not be called when the wire
  * carried no eligibility field. That field answers whether this contributor
  * may send this session -- a question only an evidence-admitted contributor
- * has. This one answers whether the session carries a checkable copy of the
- * model call that produced it, which is a fact about the trace, and the field
+ * has. This one answers whether the session carries a checkable copy of its
+ * last model call, which is a fact about the trace, and the field
  * is always present.
  *
  * THE POSITIVE CASE IS THE INTERESTING ONE HERE. A session that IS attested

@@ -127,7 +127,7 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// key, and one row's missing field would fail the WHOLE list.
     ///
     /// Not `attestation` above. That says whether the session carries a copy
-    /// of the model call that produced it; this says whether a certificate
+    /// of its last model call; this says whether a certificate
     /// is held over the reviewed bytes. A session can have either without
     /// the other.
     let holdsCertificateRaw: Bool?

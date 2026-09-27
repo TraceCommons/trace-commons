@@ -371,9 +371,9 @@ pub struct QueueEntry {
     pub eligibility: Option<String>,
     #[serde(default)]
     pub eligibility_reason: Option<String>,
-    /// Whether this session carries proof of the model call that produced
-    /// it, and why not when it does not: one of `attestation_mark`'s `MARK_*`
-    /// labels and one of its `REASON_*` labels.
+    /// Whether this session carries proof of its last model call, and why
+    /// not when it does not: one of `attestation_mark`'s `MARK_*` labels
+    /// and one of its `REASON_*` labels.
     ///
     /// **Recorded for every contributor, not only the evidence-admitted
     /// ones.** `eligibility` above answers a permission question, and an

@@ -3616,7 +3616,7 @@ pub unsafe extern "C" fn tc_contribution_eligibility_reason_line(
 /// wire carried no `eligibility` field. That field answers whether this
 /// contributor may send this session -- a question only an evidence-admitted
 /// contributor has. This one answers whether the session carries a checkable
-/// copy of the model call that produced it, which is a fact about the trace,
+/// copy of its last model call, which is a fact about the trace,
 /// and the field is always present.
 ///
 /// **The positive case is the interesting one here.** A session that IS

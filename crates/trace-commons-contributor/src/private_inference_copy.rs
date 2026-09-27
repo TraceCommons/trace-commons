@@ -2173,7 +2173,7 @@ pub const CERTIFICATE_LIST_EMPTY: &str =
     "Nothing here yet. A session joins this list once your witness has reviewed it.";
 
 pub const ATTESTATION_ATTESTED: &str =
-    "This session carries a checkable copy of the model call it came from.";
+    "This session carries a checkable copy of its last model call.";
 
 /// `unattested_permanent`.
 ///
@@ -2183,7 +2183,7 @@ pub const ATTESTATION_ATTESTED: &str =
 /// eligibility twin does -- somebody told only "there is no copy" tries to
 /// make one -- without the eligibility sentence's "cannot be sent", which is
 /// simply untrue for an invited contributor.
-pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy of the model call it came from, and \
+pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy of its last model call, and \
      nothing you change now will add one to work already finished.";
 
 /// `unattested_configuration`.
@@ -2191,7 +2191,7 @@ pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy
 /// **The only mark whose sentence names a setting**, because it is the only
 /// one where changing something helps. The row stays about its own session:
 /// what the setting changes is the sessions recorded from now on.
-pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no copy of the model call it came from. A setting \
+pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no copy of its last model call. A setting \
      decides whether the ones you record from now on will.";
 
 /// `unknown`, and any mark label this build has never heard of.
@@ -2201,7 +2201,7 @@ pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no 
 /// gets its own sentence rather than borrowing a known one, because a
 /// contributor told "no copy" about a session that has one will stop offering
 /// work that is fine.
-pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of the model call it came from has \
+pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of its last model call has \
      not been worked out. That is not the same as a no.";
 
 /// `no_inference_call`.
@@ -3718,6 +3718,30 @@ mod tests {
                     "{mark} reads exactly like the {state} verdict"
                 );
             }
+        }
+    }
+
+    /// A session is many model calls, and the witness attests only the
+    /// last one (`trace_commons_protocol::witness_provenance`: a
+    /// contribution's *final* declared inference call). No mark sentence may
+    /// read as if the session were a single call, and each names the call
+    /// it actually covers.
+    #[test]
+    fn attestation_marks_name_the_last_model_call_not_the_session() {
+        for line in [
+            ATTESTATION_ATTESTED,
+            ATTESTATION_UNATTESTED_PERMANENT,
+            ATTESTATION_UNATTESTED_CONFIGURATION,
+            ATTESTATION_UNKNOWN,
+        ] {
+            assert!(
+                !line.contains("the model call it came from"),
+                "reads as if the session were one call: {line:?}"
+            );
+            assert!(
+                line.contains("its last model call"),
+                "does not name the call it covers: {line:?}"
+            );
         }
     }
 

@@ -291,7 +291,7 @@ pub fn void_reason_line(label: &str) -> &'static str {
             "The privacy filter that reads your sessions before they are sent was added, removed or changed."
         }
         "receipt-endpoint-changed" => {
-            "Your AI provider would now be asked for receipts for the calls in your sessions, which tells it they are being contributed."
+            "Your AI provider would now be asked for a receipt for the last call in each of your sessions, which tells it they are being contributed."
         }
         "witness-changed" => {
             "A different witness, the service that checks and scrubs your sessions before they are contributed, would now read them."
@@ -633,6 +633,22 @@ mod tests {
             assert_ne!(line, VOID_REASON_UNKNOWN, "{label} has no sentence");
             assert!(seen.insert(line), "{label} shares a sentence");
         }
+    }
+
+    /// A receipt is sought for one call per session -- the last one, the
+    /// only call the witness attests (`trace_commons_protocol::
+    /// witness_provenance`) -- not for every call in it.
+    #[test]
+    fn the_receipt_reason_names_the_last_call_not_every_call() {
+        let line = void_reason_line(crate::daemon::grant_terms::VOID_RECEIPT_ENDPOINT);
+        assert!(
+            !line.contains("the calls in your sessions"),
+            "reads as a receipt for every call: {line:?}"
+        );
+        assert!(
+            line.contains("the last call in each of your sessions"),
+            "does not name the call a receipt covers: {line:?}"
+        );
     }
 
     /// The notice says plainly that automatic contributing stopped, for
