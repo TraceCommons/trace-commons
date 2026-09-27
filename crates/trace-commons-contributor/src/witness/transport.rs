@@ -767,6 +767,32 @@ pub struct HttpWitnessTransport {
     collateral_url: String,
     allowlist: Arc<HostAllowlist>,
     admission_evidence: bool,
+    /// Whether this transport's witness POSTs declare the background
+    /// workload. See [`Self::with_background_workload`].
+    background_workload: bool,
+}
+
+/// The longest a witness's `Retry-After` may hold a session, in seconds. One
+/// answer from a witness -- mistaken or hostile -- must not park a session
+/// for longer than an hour; the daemon asks again after that.
+pub const MAX_WITNESS_RETRY_AFTER_SECS: u32 = 3_600;
+
+/// Read the delay a saturated witness asked for.
+///
+/// Only a positive integer number of seconds is honoured, capped at
+/// [`MAX_WITNESS_RETRY_AFTER_SECS`]. Anything else -- absent, zero, an HTTP
+/// date, text -- is the contract's published default, never "retry now":
+/// a client that retried immediately on an unreadable header is exactly
+/// the hammering the contract exists to stop.
+fn saturation_retry_after(headers: &reqwest::header::HeaderMap) -> u32 {
+    use trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS;
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(|secs| secs.min(u64::from(MAX_WITNESS_RETRY_AFTER_SECS)) as u32)
+        .unwrap_or(WITNESS_SATURATED_RETRY_AFTER_SECS)
 }
 
 impl HttpWitnessTransport {
@@ -791,12 +817,26 @@ impl HttpWitnessTransport {
             collateral_url: collateral_url.into(),
             allowlist,
             admission_evidence: false,
+            background_workload: false,
         })
     }
 
     /// Select the distinct evidence route only for an explicitly configured profile.
     pub fn with_admission_evidence(mut self, enabled: bool) -> Self {
         self.admission_evidence = enabled;
+        self
+    }
+
+    /// Declare this transport's witness requests as unattended background
+    /// work (`x-trace-witness-workload: background`), so a witness that
+    /// reserves capacity for people waiting on a review can refuse this
+    /// work first.
+    ///
+    /// For the daemon's upload pass only. A review a person asked for sends
+    /// no header. The header carries no identity and proves nothing; it is
+    /// the cooperative half of #1014's reservation.
+    pub fn with_background_workload(mut self, enabled: bool) -> Self {
+        self.background_workload = enabled;
         self
     }
 
@@ -895,6 +935,7 @@ impl WitnessTransport for HttpWitnessTransport {
         async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
             const REFUSAL_BODY_BOUND: usize = 4096;
             let status = response.status().as_u16();
+            let retry_after_secs = saturation_retry_after(response.headers());
             let Ok(body) = response.bytes().await else {
                 return WitnessTrustError::WitnessResponseMalformed;
             };
@@ -902,6 +943,14 @@ impl WitnessTransport for HttpWitnessTransport {
             let label = serde_json::from_slice::<serde_json::Value>(head)
                 .ok()
                 .and_then(|value| value.get("error")?.as_str().map(str::to_string));
+            // Capacity first, and only on the exact pair: a witness that is
+            // busy judged nothing, so this is the one refusal a session is
+            // held through rather than refused on.
+            if label.as_deref().is_some_and(|label| {
+                trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
+            }) {
+                return WitnessTrustError::WitnessSaturated { retry_after_secs };
+            }
             match label.as_deref().and_then(|label| {
                 trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
             }) {
@@ -922,10 +971,17 @@ impl WitnessTransport for HttpWitnessTransport {
                 "/v1/witness"
             })
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
-        let response = self
+        let mut request = self
             .http
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if self.background_workload {
+            use trace_commons_protocol::witness_pacing::{
+                WITNESS_BACKGROUND_WORKLOAD, WITNESS_WORKLOAD_HEADER,
+            };
+            request = request.header(WITNESS_WORKLOAD_HEADER, WITNESS_BACKGROUND_WORKLOAD);
+        }
+        let response = request
             .body(body.to_vec())
             .send()
             .await
@@ -2078,6 +2134,147 @@ mod tests {
             .await
             .expect_err("a certificate from an unpinned key is worth nothing");
         assert_eq!(err, WitnessTrustError::WitnessCertificateUnverified);
+    }
+
+    /// A witness answering on `/v1/witness` with `reply`, recording the
+    /// workload header of every request it receives (`None` for absent).
+    async fn capacity_witness(
+        reply: fn() -> Response,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Option<String>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let app = Router::new().route(
+            "/v1/witness",
+            post(move |headers: HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(
+                        headers
+                            .get(trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER)
+                            .map(|v| v.to_str().unwrap().to_string()),
+                    );
+                    reply()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, seen, task)
+    }
+
+    fn saturated_with(retry_after: Option<&'static str>) -> Response {
+        let mut response = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "witness_saturated"})),
+        )
+            .into_response();
+        if let Some(value) = retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+        }
+        response
+    }
+
+    /// Z5's pacing contract: the exact `503 witness_saturated` pair is a
+    /// capacity refusal carrying the witness's own delay, not a broken
+    /// witness. Read as `WitnessResponseMalformed` it was a terminal refusal
+    /// and the daemon dropped the session.
+    #[tokio::test]
+    async fn a_saturated_witness_is_a_capacity_refusal_with_its_own_delay() {
+        let cases: [(fn() -> Response, u32); 6] = [
+            (|| saturated_with(Some("45")), 45),
+            // Absent, unparseable, zero, or an HTTP date: the contract's
+            // published default, never an immediate retry.
+            (|| saturated_with(None), 30),
+            (|| saturated_with(Some("soon")), 30),
+            (|| saturated_with(Some("0")), 30),
+            (|| saturated_with(Some("Wed, 21 Oct 2015 07:28:00 GMT")), 30),
+            // A hostile or mistaken delay is capped, so one answer cannot
+            // park a session for a year.
+            (|| saturated_with(Some("99999999")), 3600),
+        ];
+        for (reply, expected) in cases {
+            let (url, _seen, task) = capacity_witness(reply).await;
+            let transport = transport_for(&url, permissive());
+            let key = test_signer("capacity");
+            let witness =
+                crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+            let err =
+                witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                    .await
+                    .expect_err("a saturated witness certifies nothing");
+            assert_eq!(
+                err,
+                WitnessTrustError::WitnessSaturated {
+                    retry_after_secs: expected
+                }
+            );
+            assert_eq!(err.refusal_label(), "witness_saturated");
+            task.abort();
+        }
+    }
+
+    /// Only the exact pair is saturation. A 503 with another label, and the
+    /// saturation label on another status, keep the fail-closed reading.
+    #[tokio::test]
+    async fn only_the_exact_saturation_pair_is_a_capacity_refusal() {
+        let replies: [fn() -> Response; 2] = [
+            || {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({"error": "something_else"})),
+                )
+                    .into_response()
+            },
+            || {
+                (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({"error": "witness_saturated"})),
+                )
+                    .into_response()
+            },
+        ];
+        for reply in replies {
+            let (url, _seen, task) = capacity_witness(reply).await;
+            let transport = transport_for(&url, permissive());
+            let key = test_signer("capacity");
+            let witness =
+                crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+            let err =
+                witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+                    .await
+                    .expect_err("a refusal");
+            assert_eq!(err, WitnessTrustError::WitnessResponseMalformed);
+            task.abort();
+        }
+    }
+
+    /// Unattended work declares itself so the witness can keep a slot for a
+    /// person waiting on a review; interactive requests send nothing.
+    #[tokio::test]
+    async fn only_a_background_transport_declares_the_background_workload() {
+        let (url, seen, task) = capacity_witness(|| saturated_with(None)).await;
+        let key = test_signer("capacity");
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let interactive = transport_for(&url, permissive());
+        let background = transport_for(&url, permissive()).with_background_workload(true);
+        let _ =
+            witness_contribution(&interactive, &witness, raw_with_secret(), None, &granted()).await;
+        let _ =
+            witness_contribution(&background, &witness, raw_with_secret(), None, &granted()).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some("background".to_string())]
+        );
+        task.abort();
     }
 
     #[tokio::test]

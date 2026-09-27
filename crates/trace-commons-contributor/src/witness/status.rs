@@ -887,6 +887,9 @@ mod refusal_label_set_tests {
             WitnessTrustError::WitnessClaimUnavailable,
             WitnessTrustError::WitnessBodyNotStripped,
             WitnessTrustError::WitnessAdmissionEvidenceRefused,
+            WitnessTrustError::WitnessSaturated {
+                retry_after_secs: 30,
+            },
         ];
         assert_eq!(
             every.len(),
