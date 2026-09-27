@@ -366,11 +366,285 @@ async fn register_bundle_refuses_a_changed_descriptor_for_a_registered_instrumen
         .expect_err("changed descriptor is refused");
     assert!(error.to_string().contains("bundle_instrument_conflict"));
 
+    // BND-005: one tenant's registrations do not constrain another tenant.
+    // The exact package refused above for `tenant` is accepted for a second,
+    // unrelated tenant that has never registered anything.
+    let other_tenant = format!("bundle-registry-{}", uuid::Uuid::new_v4());
+    store
+        .register_bundle(&other_tenant, &conflicting)
+        .await
+        .expect("a different tenant may register the descriptor the first tenant refused");
+
     // Registering the same package again stays idempotent.
     store
         .register_bundle(&tenant, &first)
         .await
         .expect("re-registering the same package is idempotent");
+}
+
+/// PR #971 round 3: `pipeline_run_settlements` bounds every row's
+/// `atomic_units` to `u128::MAX` (`pipeline_run_settlements_atomic_units_bound`),
+/// and additionally bounds a `trace_credit` row to `i64::MAX`
+/// (`pipeline_run_settlements_trace_credit_bound`). `AtomicUnits` already
+/// refuses a value above `u128::MAX` on load, so the database CHECK is a
+/// backstop a Rust caller cannot trigger through the typed API; this test
+/// goes around it with raw SQL to prove the backstop itself.
+#[tokio::test]
+async fn settlement_amounts_are_bounded_by_the_database() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tenant = format!("settlement-bound-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for settlement bound test");
+
+    // Each assertion below runs in its own transaction: a CHECK violation
+    // aborts the transaction it occurs in, so a failing insert must not
+    // share a transaction with the assertion that follows it.
+    async fn open_tx<'a>(
+        client: &'a mut deadpool_postgres::Client,
+        tenant_id: &str,
+    ) -> deadpool_postgres::Transaction<'a> {
+        let tx = client
+            .transaction()
+            .await
+            .expect("tx for settlement bound test");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await
+        .expect("set tenant for settlement bound test");
+        tx
+    }
+
+    const INSERT: &str = "INSERT INTO pipeline_run_settlements (
+        tenant_id, run_id, instrument_id, atomic_units, operation_ref_hash, payout_rail
+    ) VALUES ($1,$2,$3,$4::TEXT::NUMERIC,$5,'none')";
+    const U128_MAX: &str = "340282366920938463463374607431768211455";
+    const U128_MAX_PLUS_ONE: &str = "340282366920938463463374607431768211456";
+    const I64_MAX_PLUS_ONE: &str = "9223372036854775808";
+
+    // A non-`trace_credit` row at exactly `u128::MAX` is accepted.
+    let tx = open_tx(&mut client, &tenant).await;
+    tx.execute(
+        INSERT,
+        &[
+            &tenant,
+            &run.run_id,
+            &"storage_rebate",
+            &U128_MAX,
+            &dependency_content_hash(b"settlement-bound-at-u128-max"),
+        ],
+    )
+    .await
+    .expect("a non-trace_credit row at u128::MAX is accepted");
+    tx.rollback().await.expect("rollback settlement bound tx");
+
+    // One atomic unit over `u128::MAX` is refused by the new bound.
+    let tx = open_tx(&mut client, &tenant).await;
+    let over_u128 = tx
+        .execute(
+            INSERT,
+            &[
+                &tenant,
+                &run.run_id,
+                &"storage_rebate_over",
+                &U128_MAX_PLUS_ONE,
+                &dependency_content_hash(b"settlement-bound-over-u128-max"),
+            ],
+        )
+        .await
+        .expect_err("a non-trace_credit row over u128::MAX is refused");
+    let db = over_u128.as_db_error().expect("database refusal");
+    assert_eq!(db.code(), &tokio_postgres::error::SqlState::CHECK_VIOLATION);
+    assert_eq!(
+        db.constraint(),
+        Some("pipeline_run_settlements_atomic_units_bound"),
+        "refused by the wrong constraint: {db:?}"
+    );
+    tx.rollback().await.expect("rollback settlement bound tx");
+
+    // A `trace_credit` row one unit over `i64::MAX` stays within
+    // `u128::MAX` but is refused by the tighter Trace Credit bound.
+    let tx = open_tx(&mut client, &tenant).await;
+    let over_trace_credit = tx
+        .execute(
+            INSERT,
+            &[
+                &tenant,
+                &run.run_id,
+                &"trace_credit",
+                &I64_MAX_PLUS_ONE,
+                &dependency_content_hash(b"settlement-bound-over-trace-credit"),
+            ],
+        )
+        .await
+        .expect_err("a trace_credit row over i64::MAX is refused");
+    let db = over_trace_credit.as_db_error().expect("database refusal");
+    assert_eq!(db.code(), &tokio_postgres::error::SqlState::CHECK_VIOLATION);
+    assert_eq!(
+        db.constraint(),
+        Some("pipeline_run_settlements_trace_credit_bound"),
+        "refused by the wrong constraint: {db:?}"
+    );
+    tx.rollback().await.expect("rollback settlement bound tx");
+}
+
+/// Corrupts a stored package's pinned `network` for one instrument, as an
+/// owner connection with the immutability trigger dropped and recreated
+/// exactly like `tamper_stored_bundle_package`. Unlike that helper, this
+/// keeps the artifact bytes intact and instead breaks the manifest itself,
+/// so a later load fails `BundleManifest`'s own deserialize-time validation
+/// (#971 round 3) rather than `BundlePackage::validate`'s artifact-hash
+/// check.
+async fn tamper_stored_bundle_manifest_network(
+    tenant_id: &str,
+    bundle_id: &str,
+    instrument_id: &str,
+    network: &str,
+) {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
+    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the migration owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute(
+        "DROP TRIGGER pipeline_bundle_packages_reject_update ON pipeline_bundle_packages;",
+    )
+    .await
+    .expect("drop the immutability trigger");
+
+    let row = tx
+        .query_one(
+            "SELECT package FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant_id, &bundle_id],
+        )
+        .await
+        .expect("load the stored package");
+    let mut package: serde_json::Value = row.get("package");
+    package["manifest"]["instruments"][instrument_id]["network"] =
+        serde_json::Value::String(network.to_string());
+
+    tx.execute(
+        "UPDATE pipeline_bundle_packages SET package = $3
+         WHERE tenant_id = $1 AND bundle_id = $2",
+        &[&tenant_id, &bundle_id, &package],
+    )
+    .await
+    .expect("tamper the stored manifest");
+
+    tx.batch_execute(
+        "CREATE TRIGGER pipeline_bundle_packages_reject_update
+             BEFORE UPDATE ON pipeline_bundle_packages
+             FOR EACH ROW EXECUTE FUNCTION reject_pipeline_bundle_package_mutation();",
+    )
+    .await
+    .expect("recreate the immutability trigger");
+
+    tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// I6: the per-tenant descriptor-conflict check in `register_bundle` reads
+/// every package already registered for the tenant. #971 round 3 tightened
+/// `BundleManifest`'s deserialize-time validation, so a package registered
+/// before the tightening can stop loading under the new rule. The conflict
+/// check cannot compare against a package it cannot deserialize, so it fails
+/// closed: the tenant's other registrations are refused rather than silently
+/// proceeding past a control the call could not evaluate.
+#[tokio::test]
+async fn register_bundle_refuses_while_a_registered_package_no_longer_loads() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("bundle-registry-stale-{}", uuid::Uuid::new_v4());
+    let scorer = ReferencePerplexityScorer::new();
+    let embedder = ReferenceEmbedder::new();
+
+    let package_for = |variant: &str, instrument_id: &str, descriptor: InstrumentDescriptor| {
+        MinimalPolicyBundle::minimal_package(
+            &PipelineBundleConfig {
+                instrument_awards: vec![PipelineInstrumentAwardConfig {
+                    instrument_id: instrument_id.into(),
+                    atomic_units: AtomicUnits::from_raw(5),
+                    descriptor,
+                }],
+                include_index: false,
+                variant: Some(variant.to_string()),
+            },
+            &scorer,
+            &embedder,
+        )
+        .expect("build package")
+    };
+
+    // A `nep141` descriptor, inlined here (not `trace_credit_descriptor`,
+    // which the Score tests add later): six decimals, `testnet`, so it is
+    // valid on the round-3 rule this test is about to violate.
+    let nep141_trace_credit = InstrumentDescriptor {
+        kind: InstrumentKind::Nep141,
+        network: "testnet".to_string(),
+        contract: "trace-credit.testnet".to_string(),
+        decimals: 6,
+    };
+    let stale = package_for("stale", "trace_credit", nep141_trace_credit);
+    store
+        .register_bundle(&tenant, &stale)
+        .await
+        .expect("register the package that will be corrupted");
+
+    // Corrupt it in place: the network no longer satisfies the round-3
+    // `nep141` rule (only `mainnet` or `testnet`), so the stored package no
+    // longer deserializes at all.
+    tamper_stored_bundle_manifest_network(
+        &tenant,
+        &stale.bundle_id,
+        "trace_credit",
+        "near-mainnet",
+    )
+    .await;
+
+    // A new package naming a different instrument is refused: the conflict
+    // check cannot compare against the corrupted package, so it fails closed
+    // rather than registering past a control it cannot evaluate.
+    let fresh = package_for("fresh", "storage_rebate", storage_rebate_descriptor());
+    let error = store
+        .register_bundle(&tenant, &fresh)
+        .await
+        .expect_err("a registration is refused while a registered package no longer loads");
+    assert!(error.to_string().contains("bundle_package_invalid"));
+
+    let stored_fresh = store
+        .load_bundle(&tenant, &fresh.bundle_id)
+        .await
+        .expect("load after the refused registration");
+    assert!(
+        stored_fresh.is_none(),
+        "no row is added when registration is refused"
+    );
+
+    // Another tenant, unaffected by the first tenant's corrupted package,
+    // can still register the same descriptor.
+    let other_tenant = format!("bundle-registry-stale-{}", uuid::Uuid::new_v4());
+    store
+        .register_bundle(&other_tenant, &fresh)
+        .await
+        .expect("a different tenant is not blocked by another tenant's corrupted package");
 }
 
 /// `tokio_postgres::Error`'s `Display` only prints the error kind (`"db
@@ -4558,6 +4832,73 @@ async fn a_tampered_stored_package_fails_closed() {
         outcomes_after.len(),
         outcomes_before.len(),
         "no new outcome is recorded when the stored package fails closed"
+    );
+
+    // #971 round 3: a manifest whose pinned descriptor fails the tightened
+    // `nep141` network rule fails closed the same way, even though the
+    // stored JSON is well formed -- only `BundleManifest`'s own load-time
+    // validation refuses it, not `BundlePackage::validate`'s artifact-hash
+    // check exercised above.
+    let (manifest_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let manifest_tenant = format!("tampered-manifest-{}", uuid::Uuid::new_v4());
+
+    let manifest_env = envelope(uuid::Uuid::new_v4()).await;
+    let manifest_raw = serde_json::to_vec(&manifest_env).unwrap();
+    let manifest_key = manifest_env.submission_id.to_string();
+    let PipelineReceiptResult::Created(manifest_created) = manifest_service
+        .submit(receipt(
+            &manifest_tenant,
+            &manifest_key,
+            &manifest_raw,
+            &manifest_env,
+            NO_LIMITS,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let manifest_outcomes_before = manifest_service
+        .store()
+        .list_outcomes(&manifest_tenant, manifest_created.run_id)
+        .await
+        .unwrap();
+
+    tamper_stored_bundle_manifest_network(
+        &manifest_tenant,
+        &manifest_created.bundle_id,
+        InstrumentId::trace_credit().as_str(),
+        "near-mainnet",
+    )
+    .await;
+
+    let manifest_failed = manifest_service
+        .process_run(&manifest_tenant, manifest_created.run_id)
+        .await
+        .unwrap()
+        .expect("the run fails closed on a manifest that no longer loads");
+    assert_eq!(manifest_failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        manifest_failed.last_error_label.as_deref(),
+        Some("bundle_package_invalid")
+    );
+
+    let manifest_outcomes_after = manifest_service
+        .store()
+        .list_outcomes(&manifest_tenant, manifest_created.run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        manifest_outcomes_after.len(),
+        manifest_outcomes_before.len(),
+        "no new outcome is recorded when the stored manifest fails closed"
     );
 }
 
