@@ -735,6 +735,13 @@ until all required operations complete.
 - The Settle decision MUST return every instrument identifier, atomic amount,
   operation reference, and result reference or `forfeited` state, in
   deterministic order.
+- A completed operation whose adapter effect has an external record MUST
+  record the adapter's external receipt hash, a lowercase SHA-256 reference,
+  never the raw transaction hash. A repeated operation MUST return the same
+  external receipt hash.
+- The runner MUST build each `SettlementRequest` through
+  `SettlementRequest::new`, and MUST fail a leg closed, without a retry, when
+  the receipt does not answer the request.
 - The persisted operations MUST exactly match the committed Score awards.
 - The Trace Credit adapter MUST preserve account-level batching, holds, caps,
   issuer approval, source-list approval, and duplicate-credit protection.
