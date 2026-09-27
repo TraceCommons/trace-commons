@@ -138,6 +138,14 @@ pub const PRECONDITION_NOT_LOGGED_IN: &str = "not-logged-in";
 /// Upstream classifier outage after its own retries. The daemon may retry
 /// this exact outcome with its approval and current-source checks intact.
 pub(crate) const REASON_TRANSIENT_REDACTION: &str = "privacy-filter-transient";
+/// The witness answered `503 witness_saturated`: it is at capacity and
+/// judged nothing. Like [`REASON_TRANSIENT_REDACTION`], the daemon keeps the
+/// approval and retries after the witness's own delay; unlike every other
+/// witness refusal, it is never a refusal of the session.
+///
+/// Also the daemon's health label for the condition
+/// (`daemon::health::LABEL_WITNESS_SATURATED`), so one fact has one spelling.
+pub const REASON_WITNESS_SATURATED: &str = "witness-saturated";
 
 impl std::fmt::Display for SubmitPreconditionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -490,6 +498,15 @@ pub struct SubmitContext<'a> {
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
     last_receipt_shipped: ReceiptShipped,
+    /// Whether this context's witness requests are unattended background
+    /// work. Set by the daemon's upload pass, never by a review a person
+    /// asked for. See `HttpWitnessTransport::with_background_workload`.
+    background_witness: bool,
+    /// The delay a saturated witness asked for on the last submission, in
+    /// seconds; zero for none. Reset at the start of each submission, like
+    /// `last_receipt_shipped`. Atomic only because `witness_envelope`
+    /// borrows the context immutably; there is no concurrency here.
+    last_witness_retry_after: std::sync::atomic::AtomicU32,
     /// Stands in for a fetched provider receipt, tests only.
     ///
     /// `receipt_for_attested_call` refuses a plaintext endpoint before it
@@ -556,6 +573,8 @@ impl<'a> SubmitContext<'a> {
             approved_token_bundle: None,
             hold_unless_low_risk: false,
             last_receipt_shipped: ReceiptShipped::NoCall,
+            background_witness: false,
+            last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             receipt_override: None,
             #[cfg(test)]
@@ -1098,7 +1117,8 @@ impl<'a> SubmitContext<'a> {
             std::time::Duration::from_secs(120),
         )
         .map_err(|e| e.refusal_label())?
-        .with_admission_evidence(admission_profile);
+        .with_admission_evidence(admission_profile)
+        .with_background_workload(self.background_witness);
 
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
@@ -1133,7 +1153,13 @@ impl<'a> SubmitContext<'a> {
             &GrantedConsent { scopes, uses },
         )
         .await
-        .map_err(|e| e.refusal_label())?;
+        .map_err(|e| {
+            if let crate::witness::WitnessTrustError::WitnessSaturated { retry_after_secs } = e {
+                self.last_witness_retry_after
+                    .store(retry_after_secs, std::sync::atomic::Ordering::Relaxed);
+            }
+            e.refusal_label()
+        })?;
 
         let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
         Ok((parsed, response, attested_inference, shipped))
@@ -1148,6 +1174,27 @@ impl<'a> SubmitContext<'a> {
     #[must_use]
     pub fn last_receipt_shipped(&self) -> ReceiptShipped {
         self.last_receipt_shipped
+    }
+
+    /// Declare every witness request this context makes as unattended
+    /// background work, so a witness that reserves capacity for people
+    /// waiting on a review can turn it away first. For the daemon's upload
+    /// pass only.
+    pub fn witness_as_background(&mut self) {
+        self.background_witness = true;
+    }
+
+    /// The delay, in seconds, a saturated witness asked for on the most
+    /// recent submission, or `None` if the witness was not saturated.
+    /// Meaningful immediately after a submission returns `Failed` with
+    /// [`REASON_WITNESS_SATURATED`].
+    #[must_use]
+    pub fn last_witness_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_witness_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
     }
 
     pub async fn submit_one(
@@ -1186,6 +1233,8 @@ impl<'a> SubmitContext<'a> {
         // read as this one's. Left at `NoCall` unless `witness_envelope` runs
         // and a call was carried.
         self.last_receipt_shipped = ReceiptShipped::NoCall;
+        self.last_witness_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let opts = self.opts;
         // Taken up front, not at the point it is used below: several paths
         // return before that point (already-submitted, an unavailable
@@ -1416,6 +1465,15 @@ impl<'a> SubmitContext<'a> {
                                     label: label.to_string(),
                                     certificate_obtained: certificate_obtained_for(label),
                                 });
+                                // A busy witness judged nothing. The session
+                                // is held for a retry, never refused for it.
+                                if label
+                                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
+                                {
+                                    return Ok(SubmitOutcome::Failed {
+                                        reason_label: REASON_WITNESS_SATURATED.to_string(),
+                                    });
+                                }
                                 return Ok(refused(label, &transcript.session_hash));
                             }
                         }

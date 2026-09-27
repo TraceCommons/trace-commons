@@ -1528,6 +1528,19 @@ char*       tc_consent_gate_help(int32_t pinned);
  */
 char*       tc_grant_void_notice(const char* void_json);
 
+/* The notice for approved sessions held because the privacy witness is busy.
+ *
+ * capacity_json is status's witness_capacity object, passed through as the
+ * daemon sent it. Returns an owned JSON object with title, body (counted) and
+ * next_check, the label to show beside next_retry_at rendered in local time;
+ * free it with tc_string_free.
+ *
+ * NULL when nothing is waiting (waiting_sessions absent, not a non-negative
+ * integer, or zero), for a NULL, non-UTF-8 or unparseable argument, and on a
+ * caught panic. Show nothing then; do not write a sentence natively.
+ */
+char*       tc_witness_capacity_notice(const char* capacity_json);
+
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
  * the opencode-export-version-unsupported health label. No daemon handle needed. */

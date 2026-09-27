@@ -4893,3 +4893,39 @@ fn an_unreadable_void_gets_null_not_a_guess() {
         );
     }
 }
+
+#[test]
+fn a_witness_capacity_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "waiting_sessions": 2, "next_retry_at": "2030-01-01T00:01:00Z",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_witness_capacity_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::witness_capacity_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+#[test]
+fn nothing_waiting_on_the_witness_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor_ffi::tc_witness_capacity_notice;
+    assert!(unsafe { tc_witness_capacity_notice(std::ptr::null()) }.is_null());
+    for text in [
+        "not json",
+        "[]",
+        r#"{"waiting_sessions":0,"next_retry_at":null}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_witness_capacity_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
