@@ -145,11 +145,16 @@ CREATE TABLE pipeline_run_settlements (
             'failed'
         )
     ),
+    -- A leg is `leased` under its run's lease token and expiry while its
+    -- adapter call is in flight.
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
+    -- Set the first time the leg is leased for an adapter call, and never
+    -- cleared: a failed run reconciles a dispatched external leg against
+    -- its adapter rather than forfeiting it.
+    dispatched_at TIMESTAMPTZ,
+    -- Diagnostic only: the run's own attempt budget governs retries.
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    max_attempts INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts > 0),
-    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_error_label TEXT CHECK (
         last_error_label IS NULL
         OR last_error_label ~ '^[a-z0-9_]{1,64}$'
@@ -172,9 +177,6 @@ CREATE TABLE pipeline_run_settlements (
             tenant_id, settlement_batch_id, instrument_id
         )
         ON DELETE RESTRICT,
-    CONSTRAINT pipeline_run_settlements_attempt_limit CHECK (
-        attempt_count <= max_attempts
-    ),
     -- NUMERIC(39,0) also holds values above u128::MAX, which AtomicUnits
     -- refuses to load; a row above it could be stored and never settled.
     CONSTRAINT pipeline_run_settlements_atomic_units_bound CHECK (
@@ -197,6 +199,11 @@ CREATE TABLE pipeline_run_settlements (
             AND lease_expires_at IS NULL
         )
     ),
+    -- Only a dispatched leg can be in flight or complete.
+    CONSTRAINT pipeline_run_settlements_dispatch_shape CHECK (
+        operation_state NOT IN ('leased', 'complete')
+        OR dispatched_at IS NOT NULL
+    ),
     CONSTRAINT pipeline_run_settlements_credit_shape CHECK (
         credit_event_id IS NULL OR instrument_id = 'trace_credit'
     ),
@@ -213,17 +220,6 @@ CREATE TABLE pipeline_run_settlements (
     )
 );
 
-CREATE INDEX idx_pipeline_run_settlements_work
-    ON pipeline_run_settlements (
-        operation_state,
-        next_attempt_at,
-        lease_expires_at,
-        created_at,
-        run_id,
-        instrument_id
-    )
-    WHERE operation_state IN ('pending', 'leased', 'retry');
-
 CREATE FUNCTION reject_pipeline_run_settlement_identity_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -237,6 +233,10 @@ BEGIN
        OR (
            OLD.result_ref_hash IS NOT NULL
            AND NEW.result_ref_hash IS DISTINCT FROM OLD.result_ref_hash
+       )
+       OR (
+           OLD.dispatched_at IS NOT NULL
+           AND NEW.dispatched_at IS DISTINCT FROM OLD.dispatched_at
        )
        OR NEW.payout_rail IS DISTINCT FROM OLD.payout_rail
        OR NEW.created_at IS DISTINCT FROM OLD.created_at

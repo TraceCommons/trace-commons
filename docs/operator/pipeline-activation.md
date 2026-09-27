@@ -89,6 +89,48 @@ work and not implemented yet. It is what will close both gaps above -- a
 live worker renewing its lease before it expires, rather than a phase
 finding out only after the fact (or a crash never finding out at all).
 
+## Settle failures and settlement legs
+
+A run waits in `retry` without a charge to its attempts when the failure is
+not the trace's fault:
+
+- `settlement_cap_missing`: no per-instrument cap is configured for an
+  award's instrument. The leg's adapter is not called. Configure the cap;
+  the next attempt settles the leg.
+- `settlement_adapter_missing`: the service holds no adapter for the
+  instrument.
+- `database_unavailable` (any phase): the database could not serve a
+  statement -- no pool connection, a lost connection, a serialization
+  failure, a deadlock, a shutdown, or too many connections. If a leg's
+  adapter call returned before the failure, the next attempt calls the
+  adapter again with the same operation reference. The adapter must answer
+  that call from the first one.
+
+An amount above a configured cap is different: the cap refuses the payment,
+the leg fails as `credit_cap_exceeded`, and the attempt is charged.
+
+Before each adapter call, the leg moves to `leased` under the run's lease,
+and `dispatched_at` records that the leg was sent. When a Settle run fails
+(`attempts_exhausted`, or a terminal label such as `bundle_package_invalid`
+or `index_key_conflict`), no leg stays open:
+
+- A leg that was never dispatched is `forfeited` with `run_failed`. So is a
+  Trace Credit leg: it pays only through the ledger row that commits with
+  its completion.
+- A dispatched leg of another instrument gets one more adapter call from the
+  worker that fails the run. A result equal to the selected result
+  reference makes the leg `complete`. Any other outcome makes it `failed`
+  with `settlement_unreconciled`. The worker does not make the call when
+  the submission is no longer operable, the adapter or cap is missing, or
+  the amount is above the cap.
+- When the next claim fails a crashed worker's run (`attempts_exhausted`
+  after its lease expired), no worker can call the adapter. Every
+  dispatched leg of another instrument is then `settlement_unreconciled`.
+
+`settlement_unreconciled` means the external payment may have happened.
+Find the leg's `operation_ref_hash` in the adapter's records and reconcile
+it by hand. Nothing retries it.
+
 ## Submission quota at switch-over
 
 The pipeline counts only pipeline receipts against the hourly submission

@@ -84,6 +84,57 @@ const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
 const PIPELINE_SETTLEMENT_RETRY_LABEL: &str = "settlement_operation_retry";
 /// Label for a settlement adapter the service does not hold.
 const PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL: &str = "settlement_adapter_missing";
+/// Task 4 (M1), ruling R1: a leg whose instrument has no configured
+/// per-instrument cap. A configuration gap, not the trace's fault: an
+/// uncharged suspension, raised before the leg's adapter is called. An
+/// amount over a configured cap stays `PIPELINE_CREDIT_CAP_LABEL`.
+pub const PIPELINE_SETTLEMENT_CAP_MISSING_LABEL: &str = "settlement_cap_missing";
+/// Task 4 (M1), ruling R2: a transient database failure
+/// (`is_transient_database_error`) in any phase. An uncharged suspension.
+pub const PIPELINE_DATABASE_UNAVAILABLE_LABEL: &str = "database_unavailable";
+/// Task 4 (M1): the label on a leg a failed run forfeits -- one that was
+/// never dispatched, or a Trace Credit leg (whose only effect is the ledger
+/// row that commits with its completion, so an incomplete one paid nothing).
+pub const PIPELINE_SETTLEMENT_RUN_FAILED_LABEL: &str = "run_failed";
+/// Task 4 (M1): the label on a dispatched external leg of a failed run whose
+/// outcome was not reconciled -- its reconciling adapter call returned a
+/// different result, errored, or was not made (a missing adapter or cap, an
+/// inoperable submission, or the claim sweep, which has no worker). The
+/// external effect may have happened; an operator reconciles it against the
+/// adapter by `operation_ref_hash`.
+pub const PIPELINE_SETTLEMENT_UNRECONCILED_LABEL: &str = "settlement_unreconciled";
+/// The refusal a leg write (`mark_settlement_leased`,
+/// `record_settlement_reconciliation`) returns under a lease that is still
+/// live when the leg is not in a state that write may change, or does not
+/// exist. Deliberately not the stale-lease error: `process_claimed_run`
+/// records a stale lease as the uncharged `lease_expired`, and a leg-state
+/// refusal is not a lease problem.
+const PIPELINE_SETTLEMENT_LEG_NOT_OPEN_LABEL: &str = "settlement_leg_not_open";
+
+/// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
+const UNRESOLVED_SETTLEMENT_LEG_SQL: &str = "(s.operation_state NOT IN ('complete', 'forfeited')
+      AND NOT (
+          s.operation_state = 'failed'
+          AND s.last_error_label IS NOT DISTINCT FROM 'settlement_unreconciled'
+      ))";
+
+/// Whether a failure path still has to resolve a leg. `complete` and
+/// `forfeited` never change; a leg `failed` as `settlement_unreconciled` is
+/// the resolved end state of a dispatched external leg on a failed run. A
+/// leg `failed` for any other reason (a result mismatch, an amount over the
+/// cap) is one Step 6 retries, so it is unresolved.
+/// `UNRESOLVED_SETTLEMENT_LEG_SQL` is the same rule in SQL. (Step 6 itself
+/// dispatches every leg that is not `complete` or `forfeited`: a
+/// `settlement_unreconciled` leg on a run that is still live -- a failure
+/// path interrupted by a stale lease or a database error before it failed
+/// the run -- is dispatched again, since the run did not fail.)
+fn settlement_leg_is_unresolved(operation_state: &str, last_error_label: Option<&str>) -> bool {
+    match operation_state {
+        "complete" | "forfeited" => false,
+        "failed" => last_error_label != Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+        _ => true,
+    }
+}
 /// D4: an attempt whose own phase lease has already gone stale, discovered
 /// when *that same attempt* -- the worker still holding its own claim's
 /// lease token -- writes again (the phase's own commit, or a follow-up
@@ -339,9 +390,14 @@ pub struct PipelineSettlementRecord {
     pub settlement_batch_id: Option<Uuid>,
     pub payout_rail: String,
     pub payout_state: String,
+    /// Diagnostic count of dispatches that ended `retry` or `failed`; the
+    /// run's own attempt budget governs retries.
     pub attempt_count: u32,
-    pub max_attempts: u32,
     pub last_error_label: Option<String>,
+    /// When the leg was first leased for an adapter call (ruling R4); never
+    /// cleared. A failed run reconciles a dispatched external leg rather
+    /// than forfeiting it.
+    pub dispatched_at: Option<DateTime<Utc>>,
 }
 
 /// The result of `PipelineService::settle_internal_credit`: either the
@@ -706,6 +762,13 @@ impl PgPipelineStore {
     /// or Settle's configured lease for the one row the candidate CTE
     /// selects, in the same statement that claims it, so a Score run never
     /// gets Review's shorter lease or vice versa.
+    ///
+    /// First it sweeps: a run still `leased` after its lease expired with
+    /// its attempts exhausted (its worker is gone) is failed as
+    /// `attempts_exhausted`. Task 4 (M1): in the same transaction, every open
+    /// leg of a swept Settle run is resolved without an adapter call
+    /// (`resolve_open_settlement_legs_on_tx`) -- there is no worker to make
+    /// one.
     pub async fn claim_next(
         &self,
         tenant_id: &str,
@@ -713,17 +776,25 @@ impl PgPipelineStore {
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        tx.execute(
-            "UPDATE pipeline_runs
-             SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
-                 last_error_label = $2, updated_at = NOW()
-             WHERE tenant_id = $1
-               AND state = 'leased'
-               AND lease_expires_at <= NOW()
-               AND attempt_count >= max_attempts",
-            &[&tenant_id, &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL],
-        )
-        .await?;
+        let swept = tx
+            .query(
+                "UPDATE pipeline_runs
+                 SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
+                     last_error_label = $2, updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND state = 'leased'
+                   AND lease_expires_at <= NOW()
+                   AND attempt_count >= max_attempts
+                 RETURNING run_id, next_phase",
+                &[&tenant_id, &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL],
+            )
+            .await?;
+        let swept_settle_runs = swept
+            .iter()
+            .filter(|row| row.get::<_, &str>("next_phase") == phase_as_db(Some(Phase::Settle)))
+            .map(|row| row.get::<_, Uuid>("run_id"))
+            .collect::<Vec<_>>();
+        resolve_open_settlement_legs_on_tx(&tx, tenant_id, &swept_settle_runs).await?;
         let lease_token = Uuid::new_v4();
         let review_milliseconds = lease_config.review().num_milliseconds();
         let score_milliseconds = lease_config.score().num_milliseconds();
@@ -1376,6 +1447,11 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
+    /// Fails the run terminally under its live lease. Task 4 (M1): when the
+    /// run is in Settle, every open leg is resolved in this same
+    /// transaction (`resolve_open_settlement_legs_on_tx`). A worker calls
+    /// this through `PipelineService::fail_run`, which reconciles the
+    /// dispatched external legs first, so here they are already resolved.
     pub async fn mark_failed(
         &self,
         run: &PipelineRunRecord,
@@ -1384,23 +1460,32 @@ impl PgPipelineStore {
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        let updated = tx
-            .execute(
+        let row = tx
+            .query_opt(
                 "UPDATE pipeline_runs
              SET state = 'failed', lease_token = NULL, lease_expires_at = NULL,
                  last_error_label = $3, updated_at = NOW()
              WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
-               AND lease_token = $4 AND lease_expires_at > NOW()",
+               AND lease_token = $4 AND lease_expires_at > NOW()
+             RETURNING next_phase",
                 &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
             )
-            .await?;
-        if updated != 1 {
-            return Err(stale_lease_error());
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        if phase_from_db(row.get("next_phase"))? == Some(Phase::Settle) {
+            resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
         }
         tx.commit().await?;
         Ok(())
     }
 
+    /// A charged retry: the attempt the claim took stays charged. When the
+    /// run has no attempt left, the run is failed as `attempts_exhausted`
+    /// instead, and -- Task 4 (M1) -- a Settle run's open legs are resolved
+    /// in this same transaction (`resolve_open_settlement_legs_on_tx`). A
+    /// worker calls this through `PipelineService::charged_retry`, which
+    /// first reconciles the dispatched external legs of a run this retry
+    /// will exhaust.
     pub async fn mark_retry(
         &self,
         run: &PipelineRunRecord,
@@ -1445,6 +1530,9 @@ impl PgPipelineStore {
             .await?
             .ok_or_else(stale_lease_error)?;
         let updated = pipeline_run_from_row(&row)?;
+        if updated.state == PipelineRunState::Failed && updated.next_phase == Some(Phase::Settle) {
+            resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
+        }
         tx.commit().await?;
         Ok(updated)
     }
@@ -1574,11 +1662,13 @@ impl PgPipelineStore {
     /// to a value (never overwritten or cleared); `payout_state` is written
     /// only when the caller supplies one. `attempt_count` increments on
     /// `'retry'`/`'failed'` (not `'forfeited'` -- forfeiture is not a
-    /// dispatch failure) and saturates at the row's `max_attempts`: it is a
+    /// dispatch failure) and saturates rather than overflow: it is a
     /// diagnostic count, and an adapter outage is an uncharged run retry
-    /// with no terminal bound (ruling FR3), so the row's own
-    /// `attempt_count <= max_attempts` CHECK must never refuse the update;
-    /// `next_attempt_at` only moves on `'retry'`.
+    /// with no terminal bound (ruling FR3), so it must never refuse the
+    /// update. Every update here moves the leg out of `leased` (none sets
+    /// it; `mark_settlement_leased` does), so it clears the lease columns
+    /// (`pipeline_run_settlements_lease_shape`); `dispatched_at` is never
+    /// touched.
     async fn update_settlement(
         &self,
         run: &PipelineRunRecord,
@@ -1592,6 +1682,105 @@ impl PgPipelineStore {
             update_settlement_on_tx(&tx, run, lease_token, instrument_id, update).await?;
         tx.commit().await?;
         Ok(settlement)
+    }
+
+    /// Ruling R4: moves one leg to `leased` under the run's own lease token
+    /// and expiry immediately before its adapter call, and records the first
+    /// dispatch (`dispatched_at`, set once and never cleared). It accepts
+    /// exactly the legs Step 6 dispatches -- any leg not `complete` or
+    /// `forfeited` -- so a `leased` leg an earlier, crashed attempt left
+    /// behind is leased again under this attempt's lease and dispatched
+    /// again (the adapter is idempotent by `operation_ref_hash`).
+    ///
+    /// Fenced by the run lease: `ensure_current_lease` locks the run row and
+    /// returns the stale-lease error only for a lease that is really stale.
+    /// A `complete` or `forfeited` leg (or no leg) under a live lease is
+    /// `settlement_leg_not_open_error`, never the stale-lease error.
+    async fn mark_settlement_leased(
+        &self,
+        run: &PipelineRunRecord,
+        instrument_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+        let updated = tx
+            .execute(
+                "UPDATE pipeline_run_settlements s
+                    SET operation_state = 'leased',
+                        lease_token = p.lease_token,
+                        lease_expires_at = p.lease_expires_at,
+                        dispatched_at = COALESCE(s.dispatched_at, NOW()),
+                        last_error_label = NULL,
+                        updated_at = NOW()
+                   FROM pipeline_runs p
+                  WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
+                    AND p.tenant_id = s.tenant_id AND p.run_id = s.run_id
+                    AND p.lease_token = $4
+                    AND s.operation_state NOT IN ('complete', 'forfeited')",
+                &[&run.tenant_id, &run.run_id, &instrument_id, &lease_token],
+            )
+            .await?;
+        if updated != 1 {
+            return Err(settlement_leg_not_open_error());
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Task 4 (M1): records the reconciling adapter call a worker makes for
+    /// an open, dispatched, external leg before it fails the run
+    /// (`PipelineService::reconcile_dispatched_settlement_legs`).
+    /// `Some(result)` -- equal to the selection's result reference --
+    /// completes the leg with it; `None` records `failed` /
+    /// `settlement_unreconciled`. Fenced like `mark_settlement_leased`, with
+    /// the same distinct refusal for any other leg.
+    async fn record_settlement_reconciliation(
+        &self,
+        run: &PipelineRunRecord,
+        instrument_id: &str,
+        result_ref_hash: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let (operation_state, error_label) = match result_ref_hash {
+            Some(_) => ("complete", None),
+            None => ("failed", Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)),
+        };
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+        let updated = tx
+            .execute(
+                &format!(
+                    "UPDATE pipeline_run_settlements s
+                        SET operation_state = $4,
+                            result_ref_hash = $5,
+                            last_error_label = $6,
+                            lease_token = NULL,
+                            lease_expires_at = NULL,
+                            updated_at = NOW()
+                      WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
+                        AND s.instrument_id <> $7
+                        AND s.dispatched_at IS NOT NULL
+                        AND {UNRESOLVED_SETTLEMENT_LEG_SQL}"
+                ),
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &instrument_id,
+                    &operation_state,
+                    &result_ref_hash,
+                    &error_label,
+                    &InstrumentId::trace_credit().as_str(),
+                ],
+            )
+            .await?;
+        if updated != 1 {
+            return Err(settlement_leg_not_open_error());
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Records (or updates) the receipt-artifact staging row inside the
@@ -1630,6 +1819,59 @@ impl PgPipelineStore {
     }
 }
 
+/// Task 4 (M1), owner decision 2026-09-27: resolves every open leg of the
+/// failed Settle runs `run_ids`, inside the caller's transaction -- the one
+/// that fails them (`mark_failed`, a `mark_retry` that exhausts the
+/// attempts, or the claim sweep in `claim_next`). No adapter is called
+/// here. A dispatched external leg still open is `failed` /
+/// `settlement_unreconciled`: its effect may have happened, and only its
+/// adapter can say. Every other open leg is `forfeited` / `run_failed`: one
+/// never dispatched paid nothing, and a Trace Credit leg pays only through
+/// the ledger row that commits with its completion (ruling FR2), so an
+/// incomplete one paid nothing either. Every leg it touches loses its lease
+/// columns (`pipeline_run_settlements_lease_shape`); a resolved leg is never
+/// touched. With a worker present, `PipelineService::reconcile_dispatched_settlement_legs`
+/// has already resolved the dispatched external legs, so this only
+/// forfeits.
+async fn resolve_open_settlement_legs_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    run_ids: &[Uuid],
+) -> Result<(), DatabaseError> {
+    if run_ids.is_empty() {
+        return Ok(());
+    }
+    tx.execute(
+        &format!(
+            "UPDATE pipeline_run_settlements s
+                SET operation_state = CASE
+                        WHEN s.dispatched_at IS NOT NULL AND s.instrument_id <> $3
+                            THEN 'failed'
+                        ELSE 'forfeited'
+                    END,
+                    last_error_label = CASE
+                        WHEN s.dispatched_at IS NOT NULL AND s.instrument_id <> $3
+                            THEN $4
+                        ELSE $5
+                    END,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = NOW()
+              WHERE s.tenant_id = $1 AND s.run_id = ANY($2)
+                AND {UNRESOLVED_SETTLEMENT_LEG_SQL}"
+        ),
+        &[
+            &tenant_id,
+            &run_ids,
+            &InstrumentId::trace_credit().as_str(),
+            &PIPELINE_SETTLEMENT_UNRECONCILED_LABEL,
+            &PIPELINE_SETTLEMENT_RUN_FAILED_LABEL,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 /// `PgPipelineStore::update_settlement` inside the caller's tenant
 /// transaction, fenced by the same lease check (the run row must still be
 /// `leased` under `lease_token` and unexpired), so the Trace Credit leg can
@@ -1655,13 +1897,11 @@ async fn update_settlement_on_tx(
                         last_error_label = $9,
                         attempt_count = CASE
                             WHEN $4 IN ('retry', 'failed')
-                                THEN LEAST(s.attempt_count + 1, s.max_attempts)
+                                THEN LEAST(s.attempt_count::BIGINT + 1, 2147483647)::INTEGER
                             ELSE s.attempt_count
                         END,
-                        next_attempt_at = CASE
-                            WHEN $4 = 'retry' THEN NOW() + INTERVAL '50 milliseconds'
-                            ELSE s.next_attempt_at
-                        END,
+                        lease_token = NULL,
+                        lease_expires_at = NULL,
                         updated_at = NOW()
                    FROM pipeline_runs p
                   WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
@@ -2009,6 +2249,69 @@ fn is_stale_lease_error(error: &anyhow::Error) -> bool {
     }
 }
 
+/// Task 4 (M1): a leg write under a live lease that found the leg in a
+/// state it may not change (or missing). Its own error, so it is never
+/// recorded as `lease_expired`.
+fn settlement_leg_not_open_error() -> DatabaseError {
+    DatabaseError::Constraint(PIPELINE_SETTLEMENT_LEG_NOT_OPEN_LABEL.to_string())
+}
+
+/// Task 4 (M1), ruling R2: the SQLSTATEs that mean the database could not
+/// serve the statement right now, not that the statement or its data was
+/// wrong: class 08 (connection exception), 40001 (serialization failure),
+/// 40P01 (deadlock detected), 57P01 to 57P03 (shutdown, crash shutdown,
+/// cannot connect now), and 53300 (too many connections).
+fn is_transient_sqlstate(code: &tokio_postgres::error::SqlState) -> bool {
+    let code = code.code();
+    code.starts_with("08")
+        || matches!(
+            code,
+            "40001" | "40P01" | "57P01" | "57P02" | "57P03" | "53300"
+        )
+}
+
+/// Ruling R2 for one driver error: a SQLSTATE in `is_transient_sqlstate`,
+/// or no SQLSTATE because the server never answered -- the connection is
+/// closed, or the cause is an I/O error (sending, receiving, connecting).
+/// A driver error with no SQLSTATE and no I/O cause (a row-count mismatch,
+/// a type conversion, a parameter count) is a local error in this code,
+/// not the database being unavailable, and keeps P2.
+fn is_transient_postgres_error(error: &tokio_postgres::Error) -> bool {
+    match error.code() {
+        Some(code) => is_transient_sqlstate(code),
+        None => {
+            error.is_closed()
+                || std::error::Error::source(error)
+                    .is_some_and(|cause| cause.is::<std::io::Error>())
+        }
+    }
+}
+
+/// Task 4 (M1), ruling R2: whether `error` is a transient database failure,
+/// which is never the trace's fault in any phase. Classified by downcast,
+/// along the whole error chain, because store code returns `DatabaseError`
+/// while service code wraps raw driver and pool errors with `?`: the pool
+/// could not give a connection (`DatabaseError::Pool`,
+/// `DatabaseError::PoolRuntime`, or a raw `deadpool_postgres::PoolError`),
+/// or a `tokio_postgres::Error` is transient by `is_transient_postgres_error`.
+/// Every other error keeps P2.
+fn is_transient_database_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(database_error) = cause.downcast_ref::<DatabaseError>() {
+            return matches!(
+                database_error,
+                DatabaseError::Pool(_) | DatabaseError::PoolRuntime(_)
+            );
+        }
+        if cause.is::<deadpool_postgres::PoolError>() {
+            return true;
+        }
+        cause
+            .downcast_ref::<tokio_postgres::Error>()
+            .is_some_and(is_transient_postgres_error)
+    })
+}
+
 fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> {
     let attempt_count: i32 = row.get("attempt_count");
     let max_attempts: i32 = row.get("max_attempts");
@@ -2058,9 +2361,6 @@ fn pipeline_settlement_from_row(row: &Row) -> Result<PipelineSettlementRecord, D
     let attempt_count = u32::try_from(row.get::<_, i32>("attempt_count")).map_err(|_| {
         DatabaseError::Serialization("invalid settlement attempt count".to_string())
     })?;
-    let max_attempts = u32::try_from(row.get::<_, i32>("max_attempts")).map_err(|_| {
-        DatabaseError::Serialization("invalid settlement maximum attempts".to_string())
-    })?;
     Ok(PipelineSettlementRecord {
         tenant_id: row.get("tenant_id"),
         run_id: row.get("run_id"),
@@ -2074,8 +2374,8 @@ fn pipeline_settlement_from_row(row: &Row) -> Result<PipelineSettlementRecord, D
         payout_rail: row.get("payout_rail"),
         payout_state: row.get("payout_state"),
         attempt_count,
-        max_attempts,
         last_error_label: row.get("last_error_label"),
+        dispatched_at: row.get("dispatched_at"),
     })
 }
 
@@ -2152,8 +2452,11 @@ fn validate_outcome_payload(
     Ok(())
 }
 
-/// Per-instrument settlement caps the service enforces. Not yet read: the
-/// cap-enforcement path is added by Task 13.
+/// Per-instrument settlement caps the service enforces in Settle. An
+/// instrument with no entry is a configuration gap: the run waits,
+/// uncharged, as `settlement_cap_missing`, before the leg's adapter is
+/// called. An amount above its entry is a spend limit: the leg fails as
+/// `credit_cap_exceeded` and the retry is charged.
 #[derive(Debug, Clone)]
 pub struct PipelineCaps {
     pub per_instrument_atomic_units: BTreeMap<String, AtomicUnits>,
@@ -3130,6 +3433,23 @@ impl PipelineService {
             Err(error) if is_stale_lease_error(&error) => {
                 Ok(self.store.record_lease_expired(&run).await?)
             }
+            // Task 4 (M1), ruling R2: a transient database failure (the pool
+            // could not give a connection, the connection failed, or a
+            // serialization failure or deadlock) is not the trace's fault in
+            // any phase -- the uncharged suspension, ahead of every charged
+            // P2 branch below. In Settle this covers a failure after
+            // `adapter.settle` returned: the leg stays `leased`, and the next
+            // attempt repeats the idempotent adapter call. If the database is
+            // still down, recording the suspension fails too and its error
+            // is returned: nothing can be recorded, the lease expires, and
+            // the next claim (or its sweep) handles the run.
+            Err(error) if is_transient_database_error(&error) => {
+                self.mark_transient_retry_or_record_lease_expired(
+                    &run,
+                    PIPELINE_DATABASE_UNAVAILABLE_LABEL,
+                )
+                .await
+            }
             Err(error) => {
                 let label = error.to_string();
                 if label == PIPELINE_INDEX_CONFLICT_LABEL {
@@ -3175,13 +3495,17 @@ impl PipelineService {
                 }
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
-                // uncharged suspension as a missing bound dependency.
-                if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL {
+                // uncharged suspension as a missing bound dependency. Task 4
+                // (M1), ruling R1: so is a missing per-instrument cap.
+                if let Some(gap) = [
+                    PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
+                    PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
+                ]
+                .into_iter()
+                .find(|gap| *gap == label)
+                {
                     return self
-                        .mark_transient_retry_or_record_lease_expired(
-                            &run,
-                            PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
-                        )
+                        .mark_transient_retry_or_record_lease_expired(&run, gap)
                         .await;
                 }
                 // The fixed allowlist from decision P2: a charged retry
@@ -3210,38 +3534,192 @@ impl PipelineService {
     /// the lease itself has gone stale between the phase's own failure and
     /// this call (the phase ran right up to its lease's edge), in which case
     /// the expiry is recorded instead and `error_label` is never charged.
+    /// Task 4 (M1): a Settle run resolves its open legs first (`fail_run`);
+    /// a stale lease anywhere in that resolution is recorded the same way.
     async fn mark_failed_or_record_lease_expired(
         &self,
         run: &PipelineRunRecord,
         error_label: &str,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
-        match self.store.mark_failed(run, error_label).await {
+        match self.fail_run(run, error_label).await {
             Ok(()) => self
                 .store
                 .get_run(&run.tenant_id, run.run_id)
                 .await
                 .map_err(Into::into),
-            Err(error) if is_stale_lease_db_error(&error) => {
+            Err(error) if is_stale_lease_error(&error) => {
                 Ok(self.store.record_lease_expired(run).await?)
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
     }
 
     /// Case B (D4), the `mark_retry` shape -- see
-    /// `mark_failed_or_record_lease_expired`.
+    /// `mark_failed_or_record_lease_expired` and `charged_retry`.
     async fn mark_retry_or_record_lease_expired(
         &self,
         run: &PipelineRunRecord,
         error_label: &str,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
-        match self.store.mark_retry(run, error_label).await {
+        match self.charged_retry(run, error_label).await {
             Ok(updated) => Ok(Some(updated)),
-            Err(error) if is_stale_lease_db_error(&error) => {
+            Err(error) if is_stale_lease_error(&error) => {
                 Ok(self.store.record_lease_expired(run).await?)
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
+    }
+
+    /// P2's terminal failure with a worker present. Task 4 (M1): a Settle
+    /// run first reconciles its dispatched external legs
+    /// (`reconcile_dispatched_settlement_legs`); `mark_failed` then forfeits
+    /// every other open leg in the transaction that fails the run.
+    async fn fail_run(&self, run: &PipelineRunRecord, error_label: &str) -> anyhow::Result<()> {
+        self.reconcile_dispatched_settlement_legs(run).await?;
+        self.store.mark_failed(run, error_label).await?;
+        Ok(())
+    }
+
+    /// P2's charged retry with a worker present. When this retry exhausts
+    /// the run's attempts -- `mark_retry` then fails the run as
+    /// `attempts_exhausted` -- a Settle run first reconciles its dispatched
+    /// external legs (Task 4, M1), and `mark_retry` forfeits every other
+    /// open leg in the transaction that fails the run. The claim holds the
+    /// lease, so no other writer moves `attempt_count` under it: the claimed
+    /// record predicts the outcome `mark_retry`'s SQL decides.
+    async fn charged_retry(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> anyhow::Result<PipelineRunRecord> {
+        if run.attempt_count >= run.max_attempts {
+            self.reconcile_dispatched_settlement_legs(run).await?;
+        }
+        Ok(self.store.mark_retry(run, error_label).await?)
+    }
+
+    /// Task 4 (M1), owner decision 2026-09-27: before a worker fails a
+    /// Settle run, each open, dispatched, external leg gets one more call to
+    /// its idempotent adapter with the request Step 6 made. A result equal
+    /// to the persisted selection's result reference completes the leg with
+    /// it. Anything else records `failed` / `settlement_unreconciled`: a
+    /// different result, an adapter error, or no call at all -- for a
+    /// missing adapter, a missing cap or an amount over it (the reconciling
+    /// call never pays what Step 6 would refuse), a selection without the
+    /// leg's result, or a submission that is no longer operable.
+    ///
+    /// Each call is fenced by `ensure_live_lease` and each record by the run
+    /// lease, so a stale lease here ends as `lease_expired`, never as a
+    /// charge. A Trace Credit leg and an undispatched leg are left for the
+    /// transaction that fails the run (`resolve_open_settlement_legs_on_tx`),
+    /// which forfeits them. Not a Settle run: nothing to do.
+    async fn reconcile_dispatched_settlement_legs(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> anyhow::Result<()> {
+        if run.next_phase != Some(Phase::Settle) {
+            return Ok(());
+        }
+        let dispatched = self
+            .store
+            .list_settlements(&run.tenant_id, run.run_id)
+            .await?
+            .into_iter()
+            .filter(|settlement| {
+                settlement.dispatched_at.is_some()
+                    && settlement.instrument_id != InstrumentId::trace_credit().as_str()
+                    && settlement_leg_is_unresolved(
+                        &settlement.operation_state,
+                        settlement.last_error_label.as_deref(),
+                    )
+            })
+            .collect::<Vec<_>>();
+        if dispatched.is_empty() {
+            return Ok(());
+        }
+        let operable = self.submission_guard(run).await?.operable;
+        let expected_results = match self.store.load_settle_selection(run).await {
+            Ok(selection) => selection
+                .and_then(|selection| {
+                    serde_json::from_value::<SettleDecision>(selection.decision).ok()
+                })
+                .map(|decision| {
+                    decision
+                        .settlement_operations()
+                        .iter()
+                        .filter_map(|operation| {
+                            operation.result_ref_hash().map(|result_ref_hash| {
+                                (
+                                    operation.instrument_id().as_str().to_string(),
+                                    result_ref_hash.to_string(),
+                                )
+                            })
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default(),
+            // A selection that no longer decodes cannot form the request:
+            // no reconciling call, so the leg is `settlement_unreconciled`.
+            Err(DatabaseError::Serialization(_)) => BTreeMap::new(),
+            Err(error) => return Err(error.into()),
+        };
+        for settlement in dispatched {
+            let reconciled = if operable {
+                self.reconciling_settle_call(run, &settlement, &expected_results)
+                    .await?
+            } else {
+                None
+            };
+            self.store
+                .record_settlement_reconciliation(
+                    run,
+                    &settlement.instrument_id,
+                    reconciled.as_deref(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The one reconciling adapter call for `settlement`, or `None` when it
+    /// is not made or its result is not the expected one (see
+    /// `reconcile_dispatched_settlement_legs`).
+    async fn reconciling_settle_call(
+        &self,
+        run: &PipelineRunRecord,
+        settlement: &PipelineSettlementRecord,
+        expected_results: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<String>> {
+        let Ok(instrument_id) = InstrumentId::new(settlement.instrument_id.clone()) else {
+            return Ok(None);
+        };
+        let Some(adapter) = self.settlement_adapters.get(&instrument_id) else {
+            return Ok(None);
+        };
+        let Some(expected_result_ref_hash) = expected_results.get(instrument_id.as_str()) else {
+            return Ok(None);
+        };
+        let within_cap = self
+            .caps
+            .per_instrument_atomic_units
+            .get(instrument_id.as_str())
+            .is_some_and(|cap| settlement.atomic_units <= *cap);
+        if !within_cap {
+            return Ok(None);
+        }
+        self.ensure_live_lease(run).await?;
+        let request = SettlementRequest {
+            tenant_id: run.tenant_id.clone(),
+            run_id: run.run_id,
+            instrument_id,
+            atomic_units: settlement.atomic_units,
+            operation_ref_hash: settlement.operation_ref_hash.clone(),
+            expected_result_ref_hash: expected_result_ref_hash.clone(),
+        };
+        Ok(match adapter.settle(&request) {
+            Ok(result) if result == *expected_result_ref_hash => Some(result),
+            Ok(_) | Err(_) => None,
+        })
     }
 
     /// Case B (D4), the `mark_transient_retry` shape -- see
@@ -3743,12 +4221,18 @@ impl PipelineService {
                     .settlement_adapters
                     .get(&instrument_id)
                     .ok_or_else(|| anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL))?;
+                // Task 4 (M1), ruling R1: no configured cap for the
+                // instrument is a configuration gap, an uncharged suspension
+                // (`process_claimed_run`), raised before the leg's adapter
+                // is called. An amount over a configured cap is a spend
+                // limit that refuses the payment: the leg fails below and
+                // the retry stays charged.
                 let cap = self
                     .caps
                     .per_instrument_atomic_units
                     .get(instrument_id.as_str())
                     .copied()
-                    .ok_or_else(|| anyhow::anyhow!(PIPELINE_CREDIT_CAP_LABEL))?;
+                    .ok_or_else(|| anyhow::anyhow!(PIPELINE_SETTLEMENT_CAP_MISSING_LABEL))?;
                 if settlement.atomic_units > cap {
                     self.store
                         .update_settlement(
@@ -3801,6 +4285,13 @@ impl PipelineService {
                 // lease this attempt still holds, the same check Step 5 runs
                 // before the index write.
                 self.ensure_live_lease(&run).await?;
+                // Ruling R4: the leg is `leased` under this attempt's lease
+                // while its adapter call is in flight, and `dispatched_at`
+                // records that it was dispatched -- a failed run reconciles
+                // such a leg against its adapter instead of forfeiting it.
+                self.store
+                    .mark_settlement_leased(&run, instrument_id.as_str())
+                    .await?;
                 let request = SettlementRequest {
                     tenant_id: run.tenant_id.clone(),
                     run_id: run.run_id,
@@ -3930,11 +4421,12 @@ impl PipelineService {
             // blocker fails closed and is charged, whatever else happened;
             // otherwise a hold or an adapter call error is an uncharged
             // suspension (ruling FR3), labeled by the hold when there is one.
+            // Task 4 (M1): the charged retry that exhausts the attempts
+            // resolves every open leg before the run fails (`charged_retry`).
             if settlement_blocked {
-                return Ok(self
-                    .store
-                    .mark_retry(&run, PIPELINE_SETTLEMENT_RETRY_LABEL)
-                    .await?);
+                return self
+                    .charged_retry(&run, PIPELINE_SETTLEMENT_RETRY_LABEL)
+                    .await;
             }
             if held || adapter_unavailable {
                 let label = if held {
@@ -4682,5 +5174,142 @@ mod tests {
         assert!(!is_stale_lease_error(&anyhow::anyhow!(
             PIPELINE_INDEX_CONFLICT_LABEL
         )));
+        // Task 4 (M1): a leg write refused because the leg is not open has
+        // its own error, never the stale-lease one -- recorded as
+        // `lease_expired` it would be uncharged with no terminal bound.
+        assert!(!is_stale_lease_db_error(&settlement_leg_not_open_error()));
+        assert!(!is_stale_lease_error(
+            &settlement_leg_not_open_error().into()
+        ));
+    }
+
+    /// Task 4 (M1): a failure path still resolves a leg unless it is
+    /// `complete`, `forfeited`, or already `failed` as
+    /// `settlement_unreconciled`. A leg `failed` for any other reason (a
+    /// result mismatch, an amount over the cap) is retried by Step 6 and so
+    /// is still unresolved.
+    #[test]
+    fn a_leg_is_unresolved_until_it_is_resolved() {
+        for state in ["pending", "leased", "retry", "held"] {
+            assert!(settlement_leg_is_unresolved(state, None), "{state}");
+        }
+        assert!(settlement_leg_is_unresolved(
+            "failed",
+            Some("settlement_result_mismatch")
+        ));
+        assert!(settlement_leg_is_unresolved(
+            "failed",
+            Some(PIPELINE_CREDIT_CAP_LABEL)
+        ));
+        assert!(!settlement_leg_is_unresolved(
+            "failed",
+            Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+        ));
+        assert!(!settlement_leg_is_unresolved("complete", None));
+        assert!(!settlement_leg_is_unresolved(
+            "forfeited",
+            Some(PIPELINE_SETTLEMENT_RUN_FAILED_LABEL)
+        ));
+        // The SQL form names the same resolved label.
+        assert!(
+            UNRESOLVED_SETTLEMENT_LEG_SQL
+                .contains(&format!("'{PIPELINE_SETTLEMENT_UNRECONCILED_LABEL}'"))
+        );
+    }
+
+    /// Task 4 (M1), ruling R2: a transient database failure -- the pool
+    /// could not give a connection, or a SQLSTATE in class 08, 40001,
+    /// 40P01, 57P01 to 57P03, or 53300 -- is `database_unavailable`, found by
+    /// downcast however service code wrapped it. Any other database error
+    /// (a constraint, a raise, a query cancel in class 57, a full disk in
+    /// class 53) is not.
+    #[test]
+    fn transient_database_errors_are_classified_by_sqlstate_and_pool() {
+        use tokio_postgres::error::SqlState;
+
+        for code in [
+            SqlState::CONNECTION_EXCEPTION,
+            SqlState::CONNECTION_DOES_NOT_EXIST,
+            SqlState::CONNECTION_FAILURE,
+            SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
+            SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION,
+            SqlState::TRANSACTION_RESOLUTION_UNKNOWN,
+            SqlState::PROTOCOL_VIOLATION,
+            SqlState::from_code("08ZZZ"),
+            SqlState::T_R_SERIALIZATION_FAILURE,
+            SqlState::T_R_DEADLOCK_DETECTED,
+            SqlState::ADMIN_SHUTDOWN,
+            SqlState::CRASH_SHUTDOWN,
+            SqlState::CANNOT_CONNECT_NOW,
+            SqlState::TOO_MANY_CONNECTIONS,
+        ] {
+            assert!(is_transient_sqlstate(&code), "{} is transient", code.code());
+        }
+        for code in [
+            SqlState::UNIQUE_VIOLATION,
+            SqlState::CHECK_VIOLATION,
+            SqlState::FOREIGN_KEY_VIOLATION,
+            SqlState::RAISE_EXCEPTION,
+            SqlState::INSUFFICIENT_PRIVILEGE,
+            SqlState::T_R_INTEGRITY_CONSTRAINT_VIOLATION,
+            SqlState::QUERY_CANCELED,
+            SqlState::DISK_FULL,
+        ] {
+            assert!(
+                !is_transient_sqlstate(&code),
+                "{} is not transient",
+                code.code()
+            );
+        }
+
+        let transient: Vec<anyhow::Error> = vec![
+            DatabaseError::Pool("pool exhausted".to_string()).into(),
+            DatabaseError::PoolRuntime(deadpool_postgres::PoolError::Closed).into(),
+            deadpool_postgres::PoolError::Closed.into(),
+            anyhow::Error::from(DatabaseError::Pool("pool exhausted".to_string()))
+                .context("settle leg update"),
+        ];
+        for error in &transient {
+            assert!(is_transient_database_error(error), "{error:#}");
+        }
+        let permanent: Vec<anyhow::Error> = vec![
+            stale_lease_error().into(),
+            settlement_leg_not_open_error().into(),
+            DatabaseError::Constraint("phase does not match run transition".to_string()).into(),
+            DatabaseError::Serialization("row decode failed".to_string()).into(),
+            DatabaseError::Query("statement timeout".to_string()).into(),
+            DatabaseError::NotFound {
+                entity: "pipeline_run".to_string(),
+                id: "run".to_string(),
+            }
+            .into(),
+            anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL),
+            anyhow::anyhow!(PIPELINE_DATABASE_UNAVAILABLE_LABEL),
+        ];
+        for error in &permanent {
+            assert!(!is_transient_database_error(error), "{error:#}");
+        }
+    }
+
+    /// Task 4 (M1), ruling R2: a driver error with no SQLSTATE whose cause
+    /// is I/O is transient, whether service code raised it bare or the
+    /// store wrapped it as `DatabaseError::Postgres`. Nothing listens on
+    /// port 1, so the connection is refused locally.
+    #[tokio::test]
+    async fn a_refused_connection_is_a_transient_database_error() {
+        async fn refused() -> tokio_postgres::Error {
+            tokio_postgres::connect(
+                "host=127.0.0.1 port=1 user=probe connect_timeout=5",
+                tokio_postgres::NoTls,
+            )
+            .await
+            .err()
+            .expect("nothing listens on port 1")
+        }
+        let bare = refused().await;
+        assert!(bare.code().is_none());
+        assert!(is_transient_database_error(&bare.into()));
+        let wrapped: anyhow::Error = DatabaseError::Postgres(refused().await).into();
+        assert!(is_transient_database_error(&wrapped));
     }
 }
