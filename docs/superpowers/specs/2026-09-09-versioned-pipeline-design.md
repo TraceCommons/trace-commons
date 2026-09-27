@@ -841,8 +841,10 @@ operational status outside the immutable package. A suspension does not change
 the bundle identifier or move the run to another bundle.
 
 If withdrawal commits before the Settle decision, Settle excludes index
-membership. If withdrawal commits later, Settle stops a pending command. The
-existing revocation path invalidates an index write that completed first.
+membership. If withdrawal commits later, Settle stops a pending command. A
+withdrawal or revocation after the index write queues an invalidation. The
+index invalidation worker removes the revision with
+`VectorIndexWriter::invalidate_revision` (LIF-004).
 
 Withdrawal forfeits awards that are not settled. Settled awards stay.
 "Settled" means carried by a finalized settlement batch, as on `main`. If

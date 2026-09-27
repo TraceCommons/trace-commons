@@ -121,6 +121,26 @@ pub trait VectorIndexWriter: Send + Sync {
         embedding: &[f32],
         content_hash: &str,
     ) -> Result<IndexUpsertResult, IndexWriteError>;
+
+    /// Removes every entry of `revision_id` in `index_id` under
+    /// `tenant_storage_ref`, and nothing else.
+    ///
+    /// Returns `Ok(true)` when it removed entries and `Ok(false)` when there
+    /// were none. It is idempotent: a repeated call returns `Ok(false)` and
+    /// changes nothing. A failure returns an `IndexWriteError` and never
+    /// `Ok(false)`, so a failed invalidation stays visible. It never returns
+    /// `ContentConflict`. `Uncertain` means some entries may have been
+    /// removed; `Failed` means none were. Either way the invalidation is not
+    /// complete, and a retry is safe because the method is idempotent.
+    ///
+    /// Used after a withdrawal of a submission whose revision is already in
+    /// the index (the index invalidation worker). LIF-004.
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, IndexWriteError>;
 }
 
 /// Pluggable vector index used by the gate orchestrator.

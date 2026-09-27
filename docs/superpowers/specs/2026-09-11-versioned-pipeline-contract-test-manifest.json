@@ -147,6 +147,14 @@
       "test_ids": ["versioned_pipeline_pg::withdrawal_excludes_index_but_preserves_committed_credit", "versioned_pipeline_pg::withdrawal_queues_completed_index_invalidation", "versioned_pipeline_pg::export_snapshot_is_immutable_and_withdrawal_invalidates_it", "versioned_pipeline_pg::index_invalidation_retries_and_exposes_terminal_failure"]
     },
     {
+      "contract_ids": ["LIF-004"],
+      "boundary": "index revision invalidation",
+      "implementation_milestone": 6,
+      "evidence_status": "planned",
+      "test_ids": ["versioned_pipeline_runtime_pg::invalidation_removes_the_revision_after_withdrawal", "versioned_pipeline_runtime_pg::invalidation_retries_then_fails_with_a_label", "versioned_pipeline_runtime_pg::invalidation_is_tenant_scoped", "versioned_pipeline_index::invalidate_revision_is_idempotent_and_removes_only_that_revision"],
+      "note": "The compatibility and product delivery provides these tests. gate-api has no reference index writer."
+    },
+    {
       "contract_ids": ["EXP-001", "EXP-002", "EXP-003", "EXP-004"],
       "boundary": "exports and derived artifacts",
       "implementation_milestone": 6,

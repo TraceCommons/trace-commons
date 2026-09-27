@@ -1063,6 +1063,20 @@ release, and purge.
 **Acceptance:** Break each adapter, exhaust retries, and recover the target.
 Confirm readiness and contributor reach reporting.
 
+### LIF-004: Index revision invalidation
+
+- Invalidation MUST remove every index entry of the withdrawn revision.
+- Invalidation MUST NOT remove another tenant's, index's, or revision's
+  entries.
+- Invalidation MUST be idempotent: a repeated call MUST report that no
+  entries remained.
+- A failed invalidation MUST remain visible and MUST NOT report success.
+
+**Acceptance:** Withdraw a completed run that is in the index. Confirm
+`nearest` no longer returns the revision. Confirm a repeated call reports no
+entries removed. Confirm another tenant's, index's, and revision's entries
+stay. Confirm a fault stays visible.
+
 ## 16. Customer and export contracts
 
 ### EXP-001: Authorized selection
