@@ -58,6 +58,7 @@ pub mod versioned_pipeline;
 pub mod versioned_pipeline_bundle;
 pub mod versioned_pipeline_credit;
 pub mod versioned_pipeline_index;
+pub mod versioned_pipeline_product;
 pub mod witness_service;
 
 pub const TRACE_COMMONS_SERVER_EXTRACTION_STAGE: &str = "server-storage-owned";

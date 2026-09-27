@@ -53,6 +53,9 @@ use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry, credit_account_hash,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
+use trace_commons_server::versioned_pipeline_product::{
+    PipelineCreditStatus, PipelineProcessingStatus, PipelineProductStore,
+};
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_member_only_login};
 
@@ -10716,5 +10719,532 @@ async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
     assert!(
         db_error_message(&error).contains("phase outcomes are immutable"),
         "unexpected owner error: {error:?}"
+    );
+}
+
+/// Submits one envelope as `principal` in `tenant` and drives it through
+/// Review, Score, and Settle to completion. Used by the product-read tests
+/// below, which do not care about the run's mechanics, only about its final
+/// (or, in `status_follows_outcomes`, intermediate) product-facing status.
+async fn submit_and_complete(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+) -> PipelineRunRecord {
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = submit_registered(
+        service,
+        PipelineReceiptRequest {
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &env,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs")
+}
+
+/// Review Focus 4 (Task 11): status, credit, and attestation reads never
+/// return another tenant's runs, and a contributor sees only its own
+/// submissions -- even when another tenant's principal string is identical,
+/// and even when another tenant's own submission id is asked for directly.
+#[tokio::test]
+async fn product_reads_are_tenant_and_principal_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+
+    let tenant_a = format!("product-scope-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("product-scope-b-{}", uuid::Uuid::new_v4());
+    let principal_1 = "principal_sha256:product-scope-p1";
+    let principal_2 = "principal_sha256:product-scope-p2";
+
+    let run_a1 = submit_and_complete(&service, &tenant_a, principal_1).await;
+    let run_a2 = submit_and_complete(&service, &tenant_a, principal_2).await;
+    // Same principal string as tenant A's first submission, but tenant B.
+    let run_b1 = submit_and_complete(&service, &tenant_b, principal_1).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+
+    let p1_statuses = product
+        .own_contributor_statuses(&tenant_a, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(p1_statuses.len(), 1);
+    assert_eq!(p1_statuses[0].submission_id, run_a1.submission_id);
+
+    let p2_statuses = product
+        .own_contributor_statuses(&tenant_a, principal_2)
+        .await
+        .unwrap();
+    assert_eq!(p2_statuses.len(), 1);
+    assert_eq!(p2_statuses[0].submission_id, run_a2.submission_id);
+
+    let b1_statuses = product
+        .own_contributor_statuses(&tenant_b, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(b1_statuses.len(), 1);
+    assert_eq!(
+        b1_statuses[0].submission_id, run_b1.submission_id,
+        "tenant B's own read must not return tenant A's submission for the same principal string"
+    );
+
+    // A submission id that belongs to tenant B, asked through tenant A,
+    // returns nothing -- not tenant B's row, not an error.
+    let cross_tenant = product
+        .contributor_statuses(&tenant_a, principal_1, &[run_b1.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_empty(),
+        "tenant A must not see tenant B's submission"
+    );
+
+    // The admin-scoped read over both of tenant A's principals sees both of
+    // tenant A's submissions and never tenant B's, even when tenant B's
+    // submission id is requested in the same batch.
+    let both_in_a = product
+        .contributor_statuses_for_principals(
+            &tenant_a,
+            &[principal_1.to_string(), principal_2.to_string()],
+            &[
+                run_a1.submission_id,
+                run_a2.submission_id,
+                run_b1.submission_id,
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(both_in_a.len(), 2);
+    assert!(
+        both_in_a
+            .iter()
+            .all(|status| status.submission_id != run_b1.submission_id)
+    );
+
+    // Credit and attestation reads are scoped the same way.
+    let credit_a1 = product
+        .contributor_credit(&tenant_a, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(credit_a1.submission_count, 1);
+    let credit_b1 = product
+        .contributor_credit(&tenant_b, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(credit_b1.submission_count, 1);
+
+    let attestations_a1 = product
+        .own_score_attestation_entries(&tenant_a, principal_1)
+        .await
+        .unwrap();
+    assert_eq!(attestations_a1.len(), 1);
+    assert_eq!(attestations_a1[0].submission_id, run_a1.submission_id);
+
+    let cross_attestation = product
+        .score_attestation_entries(&tenant_a, principal_1, &[run_b1.submission_id])
+        .await
+        .unwrap();
+    assert!(
+        cross_attestation.is_empty(),
+        "tenant A must not see tenant B's score attestation"
+    );
+}
+
+/// Task 11: status reads follow the run's outcomes, never a mutable status
+/// table (P3-D13). Covers: unscored before Score, the awards after Score,
+/// complete after Settle, the credit status moving from pending to
+/// finalized only once the Trace Credit batch actually finalizes (ruling
+/// T11-1), and a quarantined run's Review-phase wait.
+#[tokio::test]
+async fn status_follows_outcomes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let product = PipelineProductStore::new(backend.clone());
+
+    // -- Main progression: unscored -> scored -> settled/finalized. --
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("status-follows-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:status-follows";
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = submit_registered(
+        &service,
+        PipelineReceiptRequest {
+            tenant_id: &tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &env,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before_score = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(before_score.credit, PipelineCreditStatus::Unscored);
+    assert_eq!(before_score.score_microcredits, None);
+    assert!(
+        before_score.instruments.is_empty(),
+        "no settlement rows exist before Score seeds them"
+    );
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    let after_score = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(after_score.score_microcredits, Some(1_000_000));
+    assert_eq!(after_score.instruments.len(), 2);
+    assert_eq!(
+        after_score.credit,
+        PipelineCreditStatus::Pending,
+        "scored but not yet settled"
+    );
+
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    let after_settle = product
+        .contributor_statuses(&tenant, principal, &[created.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(after_settle.processing, PipelineProcessingStatus::Complete);
+    assert_eq!(after_settle.credit, PipelineCreditStatus::Finalized);
+    let settled_trace_credit = after_settle
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .unwrap();
+    assert_eq!(settled_trace_credit.internal_settlement_state, "finalized");
+
+    // -- Ruling T11-1: pending before the batch is finalized. --
+    //
+    // PR 2's FR2 transaction (`settle_internal_credit`) commits the ledger
+    // row, the finalized batch, and the settlement completion together, so
+    // there is no fixture that leaves a ledger row without a batch for the
+    // minimal family -- instead, observe the state with a crash point that
+    // leaves the `trace_credit` settlement row untouched.
+    // `list_settlements` orders by `instrument_id`, so `storage_rebate`
+    // (which sorts first) completes and the crash fires right after,
+    // before `trace_credit` is dispatched at all.
+    let dir_pending = tempfile::tempdir().unwrap();
+    let (pending_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_pending),
+        scored_config(false),
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let tenant_pending = format!("status-follows-pending-{}", uuid::Uuid::new_v4());
+    let principal_pending = "principal_sha256:status-follows-pending";
+    let env_pending = envelope(uuid::Uuid::new_v4()).await;
+    let raw_pending = serde_json::to_vec(&env_pending).unwrap();
+    let key_pending = env_pending.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_pending) = submit_registered(
+        &pending_service,
+        PipelineReceiptRequest {
+            tenant_id: &tenant_pending,
+            actor_principal_ref: principal_pending,
+            counts_toward_quota: true,
+            request_idempotency_key: &key_pending,
+            request_bytes: &raw_pending,
+            server_envelope: &env_pending,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    let crash_error = pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .expect_err("Settle crashes right after the first settlement leg completes");
+    assert_eq!(crash_error.to_string(), INJECTED_PIPELINE_CRASH);
+
+    let pending_status = product
+        .contributor_statuses(
+            &tenant_pending,
+            principal_pending,
+            &[created_pending.submission_id],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let pending_trace_credit = pending_status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .expect("trace_credit settlement row seeded at Score");
+    assert_eq!(pending_trace_credit.internal_settlement_state, "pending");
+    assert_ne!(pending_trace_credit.internal_settlement_state, "finalized");
+    assert_eq!(pending_status.credit, PipelineCreditStatus::Pending);
+
+    // Force the stale lease to expire (same technique as
+    // `crash_matrix_produces_one_logical_effect_per_point`), then resume
+    // with the same service -- `inject_crash` only fires once, so this call
+    // runs Settle to completion.
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant_pending).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+             WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+            &[&tenant_pending, &created_pending.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let resumed = pending_service
+        .process_run(&tenant_pending, created_pending.run_id)
+        .await
+        .unwrap()
+        .expect("Settle resumes and completes");
+    assert_eq!(resumed.state, PipelineRunState::Complete);
+
+    let finalized_status = product
+        .contributor_statuses(
+            &tenant_pending,
+            principal_pending,
+            &[created_pending.submission_id],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let finalized_trace_credit = finalized_status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .unwrap();
+    assert_eq!(
+        finalized_trace_credit.internal_settlement_state,
+        "finalized"
+    );
+    assert_eq!(finalized_status.credit, PipelineCreditStatus::Finalized);
+
+    // -- A quarantined run shows Review as the current, blocked phase. --
+    let dir_quarantine = tempfile::tempdir().unwrap();
+    let (quarantine_service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir_quarantine),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant_quarantine = format!("status-follows-quarantine-{}", uuid::Uuid::new_v4());
+    let principal_quarantine = "principal_sha256:status-follows-quarantine";
+    let mut env_quarantine = envelope(uuid::Uuid::new_v4()).await;
+    env_quarantine.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw_quarantine = serde_json::to_vec(&env_quarantine).unwrap();
+    let key_quarantine = env_quarantine.submission_id.to_string();
+    let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
+        &quarantine_service,
+        PipelineReceiptRequest {
+            tenant_id: &tenant_quarantine,
+            actor_principal_ref: principal_quarantine,
+            counts_toward_quota: true,
+            request_idempotency_key: &key_quarantine,
+            request_bytes: &raw_quarantine,
+            server_envelope: &env_quarantine,
+            residual_risk_basis: &[],
+            limits: NO_LIMITS,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("receipt creates a run")
+    };
+    quarantine_service
+        .process_run(&tenant_quarantine, created_quarantine.run_id)
+        .await
+        .unwrap()
+        .expect("Review waits for a human assessment");
+
+    let quarantine_status = product
+        .contributor_statuses(
+            &tenant_quarantine,
+            principal_quarantine,
+            &[created_quarantine.submission_id],
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(quarantine_status.current_phase, Some(Phase::Review));
+    assert_eq!(
+        quarantine_status.reason_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(
+        quarantine_status.processing,
+        PipelineProcessingStatus::AwaitingReview
+    );
+}
+
+/// Task 11: `PipelineScoreAttestationEntry` carries no raw tenant id,
+/// principal, or trace text -- only ids, hashes, and the Score decision
+/// (itself only instrument ids and amounts).
+#[tokio::test]
+async fn attestation_entries_are_hash_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("attestation-hash-only-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:attestation-hash-only";
+    submit_and_complete(&service, &tenant, principal).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let entries = product
+        .own_score_attestation_entries(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    let serialized = serde_json::to_string(&entries[0]).unwrap();
+    assert!(
+        !serialized.contains(&tenant),
+        "attestation entry must not carry the raw tenant id"
+    );
+    assert!(
+        !serialized.contains(principal),
+        "attestation entry must not carry the raw principal ref"
+    );
+    assert!(
+        !serialized.contains("Inspect the bounded runtime fixture"),
+        "attestation entry must not carry raw trace text"
+    );
+}
+
+/// Task 11: a `storage_rebate` award above `u64::MAX` round-trips through
+/// the status read as the exact decimal string, since
+/// `PipelineInstrumentStatus.atomic_units` is `AtomicUnits` (a `u128`, #971)
+/// serialized as a decimal string, not a JSON number.
+#[tokio::test]
+async fn amounts_above_u64_round_trip_as_strings() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let large_amount = AtomicUnits::from_raw(u128::from(u64::MAX) + 1);
+    let config = PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: "storage_rebate".into(),
+            atomic_units: large_amount,
+            descriptor: storage_rebate_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    };
+    let (service, _, _) = test_service(backend.clone(), artifact_store(&dir), config, None).await;
+    let tenant = format!("large-amount-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:large-amount";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.instruments.len(), 1);
+    let rebate = &status.instruments[0];
+    assert_eq!(rebate.instrument_id, "storage_rebate");
+    assert_eq!(rebate.atomic_units, large_amount);
+
+    let serialized = serde_json::to_value(rebate).unwrap();
+    assert_eq!(
+        serialized["atomic_units"],
+        serde_json::json!("18446744073709551616")
     );
 }

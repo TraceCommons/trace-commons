@@ -360,7 +360,9 @@ impl Default for PipelineLeaseConfig {
     }
 }
 
-fn sha256_prefixed(bytes: &[u8]) -> String {
+/// `pub(crate)`: `versioned_pipeline_product.rs` reuses this instead of
+/// holding a second copy.
+pub(crate) fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
