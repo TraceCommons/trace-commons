@@ -718,6 +718,49 @@
                 </Grid>
             </Border>
 
+            <!--
+                Approved sessions held because the privacy witness is busy,
+                from status.witness_capacity in the Rust's words. A third
+                banner rather than a case of the health one, for the reason
+                the budget banner is: a higher label can hold the health slot
+                while these sessions are still waiting.
+
+                Same clock and no action button as the budget banner: nothing
+                is wrong, nothing was lost, and the daemon retries on its own.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasWitnessBanner, Mode=OneWay}"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                    <Viewbox Grid.Column="0"
+                             Width="14" Height="14"
+                             VerticalAlignment="Top"
+                             Margin="0,2,0,0">
+                        <Canvas Width="16" Height="16">
+                            <Ellipse Canvas.Left="1.4" Canvas.Top="1.4"
+                                     Width="13.2" Height="13.2"
+                                     Stroke="{ThemeResource TcGoldTextBrush}"
+                                     StrokeThickness="1.4" />
+                            <Path Data="M8 4.4V8l2.6 1.8"
+                                  Stroke="{ThemeResource TcGoldTextBrush}"
+                                  StrokeThickness="1.4" />
+                        </Canvas>
+                    </Viewbox>
+
+                    <StackPanel Grid.Column="1" Spacing="2">
+                        <TextBlock Text="{x:Bind ViewModel.WitnessTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.WitnessDetail, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
             </StackPanel>
 
             <!--
