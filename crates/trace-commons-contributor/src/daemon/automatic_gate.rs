@@ -219,6 +219,13 @@ pub enum Disclosure {
     /// Only the fixed patterns can be relied on. The wording for this is
     /// `consent_copy::AUTO_PATTERNS_ONLY_*`, drafted for the Tauri grant
     /// screen and not yet approved (the spec's Open list).
+    ///
+    /// It is what [`disclosure`] always answers, and so what the pre-grant
+    /// screen shows, correctly: [`disclosure`] reads configuration only,
+    /// and before the grant no automatic session has run, so there is no
+    /// certificate for [`folder_disclosure`] to read. Configuration is not
+    /// evidence that a model ran; only per-session certificates are, and
+    /// they exist only after sessions have been sent.
     PatternsOnly,
 }
 

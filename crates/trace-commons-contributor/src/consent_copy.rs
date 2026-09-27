@@ -499,8 +499,12 @@ pub const AUTO_SCOPE_REQUIRED: &str = "Automatic contributing needs your choice 
 ///
 /// **DRAFT, NEEDS APPROVAL.** Worded to `grant_automatic`'s K3 and K4: it
 /// arms projects discovered after the grant, and a project with any session
-/// on disk at the grant keeps asking, for its new sessions too.
-pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects already on this computer keep asking first.";
+/// on disk at the grant keeps asking, for its new sessions too. "Have
+/// sessions", not "already on this computer": the daemon exempts only
+/// projects with sessions on disk (`AutomaticGrant::projects_on_disk` in
+/// `daemon::policy`), so a folder that exists but holds no session yet is
+/// armed when its first one lands.
+pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
 
 /// The ask-first path, as the path question offers it.
 ///
@@ -702,6 +706,10 @@ mod tests {
         assert!(AUTO_WITNESS_ORIGIN.contains("no record of which"));
         // No default scope, and declining is not a floor-scope grant.
         assert!(AUTO_SCOPE_REQUIRED.contains("Nothing is selected for you"));
+        // The exemption is for projects with sessions on disk at the grant,
+        // not every folder that exists: an empty one is armed.
+        assert!(AUTO_PATH_AUTOMATIC.contains("already have sessions"));
+        assert!(!AUTO_PATH_AUTOMATIC.contains("already on this computer"));
     }
 
     /// The statement, character for character.

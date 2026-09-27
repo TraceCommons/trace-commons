@@ -143,10 +143,17 @@ pub(crate) fn witness_review_copy() -> Value {
 /// The sentences a contributor reads on the Flow 1 grant screens.
 ///
 /// Both the words and the choice between them come from the contributor
-/// core: `automatic_gate::disclosure` decides whether a certified full
-/// pipeline ran (R1), and `consent_copy::automatic_grant_copy` carries only
-/// the scrub wording that answer allows. The model-scrub sentences never
-/// reach this client on a route where no model's result is relied on.
+/// core: `automatic_gate::disclosure` picks the disclosure (R1), and
+/// `consent_copy::automatic_grant_copy` carries only the scrub wording that
+/// answer allows.
+///
+/// `disclosure(cfg)` reads configuration only, so it answers
+/// `PatternsOnly`, and that is the right answer for a screen shown before
+/// the grant. Configuration is not evidence that a model ran: the model-scrub
+/// wording is earned only by `automatic_gate::folder_disclosure`, over the
+/// certificates of sessions the witness has already redacted, and before the
+/// grant there are none. So the model-scrub sentences never reach this
+/// screen.
 #[tauri::command]
 pub(crate) async fn automatic_contribution_copy(
     state: State<'_, AppState>,
