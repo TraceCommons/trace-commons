@@ -4,8 +4,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use base64::Engine;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
@@ -28,10 +29,12 @@ use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
-    LocalEncryptedTraceArtifactStore, TraceArtifactKind, TraceArtifactStore,
+    EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
+    TraceArtifactKind, TraceArtifactStore,
 };
 use trace_commons_server::trace_corpus_storage::{
-    TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite,
+    TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite, TraceObjectArtifactKind,
+    TraceObjectRefWrite,
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
@@ -3461,6 +3464,449 @@ async fn withdraw_submission(backend: &PgBackend, tenant_id: &str, submission_id
     .await
     .expect("insert trace_withdrawals row");
     tx.commit().await.expect("commit withdrawal insert");
+}
+
+/// Task 1 (H1), review comment 4108170510: a withdrawal that lands while a
+/// run is claimed in Review must never be reversed by the Review commit
+/// racing in behind it. Store level: the run is claimed in Review, the
+/// approved revision is built exactly the way the Review arm builds it, the
+/// submission is withdrawn *for real* (`record_trace_withdrawal`, which sets
+/// `status = 'revoked'` with `revoked_at`/`purged_at` under the submission
+/// row's lock -- not the tombstone-only `withdraw_submission` helper), and
+/// then `commit_review` is called directly. The commit must refuse and
+/// write nothing: no `review_snapshot` object ref, no derived record, no
+/// Review outcome, and no change to the run row.
+#[tokio::test]
+async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let tenant = format!("review-withdraw-store-{}", uuid::Uuid::new_v4());
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the seeded run is claimable");
+    let lease_token = claimed.lease_token.expect("a claim carries a lease");
+
+    // Build the approved revision the way the Review arm does: write the
+    // approved bytes under the claim's own attempt object id (FR1), wrapped
+    // per decision P1, then the same `trace_object_refs` write
+    // `approved_object_ref` computes.
+    let content = b"approved content for the withdrawal-during-review test".to_vec();
+    let wrapper = serde_json::to_vec(&serde_json::json!({
+        "schema": "trace_commons.pipeline_artifact_bytes.v1",
+        "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&content),
+    }))
+    .unwrap();
+    let object_id = pipeline_attempt_object_id("approved", claimed.run_id, lease_token);
+    let receipt = artifacts
+        .put_serialized_json(
+            pipeline_tenant_storage_ref(&tenant).as_str(),
+            TraceArtifactKind::ContributionEnvelope,
+            &object_id,
+            &wrapper,
+        )
+        .expect("write the approved object");
+    let object_ref_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("tracecommons:pipeline-approved-object:{}", claimed.run_id).as_bytes(),
+    );
+    let approved = ApprovedRevision {
+        revision_id: uuid::Uuid::new_v4(),
+        object_ref: TraceObjectRefWrite {
+            object_ref_id,
+            tenant_id: tenant.clone(),
+            submission_id: claimed.submission_id,
+            artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
+            object_store: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
+            object_key: receipt.object_key.clone(),
+            content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+            encryption_key_ref: format!("tenant:{}", pipeline_tenant_storage_ref(&tenant).as_str()),
+            size_bytes: content.len() as i64,
+            compression: None,
+            created_by_job_id: None,
+        },
+        content_hash: dependency_content_hash(&content),
+        source_content_hash: dependency_content_hash(b"source-bytes-for-the-test"),
+        worker_identity: "minimal_review_passthrough".to_string(),
+    };
+
+    // The real withdrawal: revokes and purges the submission under the
+    // submission row's lock, exactly as a contributor-initiated withdrawal
+    // does in production.
+    backend
+        .record_trace_withdrawal(
+            &tenant,
+            claimed.submission_id,
+            chrono::Utc::now(),
+            "received",
+            "not_distributed",
+        )
+        .await
+        .expect("record the withdrawal");
+    assert_eq!(
+        submission_status(&backend, &tenant, claimed.submission_id).await,
+        "revoked"
+    );
+
+    let outcome = StoredPhaseResult {
+        phase: Phase::Review,
+        decision: serde_json::json!({"approved": true}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    };
+
+    let result = store.commit_review(&claimed, outcome, Some(approved)).await;
+    let error = result.expect_err("commit_review must refuse an inoperable submission");
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+
+    // The withdrawal's own effect must survive untouched -- not reversed to
+    // `accepted`.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT status, revoked_at, purged_at FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &claimed.submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let status: String = row.get("status");
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = row.get("revoked_at");
+    let purged_at: Option<chrono::DateTime<chrono::Utc>> = row.get("purged_at");
+    assert_eq!(status, "revoked");
+    assert!(revoked_at.is_some());
+    assert!(purged_at.is_some());
+
+    // No review_snapshot object ref, no derived record for the run.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let object_ref_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2 AND artifact_kind = 'review_snapshot'",
+            &[&tenant, &claimed.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let derived_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_derived_records
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &claimed.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(object_ref_count, 0, "no review_snapshot object ref");
+    assert_eq!(derived_count, 0, "no derived record for the submission");
+
+    // No Review outcome row.
+    let outcomes = store.list_outcomes(&tenant, claimed.run_id).await.unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome.phase != Phase::Review),
+        "no Review outcome row"
+    );
+
+    // The run row is unchanged by the refused commit.
+    let after = store
+        .get_run(&tenant, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run still exists");
+    assert_eq!(after.next_phase, Some(Phase::Review));
+    assert_eq!(after.state, PipelineRunState::Leased);
+    assert_eq!(after.lease_token, Some(lease_token));
+    assert!(after.approved_revision_id.is_none());
+    assert!(after.approved_object_ref_id.is_none());
+    assert!(after.approved_content_hash.is_none());
+}
+
+/// Task 1 (H1), service-level race window: withdraws the submission
+/// *after* the approved object is written and *before* `commit_review`
+/// runs. `put_serialized_json` is a synchronous call the Review arm makes
+/// mid-transaction-free (there is no open database transaction while it
+/// runs), so a wrapper that intercepts exactly that write and drives the
+/// real withdrawal to completion before returning reproduces the review
+/// comment's race deterministically: `commit_review` must always find the
+/// submission already withdrawn by the time it takes the submission row's
+/// lock.
+///
+/// The withdrawal itself runs on its own thread with its own Tokio runtime
+/// and its own single-connection `PgBackend` (never the shared pool the
+/// rest of the test drives): the wrapper's `put_serialized_json` is called
+/// from inside the test's own `#[tokio::test]` runtime, and nesting a
+/// `block_on` inside a running runtime panics, so the withdrawal needs a
+/// runtime of its own. Using a dedicated connection (rather than checking
+/// the shared pool out from a foreign runtime) avoids leaving a connection
+/// whose background I/O task belongs to a runtime that is about to be torn
+/// down.
+struct WithdrawOnApprovedWriteStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    runtime_url: String,
+    tenant_id: String,
+    submission_id: uuid::Uuid,
+    triggered: AtomicBool,
+}
+
+impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        let receipt = self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        if object_id.starts_with("pipeline-approved-")
+            && !self.triggered.swap(true, Ordering::SeqCst)
+        {
+            let runtime_url = self.runtime_url.clone();
+            let tenant_id = self.tenant_id.clone();
+            let submission_id = self.submission_id;
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().expect("build withdrawal runtime");
+                runtime.block_on(async move {
+                    let withdrawal_backend =
+                        PgBackend::new(&DatabaseConfig::from_postgres_url(&runtime_url, 1))
+                            .await
+                            .expect("connect a dedicated withdrawal connection");
+                    withdrawal_backend
+                        .record_trace_withdrawal(
+                            &tenant_id,
+                            submission_id,
+                            chrono::Utc::now(),
+                            "received",
+                            "not_distributed",
+                        )
+                        .await
+                        .expect("record the race-window withdrawal");
+                });
+            })
+            .join()
+            .expect("withdrawal thread completes");
+        }
+        Ok(receipt)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+}
+
+/// Builds the runtime role's connection URL from the test database URL env
+/// var, the same transform `runtime_backend` applies.
+fn runtime_role_url(base_url: &str) -> String {
+    let mut runtime_url = reqwest::Url::parse(base_url).expect("parse test URL");
+    runtime_url
+        .set_username(RUNTIME_ROLE)
+        .expect("set runtime user");
+    runtime_url.to_string()
+}
+
+#[tokio::test]
+async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner_url =
+        std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("review-withdraw-race-{}", uuid::Uuid::new_v4());
+    let submission_id = uuid::Uuid::new_v4();
+    let wrapper = Arc::new(WithdrawOnApprovedWriteStore {
+        inner: artifact_store(&dir),
+        runtime_url: runtime_role_url(&owner_url),
+        tenant_id: tenant.clone(),
+        submission_id,
+        triggered: AtomicBool::new(false),
+    });
+    let (service, _, _) = test_service(
+        backend.clone(),
+        wrapper as Arc<dyn TraceArtifactStore>,
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let env = envelope(submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    // Before Review runs, only the source envelope has been written.
+    assert_eq!(count_files_under(dir.path()), 1);
+
+    let processed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs and fails closed on the race-window withdrawal");
+
+    assert_eq!(processed.state, PipelineRunState::Failed);
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "revoked"
+    );
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let object_ref_count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2 AND artifact_kind = 'review_snapshot'",
+            &[&tenant, &created.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(object_ref_count, 0, "no review_snapshot object ref");
+
+    // The approved object this attempt wrote must be deleted after the
+    // refused commit -- the source envelope is the only file left.
+    assert_eq!(
+        count_files_under(dir.path()),
+        1,
+        "the approved object this attempt wrote must be deleted, leaving only \
+         the source envelope"
+    );
+}
+
+/// Task 1 (H1), ruling item 4: a submission withdrawn *before* the run is
+/// even claimed for Review must fail the run terminally on the very first
+/// pass -- `load_object_bytes`'s existing operability refusal is permanent
+/// in Review, not a charged retry to burn through `max_attempts` (P2's
+/// ordinary charged-retry allowlist, which this label was in before this
+/// task, would otherwise take five attempts to exhaust it). No approved
+/// object is ever written, because Review never reaches the point that
+/// writes one.
+#[tokio::test]
+async fn withdrawal_before_review_claim_fails_closed_on_the_first_pass() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-withdraw-before-claim-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    backend
+        .record_trace_withdrawal(
+            &tenant,
+            created.submission_id,
+            chrono::Utc::now(),
+            "received",
+            "not_distributed",
+        )
+        .await
+        .expect("record the withdrawal");
+
+    let files_before = count_files_under(dir.path());
+
+    let processed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review fails closed on the first pass");
+
+    assert_eq!(processed.state, PipelineRunState::Failed);
+    assert_eq!(processed.attempt_count, 1, "failed on the first attempt");
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "revoked"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        files_before,
+        "no approved object was written"
+    );
 }
 
 /// Fix round 1 (review finding on Task 12): the committed Settle decision

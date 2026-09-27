@@ -732,6 +732,18 @@ impl PgPipelineStore {
     /// outcome row, and the run's terminal transition commit -- the run's
     /// `approved_*` columns stay NULL, satisfying
     /// `pipeline_runs_approved_content_shape`.
+    ///
+    /// Task 1 (H1), review comment 4108170510: the submission-operability
+    /// guard that gated the source read at the start of Review
+    /// (`load_object_bytes`) was checked in an earlier, already-committed
+    /// transaction. A withdrawal (or an expiry/purge) landing after that
+    /// read and before this commit -- for example while this attempt was
+    /// writing the approved object -- must never be reversed by an approval
+    /// or rejection racing in behind it. This re-checks operability here,
+    /// under the same lock this commit already takes, and refuses the whole
+    /// commit (`PIPELINE_SUBMISSION_INOPERABLE_LABEL`) rather than resurrect
+    /// the trace: no object ref, no derived record, no status change, no
+    /// outcome, no run update.
     pub async fn commit_review(
         &self,
         run: &PipelineRunRecord,
@@ -746,7 +758,47 @@ impl PgPipelineStore {
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        // Lock order: the run row (`ensure_current_lease`), then the
+        // submission row (below) -- held the same way everywhere both are
+        // touched.
         ensure_current_lease(&tx, run, lease_token).await?;
+
+        let submission_row = tx
+            .query_opt(
+                "SELECT status, revoked_at, purged_at, withdrawn_at, expires_at
+                   FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  FOR UPDATE",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?;
+        let operable = match &submission_row {
+            None => false,
+            Some(row) => {
+                let status: String = row.get("status");
+                let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
+                let purged_at: Option<DateTime<Utc>> = row.get("purged_at");
+                let withdrawn_at: Option<DateTime<Utc>> = row.get("withdrawn_at");
+                let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
+                matches!(status.as_str(), "received" | "quarantined")
+                    && revoked_at.is_none()
+                    && purged_at.is_none()
+                    && withdrawn_at.is_none()
+                    && expires_at.is_none_or(|expires_at| expires_at > Utc::now())
+            }
+        };
+        let withdrawn = tx
+            .query_opt(
+                "SELECT 1 FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .is_some();
+        if !operable || withdrawn {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
 
         let (approved_revision_id, approved_object_ref_id, approved_content_hash) =
             if let Some(approved) = &approved {
@@ -790,26 +842,45 @@ impl PgPipelineStore {
                     ],
                 )
                 .await?;
-                tx.execute(
-                    "UPDATE trace_submissions
-                     SET status = 'accepted', reviewed_at = NOW(), updated_at = NOW()
-                     WHERE tenant_id = $1 AND submission_id = $2",
-                    &[&run.tenant_id, &run.submission_id],
-                )
-                .await?;
+                // Ruling item 2 (defense in depth): the status update stays
+                // conditional on the same pre-review states the gate above
+                // just re-checked, and must touch exactly one row. The
+                // whole transaction has not committed yet, so refusing here
+                // still rolls back the two inserts just above.
+                let updated_submission = tx
+                    .execute(
+                        "UPDATE trace_submissions
+                         SET status = 'accepted', reviewed_at = NOW(), updated_at = NOW()
+                         WHERE tenant_id = $1 AND submission_id = $2
+                           AND status IN ('received', 'quarantined')",
+                        &[&run.tenant_id, &run.submission_id],
+                    )
+                    .await?;
+                if updated_submission != 1 {
+                    return Err(DatabaseError::Constraint(
+                        PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+                    ));
+                }
                 (
                     Some(approved.revision_id),
                     Some(approved.object_ref.object_ref_id),
                     Some(approved.content_hash.clone()),
                 )
             } else {
-                tx.execute(
-                    "UPDATE trace_submissions
-                     SET status = 'rejected', reviewed_at = NOW(), updated_at = NOW()
-                     WHERE tenant_id = $1 AND submission_id = $2",
-                    &[&run.tenant_id, &run.submission_id],
-                )
-                .await?;
+                let updated_submission = tx
+                    .execute(
+                        "UPDATE trace_submissions
+                         SET status = 'rejected', reviewed_at = NOW(), updated_at = NOW()
+                         WHERE tenant_id = $1 AND submission_id = $2
+                           AND status IN ('received', 'quarantined')",
+                        &[&run.tenant_id, &run.submission_id],
+                    )
+                    .await?;
+                if updated_submission != 1 {
+                    return Err(DatabaseError::Constraint(
+                        PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+                    ));
+                }
                 (None, None, None)
             };
 
@@ -2783,6 +2854,28 @@ impl PipelineService {
                         .await
                         .map_err(Into::into);
                 }
+                // Task 1 (H1), controller ruling: in Review, an inoperable
+                // submission (withdrawn, expired, or purged) is permanent --
+                // the condition that caused it can never reverse -- so the
+                // run ends terminally here rather than waiting out P2's
+                // ordinary charged retry for this label. This covers both
+                // `commit_review`'s own refusal and the existing
+                // `load_object_bytes` refusal `load_source_bytes` hits
+                // before Review even runs its policy. Every other phase
+                // keeps the charged retry below (Score's read of the
+                // already-validated approved bytes, for one).
+                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                    && run.next_phase == Some(Phase::Review)
+                {
+                    self.store
+                        .mark_failed(&run, PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+                        .await?;
+                    return self
+                        .store
+                        .get_run(&run.tenant_id, run.run_id)
+                        .await
+                        .map_err(Into::into);
+                }
                 // D9 (Task 15) / FR3: a typed `PolicyError` raised while a
                 // phase runs is budgeted by kind, ahead of the P2 string
                 // allowlist below -- a transient failure (an outage, a
@@ -2859,6 +2952,7 @@ impl PipelineService {
                     })
                     .await?;
                 let (result, content) = output.into_parts();
+                let mut written_receipt = None;
                 let approved = match (&result.decision, content) {
                     (
                         ReviewDecision::Approved {
@@ -2883,6 +2977,7 @@ impl PipelineService {
                             &wrapper,
                         )?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
+                        written_receipt = Some(receipt.clone());
                         Some(ApprovedRevision {
                             revision_id: *registry_revision_id,
                             object_ref: approved_object_ref(
@@ -2899,14 +2994,50 @@ impl PipelineService {
                     (ReviewDecision::Rejected { .. }, None) => None,
                     _ => anyhow::bail!("review_output_invalid"),
                 };
-                let updated = self
+                let commit_result = self
                     .store
                     .commit_review(
                         run,
                         StoredPhaseResult::from_result(Phase::Review, &result)?,
                         approved,
                     )
-                    .await?;
+                    .await;
+                let updated = match commit_result {
+                    Ok(updated) => updated,
+                    // Task 1 (H1): the submission became inoperable (a
+                    // withdrawal, expiry, or purge) in the window between
+                    // this attempt's artifact write and the commit above.
+                    // The store's `Display` prefixes every `Constraint`
+                    // error ("Constraint violation: ..."), which would not
+                    // match the safe-label allowlist verbatim (the same
+                    // reason `commit_score_phase` re-raises
+                    // `settlement_adapter_missing` bare); re-raise this one
+                    // the same way. Delete the approved object this attempt
+                    // wrote -- best effort, and never let a failed delete
+                    // mask the real refusal.
+                    Err(DatabaseError::Constraint(ref label))
+                        if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                    {
+                        if let Some(receipt) = written_receipt.as_ref() {
+                            if self
+                                .artifact_store
+                                .delete_artifact(
+                                    pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                                    receipt,
+                                )
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    label = "review_approved_object_delete_failed",
+                                    "best-effort delete of an approved object failed after \
+                                     commit_review refused an inoperable submission"
+                                );
+                            }
+                        }
+                        return Err(anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
                 Ok(updated)
             }
