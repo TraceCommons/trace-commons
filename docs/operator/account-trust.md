@@ -65,8 +65,9 @@ account-ledger submissions require valid `source_session` metadata before any
 budget reservation or content staging.
 
 Before enabling, record read-only counts of legacy invite tenants, wallet
-accounts, NEAR AI accounts, ambiguous links, and unlinked devices. Those counts
-are **unknown** until measured on the target deployment. Verify control of
+accounts, NEAR AI accounts, ambiguous links, and unlinked devices with
+`scripts/operator/legacy-invite-counts.sql` ([how](./legacy-invite-counts.md)).
+Those counts are **unknown** until measured on the target deployment. Verify control of
 both identities before migrating a legacy link; never infer a merge from a
 name or invite. The switch is global. Since V81 it governs only the
 `near-`/`nearai-` namespaces: legacy `tenant-…` invite identities coexist,
