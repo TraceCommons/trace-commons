@@ -115,16 +115,22 @@ impl GrantTerms {
     /// sent at all.
     pub fn in_force(shared: &super::ipc::DaemonShared) -> Option<Self> {
         let cfg = shared.store.load_config().ok().flatten()?;
+        Some(Self::in_force_for(shared, &cfg))
+    }
+
+    /// The terms in force under `cfg`, a config the caller already read, so
+    /// a check made against that config and the terms captured agree.
+    pub fn in_force_for(shared: &super::ipc::DaemonShared, cfg: &ContributorConfig) -> Self {
         let (near_ai, attested_bodies) = {
             let s = shared.settings.lock().expect("settings lock");
             (s.near_ai.clone(), s.ironwire_attested_bodies)
         };
-        Some(Self::current(
-            &cfg,
+        Self::current(
+            cfg,
             near_ai.as_ref(),
             attested_bodies,
             &env_filter_backend(),
-        ))
+        )
     }
 
     /// The terms in force now.
@@ -265,6 +271,7 @@ mod tests {
         use crate::daemon::preview::input_fingerprint_with_env_filter;
         let cfg = ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.invalid".to_string(),

@@ -216,8 +216,16 @@ pub enum Disclosure {
     /// `AUTO_SCRUB_*` wording, which says a model removes what it
     /// recognises, is true.
     ModelScrubbed,
-    /// Only the fixed patterns can be relied on. The wording for this is not
-    /// yet written (the spec's Open list).
+    /// Only the fixed patterns can be relied on. The wording for this is
+    /// `consent_copy::AUTO_PATTERNS_ONLY_*`, drafted for the Tauri grant
+    /// screen and not yet approved (the spec's Open list).
+    ///
+    /// It is what [`disclosure`] always answers, and so what the pre-grant
+    /// screen shows, correctly: [`disclosure`] reads configuration only,
+    /// and before the grant no automatic session has run, so there is no
+    /// certificate for [`folder_disclosure`] to read. Configuration is not
+    /// evidence that a model ran; only per-session certificates are, and
+    /// they exist only after sessions have been sent.
     PatternsOnly,
 }
 
@@ -319,6 +327,7 @@ mod tests {
     fn cfg(tenant: &str, scopes: &[&str], witness: bool, pii: Option<&str>) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.invalid".to_string(),

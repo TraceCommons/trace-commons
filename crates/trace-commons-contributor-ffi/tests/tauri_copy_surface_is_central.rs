@@ -104,16 +104,35 @@ fn tauri_commands_project_shared_contributor_copy() {
     assert!(disclosure.contains("privacy_scan_copy::privacy_scan_copy"));
     assert!(disclosure.contains("onboarding_copy::onboarding_copy"));
 
-    // The automatic-contribution sentences come from the consent payload,
-    // field by field, and are never written in the client.
-    let automatic = rust_function(&native_flows, "fn automatic_contribution_copy");
-    assert!(automatic.contains("consent_copy::consent_copy"));
-    for field in ["auto_scrub_scope", "auto_scrub_limit", "auto_no_review"] {
+    // The automatic-contribution sentences come from the contributor core,
+    // and so does the choice between the model-scrub and patterns-only
+    // wording (R1): Tauri asks `automatic_gate::disclosure` and passes the
+    // answer to `consent_copy::automatic_grant_copy`. It never reads the
+    // `auto_scrub_*` fields itself, which would put the model-scrub wording
+    // on a route where no model ran.
+    let automatic = rust_function(&native_flows, "fn automatic_contribution_value");
+    assert!(automatic.contains("automatic_gate::disclosure"));
+    assert!(automatic.contains("consent_copy::automatic_grant_copy"));
+    for field in ["auto_scrub_scope", "auto_scrub_limit", "AUTO_SCRUB_SCOPE"] {
         assert!(
-            automatic.contains(&format!("copy.{field}")),
-            "Tauri must take `{field}` from the shared consent payload"
+            !automatic.contains(field),
+            "Tauri must not pick the scrub wording itself (`{field}`)"
         );
     }
+    let wrapper = rust_function(&native_flows, "fn automatic_contribution_copy");
+    assert!(wrapper.contains("automatic_contribution_value"));
+
+    // The Flow 1 grant is reached through named commands, and the grant
+    // itself refuses before the daemon is asked without a confirmation and
+    // scopes chosen in the picker -- not merely saved, since enrollment
+    // saves the floor scope. It passes the daemon the witness the
+    // disclosure screen showed, which the daemon checks.
+    let consent = read(&root, "tauri-desktop/src-tauri/src/commands/consent.rs");
+    let grant = rust_function(&consent, "fn grant_automatic");
+    assert!(grant.contains("grant_precondition(confirmed"));
+    assert!(grant.contains("witness_signing_address"));
+    let precondition = rust_function(&consent, "fn grant_precondition");
+    assert!(precondition.contains("consent_scopes_chosen"));
 
     let witness = rust_function(&native_flows, "fn witness_review_copy");
     assert!(witness.contains("witness_copy::witness_copy"));
@@ -469,6 +488,114 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "the roots step must use `{rendered_copy}`"
         );
     }
+
+    // The Flow 1 grant screens (K10, K11) render the core's words, reach the
+    // grant only through `requestGrant`, and never choose the scrub wording.
+    for (name, handler_path) in [
+        (
+            "automatic_contribution_copy",
+            "native_flows::automatic_contribution_copy",
+        ),
+        ("automatic_grant", "consent::automatic_grant"),
+        ("grant_automatic", "consent::grant_automatic"),
+        (
+            "withdraw_automatic_grant",
+            "consent::withdraw_automatic_grant",
+        ),
+    ] {
+        assert!(
+            build.contains(&format!("\"{name}\"")),
+            "{name} is missing from Tauri's generated command allowlist"
+        );
+        assert!(
+            handler.contains(handler_path),
+            "{name} is missing from Tauri's invoke handler"
+        );
+    }
+    assert!(api.contains("invokeTauri(\"automatic_contribution_copy\""));
+    let grant_copy = read(
+        &root,
+        "tauri-desktop/frontend/src/lib/tauri/automatic-grant-copy.ts",
+    );
+    assert!(grant_copy.contains("Patterns-only grant copy carried model-scrub wording"));
+    let onboarding_dir = "tauri-desktop/frontend/src/features/onboarding";
+    let scrub_step = read(
+        &root,
+        &format!("{onboarding_dir}/components/onboarding-scrub-disclosure-step.tsx"),
+    );
+    assert!(scrub_step.contains("useAutomaticGrantCopy"));
+    assert!(scrub_step.contains("scrubDisclosureLines(copy)"));
+    assert!(scrub_step.contains("disabled={busy || !copy}"));
+    for forbidden in ["model_scrubbed", "patterns_only", "auto_scrub"] {
+        assert!(
+            !scrub_step.contains(forbidden),
+            "the scrub disclosure must not choose its wording (`{forbidden}`)"
+        );
+    }
+    let witness_step = read(
+        &root,
+        &format!("{onboarding_dir}/components/onboarding-witness-disclosure-step.tsx"),
+    );
+    for rendered_copy in [
+        "useWitness",
+        "status.state_line",
+        "copy.raw_send",
+        "copy.witness_origin",
+        "status?.state === \"pinned\"",
+        "disabled={busy || !ready}",
+    ] {
+        assert!(
+            witness_step.contains(rendered_copy),
+            "the witness disclosure must use `{rendered_copy}`"
+        );
+    }
+    let consent_step = read(
+        &root,
+        &format!("{onboarding_dir}/components/onboarding-consent-step.tsx"),
+    );
+    assert!(consent_step.contains("useState<string[]>(initialScopeSelection)"));
+    assert!(consent_step.contains("copy.scope_required"));
+    // Continue saves only a complete choice; a try without one marks the
+    // missing scope and saves nothing.
+    assert!(consent_step.contains("if (choice.canContinue && copy && privacyKnown)"));
+    assert!(consent_step.contains("aria-describedby"));
+    let grant_step = read(
+        &root,
+        &format!("{onboarding_dir}/components/onboarding-grant-step.tsx"),
+    );
+    assert!(grant_step.contains("copy.no_review"));
+    assert!(grant_step.contains("disabled={busy || !copy || blocked}"));
+    assert!(!grant_step.contains("bg-primary"));
+    let skip = grant_step
+        .find("onboarding.skipGrant")
+        .expect("the grant can be declined");
+    let give = grant_step
+        .find("onboarding.grant()")
+        .expect("the grant is offered");
+    assert!(
+        skip < give,
+        "declining the grant must come before giving it"
+    );
+    assert!(
+        witness_step.contains("acknowledgeWitnessDisclosure(")
+            && witness_step.contains("status?.signing_address ?? null"),
+        "the witness screen records the witness it showed"
+    );
+    let hook = read(&root, &format!("{onboarding_dir}/hooks/use-onboarding.ts"));
+    assert!(hook.contains("requestGrant(current, grantAutomatic)"));
+    // A withdraw is confirmed by re-reading the grant, here and in Settings.
+    assert!(hook.contains("withdrawAndConfirm(withdrawAutomaticGrant, getAutomaticGrant)"));
+    let settings_grant = read(
+        &root,
+        "tauri-desktop/frontend/src/features/settings/hooks/use-automatic-grant.ts",
+    );
+    assert!(settings_grant.contains("withdrawAndConfirm(withdrawAutomaticGrant"));
+    assert!(settings_grant.contains("getAutomaticGrant"));
+    let grant_calls = hook.matches("grantAutomatic").count();
+    assert_eq!(
+        grant_calls, 2,
+        "grantAutomatic is imported once and called only through requestGrant"
+    );
 
     let private_inference = read(
         &root,

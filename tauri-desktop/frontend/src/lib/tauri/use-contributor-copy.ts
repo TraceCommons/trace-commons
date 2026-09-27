@@ -1,6 +1,7 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   getArmingOfferCopy,
+  getAutomaticGrantCopy,
   getContributorDisclosureCopy,
   getEligibilityCopy,
   getEligibilityGroupCopy,
@@ -18,6 +19,8 @@ const copyKeys = {
   armingOffer: (projectLabel: string, count: number) =>
     ["contributor-copy", "arming-offer", projectLabel, count] as const,
   disclosure: ["contributor-copy", "disclosure"] as const,
+  automaticGrant: (account: string) =>
+    ["account", account, "contributor-copy", "automatic-grant"] as const,
   witnessReview: ["contributor-copy", "witness-review"] as const,
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
@@ -46,6 +49,20 @@ export function useContributorDisclosureCopy() {
     queryKey: copyKeys.disclosure,
     queryFn: getContributorDisclosureCopy,
     staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The Flow 1 grant screens' words. Which scrub wording they carry depends on
+ * this account's configuration, so they are keyed by account and re-read
+ * whenever the grant screens open rather than cached for the session.
+ */
+export function useAutomaticGrantCopy(account: string, enabled: boolean) {
+  return useQuery({
+    queryKey: copyKeys.automaticGrant(account),
+    queryFn: getAutomaticGrantCopy,
+    enabled,
+    staleTime: 0,
   });
 }
 

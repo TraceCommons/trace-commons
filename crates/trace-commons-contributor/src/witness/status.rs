@@ -453,6 +453,7 @@ mod tests {
     fn cfg_with(witness: Option<WitnessSettings>) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),

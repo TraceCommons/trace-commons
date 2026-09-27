@@ -78,6 +78,7 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // receipt fetch would disclose an exchange to the provider for a
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
     }
 }
@@ -192,6 +193,7 @@ pub(crate) async fn enroll_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -2173,6 +2175,7 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2318,6 +2321,7 @@ mod tests {
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2838,6 +2842,7 @@ async fn enroll_with_invite_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };

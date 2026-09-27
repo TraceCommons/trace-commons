@@ -149,3 +149,52 @@ export async function getScrubberPatternNames(): Promise<string[]> {
     throw new Error("Invalid scrubber names");
   return response.names as string[];
 }
+
+export type AutomaticGrant = {
+  granted: boolean;
+  granted_at: string | null;
+  on_disk_recorded: boolean;
+};
+
+function parseAutomaticGrant(value: unknown): AutomaticGrant {
+  const response = record(value, "automatic grant response");
+  const granted = boolean(response, "granted");
+  if (!granted) {
+    return { granted: false, granted_at: null, on_disk_recorded: false };
+  }
+  return {
+    granted: true,
+    granted_at: nullableString(response, "granted_at"),
+    on_disk_recorded: boolean(response, "on_disk_recorded"),
+  };
+}
+
+export async function getAutomaticGrant(): Promise<AutomaticGrant> {
+  return parseAutomaticGrant(await invokeTauri("automatic_grant"));
+}
+
+/**
+ * The Flow 1 grant. Reached only through `requestGrant` in `flow1.ts`, which
+ * refuses until every step before it is done; Rust refuses again without
+ * the confirmation, an enrollment, or scopes chosen in the picker, and the
+ * daemon refuses when the configured witness is not `witnessSigningAddress`,
+ * the one the witness screen showed (`null` for none).
+ */
+export async function grantAutomatic(
+  witnessSigningAddress: string | null,
+): Promise<AutomaticGrant> {
+  return parseAutomaticGrant(
+    await invokeTauri("grant_automatic", {
+      confirmed: true,
+      witnessSigningAddress,
+    }),
+  );
+}
+
+export async function withdrawAutomaticGrant(): Promise<boolean> {
+  const response = record(
+    await invokeTauri("withdraw_automatic_grant"),
+    "automatic grant withdrawal response",
+  );
+  return boolean(response, "withdrawn");
+}

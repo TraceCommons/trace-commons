@@ -280,6 +280,7 @@ async fn daemon_status_reports_the_running_daemons_real_health() {
 fn test_config(device_key_id: String) -> trace_commons_contributor::config::ContributorConfig {
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),

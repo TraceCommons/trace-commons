@@ -1,8 +1,9 @@
 use tauri::State;
+use trace_commons_contributor::config::{ConfigStore, ContributorConfig};
 
 use crate::{
     ipc::{call_daemon, optional_shared_state, shared_state},
-    state::AppState,
+    state::{AppState, state_directory},
 };
 
 #[tauri::command]
@@ -96,9 +97,140 @@ pub(crate) async fn acknowledge_grant_voids(
     .await
 }
 
+/// What the Tauri shell can check before asking for the Flow 1 grant.
+///
+/// A first line only: the daemon's `grant_automatic` refuses on its own
+/// without a recorded scope choice (`automatic-grant-scopes-not-chosen`) or
+/// when the witness is not the one shown. The shell refuses before asking
+/// when the contributor has not confirmed the grant screens, is not
+/// enrolled, or never chose scopes through the picker. A saved scope list is
+/// not a choice: `validate_scopes` always adds the floor scope, so an invite
+/// enrollee holds one before the picker runs. The labels are fixed and
+/// carry no content.
+fn grant_precondition(
+    confirmed: bool,
+    config: Option<&ContributorConfig>,
+) -> Result<(), &'static str> {
+    if !confirmed {
+        return Err("automatic-grant-confirmation-required");
+    }
+    let Some(config) = config else {
+        return Err("automatic-grant-not-enrolled");
+    };
+    if !config.consent_scopes_chosen || config.consent_scopes.is_empty() {
+        return Err("automatic-grant-scope-required");
+    }
+    Ok(())
+}
+
+pub(crate) fn load_config(
+    state: &State<'_, AppState>,
+) -> Result<Option<ContributorConfig>, String> {
+    let store = ConfigStore::open(state_directory(state)?)
+        .map_err(|_| "contributor-config-unreadable".to_owned())?;
+    store
+        .load_config()
+        .map_err(|_| "contributor-config-unreadable".to_owned())
+}
+
+/// Whether the Flow 1 grant is in force, as the daemon reports it.
+#[tauri::command]
+pub(crate) async fn automatic_grant(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "automatic_grant",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+/// Give the Flow 1 grant: arm projects discovered from now on, never what is
+/// on disk. `confirmed` is the grant screen's button, pressed after the
+/// scope, path and disclosure steps. `witness_signing_address` is the
+/// witness the disclosure screen showed, `None` for none; the daemon refuses
+/// the grant when the witness configured now is a different one.
+#[tauri::command]
+pub(crate) async fn grant_automatic(
+    state: State<'_, AppState>,
+    confirmed: bool,
+    witness_signing_address: Option<String>,
+) -> Result<serde_json::Value, String> {
+    grant_precondition(confirmed, load_config(&state)?.as_ref()).map_err(str::to_owned)?;
+    call_daemon(
+        shared_state(&state)?,
+        "grant_automatic",
+        serde_json::json!({ "witness_signing_address": witness_signing_address }),
+    )
+    .await
+}
+
+/// Withdraw the Flow 1 grant. Projects it armed keep their own modes.
+#[tauri::command]
+pub(crate) async fn withdraw_automatic_grant(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "withdraw_automatic_grant",
+        serde_json::json!({}),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{grant_void_notice, scrubber_pattern_names};
+    use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
+
+    fn config(
+        scopes: &[&str],
+        chosen: bool,
+    ) -> trace_commons_contributor::config::ContributorConfig {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.invalid",
+            "ingest_url": "https://ingest.invalid",
+            "audience": "aud",
+            "tenant_id": "tenant-1",
+            "instance_id": "instance-1",
+            "user_subject": "alice",
+            "device_key_id": "sha256:aa",
+            "consent_scopes": scopes,
+            "consent_scopes_chosen": chosen,
+        }))
+        .expect("a contributor config")
+    }
+
+    /// What an invite enrollment saves: the floor scope `validate_scopes`
+    /// adds, with nobody having picked it.
+    fn invite_enrolled() -> trace_commons_contributor::config::ContributorConfig {
+        let floor =
+            trace_commons_contributor::consent::validate_scopes(&[]).expect("the floor scope");
+        let floor: Vec<&str> = floor.iter().map(String::as_str).collect();
+        config(&floor, false)
+    }
+
+    #[test]
+    fn the_grant_needs_confirmation_enrollment_and_a_chosen_scope() {
+        let chosen = config(&["debugging_evaluation"], true);
+        assert_eq!(
+            grant_precondition(false, Some(&chosen)),
+            Err("automatic-grant-confirmation-required")
+        );
+        assert_eq!(
+            grant_precondition(true, None),
+            Err("automatic-grant-not-enrolled")
+        );
+        // An invite enrollee holds a saved scope before the picker runs.
+        let enrolled = invite_enrolled();
+        assert!(!enrolled.consent_scopes.is_empty());
+        assert_eq!(
+            grant_precondition(true, Some(&enrolled)),
+            Err("automatic-grant-scope-required")
+        );
+        assert_eq!(grant_precondition(true, Some(&chosen)), Ok(()));
+    }
 
     #[test]
     fn a_void_notice_is_the_contributor_cores_copy() {

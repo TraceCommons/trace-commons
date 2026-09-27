@@ -239,7 +239,19 @@ pub const REDACTION_RULESET_VERSION: &str = "2";
 /// `every_config_field_is_a_deliberate_fingerprint_decision` pins the whole
 /// field set, so the addition fails that test until someone says which side
 /// of this line the new field falls on.
-const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "public_since"];
+///
+/// `consent_scopes_chosen` is on this list too. It records only that the
+/// contributor picked `consent_scopes` through the picker, for the Flow 1
+/// grant (R7); the scopes themselves are fingerprinted, so a choice that
+/// changes them still moves the fingerprint. Confirming the scopes already
+/// saved changes no byte of any envelope, and re-asking the approved backlog
+/// for it would be a prompt with no consent content.
+const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &[
+    "consent_scopes_chosen",
+    "display_handle",
+    "public_bio",
+    "public_since",
+];
 
 /// The contributor config reduced to its envelope-determining fields, as
 /// canonical bytes for [`input_fingerprint`].
@@ -1267,6 +1279,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -2270,6 +2283,8 @@ mod tests {
                 "allowed_hosts",
                 "audience",
                 "consent_scopes",
+                // Not fingerprinted: see NON_ENVELOPE_CONFIG_FIELDS.
+                "consent_scopes_chosen",
                 "device_key_id",
                 "display_handle",
                 // Fingerprinted, deliberately, for the same reason as

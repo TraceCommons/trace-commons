@@ -204,6 +204,7 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
     store
         .save_config(&trace_commons_contributor::config::ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
                 .into(),
@@ -477,6 +478,7 @@ async fn preview_reports_the_redacted_envelope_not_the_raw_file() {
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -679,6 +681,7 @@ fn write_config(store_dir: &std::path::Path, display_handle: Option<&str>) {
     let store = ConfigStore::open(store_dir.to_path_buf()).unwrap();
     let mut cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -866,6 +869,7 @@ async fn daemon_with_a_multi_event_entry() -> (tempfile::TempDir, std::path::Pat
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -967,6 +971,7 @@ async fn daemon_with_a_redactable_entry() -> (tempfile::TempDir, std::path::Path
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -1438,6 +1443,7 @@ async fn enrolled_daemon_with_sessions_in_two_projects() -> (EnrolledDaemon, Con
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -1705,6 +1711,7 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
     let device = DeviceIdentity::load_or_generate(&store).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),

@@ -147,6 +147,20 @@ pub struct ContributorConfig {
     /// The witness's own `required` mode is where a refusal belongs.
     #[serde(default)]
     pub inference_receipt_check_attestation: bool,
+    /// The contributor chose `consent_scopes` themselves, through
+    /// `set_consent_scopes`, rather than holding what enrollment saved.
+    ///
+    /// R7 of the connect-and-forget design: the Flow 1 grant is refused
+    /// without it (`grant_automatic`, `automatic-grant-scopes-not-chosen`).
+    /// A scope list alone cannot say this, because `validate_scopes` always
+    /// adds the floor scope and an invite enrollment saves it with nobody
+    /// having picked it. Every enrollment path writes `false`; only
+    /// `set_consent_scopes` writes `true`, and a new enrollment starts over.
+    ///
+    /// `#[serde(default)]` is required: a config written before this field
+    /// existed has no such key, and reads as not chosen.
+    #[serde(default)]
+    pub consent_scopes_chosen: bool,
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -1248,6 +1262,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
@@ -1293,6 +1308,15 @@ mod tests {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":[]}"#;
         let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
         assert!(!cfg.inference_receipt_check_attestation);
+    }
+
+    /// R7: a config written before the scope choice was recorded holds no
+    /// choice, so the Flow 1 grant stays refused until the picker runs.
+    #[test]
+    fn a_config_that_predates_the_scope_choice_record_holds_no_choice() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.consent_scopes_chosen);
     }
 
     #[test]

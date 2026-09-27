@@ -439,6 +439,143 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
     }
 }
 
+// ---------------------------------------------------------------------------
+// The Flow 1 grant screens (K10, K11)
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section except the `AUTO_SCRUB_*` and
+// `AUTO_NO_REVIEW` sentences above is DRAFT, NEEDS APPROVAL: written for the
+// Tauri onboarding so that no shell writes its own, and not yet agreed in
+// review. Each says so in its own doc comment. Only the Tauri client renders
+// them; macOS, Windows and GTK do not take this payload yet.
+
+/// What the fixed patterns remove, for an armed folder where no certified
+/// full pipeline ran -- the spec's "deterministic-only arming disclosure".
+///
+/// **DRAFT, NEEDS APPROVAL.** The spec's Open list says this wording is not
+/// yet written. The first two sentences are [`AUTO_SCRUB_SCOPE`]'s, word for
+/// word, so `the_scrub_sentences_match_what_the_redactor_does` holds them to
+/// the redactor too. The last replaces the model clause: it does not say no
+/// model runs (a configured filter or witness may run one), only that nothing
+/// confirms one did, which is what `automatic_gate::disclosure` answering
+/// `PatternsOnly` means. "Trust relaxes what may be sent, never what may be
+/// said."
+pub const AUTO_PATTERNS_ONLY_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Nothing confirms that a model checked these sessions, so treat names, people, addresses, account numbers and a password typed into a sentence as sent.";
+
+/// The limit of the patterns, for the same route as
+/// [`AUTO_PATTERNS_ONLY_SCOPE`].
+///
+/// **DRAFT, NEEDS APPROVAL.** [`AUTO_SCRUB_LIMIT`] without its model
+/// sentence, since on this route no model's result is relied on.
+pub const AUTO_PATTERNS_ONLY_LIMIT: &str = "The patterns are reliable for the formats they cover. Beyond those, in text they catch only a long, random-looking value right after a word like \"password\" or \"token\", and are blind to everything else. Nothing here checks whether they were right.";
+
+/// The raw send, and both enclaves: the spec's first "further sentence".
+/// Shown only where a pinned witness is configured, since only then does a
+/// session leave unredacted.
+///
+/// **DRAFT, NEEDS APPROVAL.** States the spec's answer rather than its
+/// question: the witness does not verify NEAR AI's attestation on each
+/// classifier call, which puts the classifier's operator inside the
+/// transcript's trust boundary, and the classifier receives the
+/// deterministic-pass output rather than the unredacted session.
+pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted to your witness, which redacts it inside an enclave. The witness can pass the text its fixed patterns leave to NEAR AI's privacy filter, which runs in a second enclave with a second operator, NEAR AI. The witness does not check that second enclave's attestation on each call, so NEAR AI's operator is trusted with that text.";
+
+/// Where the witness came from: the spec's second "further sentence".
+///
+/// **DRAFT, NEEDS APPROVAL.** Worded for what the client can know, which is
+/// less than the spec asks for. A NEAR AI or wallet join writes the witness
+/// the commons publishes, without asking; Settings can write one too; and
+/// the config records neither, so this cannot say which happened. When the
+/// daemon records the origin, this becomes two sentences and a branch.
+pub const AUTO_WITNESS_ORIGIN: &str = "This witness was set up either by the commons you joined, which published its address and keys and had them saved when you joined without asking you, or by someone entering it in Settings. This app keeps no record of which.";
+
+/// Why the scope picker blocks the grant (R7), and what declining means.
+///
+/// **DRAFT, NEEDS APPROVAL.** R7: the picker has no default, and a
+/// contributor who does not choose gets no grant and lands on Flow 2.
+pub const AUTO_SCOPE_REQUIRED: &str = "Automatic contributing needs your choice of how your traces may be used. Nothing is selected for you. If you don't choose, nothing is contributed automatically and each session waits for you.";
+
+/// The automatic path, as the path question offers it.
+///
+/// **DRAFT, NEEDS APPROVAL.** Worded to `grant_automatic`'s K3 and K4: it
+/// arms projects discovered after the grant, and a project with any session
+/// on disk at the grant keeps asking, for its new sessions too. "Have
+/// sessions", not "already on this computer": the daemon exempts only
+/// projects with sessions on disk (`AutomaticGrant::projects_on_disk` in
+/// `daemon::policy`), so a folder that exists but holds no session yet is
+/// armed when its first one lands.
+pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
+
+/// The ask-first path, as the path question offers it.
+///
+/// **DRAFT, NEEDS APPROVAL.** "Contributed", not "sent": reviewing with a
+/// witness or the privacy scan sends a session somewhere before approval.
+pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
+
+/// What the fixed patterns remove and where they stop, for one disclosure.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ScrubCopy {
+    pub scope: &'static str,
+    pub limit: &'static str,
+}
+
+/// Everything the Flow 1 grant screens say, for one disclosure.
+///
+/// THE BRANCH CROSSES, as with [`gate_help`]: exactly one of
+/// `patterns_only` and `model_scrubbed` is present, the one `disclosure`
+/// names, so a shell never holds the model-scrub wording on a route that did
+/// not earn it and has no second copy of the choice to get wrong.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AutomaticGrantCopy {
+    /// `patterns_only` or `model_scrubbed`.
+    pub disclosure: &'static str,
+    pub patterns_only: Option<ScrubCopy>,
+    pub model_scrubbed: Option<ScrubCopy>,
+    pub no_review: &'static str,
+    pub scope_required: &'static str,
+    pub path_automatic: &'static str,
+    pub path_ask_first: &'static str,
+    pub raw_send: &'static str,
+    pub witness_origin: &'static str,
+}
+
+/// The grant screens' words for what `automatic_gate::disclosure` answered.
+#[must_use]
+pub fn automatic_grant_copy(
+    disclosure: crate::daemon::automatic_gate::Disclosure,
+) -> AutomaticGrantCopy {
+    use crate::daemon::automatic_gate::Disclosure;
+    let (label, patterns_only, model_scrubbed) = match disclosure {
+        Disclosure::PatternsOnly => (
+            "patterns_only",
+            Some(ScrubCopy {
+                scope: AUTO_PATTERNS_ONLY_SCOPE,
+                limit: AUTO_PATTERNS_ONLY_LIMIT,
+            }),
+            None,
+        ),
+        Disclosure::ModelScrubbed => (
+            "model_scrubbed",
+            None,
+            Some(ScrubCopy {
+                scope: AUTO_SCRUB_SCOPE,
+                limit: AUTO_SCRUB_LIMIT,
+            }),
+        ),
+    };
+    AutomaticGrantCopy {
+        disclosure: label,
+        patterns_only,
+        model_scrubbed,
+        no_review: AUTO_NO_REVIEW,
+        scope_required: AUTO_SCOPE_REQUIRED,
+        path_automatic: AUTO_PATH_AUTOMATIC,
+        path_ask_first: AUTO_PATH_ASK_FIRST,
+        raw_send: AUTO_RAW_SEND_BOTH_ENCLAVES,
+        witness_origin: AUTO_WITNESS_ORIGIN,
+    }
+}
+
 /// The title of the notice a shell shows while approved sessions wait on a
 /// busy witness (`status.witness_capacity`, health label
 /// `witness-saturated`).
@@ -499,6 +636,81 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Trust relaxes what may be sent, never what may be said": the
+    /// patterns-only payload carries neither model-scrub sentence anywhere,
+    /// and claims no model removed anything.
+    #[test]
+    fn the_patterns_only_grant_copy_never_carries_the_model_scrub_wording() {
+        use crate::daemon::automatic_gate::Disclosure;
+        let copy = automatic_grant_copy(Disclosure::PatternsOnly);
+        assert_eq!(copy.disclosure, "patterns_only");
+        assert!(copy.model_scrubbed.is_none());
+        let wire = serde_json::to_string(&copy).expect("serialises");
+        let escaped = |s: &str| serde_json::to_string(s).expect("serialises");
+        for sentence in [AUTO_SCRUB_SCOPE, AUTO_SCRUB_LIMIT] {
+            let inner = escaped(sentence);
+            assert!(!wire.contains(inner.trim_matches('"')));
+        }
+        assert!(!wire.contains("when a model recognises it"));
+        assert!(!wire.contains("The model is not reliable"));
+        // The pattern half is the agreed sentence's, so the redactor test
+        // holds it.
+        let pattern_half = AUTO_SCRUB_SCOPE
+            .split(" Everything else")
+            .next()
+            .expect("the agreed scope sentence");
+        assert!(AUTO_PATTERNS_ONLY_SCOPE.starts_with(pattern_half));
+    }
+
+    /// The model-scrub route gets the agreed sentences and nothing of the
+    /// patterns-only route.
+    #[test]
+    fn the_model_scrubbed_grant_copy_is_the_agreed_wording() {
+        use crate::daemon::automatic_gate::Disclosure;
+        let copy = automatic_grant_copy(Disclosure::ModelScrubbed);
+        assert_eq!(copy.disclosure, "model_scrubbed");
+        assert!(copy.patterns_only.is_none());
+        assert_eq!(
+            copy.model_scrubbed,
+            Some(ScrubCopy {
+                scope: AUTO_SCRUB_SCOPE,
+                limit: AUTO_SCRUB_LIMIT,
+            })
+        );
+        assert_eq!(copy.no_review, AUTO_NO_REVIEW);
+    }
+
+    /// Every grant-screen sentence is non-empty, and the draft sentences do
+    /// not soften the no-review sentence or promise a model pass.
+    #[test]
+    fn the_draft_grant_sentences_do_not_overclaim() {
+        for sentence in [
+            AUTO_PATTERNS_ONLY_SCOPE,
+            AUTO_PATTERNS_ONLY_LIMIT,
+            AUTO_RAW_SEND_BOTH_ENCLAVES,
+            AUTO_WITNESS_ORIGIN,
+            AUTO_SCOPE_REQUIRED,
+            AUTO_PATH_AUTOMATIC,
+            AUTO_PATH_ASK_FIRST,
+        ] {
+            assert!(!sentence.is_empty());
+            assert!(!sentence.contains("removed by a model"));
+            assert!(!sentence.contains("when a model recognises it"));
+        }
+        // Two enclaves and two operators, not one.
+        assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("unredacted"));
+        assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("second enclave"));
+        assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("second operator"));
+        // The origin sentence does not pretend to know which happened.
+        assert!(AUTO_WITNESS_ORIGIN.contains("no record of which"));
+        // No default scope, and declining is not a floor-scope grant.
+        assert!(AUTO_SCOPE_REQUIRED.contains("Nothing is selected for you"));
+        // The exemption is for projects with sessions on disk at the grant,
+        // not every folder that exists: an empty one is armed.
+        assert!(AUTO_PATH_AUTOMATIC.contains("already have sessions"));
+        assert!(!AUTO_PATH_AUTOMATIC.contains("already on this computer"));
+    }
 
     /// The statement, character for character.
     ///

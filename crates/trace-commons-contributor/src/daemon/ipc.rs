@@ -2658,13 +2658,57 @@ fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
     }
 }
 
+/// `grant_automatic` refused: the saved consent scopes were never chosen
+/// through `set_consent_scopes` (R7). An enrollment saves the floor scope
+/// with nobody having picked it, so a non-empty list is not a choice.
+pub const ERR_GRANT_SCOPES_NOT_CHOSEN: &str = "automatic-grant-scopes-not-chosen";
+/// `grant_automatic` refused: the caller did not say which witness the
+/// contributor was shown (`witness_signing_address`, a string or `null`).
+pub const ERR_GRANT_WITNESS_REQUIRED: &str = "automatic-grant-witness-required";
+/// `grant_automatic` refused: the witness configured now is not the one the
+/// contributor was shown.
+pub const ERR_GRANT_WITNESS_CHANGED: &str = "automatic-grant-witness-changed";
+
+/// Why the Flow 1 grant may not be given under `cfg`, given the witness
+/// signing address the caller says the contributor was shown. `None` when it
+/// may. The labels are fixed and carry no content.
+fn grant_automatic_refusal(
+    cfg: &crate::config::ContributorConfig,
+    params: &serde_json::Value,
+) -> Option<&'static str> {
+    // R7: a scope nobody chose never carries a standing grant.
+    if !cfg.consent_scopes_chosen {
+        return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
+    }
+    // The witness shown on the disclosure screen, or `null` for none. It
+    // must be stated: a caller that omits it has shown nothing to compare.
+    let shown = match params.get("witness_signing_address") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(address)) => Some(address.as_str()),
+        _ => return Some(ERR_GRANT_WITNESS_REQUIRED),
+    };
+    let configured = cfg.witness.as_ref().map(|w| w.signing_address.as_str());
+    if shown != configured {
+        return Some(ERR_GRANT_WITNESS_CHANGED);
+    }
+    None
+}
+
 // Give the Flow 1 grant: arm projects discovered from now on (K3), never
 // anything already on disk (K4). Refused without terms to grant under, like
-// arming one project, and recorded before it takes effect.
+// arming one project, and recorded before it takes effect. Refused, too,
+// unless the contributor chose the scopes (R7) and the witness configured
+// now is the one the disclosure screen showed.
 fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
-    let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
+    let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
     };
+    if let Some(refusal) = grant_automatic_refusal(&cfg, &req.params) {
+        return Response::err(req.id, ERR_BAD_PARAMS, refusal);
+    }
+    // From the config just checked, not a second read, so the witness
+    // compared is the witness the grant is given under.
+    let terms = super::grant_terms::GrantTerms::in_force_for(shared, &cfg);
     let now = Utc::now();
     if audit::append(
         &shared.store,
@@ -7226,6 +7270,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -10929,6 +10974,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
