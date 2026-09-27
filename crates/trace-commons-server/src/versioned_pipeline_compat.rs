@@ -11,12 +11,11 @@
 //! numbers. Score never writes the live index; Settle applies the stored
 //! command later from committed Score evidence only.
 //!
-//! The compatibility Settle policy and the bundle constructor that binds
-//! this policy to a `BundlePackage` land in a later task; this module holds
-//! only the config, the baseline-comparison helper, and
-//! [`CompatibilityScorePolicy`].
+//! The compatibility Settle policy, the bundle constructor that binds this
+//! policy to a `BundlePackage`, and the baseline-comparison helper against
+//! the current fixture land in a later task; this module holds only the
+//! config and [`CompatibilityScorePolicy`].
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -63,98 +62,12 @@ pub const COMPATIBILITY_ZERO_FLOOR_LABEL: &str = "compatibility_zero_floor";
 /// Safe label for a `novelty_utility_microcredits` delta above the trace
 /// credit ledger's bound.
 pub const COMPATIBILITY_DELTA_OUT_OF_RANGE_LABEL: &str = "compatibility_delta_out_of_range";
-pub const COMPATIBILITY_BASELINE_PATH: &str =
-    "docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json";
-pub const COMPATIBILITY_CORPUS_PATH: &str =
-    "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityQualification {
     LocalSyntheticNonQualifiable,
     ProductionCompatible,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompatibilityFixtureDecision {
-    pub admission: String,
-    pub review: String,
-    pub score: String,
-    pub settle: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompatibilityBaselineObservation {
-    pub fixture_order: Vec<String>,
-    pub initial_index: String,
-    pub gate_floors: CompatibilityGateFloors,
-    pub fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompatibilityGateFloors {
-    pub qualification: CompatibilityQualification,
-    pub perplexity_floor_micros: u64,
-    pub tail_fraction_floor_micros: u64,
-    pub novelty_floor_micros: u64,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityBaselineDocument {
-    corpus: CompatibilityBaselineCorpus,
-    configuration_identities: CompatibilityBaselineConfiguration,
-    expected_fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityBaselineCorpus {
-    initial_index: String,
-    fixture_order: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityBaselineConfiguration {
-    gate_floors: CompatibilityGateFloors,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityCorpusDocument {
-    fixtures: Vec<CompatibilityCorpusFixture>,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityCorpusFixture {
-    label: String,
-}
-
-pub fn compare_compatibility_baseline(
-    observation: &CompatibilityBaselineObservation,
-) -> anyhow::Result<()> {
-    let baseline: CompatibilityBaselineDocument = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json"
-    )))?;
-    let corpus: CompatibilityCorpusDocument = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json"
-    )))?;
-    let corpus_order = corpus
-        .fixtures
-        .into_iter()
-        .map(|fixture| fixture.label)
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        corpus_order == baseline.corpus.fixture_order,
-        "compatibility corpus order mismatch"
-    );
-    let expected = CompatibilityBaselineObservation {
-        fixture_order: baseline.corpus.fixture_order,
-        initial_index: baseline.corpus.initial_index,
-        gate_floors: baseline.configuration_identities.gate_floors,
-        fixture_classes: baseline.expected_fixture_classes,
-    };
-    anyhow::ensure!(observation == &expected, "compatibility baseline mismatch");
-    Ok(())
 }
 
 /// Default trace-credit instrument pin shared by [`CompatibilityBundleConfig::local_reference`]
@@ -536,7 +449,7 @@ fn hash_neighbors(neighbors: &[NearestNeighbor]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
