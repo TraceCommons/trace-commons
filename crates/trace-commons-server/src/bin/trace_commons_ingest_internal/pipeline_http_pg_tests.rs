@@ -1420,6 +1420,147 @@ async fn real_http_pipeline_receipt_refuses_a_different_devices_retry() {
     join_within(server, 20, "different-device-retry test server").await;
 }
 
+/// `route_pipeline_receipt` (the plain-receipt branch a fresh submission or
+/// its ordinary retry takes) must apply the same ownership check the
+/// completed-admission branch of `submit_trace_handler` already applies. For
+/// a pipeline-routed tenant, `read_submission_record` finds no legacy file
+/// record -- the pipeline never writes one -- so the legacy
+/// `can_access_submission` check never runs, and without an ownership check
+/// of its own, `submit`'s `Replayed`/`ContentConflict` outcome would reach
+/// the caller unchecked: a second principal posting the first principal's
+/// submission id would get the first principal's receipt back on identical
+/// bytes, or the generic "receipt id reused with different content" 409 on
+/// changed bytes, never the ownership refusal.
+///
+/// Exercised with two static contributor tokens on one pipeline-routed
+/// tenant (`token-a` and `token-a-2`, both already configured for
+/// `tenant-a` by the default test fixture) and no NEAR admission
+/// configured, so the plain-receipt branch is the one under test -- not the
+/// completed-admission branch `real_http_pipeline_receipt_refuses_a_different_devices_retry`
+/// already covers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = o1_pipeline_service(backend.clone(), &dir);
+
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        Some(local_artifacts(&dir)),
+        true,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.pipeline_service = Some(service);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-a"],
+    );
+
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let body = serde_json::to_vec(&envelope).expect("envelope serialises");
+
+    // Principal A (token-a) uploads and creates the run.
+    let first = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers("token-a")))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("first principal's upload over real HTTP");
+    assert_eq!(first.status(), 200, "the first upload must be accepted");
+    let first_receipt: serde_json::Value = first.json().await.expect("first receipt body");
+    assert_eq!(first_receipt["status"], "processing");
+
+    // Principal B (token-a-2, a different principal on the same tenant)
+    // posts the same submission id with the exact same bytes: this must be
+    // refused as an ownership conflict, not replayed as if B owned the run.
+    let same_bytes_from_b = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers("token-a-2")))
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("second principal's same-bytes retry over real HTTP");
+    assert_eq!(
+        same_bytes_from_b.status(),
+        409,
+        "a different principal replaying someone else's submission id must be refused"
+    );
+    let same_bytes_body: serde_json::Value = same_bytes_from_b
+        .json()
+        .await
+        .expect("same-bytes conflict body");
+    assert_eq!(
+        same_bytes_body["error"],
+        "submission id already belongs to another principal"
+    );
+
+    // Principal B, different bytes under the same submission id: still the
+    // ownership refusal, not the generic content-conflict message.
+    let mut changed = envelope.clone();
+    changed.privacy.warnings.push("changed-by-b".to_string());
+    let different_bytes_from_b = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers("token-a-2")))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&changed).expect("changed envelope serialises"))
+        .send()
+        .await
+        .expect("second principal's different-bytes retry over real HTTP");
+    assert_eq!(
+        different_bytes_from_b.status(),
+        409,
+        "a different principal posting different bytes under someone else's \
+         submission id must also be refused as an ownership conflict"
+    );
+    let different_bytes_body: serde_json::Value = different_bytes_from_b
+        .json()
+        .await
+        .expect("different-bytes conflict body");
+    assert_eq!(
+        different_bytes_body["error"],
+        "submission id already belongs to another principal"
+    );
+
+    // Principal A's own retry is unaffected: still 200 with the same
+    // receipt as the first upload.
+    let owner_retry = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers("token-a")))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("owning principal's retry over real HTTP");
+    assert_eq!(
+        owner_retry.status(),
+        200,
+        "the owner's retry must still replay"
+    );
+    let owner_retry_receipt: serde_json::Value =
+        owner_retry.json().await.expect("owner retry receipt body");
+    assert_eq!(
+        first_receipt, owner_retry_receipt,
+        "the owner's retry must return the exact same pipeline receipt"
+    );
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "ownership-on-replay test server").await;
+}
+
 /// Requirement in the completed-admission branch when the tenant is routed
 /// but no pipeline run exists yet: falls back to the legacy record read,
 /// unchanged. Models a submission that completed admission on the legacy
