@@ -22937,7 +22937,9 @@ struct TraceCreditSettlementDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     require_pending: bool,
@@ -25469,7 +25471,7 @@ async fn run_credit_settlement_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         require_pending: readiness.require_pending,
@@ -43205,7 +43207,9 @@ struct TraceRollbackDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     active_rollout_flags: Vec<String>,
@@ -43236,7 +43240,9 @@ struct TraceKeyRotationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     signed_token_auth_enabled: bool,
@@ -43407,7 +43413,9 @@ struct TraceAuditChainDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     file_verified: bool,
@@ -43441,7 +43449,9 @@ struct TracePostgresRlsDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     rls_ready: bool,
@@ -43472,7 +43482,9 @@ struct TraceRetentionDryRunDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     dry_run: bool,
@@ -43502,7 +43514,9 @@ struct TraceVectorIndexDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     dry_run: bool,
@@ -43530,7 +43544,9 @@ struct TraceAnalyticsReleaseDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     min_cell_count: usize,
@@ -43564,7 +43580,9 @@ struct TraceBenchmarkReadinessDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     require_artifacts: bool,
@@ -43605,7 +43623,9 @@ struct TraceRankingModelReadinessDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     require_active_model: bool,
@@ -43642,7 +43662,9 @@ struct TraceRevocationPropagationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     dry_run: bool,
@@ -43662,7 +43684,9 @@ struct TraceRevocationEffectsDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     submission_ref_hash: String,
@@ -43690,7 +43714,9 @@ struct TraceCanaryReadDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     submission_ref_hash: String,
@@ -43713,7 +43739,9 @@ struct TraceObjectPrimaryReadDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     submission_ref_hash: String,
@@ -43740,7 +43768,9 @@ struct TraceObjectStoreMigrationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     migration_manifest_hash: String,
     evidence_hash: String,
@@ -43856,7 +43886,7 @@ async fn run_canary_read_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         submission_ref_hash,
@@ -44013,7 +44043,7 @@ async fn run_object_primary_read_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         submission_ref_hash,
@@ -44204,7 +44234,7 @@ async fn run_object_store_migration_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_ref,
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         migration_manifest_hash: String::new(),
         evidence_hash: String::new(),
@@ -44290,7 +44320,7 @@ async fn run_revocation_propagation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: worker.purpose,
+        purpose_hash: sha256_prefixed(&worker.purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         dry_run: worker.dry_run,
@@ -44536,7 +44566,7 @@ async fn run_revocation_effects_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         submission_ref_hash,
@@ -44634,7 +44664,7 @@ async fn run_retention_dry_run_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: maintenance.purpose,
+        purpose_hash: sha256_prefixed(&maintenance.purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         dry_run: maintenance.dry_run,
@@ -44732,7 +44762,7 @@ async fn run_vector_index_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: worker.purpose,
+        purpose_hash: sha256_prefixed(&worker.purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash: String::new(),
         dry_run: worker.dry_run,
@@ -44859,7 +44889,7 @@ async fn run_analytics_release_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         min_cell_count: state.analytics_min_cell_count,
@@ -44939,7 +44969,7 @@ async fn run_benchmark_readiness_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         require_artifacts: request.require_artifacts,
@@ -45086,7 +45116,7 @@ async fn run_ranking_model_readiness_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         require_active_model: request.require_active_model,
@@ -45186,7 +45216,7 @@ async fn run_postgres_rls_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: production_ready_with_expected_runtime_role && blocking_gaps.is_empty(),
         evidence_hash,
         rls_ready: diagnostics.rls_ready(),
@@ -45246,7 +45276,9 @@ struct TraceDbReconciliationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     file_submission_count: usize,
@@ -45324,7 +45356,7 @@ async fn run_db_reconciliation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: report.blocking_gaps.is_empty(),
         evidence_hash,
         file_submission_count: report.file_submission_count,
@@ -45486,7 +45518,7 @@ async fn run_audit_chain_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         file_verified: report.verified,
@@ -45678,7 +45710,7 @@ async fn run_key_rotation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         signed_token_auth_enabled,
@@ -45845,7 +45877,7 @@ async fn run_rollback_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         active_rollout_flags,
@@ -47004,7 +47036,7 @@ fn object_store_migration_manifest_hash(
         "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
         "actor_principal_ref": tenant.principal_ref,
         "generated_at": response.generated_at,
-        "purpose_hash": sha256_prefixed(&response.purpose),
+        "purpose_hash": response.purpose_hash,
         "object_store_configured": response.object_store_configured,
         "object_store_name": response.object_store_name,
         "object_store_eligible": response.object_store_eligible,
@@ -75557,7 +75589,9 @@ struct TraceNearAttestationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     /// Named so an operator reading a refusal knows what to set.
@@ -75671,7 +75705,7 @@ async fn run_near_attestation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready,
         evidence_hash,
         expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,
@@ -75768,7 +75802,9 @@ struct TraceNearAttestationKeyDriftDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     /// Whether **this run** passed every step. Says nothing about drift.
     ready: bool,
     evidence_hash: String,
@@ -75958,7 +75994,7 @@ async fn run_near_attestation_key_drift_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready,
         evidence_hash,
         expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,

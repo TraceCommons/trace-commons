@@ -72,6 +72,27 @@ cargo test -p trace-commons-server --test trace_corpus_storage_contract
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
 ```
 
+The `trace-commons-ingest` bin's PostgreSQL tests self-skip without
+`TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the `postgres-suites` job runs only
+named slices of them. To run the whole bin locally, use a fresh
+`admission_test_*` database on the literal host `127.0.0.1`, set the
+login-resolver URL (a LOGIN role that is a member of `trace_login_resolver`,
+see `docs/operator/login-resolver-role.md`), and run single-threaded, because
+the tests share the `tenant-a` fixture tenant:
+
+```bash
+createdb -h 127.0.0.1 admission_test_ingest_local
+TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://$USER@127.0.0.1:5432/admission_test_ingest_local \
+TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL=postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_local \
+cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+```
+
+Without the resolver URL, about 74 account, passkey and login tests fail with
+`redeem succeeds: left 400 right 303`. CI runs the same thing in the
+`ingest-bin-postgres` job (`trace-commons-ingest tests, whole bin, against
+PostgreSQL (advisory)`), which is not a required check yet: it becomes one
+once it is green on `main`.
+
 CI applies `RUSTFLAGS=-D warnings` to check + test, so plain `cargo check`
 will not catch what CI catches. Always use the `RUSTFLAGS` form locally
 before claiming green. Clippy is CI-enforced — run it locally too.
@@ -111,7 +132,7 @@ churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
 reason: a cancelled job saves no cache, and merges to `main` land close
 together.
 
-Running is not the same as blocking. **Ten** of the sixteen are required
+Running is not the same as blocking. **Ten** of the seventeen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never
