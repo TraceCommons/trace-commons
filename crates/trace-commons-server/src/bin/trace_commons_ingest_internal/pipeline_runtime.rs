@@ -5,17 +5,21 @@ use super::*;
 
 /// What a proprietary production pipeline assembly needs from ingest: the
 /// PostgreSQL backend the pipeline's own tables live on, the artifact store
-/// envelopes and pipeline artifacts are written to, and that store's name.
-/// All three come from the connections and configuration
+/// envelopes and pipeline artifacts are written to, that store's name, and
+/// the per-phase claim lease (decision D4). All four come from the
+/// connections and configuration
 /// `AppState::from_env_with_pipeline_runtime_assembler` already holds.
 /// An assembly passes `object_store_name` to
-/// `PipelineServiceBuilder::with_object_store_name`, so the pipeline's object
-/// refs carry the configured store's label as the legacy receipt's do;
-/// `assemble_ingest_pipeline_runtime` refuses a service that does not.
+/// `PipelineServiceBuilder::with_object_store_name` and `lease_config` to
+/// `PipelineServiceBuilder::with_lease_config`, so the assembled service
+/// carries the configured store's label and lease lengths, the same way M11
+/// pins the store name; `assemble_ingest_pipeline_runtime` refuses a service
+/// that does not.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
     pub object_store_name: String,
+    pub lease_config: PipelineLeaseConfig,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -43,6 +47,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     db_connections: Option<&TraceCorpusDbConnections>,
     artifact_store: Option<&ConfiguredTraceArtifactStore>,
     production_required: bool,
+    lease_config: PipelineLeaseConfig,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     let Some(assembler) = assembler else {
         anyhow::ensure!(
@@ -61,12 +66,20 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         backend,
         artifact_store: configured_store.store.clone(),
         object_store_name: object_store_name.clone(),
+        lease_config,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
     anyhow::ensure!(
         service.object_store_name() == object_store_name,
         "pipeline_runtime_object_store_mismatch"
+    );
+    // D4: the same shape as M11's store-name check -- an assembly that
+    // ignores the configured lease lengths would silently run every phase
+    // under whatever lease lengths its own construction happened to pick.
+    anyhow::ensure!(
+        service.lease_config() == lease_config,
+        "pipeline_runtime_lease_config_mismatch"
     );
     if production_required {
         anyhow::ensure!(

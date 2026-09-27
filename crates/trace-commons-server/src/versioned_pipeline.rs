@@ -78,13 +78,109 @@ pub const PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL: &str = "bundle_store_unavaila
 /// refuses a service that still carries it (M11).
 pub const PIPELINE_DEFAULT_OBJECT_STORE_NAME: &str = "pipeline_local_encrypted";
 pub const INJECTED_PIPELINE_CRASH: &str = "injected_pipeline_crash";
-const DEFAULT_LEASE_SECONDS: i64 = 30;
 const DEFAULT_RETRY_MILLISECONDS: i64 = 50;
 /// Label for an adapter call error or a charged settlement blocker; the leg
 /// waits and the run retries (`complete_settle_phase`).
 const PIPELINE_SETTLEMENT_RETRY_LABEL: &str = "settlement_operation_retry";
 /// Label for a settlement adapter the service does not hold.
 const PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL: &str = "settlement_adapter_missing";
+/// D4: an attempt whose own phase lease has already gone stale, discovered
+/// when *that same attempt* -- the worker still holding its own claim's
+/// lease token -- writes again (the phase's own commit, or a follow-up
+/// `mark_retry`/`mark_transient_retry`/`mark_failed` after the phase failed
+/// for another reason) and finds its lease has already expired. Recorded by
+/// `PgPipelineStore::record_lease_expired` and never charged as
+/// `PIPELINE_OPERATIONAL_ERROR_LABEL` or any other P2 label.
+///
+/// This is *not* what happens to a worker that crashes mid-phase (review
+/// finding I3): a crashed worker never comes back to write anything, so
+/// nothing is recorded for it. Its run stays `leased` until
+/// `lease_expires_at` passes, then the next claim -- by any worker --
+/// reclaims it as an ordinary charged attempt (`attempt_count += 1`,
+/// `last_error_label` cleared); enough crashes still exhaust `max_attempts`
+/// and the sweep in `claim_next` marks the run `failed`/`attempts_exhausted`
+/// with nothing recording why. The same gap applies with more than one
+/// worker racing the same run: if a second worker reclaims the lease before
+/// the first worker's own stale write runs, `record_lease_expired`'s
+/// token-only fence finds no row under the first worker's now-superseded
+/// token and changes nothing -- that attempt is silently lost, recorded
+/// neither as `lease_expired` nor as a charge reversed. Lease renewal (PR 4)
+/// is what closes both gaps, by extending a live lease before it expires
+/// rather than discovering the expiry after the fact.
+pub const PIPELINE_LEASE_EXPIRED_LABEL: &str = "lease_expired";
+/// Safe label `PipelineLeaseConfig::new` refuses with when a phase's
+/// configured lease falls outside [1 second, 2 hours].
+pub const PIPELINE_LEASE_CONFIG_INVALID_LABEL: &str = "pipeline_lease_config_invalid";
+const PIPELINE_LEASE_MIN_SECONDS: i64 = 1;
+const PIPELINE_LEASE_MAX_SECONDS: i64 = 2 * 60 * 60;
+const PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS: i64 = 5 * 60;
+const PIPELINE_LEASE_DEFAULT_SCORE_SECONDS: i64 = 30 * 60;
+const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
+
+/// Owner decision D4 (review comment 4108170518): each pipeline phase gets
+/// its own claim-lease length, sized for how long that phase can actually
+/// run rather than one fixed lease every phase shared. Score, in
+/// particular, runs the injected scorer and the embedder inside the lease
+/// -- a chunked NEAR AI perplexity scorer or a CPU-bound embedder routinely
+/// exceeds a short fixed lease, which used to make `commit_score` and the
+/// following `mark_retry` both fail on a stale lease and burn an attempt
+/// every time. The defaults below give Score six times the headroom Review
+/// and Settle get. Lease renewal mid-phase (extending a lease the phase
+/// still holds) is PR 4 and out of scope here -- this only sizes the one
+/// lease a phase gets when it is claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineLeaseConfig {
+    review: Duration,
+    score: Duration,
+    settle: Duration,
+}
+
+impl PipelineLeaseConfig {
+    /// Refuses any of the three durations outside [1 second, 2 hours]
+    /// inclusive, with the safe label `PIPELINE_LEASE_CONFIG_INVALID_LABEL`
+    /// (fail closed: an operator typo never silently becomes an unbounded or
+    /// zero-length lease).
+    pub fn new(review: Duration, score: Duration, settle: Duration) -> anyhow::Result<Self> {
+        let min = Duration::seconds(PIPELINE_LEASE_MIN_SECONDS);
+        let max = Duration::seconds(PIPELINE_LEASE_MAX_SECONDS);
+        for candidate in [review, score, settle] {
+            anyhow::ensure!(
+                candidate >= min && candidate <= max,
+                PIPELINE_LEASE_CONFIG_INVALID_LABEL
+            );
+        }
+        Ok(Self {
+            review,
+            score,
+            settle,
+        })
+    }
+
+    pub fn review(&self) -> Duration {
+        self.review
+    }
+
+    pub fn score(&self) -> Duration {
+        self.score
+    }
+
+    pub fn settle(&self) -> Duration {
+        self.settle
+    }
+}
+
+impl Default for PipelineLeaseConfig {
+    /// Review 5 minutes, Score 30 minutes, Settle 5 minutes (owner decision
+    /// D4, 2026-09-27): defaults that fit a slow Score without operator
+    /// configuration.
+    fn default() -> Self {
+        Self {
+            review: Duration::seconds(PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS),
+            score: Duration::seconds(PIPELINE_LEASE_DEFAULT_SCORE_SECONDS),
+            settle: Duration::seconds(PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS),
+        }
+    }
+}
 
 fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
@@ -604,24 +700,17 @@ impl PgPipelineStore {
         rows.iter().map(phase_outcome_from_row).collect()
     }
 
+    /// Claims the next due run for `tenant_id` across every phase, sizing
+    /// the lease this claim grants by the claimed row's own `next_phase`
+    /// (decision D4, requirement 2): the CASE below picks Review's, Score's,
+    /// or Settle's configured lease for the one row the candidate CTE
+    /// selects, in the same statement that claims it, so a Score run never
+    /// gets Review's shorter lease or vice versa.
     pub async fn claim_next(
         &self,
         tenant_id: &str,
+        lease_config: PipelineLeaseConfig,
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
-        self.claim_next_with_lease(tenant_id, Duration::seconds(DEFAULT_LEASE_SECONDS))
-            .await
-    }
-
-    pub async fn claim_next_with_lease(
-        &self,
-        tenant_id: &str,
-        lease_duration: Duration,
-    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
-        if lease_duration <= Duration::zero() || lease_duration > Duration::minutes(5) {
-            return Err(DatabaseError::Constraint(
-                "pipeline lease duration is invalid".to_string(),
-            ));
-        }
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
@@ -636,7 +725,9 @@ impl PgPipelineStore {
         )
         .await?;
         let lease_token = Uuid::new_v4();
-        let lease_milliseconds = lease_duration.num_milliseconds();
+        let review_milliseconds = lease_config.review().num_milliseconds();
+        let score_milliseconds = lease_config.score().num_milliseconds();
+        let settle_milliseconds = lease_config.settle().num_milliseconds();
         let row = tx
             .query_opt(
                 "WITH candidate AS (
@@ -655,27 +746,47 @@ impl PgPipelineStore {
                  UPDATE pipeline_runs p
                  SET state = 'leased',
                      lease_token = $2,
-                     lease_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
+                     lease_expires_at = NOW() + (
+                         CASE p.next_phase
+                             WHEN 'review' THEN $3::bigint
+                             WHEN 'score' THEN $4::bigint
+                             WHEN 'settle' THEN $5::bigint
+                             ELSE $3::bigint
+                         END * INTERVAL '1 millisecond'
+                     ),
                      attempt_count = p.attempt_count + 1,
                      last_error_label = NULL,
                      updated_at = NOW()
                  FROM candidate
                  WHERE p.tenant_id = $1 AND p.run_id = candidate.run_id
                  RETURNING p.*",
-                &[&tenant_id, &lease_token, &lease_milliseconds],
+                &[
+                    &tenant_id,
+                    &lease_token,
+                    &review_milliseconds,
+                    &score_milliseconds,
+                    &settle_milliseconds,
+                ],
             )
             .await?;
         tx.commit().await?;
         row.as_ref().map(pipeline_run_from_row).transpose()
     }
 
+    /// Claims a specific run with an explicit lease length, kept for tests
+    /// that need precise control over a claim's own lease (many call this
+    /// directly with `chrono::Duration::seconds(30)`).
+    /// `PipelineService::process_run` uses `claim_run_with_lease_config`
+    /// instead, so it never has to read the run's phase before claiming it.
+    /// The bound was 5 minutes; decision D4 raises it to 2 hours so a caller
+    /// can hand this the same lease `PipelineLeaseConfig` allows.
     pub async fn claim_run(
         &self,
         tenant_id: &str,
         run_id: Uuid,
         lease_duration: Duration,
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
-        if lease_duration <= Duration::zero() || lease_duration > Duration::minutes(5) {
+        if lease_duration <= Duration::zero() || lease_duration > Duration::hours(2) {
             return Err(DatabaseError::Constraint(
                 "pipeline lease duration is invalid".to_string(),
             ));
@@ -702,6 +813,65 @@ impl PgPipelineStore {
                    )
                  RETURNING *",
                 &[&tenant_id, &run_id, &lease_token, &lease_milliseconds],
+            )
+            .await?;
+        tx.commit().await?;
+        row.as_ref().map(pipeline_run_from_row).transpose()
+    }
+
+    /// Claims a specific run, picking the granted lease by its own
+    /// `next_phase` in the claiming SQL itself (decision D4, requirement 2)
+    /// -- the same `CASE` `claim_next` uses, scoped to one `run_id` instead
+    /// of scanning the whole tenant queue. `PipelineService::process_run`
+    /// uses this rather than reading the run's phase first and handing
+    /// `claim_run` an explicit duration: a phase commit landing between an
+    /// earlier read and a later claim could otherwise hand out a lease sized
+    /// for the phase the row was in at read time, not the one it is
+    /// actually claimed for.
+    pub async fn claim_run_with_lease_config(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        lease_config: PipelineLeaseConfig,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let lease_token = Uuid::new_v4();
+        let review_milliseconds = lease_config.review().num_milliseconds();
+        let score_milliseconds = lease_config.score().num_milliseconds();
+        let settle_milliseconds = lease_config.settle().num_milliseconds();
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs p
+                 SET state = 'leased',
+                     lease_token = $3,
+                     lease_expires_at = NOW() + (
+                         CASE p.next_phase
+                             WHEN 'review' THEN $4::bigint
+                             WHEN 'score' THEN $5::bigint
+                             WHEN 'settle' THEN $6::bigint
+                             ELSE $4::bigint
+                         END * INTERVAL '1 millisecond'
+                     ),
+                     attempt_count = p.attempt_count + 1,
+                     last_error_label = NULL,
+                     updated_at = NOW()
+                 WHERE p.tenant_id = $1 AND p.run_id = $2
+                   AND next_phase <> 'none'
+                   AND attempt_count < max_attempts
+                   AND (
+                       (state IN ('pending', 'retry') AND next_attempt_at <= NOW())
+                       OR (state = 'leased' AND lease_expires_at <= NOW())
+                   )
+                 RETURNING p.*",
+                &[
+                    &tenant_id,
+                    &run_id,
+                    &lease_token,
+                    &review_milliseconds,
+                    &score_milliseconds,
+                    &settle_milliseconds,
+                ],
             )
             .await?;
         tx.commit().await?;
@@ -1322,6 +1492,53 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
+    /// D4: records that `run`'s own phase lease went stale before the phase
+    /// finished, as its own uncharged reason (`PIPELINE_LEASE_EXPIRED_LABEL`)
+    /// with the same FR3 backoff `mark_transient_retry` uses -- never a
+    /// charged policy failure, even though the lease has already gone stale
+    /// by the time this is called.
+    ///
+    /// Fenced by the lease TOKEN alone, with no expiry predicate: every
+    /// other lease-checked write in this store also requires
+    /// `lease_expires_at > NOW()`, which is exactly the condition this call
+    /// exists to act past. `state = 'leased' AND lease_token = $token` still
+    /// guards it -- once a phase transition, a terminal write, or another
+    /// worker's claim has moved the row off this token, this changes
+    /// nothing and reports that as `Ok(None)` (decision D4's token-only
+    /// fence) rather than disturbing whatever holds the run now.
+    pub async fn record_lease_expired(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET state = 'retry', lease_token = NULL, lease_expires_at = NULL,
+                        attempt_count = GREATEST(attempt_count - 1, 0),
+                        next_attempt_at = NOW() + LEAST(
+                            GREATEST(NOW() - phase_started_at, INTERVAL '1 second'),
+                            INTERVAL '1 hour'
+                        ),
+                        last_error_label = $3, updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $4
+                  RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &PIPELINE_LEASE_EXPIRED_LABEL,
+                    &lease_token,
+                ],
+            )
+            .await?;
+        let updated = row.as_ref().map(pipeline_run_from_row).transpose()?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn list_settlements(
         &self,
         tenant_id: &str,
@@ -1763,6 +1980,35 @@ fn stale_lease_error() -> DatabaseError {
     DatabaseError::Constraint("pipeline lease is stale".to_string())
 }
 
+/// True for exactly the `DatabaseError` `stale_lease_error()` builds --
+/// every mark_*/commit_*/update_settlement call in this store raises this
+/// one when its lease-checked `WHERE` finds no row, and `ensure_current_lease`
+/// raises it directly. Matches by variant *and* message, not variant alone:
+/// `DatabaseError::Constraint` also carries unrelated refusals (a phase
+/// mismatch, an invalid lease duration), so the variant alone is not proof of
+/// a stale lease.
+fn is_stale_lease_db_error(error: &DatabaseError) -> bool {
+    matches!(error, DatabaseError::Constraint(message) if message == "pipeline lease is stale")
+}
+
+/// D4: one helper for both shapes a stale lease reaches `process_claimed_run`
+/// in -- a `DatabaseError::Constraint` from any mark_*/commit_* call (case
+/// A, when the phase's own commit already found the lease gone, and case B,
+/// when the phase failed for another reason and the follow-up mark_* call
+/// finds it gone), or `ensure_live_lease`'s bare `anyhow!("pipeline lease is
+/// stale")` (case A's service-level check before an external effect, which
+/// has no open transaction and so no `DatabaseError` to carry). Checked by
+/// type first: a `DatabaseError`'s `Display` prefixes every message with
+/// "Constraint violation: ", so comparing the *outer* anyhow message against
+/// the bare "pipeline lease is stale" text would silently miss every case
+/// that reached here as a `DatabaseError`.
+fn is_stale_lease_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<DatabaseError>() {
+        Some(db_error) => is_stale_lease_db_error(db_error),
+        None => error.to_string() == "pipeline lease is stale",
+    }
+}
+
 fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> {
     let attempt_count: i32 = row.get("attempt_count");
     let max_attempts: i32 = row.get("max_attempts");
@@ -1998,6 +2244,7 @@ pub struct PipelineServiceBuilder {
     settlement_adapters: SettlementAdapterRegistry,
     caps: PipelineCaps,
     object_store_name: String,
+    lease_config: PipelineLeaseConfig,
     crash_point: Option<PipelineCrashPoint>,
 }
 
@@ -2023,6 +2270,7 @@ impl PipelineServiceBuilder {
             settlement_adapters,
             caps,
             object_store_name: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
+            lease_config: PipelineLeaseConfig::default(),
             crash_point: None,
         }
     }
@@ -2034,6 +2282,13 @@ impl PipelineServiceBuilder {
     /// which the legacy readers match before they read an object.
     pub fn with_object_store_name(mut self, object_store_name: impl Into<String>) -> Self {
         self.object_store_name = object_store_name.into();
+        self
+    }
+
+    /// The per-phase claim lease `process_one`/`process_run` use (decision
+    /// D4). Defaults to `PipelineLeaseConfig::default()` when not called.
+    pub fn with_lease_config(mut self, lease_config: PipelineLeaseConfig) -> Self {
+        self.lease_config = lease_config;
         self
     }
 
@@ -2075,6 +2330,7 @@ impl PipelineServiceBuilder {
             settlement_adapters: self.settlement_adapters,
             caps: self.caps,
             object_store_name: self.object_store_name,
+            lease_config: self.lease_config,
             crash_point: self.crash_point,
             crash_pending: AtomicBool::new(self.crash_point.is_some()),
             score_evaluations: AtomicUsize::new(0),
@@ -2099,6 +2355,7 @@ pub struct PipelineService {
     settlement_adapters: SettlementAdapterRegistry,
     caps: PipelineCaps,
     object_store_name: String,
+    lease_config: PipelineLeaseConfig,
     crash_point: Option<PipelineCrashPoint>,
     crash_pending: AtomicBool,
     score_evaluations: AtomicUsize,
@@ -2113,6 +2370,12 @@ impl PipelineService {
     /// The `trace_object_refs.object_store` label this service records.
     pub fn object_store_name(&self) -> &str {
         &self.object_store_name
+    }
+
+    /// The per-phase claim lease this service's `process_one`/`process_run`
+    /// use (decision D4).
+    pub fn lease_config(&self) -> PipelineLeaseConfig {
+        self.lease_config
     }
 
     /// How many times the Settle policy actually ran for this service. A
@@ -2790,14 +3053,20 @@ impl PipelineService {
     }
 
     /// Claims the next due run for `tenant_id` and advances it one phase.
+    /// The claim itself picks the lease by the claimed row's own
+    /// `next_phase` (decision D4); see `PgPipelineStore::claim_next`.
     pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
-        let Some(run) = self.store.claim_next(tenant_id).await? else {
+        let Some(run) = self.store.claim_next(tenant_id, self.lease_config).await? else {
             return Ok(None);
         };
         self.process_claimed_run(run).await
     }
 
-    /// Claims a specific run and advances it one phase.
+    /// Claims a specific run and advances it one phase. The claim itself
+    /// picks the lease by the row's own `next_phase` in SQL (decision D4,
+    /// requirement 2, review finding S4) -- there is no separate read of the
+    /// run before the claim, so a phase commit that lands concurrently can
+    /// never hand out a lease sized for a phase the row is no longer in.
     pub async fn process_run(
         &self,
         tenant_id: &str,
@@ -2805,7 +3074,7 @@ impl PipelineService {
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let Some(run) = self
             .store
-            .claim_run(tenant_id, run_id, Duration::seconds(DEFAULT_LEASE_SECONDS))
+            .claim_run_with_lease_config(tenant_id, run_id, self.lease_config)
             .await?
         else {
             return Ok(None);
@@ -2834,31 +3103,39 @@ impl PipelineService {
                     || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL
                     || label == PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL =>
             {
-                return Ok(Some(self.store.mark_transient_retry(&run, label).await?));
+                return self
+                    .mark_transient_retry_or_record_lease_expired(&run, label)
+                    .await;
             }
             Err(label) => {
-                self.store.mark_failed(&run, label).await?;
-                return self
-                    .store
-                    .get_run(&run.tenant_id, run.run_id)
-                    .await
-                    .map_err(Into::into);
+                return self.mark_failed_or_record_lease_expired(&run, label).await;
             }
         };
         match self.process_claimed(&run, &bundle).await {
             Ok(updated) => Ok(Some(updated)),
             Err(error) if error.to_string() == INJECTED_PIPELINE_CRASH => Err(error),
+            // D4 (H2), review comment 4108170518: the phase itself found its
+            // own lease already gone -- from a commit's `ensure_current_lease`
+            // re-check, from a commit's plain `WHERE ... lease_token = $t AND
+            // lease_expires_at > NOW()` finding no row, or from
+            // `ensure_live_lease`'s service-level check before an
+            // uncommittable external effect (the index write, a settlement
+            // adapter dispatch). Recorded as its own uncharged reason ahead
+            // of every other P2 branch below -- a Score or Settle phase slow
+            // enough to outrun its lease (a chunked NEAR AI scorer, a
+            // CPU-bound embedder) must never be mistaken for
+            // `index_key_conflict`, a Review-only inoperable submission, a
+            // typed `PolicyError`, a missing settlement adapter, or the
+            // generic `minimal_policy_failed` retry.
+            Err(error) if is_stale_lease_error(&error) => {
+                Ok(self.store.record_lease_expired(&run).await?)
+            }
             Err(error) => {
                 let label = error.to_string();
                 if label == PIPELINE_INDEX_CONFLICT_LABEL {
-                    self.store
-                        .mark_failed(&run, PIPELINE_INDEX_CONFLICT_LABEL)
-                        .await?;
                     return self
-                        .store
-                        .get_run(&run.tenant_id, run.run_id)
-                        .await
-                        .map_err(Into::into);
+                        .mark_failed_or_record_lease_expired(&run, PIPELINE_INDEX_CONFLICT_LABEL)
+                        .await;
                 }
                 // Task 1 (H1), controller ruling: in Review, an inoperable
                 // submission (withdrawn, expired, or purged) is permanent --
@@ -2873,14 +3150,12 @@ impl PipelineService {
                 if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
                     && run.next_phase == Some(Phase::Review)
                 {
-                    self.store
-                        .mark_failed(&run, PIPELINE_SUBMISSION_INOPERABLE_LABEL)
-                        .await?;
                     return self
-                        .store
-                        .get_run(&run.tenant_id, run.run_id)
-                        .await
-                        .map_err(Into::into);
+                        .mark_failed_or_record_lease_expired(
+                            &run,
+                            PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+                        )
+                        .await;
                 }
                 // D9 (Task 15) / FR3: a typed `PolicyError` raised while a
                 // phase runs is budgeted by kind, ahead of the P2 string
@@ -2890,23 +3165,24 @@ impl PipelineService {
                 // bound dependency; a permanent policy failure is charged
                 // like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
-                    return Ok(Some(if policy.is_transient() {
-                        self.store
-                            .mark_transient_retry(&run, policy.label())
-                            .await?
+                    return if policy.is_transient() {
+                        self.mark_transient_retry_or_record_lease_expired(&run, policy.label())
+                            .await
                     } else {
-                        self.store.mark_retry(&run, policy.label()).await?
-                    }));
+                        self.mark_retry_or_record_lease_expired(&run, policy.label())
+                            .await
+                    };
                 }
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
                 // uncharged suspension as a missing bound dependency.
                 if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL {
-                    return Ok(Some(
-                        self.store
-                            .mark_transient_retry(&run, PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL)
-                            .await?,
-                    ));
+                    return self
+                        .mark_transient_retry_or_record_lease_expired(
+                            &run,
+                            PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
+                        )
+                        .await;
                 }
                 // The fixed allowlist from decision P2: a charged retry
                 // (the attempt already taken by the claim stays charged)
@@ -2923,8 +3199,64 @@ impl PipelineService {
                     | "submission_inoperable" => label.as_str(),
                     _ => PIPELINE_OPERATIONAL_ERROR_LABEL,
                 };
-                Ok(Some(self.store.mark_retry(&run, retry_label).await?))
+                self.mark_retry_or_record_lease_expired(&run, retry_label)
+                    .await
             }
+        }
+    }
+
+    /// Case B (D4): the phase failed for `error_label`, a reason
+    /// `process_claimed_run` charges as a terminal `mark_failed` -- unless
+    /// the lease itself has gone stale between the phase's own failure and
+    /// this call (the phase ran right up to its lease's edge), in which case
+    /// the expiry is recorded instead and `error_label` is never charged.
+    async fn mark_failed_or_record_lease_expired(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        match self.store.mark_failed(run, error_label).await {
+            Ok(()) => self
+                .store
+                .get_run(&run.tenant_id, run.run_id)
+                .await
+                .map_err(Into::into),
+            Err(error) if is_stale_lease_db_error(&error) => {
+                Ok(self.store.record_lease_expired(run).await?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Case B (D4), the `mark_retry` shape -- see
+    /// `mark_failed_or_record_lease_expired`.
+    async fn mark_retry_or_record_lease_expired(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        match self.store.mark_retry(run, error_label).await {
+            Ok(updated) => Ok(Some(updated)),
+            Err(error) if is_stale_lease_db_error(&error) => {
+                Ok(self.store.record_lease_expired(run).await?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Case B (D4), the `mark_transient_retry` shape -- see
+    /// `mark_failed_or_record_lease_expired`.
+    async fn mark_transient_retry_or_record_lease_expired(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        match self.store.mark_transient_retry(run, error_label).await {
+            Ok(updated) => Ok(Some(updated)),
+            Err(error) if is_stale_lease_db_error(&error) => {
+                Ok(self.store.record_lease_expired(run).await?)
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -4290,5 +4622,65 @@ mod tests {
             pipeline_tenant_storage_ref("tenant-a").as_str(),
             "tenant_sha256:80a707af7dc77ee1228f9127180f3964"
         );
+    }
+
+    /// D4: the default configuration is Review 5 minutes, Score 30 minutes,
+    /// Settle 5 minutes, and Score's default is longer than the old fixed
+    /// 30-second lease every phase used to share.
+    #[test]
+    fn default_lease_config_fits_a_slow_score() {
+        let config = PipelineLeaseConfig::default();
+        assert_eq!(config.review(), Duration::minutes(5));
+        assert_eq!(config.score(), Duration::minutes(30));
+        assert_eq!(config.settle(), Duration::minutes(5));
+        assert!(config.score() > Duration::seconds(30));
+    }
+
+    /// D4: each phase's lease must fall in [1 second, 2 hours] inclusive.
+    #[test]
+    fn lease_config_refuses_a_value_outside_one_second_to_two_hours() {
+        let one_second = Duration::seconds(1);
+        let two_hours = Duration::hours(2);
+
+        assert!(PipelineLeaseConfig::new(one_second, one_second, one_second).is_ok());
+        assert!(PipelineLeaseConfig::new(two_hours, two_hours, two_hours).is_ok());
+
+        let zero = Duration::zero();
+        let error = PipelineLeaseConfig::new(zero, one_second, one_second)
+            .expect_err("zero seconds is refused");
+        assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+        let too_long = two_hours + Duration::seconds(1);
+        let error = PipelineLeaseConfig::new(one_second, too_long, one_second)
+            .expect_err("two hours plus one second is refused");
+        assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+        // Every one of the three fields is checked, not only the first.
+        let error = PipelineLeaseConfig::new(one_second, one_second, zero)
+            .expect_err("a zero settle lease is refused too");
+        assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+    }
+
+    /// D4: `is_stale_lease_error` must recognize the stale-lease condition
+    /// both as a `DatabaseError::Constraint` (every mark_*/commit_* method's
+    /// `stale_lease_error()`) and as `ensure_live_lease`'s bare `anyhow!` --
+    /// and must not mistake an unrelated `DatabaseError::Constraint` (a
+    /// phase mismatch, an invalid lease duration) or an unrelated bare
+    /// anyhow error for one.
+    #[test]
+    fn stale_lease_detection_matches_by_type_or_by_the_exact_message() {
+        assert!(is_stale_lease_error(&stale_lease_error().into()));
+        assert!(is_stale_lease_error(&anyhow::anyhow!(
+            "pipeline lease is stale"
+        )));
+        assert!(!is_stale_lease_error(&anyhow::anyhow!(
+            "pipeline lease is STALE"
+        )));
+        assert!(!is_stale_lease_error(
+            &DatabaseError::Constraint("phase does not match run transition".to_string()).into()
+        ));
+        assert!(!is_stale_lease_error(&anyhow::anyhow!(
+            PIPELINE_INDEX_CONFLICT_LABEL
+        )));
     }
 }

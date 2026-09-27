@@ -10273,13 +10273,79 @@ fn tenant_rollout_gate_dependency_requires_matching_tenant_scope() {
 
 #[test]
 fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
-    let error = assemble_ingest_pipeline_runtime(None, None, None, true)
-        .err()
-        .unwrap();
+    let error = assemble_ingest_pipeline_runtime(
+        None,
+        None,
+        None,
+        true,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+    )
+    .err()
+    .unwrap();
     assert_eq!(
         error.to_string(),
         "pipeline_runtime_required_but_not_injected"
     );
+}
+
+/// D4: an out-of-range or unparsable
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_*` refuses startup with the safe
+/// label `pipeline_lease_config_invalid`, never a raw parse error or a
+/// silently accepted value. Uses the real variable names -- no other test in
+/// this suite reads them, so setting and clearing them here does not race
+/// another test's env state.
+#[test]
+fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
+    // SAFETY: env mutation in tests is OK here -- these three variables are
+    // read only by `parse_pipeline_lease_config_from_env`, which nothing
+    // else in this suite calls concurrently.
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
+    }
+
+    // Unset every variable: the defaults, unchanged.
+    let defaults = parse_pipeline_lease_config_from_env().expect("defaults parse");
+    assert_eq!(defaults, PipelineLeaseConfig::default());
+
+    // Out of range (two hours plus one second): refused with the safe label.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "7201") };
+    let error =
+        parse_pipeline_lease_config_from_env().expect_err("an out-of-range Score lease is refused");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // Unparsable: refused with the same safe label, not a raw parse error.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "not-a-number") };
+    let error =
+        parse_pipeline_lease_config_from_env().expect_err("an unparsable Score lease is refused");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // Review finding S5: a value that parses as `i64` but overflows
+    // `chrono::Duration::seconds` (above `i64::MAX / 1_000`) must refuse
+    // with the safe label, not panic.
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+            "10000000000000000",
+        )
+    };
+    let error = parse_pipeline_lease_config_from_env()
+        .expect_err("a Score lease that overflows Duration::seconds is refused, not a panic");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // In range: accepted, and the configured seconds land on the right phase.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "120") };
+    let configured = parse_pipeline_lease_config_from_env().expect("120 seconds is in range");
+    assert_eq!(configured.score(), chrono::Duration::seconds(120));
+    assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
+    assert_eq!(configured.settle(), PipelineLeaseConfig::default().settle());
+
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
+    }
 }
 
 #[test]
@@ -10446,6 +10512,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         Some(&connections),
         Some(&configured_store),
         false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10461,6 +10528,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         Some(&connections),
         Some(&configured_store),
         false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
     )
     .unwrap()
     .unwrap();

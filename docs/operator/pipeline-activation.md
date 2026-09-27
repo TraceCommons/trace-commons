@@ -41,6 +41,54 @@ injects a pipeline runtime. The repository binary injects none.
 
 Activation replaces this list with qualified routing.
 
+## Per-phase claim lease (decision D4)
+
+Each pipeline phase claims its run under its own lease length, sized for how
+long that phase can actually run rather than one fixed lease every phase
+shared. Score, in particular, runs the injected scorer and embedder inside
+the lease -- a chunked NEAR AI perplexity scorer or a CPU-bound embedder can
+exceed a short lease on the pilot.
+
+- `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
+  (5 minutes).
+- `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE` -- whole seconds, default 1800
+  (30 minutes).
+- `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE` -- whole seconds, default 300
+  (5 minutes).
+
+Each variable is optional; an unset variable keeps its phase's default.
+Each configured value must be between 1 second and 2 hours (7200 seconds)
+inclusive. A value that does not parse as a non-negative integer, or that
+falls outside that range, refuses ingest startup with the safe label
+`pipeline_lease_config_invalid`.
+
+`lease_expired` records exactly one situation: the worker that is still
+holding the run's lease comes back and writes again -- the phase's own
+commit, or a follow-up retry write -- after its own lease has already
+expired (the scorer or embedder ran longer than the configured lease). That
+write is recorded with `last_error_label = lease_expired` and returned to
+`retry` without charging the attempt the claim took. A phase that always
+overruns its lease this way shows `lease_expired` every time and never
+reaches `failed`/`attempts_exhausted` on that account alone.
+
+This does **not** cover a worker that crashes mid-phase. A crashed worker
+never comes back to write anything, so nothing is recorded for it -- the run
+simply stays `leased` until `lease_expires_at` passes on its own, at which
+point the next claim (by any worker) reclaims it as an ordinary charged
+attempt with `last_error_label` cleared. Repeated crashes still exhaust
+`max_attempts` and end in `failed`/`attempts_exhausted`, with no record of
+why. The same gap applies whenever more than one worker races the same run:
+if a second worker reclaims an expired lease before the first worker's own
+stale write runs, that write's lease token no longer matches anything (the
+token-only fence in `record_lease_expired`), so it changes nothing -- that
+attempt is silently lost, not recorded as `lease_expired` and not otherwise
+un-charged.
+
+Lease renewal (extending a lease a phase still holds, mid-phase) is PR 4
+work and not implemented yet. It is what will close both gaps above -- a
+live worker renewing its lease before it expires, rather than a phase
+finding out only after the fact (or a crash never finding out at all).
+
 ## Submission quota at switch-over
 
 The pipeline counts only pipeline receipts against the hourly submission

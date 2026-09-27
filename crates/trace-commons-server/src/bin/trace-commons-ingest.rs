@@ -252,8 +252,8 @@ use trace_commons_server::trace_score_attestation::{
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PipelineAdmissionLimits, PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult,
-    PipelineService,
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineService,
 };
 use uuid::Uuid;
 
@@ -660,6 +660,15 @@ const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
 /// injected one is not production-qualified) rather than booting without one.
 /// See `assemble_ingest_pipeline_runtime`.
 const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED";
+/// Whole-seconds overrides for the per-phase claim lease (decision D4); see
+/// `parse_pipeline_lease_config_from_env`. Unset keeps
+/// `PipelineLeaseConfig::default()`'s value for that phase.
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -3781,11 +3790,13 @@ impl AppState {
             artifact_store.as_ref(),
         )?;
         let pipeline_runtime_required = env_truthy(TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED);
+        let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
             artifact_store.as_ref(),
             pipeline_runtime_required,
+            pipeline_lease_config,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -9207,6 +9218,52 @@ fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> 
         Err(error) => Err(error).with_context(|| {
             format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS}")
         }),
+    }
+}
+
+/// D4: the per-phase claim lease from
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_{REVIEW,SCORE,SETTLE}` (whole
+/// seconds each; unset keeps `PipelineLeaseConfig::default()`'s value for
+/// that phase). Fails closed with the single safe label
+/// `pipeline_lease_config_invalid` for either failure mode -- a value that
+/// does not parse as a non-negative integer, or one that parses but falls
+/// outside `PipelineLeaseConfig::new`'s [1 second, 2 hours] bound -- rather
+/// than two different messages for what is, from an operator's point of
+/// view, the same misconfiguration.
+fn parse_pipeline_lease_config_from_env() -> anyhow::Result<PipelineLeaseConfig> {
+    let defaults = PipelineLeaseConfig::default();
+    let review = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW,
+        defaults.review(),
+    )?;
+    let score = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+        defaults.score(),
+    )?;
+    let settle = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE,
+        defaults.settle(),
+    )?;
+    PipelineLeaseConfig::new(review, score, settle)
+}
+
+fn parse_pipeline_lease_seconds_env(
+    var: &'static str,
+    default: chrono::Duration,
+) -> anyhow::Result<chrono::Duration> {
+    match optional_trimmed_env(var)? {
+        Some(raw) => {
+            let seconds: i64 = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))?;
+            // review finding S5: `chrono::Duration::seconds` panics above
+            // `i64::MAX / 1_000`; `try_seconds` reports that the same way
+            // every other malformed value is reported here, rather than
+            // taking the process down on an operator typo.
+            chrono::Duration::try_seconds(seconds)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))
+        }
+        None => Ok(default),
     }
 }
 

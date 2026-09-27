@@ -317,6 +317,369 @@ async fn stale_lease_cannot_commit_after_reclaim() {
     );
 }
 
+/// D4: the token-only fence. `record_lease_expired` is fenced by the lease
+/// token alone, with no expiry predicate (unlike every other lease-checked
+/// write) -- but once another claim has moved the run onto a new token, the
+/// old token no longer matches and this changes nothing, the same as any
+/// other lease-checked write losing a race to a reclaim.
+#[tokio::test]
+async fn record_lease_expired_on_a_reclaimed_run_changes_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("lease-expired-fence-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let first = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let second = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.lease_token, second.lease_token);
+
+    let unchanged = store.record_lease_expired(&first).await.unwrap();
+    assert!(
+        unchanged.is_none(),
+        "the old lease token no longer matches the reclaimed run"
+    );
+
+    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(current.lease_token, second.lease_token);
+    assert_eq!(current.state, PipelineRunState::Leased);
+}
+
+/// D4 / H2 (review comment 4108170518), controller ruling: a Score phase
+/// slower than Review's and Settle's short lease still completes when Score
+/// has its own longer configured lease -- scaled to a couple of seconds,
+/// never a real 30-second sleep. Review finding I2: Review and Settle get 1
+/// second, Score gets a few seconds, and the embedder's delay sits strictly
+/// between the two (1s < 2s < 4s) -- a fixed margin that does not depend on
+/// how many 256-byte chunks the fixture happens to produce (`SlowEmbedder`
+/// sleeps once per attempt, not once per chunk).
+#[tokio::test]
+async fn a_slow_score_completes_under_its_own_longer_configured_lease() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(4),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s review/settle, 4s score is in bounds");
+    let embedder = Arc::new(SlowEmbedder::new(std::time::Duration::from_millis(2_000)));
+    let service = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        lease_config,
+        embedder,
+    )
+    .await;
+
+    let tenant = format!("slow-score-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review completes under its own 1-second lease");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_ne!(
+        reviewed.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score completes under its own longer lease despite the slow embedder");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert_ne!(
+        scored.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes under its own 1-second lease");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_ne!(
+        settled.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+}
+
+/// D4: a Score phase whose lease expires records the expiry as its own
+/// uncharged reason, never as a policy failure -- `record_lease_expired`
+/// always gives back the attempt the claim took, so `attempt_count` never
+/// climbs toward `max_attempts` no matter how many times the phase overruns,
+/// and the run stays retryable rather than ever reaching
+/// `failed`/`attempts_exhausted`. Review finding I2: `SlowEmbedder` sleeps
+/// once per attempt (`reset_for_next_attempt` between iterations below), so
+/// each of the 8 attempts here costs about 1.5 s of real sleep, not the
+/// fixture's chunk count times 1.5 s.
+#[tokio::test]
+async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s/1s/1s is in bounds");
+    let embedder = Arc::new(SlowEmbedder::new(std::time::Duration::from_millis(1_500)));
+    let service = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        lease_config,
+        embedder.clone(),
+    )
+    .await;
+
+    let tenant = format!("expired-score-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review completes under its own 1-second lease");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let attempt_count_before = reviewed.attempt_count;
+
+    let expired = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the stale Score lease is recorded, not propagated as an error");
+    assert_eq!(expired.state, PipelineRunState::Retry);
+    assert_eq!(expired.next_phase, Some(Phase::Score));
+    assert_eq!(
+        expired.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(expired.attempt_count, attempt_count_before);
+    assert!(expired.next_attempt_at > chrono::Utc::now());
+
+    // max_attempts defaults to 5 (migration V76/V77); loop more times than
+    // that and confirm the run is never failed / attempts_exhausted.
+    for _ in 0..7 {
+        force_due(&backend, &tenant, created.run_id).await;
+        embedder.reset_for_next_attempt();
+        let retried = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("the run stays claimable every time its lease expires again");
+        assert_eq!(retried.state, PipelineRunState::Retry);
+        assert_eq!(
+            retried.last_error_label.as_deref(),
+            Some(PIPELINE_LEASE_EXPIRED_LABEL)
+        );
+    }
+}
+
+/// D4 case B (review finding I1): the phase itself fails for an ordinary
+/// reason (a transient `PolicyError`, not a lease problem) -- but the
+/// *follow-up* `mark_transient_retry` call finds the lease already gone,
+/// because the phase ran right up to (and past) its own lease's edge before
+/// it failed. `process_claimed_run`'s bundle-load branch and every
+/// generic-dispatch branch used to call the store directly here and let a
+/// stale-lease error from that follow-up write propagate raw; this proves
+/// each now records the expiry instead, uncharged, the same as when the
+/// phase's own commit finds the lease gone (case A, tested above).
+#[tokio::test]
+async fn a_stale_lease_found_by_the_follow_up_mark_call_is_recorded_not_charged() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s/1s/1s is in bounds");
+    let embedder = Arc::new(SlowThenFailingEmbedder {
+        delay: std::time::Duration::from_millis(1_500),
+    });
+    let service = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        lease_config,
+        embedder,
+    )
+    .await;
+
+    let tenant = format!("case-b-lease-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review completes under its own 1-second lease");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let attempt_count_before = reviewed.attempt_count;
+
+    let expired = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect(
+            "the stale lease the follow-up mark_transient_retry finds is recorded, not propagated",
+        );
+    assert_eq!(expired.state, PipelineRunState::Retry);
+    assert_eq!(expired.next_phase, Some(Phase::Score));
+    assert_eq!(
+        expired.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_ne!(
+        expired.last_error_label.as_deref(),
+        Some("embedder_unavailable")
+    );
+    assert_eq!(expired.attempt_count, attempt_count_before);
+    assert!(expired.next_attempt_at > chrono::Utc::now());
+}
+
+/// D4 (requirement 2): `claim_next` -- the tenant-wide claim `process_one`
+/// uses, as opposed to `claim_run`'s explicit-duration claim -- picks the
+/// lease by the claimed row's own `next_phase` in the claiming SQL itself,
+/// so a Score row never gets Review's lease or vice versa. Drives the same
+/// run through all three phases with three different configured lease
+/// lengths and checks each claim's granted `lease_expires_at` against the
+/// phase it actually claimed.
+#[tokio::test]
+async fn claim_next_picks_the_lease_by_the_runs_next_phase() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("claim-next-lease-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(11),
+        chrono::Duration::seconds(1_234),
+        chrono::Duration::seconds(22),
+    )
+    .expect("11s/1234s/22s is in bounds");
+
+    let claimed_review = store
+        .claim_next(&tenant, lease_config)
+        .await
+        .unwrap()
+        .expect("the seeded run is due for Review");
+    assert_eq!(claimed_review.next_phase, Some(Phase::Review));
+    let review_seconds =
+        (claimed_review.lease_expires_at.unwrap() - claimed_review.updated_at).num_seconds();
+    assert!(
+        (10..=11).contains(&review_seconds),
+        "expected ~11s, got {review_seconds}s"
+    );
+
+    // Force the run straight to Score, pending and due -- a raw update, not
+    // a real Review commit: this test is only about which lease `claim_next`
+    // grants a row by its `next_phase`, not about getting there through a
+    // real phase transition.
+    advance_run_to_phase(&backend, &tenant, run.run_id, "score").await;
+    let claimed_score = store
+        .claim_next(&tenant, lease_config)
+        .await
+        .unwrap()
+        .expect("the run is now due for Score");
+    assert_eq!(claimed_score.next_phase, Some(Phase::Score));
+    let score_seconds =
+        (claimed_score.lease_expires_at.unwrap() - claimed_score.updated_at).num_seconds();
+    assert!(
+        (1_233..=1_234).contains(&score_seconds),
+        "expected ~1234s, got {score_seconds}s"
+    );
+
+    advance_run_to_phase(&backend, &tenant, run.run_id, "settle").await;
+    let claimed_settle = store
+        .claim_next(&tenant, lease_config)
+        .await
+        .unwrap()
+        .expect("the run is now due for Settle");
+    assert_eq!(claimed_settle.next_phase, Some(Phase::Settle));
+    let settle_seconds =
+        (claimed_settle.lease_expires_at.unwrap() - claimed_settle.updated_at).num_seconds();
+    assert!(
+        (21..=22).contains(&settle_seconds),
+        "expected ~22s, got {settle_seconds}s"
+    );
+}
+
+/// Test-only: forces `run_id` to `phase`, `pending`, and due now, with no
+/// lease -- so the next `claim_next`/`claim_run` claims it fresh under
+/// whatever lease its new `next_phase` earns. Used only to set up which
+/// phase a claim will see; never a stand-in for a real phase commit.
+async fn advance_run_to_phase(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+    phase: &str,
+) {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for advance_run_to_phase");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET next_phase = $3, state = 'pending', lease_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = NOW()
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id, &phase],
+    )
+    .await
+    .expect("advance run to phase");
+    tx.commit().await.expect("commit advance_run_to_phase");
+}
+
 #[tokio::test]
 async fn register_bundle_refuses_a_changed_descriptor_for_a_registered_instrument() {
     let Some(backend) = runtime_backend(2).await else {
@@ -1389,6 +1752,137 @@ impl IdentifiedEmbedder for FlakyEmbedder {
     fn content_descriptor(&self) -> Vec<u8> {
         b"flaky-embedder-test-descriptor-v1".to_vec()
     }
+}
+
+/// D4: an embedder whose `embed` call blocks for a fixed wall-clock delay
+/// once per simulated attempt -- not once per chunk (review finding I2) --
+/// before delegating to the reference embedder. `Embedder::embed` is
+/// synchronous, so `std::thread::sleep` inside it is a real elapsed delay a
+/// claimed lease's `lease_expires_at` genuinely runs past, without a real
+/// 30-second sleep (the controller's scaled-test ruling) and without the
+/// total delay growing with the fixture's chunk count: only the first
+/// `embed` call since construction or since the last
+/// `reset_for_next_attempt` sleeps, so a test driving several simulated
+/// attempts controls the total delay directly rather than as a function of
+/// how many 256-byte chunks the reviewed artifact happens to produce.
+struct SlowEmbedder {
+    delay: std::time::Duration,
+    slept_this_attempt: AtomicBool,
+}
+
+impl SlowEmbedder {
+    fn new(delay: std::time::Duration) -> Self {
+        Self {
+            delay,
+            slept_this_attempt: AtomicBool::new(false),
+        }
+    }
+
+    /// Test-only: call before driving the next simulated attempt so its
+    /// first chunk sleeps again. Without this, only the very first `embed`
+    /// call across every attempt this double ever serves would sleep.
+    fn reset_for_next_attempt(&self) {
+        self.slept_this_attempt.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Embedder for SlowEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        if !self.slept_this_attempt.swap(true, Ordering::SeqCst) {
+            std::thread::sleep(self.delay);
+        }
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for SlowEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "slow_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "slow-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"slow-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
+/// D4 case B (review finding I1): sleeps a fixed wall-clock delay and then
+/// fails, every call. `FixedScorePolicy`'s chunk loop aborts on the first
+/// `embed` error (the same reason `FlakyEmbedder` above needs no per-attempt
+/// reset), so this always sleeps exactly once per simulated attempt without
+/// needing `SlowEmbedder`'s reset bookkeeping. Used to make the *phase*
+/// raise an ordinary transient `PolicyError` -- not a lease problem -- after
+/// its lease has already gone stale, so it is the follow-up
+/// `mark_transient_retry` call, not the phase's own commit, that discovers
+/// the lease is gone.
+struct SlowThenFailingEmbedder {
+    delay: std::time::Duration,
+}
+
+impl Embedder for SlowThenFailingEmbedder {
+    fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        std::thread::sleep(self.delay);
+        anyhow::bail!("embedder dependency outage (test double)")
+    }
+}
+
+impl IdentifiedEmbedder for SlowThenFailingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "slow_then_failing_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "slow-then-failing-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"slow-then-failing-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
+/// Builds a service over `minimal_config(true)` (Score's embedder runs, and
+/// there are no instrument awards, so Settle needs no adapter dispatch) with
+/// `embedder` and the given lease configuration. Shared by the D4
+/// lease-expiry tests below; the caller keeps its own `Arc` to the embedder
+/// double so it can call `reset_for_next_attempt` (for `SlowEmbedder`)
+/// between simulated attempts.
+async fn score_lease_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    lease_config: PipelineLeaseConfig,
+    embedder: Arc<dyn IdentifiedEmbedder>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(true),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::new(),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_lease_config(lease_config)
+    .build()
+    .expect("build pipeline service");
+    Arc::new(service)
 }
 
 /// P5's mismatching adapter double: always returns a well-formed but wrong
