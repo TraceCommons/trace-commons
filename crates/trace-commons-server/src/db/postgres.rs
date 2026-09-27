@@ -248,6 +248,11 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_receipt_artifacts",
     "pipeline_run_settlements",
     "pipeline_admission_usage",
+    "pipeline_review_claims",
+    "pipeline_review_assessments",
+    "pipeline_index_invalidations",
+    "pipeline_export_snapshots",
+    "pipeline_export_snapshot_items",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1528,6 +1533,20 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         95,
         "versioned_pipeline_receipt_content",
         include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+    ),
+    // V96 and V97 add human review claims and assessments, index
+    // invalidations with retry columns, pipeline_runs.index_invalidation_state,
+    // and immutable customer export snapshots. Every table forces RLS; there
+    // is no cross-tenant claim function.
+    (
+        96,
+        "versioned_pipeline_review_invalidation",
+        include_str!("../../../../migrations/V96__versioned_pipeline_review_invalidation.sql"),
+    ),
+    (
+        97,
+        "versioned_pipeline_exports",
+        include_str!("../../../../migrations/V97__versioned_pipeline_exports.sql"),
     ),
 ];
 
@@ -6717,6 +6736,8 @@ mod tests {
         (93, 4),
         (94, 4),
         (95, 4),
+        (96, 4),
+        (97, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7491,6 +7512,8 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+            include_str!("../../../../migrations/V96__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V97__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7521,6 +7544,8 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+            include_str!("../../../../migrations/V96__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V97__versioned_pipeline_exports.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7602,6 +7627,9 @@ mod tests {
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql");
         let content =
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
+        let review_invalidation =
+            include_str!("../../../../migrations/V96__versioned_pipeline_review_invalidation.sql");
+        let exports = include_str!("../../../../migrations/V97__versioned_pipeline_exports.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7663,6 +7691,60 @@ mod tests {
             "ALTER TABLE pipeline_admission_usage FORCE ROW LEVEL SECURITY;",
         ] {
             assert!(content.contains(required), "V95 is missing `{required}`");
+        }
+        for required in [
+            "CREATE TABLE pipeline_review_claims",
+            "CREATE TABLE pipeline_review_assessments",
+            "CREATE TABLE pipeline_index_invalidations",
+            "reject_pipeline_review_assessment_mutation",
+            "CREATE TRIGGER pipeline_review_assessments_reject_update",
+            "CREATE TRIGGER pipeline_review_assessments_reject_delete",
+            "index_invalidation_state TEXT NOT NULL DEFAULT 'none'",
+            "attempt_count INTEGER NOT NULL DEFAULT 0",
+            "max_attempts INTEGER NOT NULL DEFAULT 5",
+            "next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+            "pipeline_index_invalidation_attempt_limit",
+            "ALTER TABLE pipeline_review_claims FORCE ROW LEVEL SECURITY;",
+            "ALTER TABLE pipeline_review_assessments FORCE ROW LEVEL SECURITY;",
+            "ALTER TABLE pipeline_index_invalidations FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(
+                review_invalidation.contains(required),
+                "V96 is missing `{required}`"
+            );
+        }
+        for forbidden in [
+            "admission_reason TEXT",
+            "pipeline_policy_interventions",
+            "operational_status",
+            "transformed_",
+            "pipeline_admission_usage",
+            "SECURITY DEFINER",
+            "SET search_path",
+        ] {
+            assert!(
+                !review_invalidation.contains(forbidden),
+                "V96 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_export_snapshots",
+            "CREATE TABLE pipeline_export_snapshot_items",
+            "reject_pipeline_export_snapshot_identity_mutation",
+            "reject_pipeline_export_snapshot_item_identity_mutation",
+            "reject_pipeline_export_snapshot_delete",
+            "CREATE TRIGGER pipeline_export_snapshots_reject_delete",
+            "CREATE TRIGGER pipeline_export_snapshot_items_reject_delete",
+            "ALTER TABLE pipeline_export_snapshots FORCE ROW LEVEL SECURITY;",
+            "ALTER TABLE pipeline_export_snapshot_items FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(exports.contains(required), "V97 is missing `{required}`");
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "attempt_count"] {
+            assert!(
+                !exports.contains(forbidden),
+                "V97 must not contain `{forbidden}`"
+            );
         }
     }
 

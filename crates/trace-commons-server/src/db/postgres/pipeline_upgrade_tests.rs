@@ -84,7 +84,7 @@ async fn set_tenant(client: &Client, tenant: &str) {
         .expect("set migration test tenant");
 }
 
-const PIPELINE_TABLES: [&str; 8] = [
+const PIPELINE_TABLES: [&str; 13] = [
     "pipeline_runs",
     "phase_outcomes",
     "pipeline_bundle_packages",
@@ -93,10 +93,15 @@ const PIPELINE_TABLES: [&str; 8] = [
     "pipeline_receipt_artifacts",
     "pipeline_run_settlements",
     "pipeline_admission_usage",
+    "pipeline_review_claims",
+    "pipeline_review_assessments",
+    "pipeline_index_invalidations",
+    "pipeline_export_snapshots",
+    "pipeline_export_snapshot_items",
 ];
 
 /// Every privilege any role but the owner holds on the pipeline tables once
-/// V92 to V95 have run, as `(table, privilege, columns)`; no columns means
+/// V92 to V97 have run, as `(table, privilege, columns)`; no columns means
 /// the whole table. The ingest runtime group, `trace_ingest_runtime`, is the
 /// only grantee, and it holds what the pipeline code reads and writes and
 /// nothing broader. A privilege the code comes to need goes into its
@@ -235,7 +240,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, Some(95));
+    assert_eq!(version, Some(97));
 
     for table in PIPELINE_TABLES {
         assert!(
@@ -258,6 +263,24 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             "{table} must enable and force RLS with the tenant policy"
         );
     }
+
+    for (table, column) in [
+        ("pipeline_runs", "admission_reason"),
+        ("pipeline_runs", "index_invalidation_state"),
+        ("pipeline_index_invalidations", "next_attempt_at"),
+    ] {
+        let present: bool = admin
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                 WHERE table_name = $1 AND column_name = $2)",
+                &[&table, &column],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(present, "{table}.{column} must exist after the upgrade");
+    }
+
     let claim_function: bool = admin
         .query_one(
             "SELECT to_regprocedure('claim_pipeline_run(uuid,integer)') IS NOT NULL",
