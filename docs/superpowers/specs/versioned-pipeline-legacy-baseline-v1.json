@@ -1,0 +1,57 @@
+{
+  "schema": "trace_commons.legacy_baseline.v1",
+  "scope": "offline_pilot_bootstrap_receipt_path",
+  "captured_from_revision": "68ce6f9b169003f3fa887842c376e2b3e4558254",
+  "input_identities": {
+    "fixture_tree_git_id": "2ce08ebdd9114d418bd21f1a7d501782e448539f",
+    "fixture_count": 10,
+    "ordered_fixture_sha256": [
+      "sha256:a819c5c6b854d58f83b4e31ff0353fd6dc9c99c73716c72b783ab1cbde7aa2e6",
+      "sha256:86984b744053bff3cfa2ca0d41ab1ba3f54779e9e8eed1d0208ab27aa5989b7c",
+      "sha256:5e2d6d4f5fec546bcc361bc0bf612be598f8536aa223b84ce8bffb74544793d6",
+      "sha256:ed23ea9e0dd2eb842db50cbbabd8516c1ef6d5302fb1dda60c6ba366c5ea8488",
+      "sha256:67ff869be8240f8faa10a93d6404aaec7cf3258bb2e08d6c9fcb747e37013e95",
+      "sha256:4a56265a69b257fbb6df68730bb28ad865e945cbff54420d02efe58a9aebb85e",
+      "sha256:94f6ae404a4d7b09c6d1c20e82d19a4045b3dbf699dbc06470cd61f7b0085380",
+      "sha256:31828a73312c24204b62d9dad491dea4309cfe800a5f5fc0d63ed04c0ce2e634",
+      "sha256:e16e2976ff387eab7376f5aaf95666cce68aee90cef84e2bfa0898b8905bfa9d",
+      "sha256:1d57587010b3e347ac814a7612af9464f3a9f769b34980a9dd532263d524701c"
+    ],
+    "source_dataset": "jedisct1/agent-traces-swival",
+    "fixed_dataset_revision": "smokecommit0000000000000000000000000001",
+    "order": "fixture_filename_ascending"
+  },
+  "configuration_identities": {
+    "ingest_binary_git_blob": "a34c70fbf11ff4942b65ce684c30c7437b6658cf",
+    "trace_gate_service_git_blob": "e3fb0e465656ca7b1a95caaf522233aa579ecd14",
+    "gate_orchestrator_git_blob": "05358db87ac048ea8ec917ba19afae309701435c",
+    "pilot_bootstrap_tree_git_id": "a9d7ddc54721d323b3a7436f17a31d31a9927f50",
+    "smoke_script_git_blob": "ff963f2e3e2de831275c5e861ca5a56fb799ab2e",
+    "mock_receipt_policy": "accepted",
+    "submission_count": 10,
+    "submission_rate_per_second": 50,
+    "external_network": false
+  },
+  "expected_results": {
+    "first_run": {
+      "attempt_count": 10,
+      "distinct_submission_count": 10,
+      "receipt_counts": {
+        "accepted": 10,
+        "quarantined": 0,
+        "rejected": 0,
+        "error": 0
+      }
+    },
+    "exact_replay": {
+      "cumulative_attempt_count": 20,
+      "distinct_submission_count": 10,
+      "same_submission_identity": true
+    }
+  },
+  "limitations": [
+    "This baseline captures the existing offline bootstrap receipt contract.",
+    "The mock server does not capture model, vector-index, credit, or settlement results.",
+    "The compatibility milestone must approve a larger baseline before policy activation."
+  ]
+}
