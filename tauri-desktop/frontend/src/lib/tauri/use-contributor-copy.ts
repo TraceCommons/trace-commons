@@ -11,6 +11,7 @@ import {
   getRedactionSummary,
   getResidualSecretLine,
   getWithdrawalConfirmationPrompt,
+  getWitnessCapacityNotice,
   getWitnessReviewCopy,
 } from "./contributor-copy-api";
 
@@ -24,6 +25,8 @@ const copyKeys = {
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
   grantVoid: (id: number) => ["contributor-copy", "grant-void", id] as const,
+  witnessCapacity: (waiting: number) =>
+    ["contributor-copy", "witness-capacity", waiting] as const,
   eligibility: (label: string, reason: string | null) =>
     ["contributor-copy", "eligibility", label, reason] as const,
   eligibilityGroup: (pending: number, contributable: number | null) =>
@@ -77,6 +80,21 @@ export function useGrantVoidNotice(id: number, wire: Record<string, unknown>) {
   return useQuery({
     queryKey: copyKeys.grantVoid(id),
     queryFn: () => getGrantVoidNotice(wire),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The notice for sessions waiting on a busy witness. Keyed by the count,
+ * which is the only thing its words depend on.
+ */
+export function useWitnessCapacityNotice(
+  waiting: number,
+  wire: Record<string, unknown>,
+) {
+  return useQuery({
+    queryKey: copyKeys.witnessCapacity(waiting),
+    queryFn: () => getWitnessCapacityNotice(wire),
     staleTime: Number.POSITIVE_INFINITY,
   });
 }

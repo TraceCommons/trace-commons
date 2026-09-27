@@ -13,6 +13,10 @@ import {
   parseQuitConfirmationCopy,
   type QuitConfirmationCopy,
 } from "./quit-confirmation-copy";
+import {
+  parseWitnessCapacityNotice,
+  type WitnessCapacityNotice,
+} from "./witness-capacity";
 
 export type { QuitConfirmationCopy } from "./quit-confirmation-copy";
 
@@ -575,6 +579,19 @@ export async function getGrantVoidNotice(
   wire: Record<string, unknown>,
 ): Promise<GrantVoidNotice> {
   return parseGrantVoidNotice(await invokeTauri("grant_void_notice", { void: wire }));
+}
+
+/**
+ * The core's notice for sessions waiting on a busy privacy witness, from
+ * `status.witness_capacity` passed through. Only asked while sessions are
+ * waiting, so the core answering `null` is a payload out of step, refused.
+ */
+export async function getWitnessCapacityNotice(
+  wire: Record<string, unknown>,
+): Promise<WitnessCapacityNotice> {
+  return parseWitnessCapacityNotice(
+    await invokeTauri("witness_capacity_notice", { capacity: wire }),
+  );
 }
 
 export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy> {

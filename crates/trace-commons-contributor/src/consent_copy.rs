@@ -40,6 +40,16 @@
 //! one element of that list and returns the finished notice; across the ABI
 //! it is `tc_grant_void_notice`. It is consent copy -- the other half of the
 //! arming disclosure -- which is why it lives here.
+//!
+//! # Witness capacity notice
+//!
+//! And the notice for approved sessions held because the privacy witness is
+//! busy (`status.witness_capacity`, health label `witness-saturated`): why
+//! they wait, that nothing is sent until the witness can check them, and
+//! that nothing was lost. [`witness_capacity_notice_for_wire`] takes the
+//! status object; across the ABI it is `tc_witness_capacity_notice`. Here
+//! because it is the answer to "is anything going out without being
+//! checked", which is a consent question.
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -562,6 +572,63 @@ pub fn automatic_grant_copy(
     }
 }
 
+/// The title of the notice a shell shows while approved sessions wait on a
+/// busy witness (`status.witness_capacity`, health label
+/// `witness-saturated`).
+pub const WITNESS_CAPACITY_TITLE: &str = "Waiting for the privacy witness";
+
+/// The label beside the next retry time, which each shell renders in the
+/// contributor's local time from `status.witness_capacity.next_retry_at`.
+pub const WITNESS_CAPACITY_NEXT_CHECK: &str = "Next try";
+
+/// The notice for sessions waiting on a busy witness. See
+/// [`witness_capacity_notice`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct WitnessCapacityCopy {
+    pub title: &'static str,
+    /// Why the sessions are waiting, that nothing is sent meanwhile, and
+    /// that nothing was lost. Counted when the daemon gave a count.
+    pub body: String,
+    /// Shown with `next_retry_at` when the daemon gave one; omitted with it.
+    pub next_check: &'static str,
+}
+
+/// The notice for `waiting_sessions` approved sessions held because the
+/// privacy witness is busy. Zero words it without a count, for a shell that
+/// has the health label and nothing else.
+///
+/// Not an error and not phrased as one: nothing is broken, nothing left the
+/// machine, and the daemon retries on its own.
+#[must_use]
+pub fn witness_capacity_notice(waiting_sessions: u64) -> WitnessCapacityCopy {
+    const REST: &str = "because the privacy witness is busy checking other sessions. Nothing is sent until the witness can check";
+    let body = match waiting_sessions {
+        0 => format!(
+            "Approved sessions are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
+        ),
+        1 => format!(
+            "1 approved session is waiting {REST} it. It will be tried again automatically, and nothing has been lost."
+        ),
+        n => format!(
+            "{n} approved sessions are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
+        ),
+    };
+    WitnessCapacityCopy {
+        title: WITNESS_CAPACITY_TITLE,
+        body,
+        next_check: WITNESS_CAPACITY_NEXT_CHECK,
+    }
+}
+
+/// [`witness_capacity_notice`] from `status.witness_capacity`, passed
+/// through as the object the daemon sent. `None` when nothing is waiting,
+/// or for a value that is not that object: there is nothing to show.
+#[must_use]
+pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<WitnessCapacityCopy> {
+    let waiting = value.get("waiting_sessions")?.as_u64()?;
+    (waiting > 0).then(|| witness_capacity_notice(waiting))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,6 +1079,62 @@ mod tests {
             serde_json::json!([]),
         ] {
             assert!(void_notice_for_wire(&value).is_none(), "{value}");
+        }
+    }
+
+    /// The saturation notice says the three things a contributor needs:
+    /// why sessions are waiting, that nothing is sent meanwhile, and that
+    /// nothing was lost. With the count when the daemon gave one, agreeing
+    /// in number.
+    #[test]
+    fn the_witness_capacity_notice_says_why_and_that_nothing_is_sent() {
+        let one = witness_capacity_notice(1);
+        let many = witness_capacity_notice(3);
+        let uncounted = witness_capacity_notice(0);
+        assert_eq!(one.title, WITNESS_CAPACITY_TITLE);
+        assert!(
+            one.body.starts_with("1 approved session is waiting"),
+            "{}",
+            one.body
+        );
+        assert!(
+            many.body.starts_with("3 approved sessions are waiting"),
+            "{}",
+            many.body
+        );
+        assert!(!uncounted.body.contains('0'), "{}", uncounted.body);
+        for notice in [&one, &many, &uncounted] {
+            let lower = notice.body.to_lowercase();
+            assert!(lower.contains("privacy witness is busy"), "{}", notice.body);
+            assert!(lower.contains("nothing is sent until"), "{}", notice.body);
+            assert!(lower.contains("nothing has been lost"), "{}", notice.body);
+            for word in ["error", "failed", "503", "saturated", "capacity"] {
+                assert!(!lower.contains(word), "{word} in: {}", notice.body);
+            }
+            assert_eq!(notice.next_check, WITNESS_CAPACITY_NEXT_CHECK);
+        }
+    }
+
+    /// The wire object is `status.witness_capacity`, passed through. Nothing
+    /// to say when nothing is waiting, or for a value that is not the object.
+    #[test]
+    fn the_witness_capacity_notice_reads_the_status_object() {
+        let wire = serde_json::json!({
+            "waiting_sessions": 2, "next_retry_at": "2030-01-01T00:01:00Z",
+        });
+        assert_eq!(
+            witness_capacity_notice_for_wire(&wire),
+            Some(witness_capacity_notice(2))
+        );
+        for value in [
+            serde_json::json!({"waiting_sessions": 0, "next_retry_at": null}),
+            serde_json::json!({"next_retry_at": null}),
+            serde_json::json!({"waiting_sessions": -1}),
+            serde_json::json!({"waiting_sessions": "2"}),
+            serde_json::json!(null),
+            serde_json::json!([]),
+        ] {
+            assert_eq!(witness_capacity_notice_for_wire(&value), None, "{value}");
         }
     }
 }

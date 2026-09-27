@@ -48,6 +48,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "set_consent_scopes",
     "acknowledge_near_ai_notice",
     "grant_void_notice",
+    "witness_capacity_notice",
     "acknowledge_grant_voids",
     "automatic_grant",
     "grant_automatic",

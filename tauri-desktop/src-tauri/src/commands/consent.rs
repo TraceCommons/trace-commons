@@ -72,6 +72,16 @@ pub(crate) fn grant_void_notice(void: serde_json::Value) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// The notice for approved sessions held because the privacy witness is
+/// busy, from `status.witness_capacity` passed through: the words and the
+/// count, both from the contributor core. `null` when nothing is waiting.
+#[tauri::command]
+pub(crate) fn witness_capacity_notice(capacity: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::witness_capacity_notice_for_wire(&capacity)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Record that the notices with these ids were shown. Acknowledging re-arms
 /// nothing.
 #[tauri::command]

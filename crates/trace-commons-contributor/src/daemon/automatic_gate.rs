@@ -44,14 +44,17 @@
 //!
 //! **R1 is not a gate.** Full trust lets a folder with no verified model pass
 //! send after deterministic redaction. What R1 still decides is what the
-//! contributor is told: see [`disclosure`], which may claim a model scrubbed
-//! a session only where a certified full pipeline ran.
+//! contributor is told: see [`session_redaction`], the per-session check of
+//! the certified pipeline version against the published allowlist (K6), and
+//! [`folder_disclosure`], which may claim a model scrubbed a folder's
+//! sessions only where a certified full pipeline ran on every one.
 //!
 //! R4 (provenance) is a property of what is claimed, R5 (the hold) is the
 //! queue's `held_for_review`, and R6 (the void rule) is a property of the
 //! grant rather than of a send; none is evaluated here.
 
-use crate::config::ContributorConfig;
+use crate::config::{ContributorConfig, WitnessSettings};
+use crate::witness::transport::{WitnessedEnvelope, certified_redaction_pipeline_version};
 
 /// Whether an unmet requirement stops an unattended approval. See the module
 /// docs for why this is off.
@@ -222,12 +225,92 @@ pub enum Disclosure {
 /// R1, as the choice of disclosure: "trust relaxes what may be sent, never
 /// what may be said".
 ///
-/// Always [`Disclosure::PatternsOnly`] for now. A configured witness or
-/// filter is not enough -- R1 needs the certified pipeline version checked
-/// per session against the published allowlist (K6), which waits on #1005.
-/// Configuration presence never earns the model-scrub wording.
+/// From configuration alone, always [`Disclosure::PatternsOnly`]. A
+/// configured witness or filter is not evidence that a classifier ran: the
+/// witness has a `deterministic-only` mode, and a `pii_filter` of `None` can
+/// still pick up one from the environment. Configuration presence never
+/// earns the model-scrub wording; only [`folder_disclosure`] over the
+/// sessions' certificates does.
 pub fn disclosure(_cfg: Option<&ContributorConfig>) -> Disclosure {
     Disclosure::PatternsOnly
+}
+
+/// What one session's certificate shows about the redaction it had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRedaction {
+    /// A certificate that verifies against the pinned witness names a
+    /// pipeline in `FULL_REDACTION_PIPELINE_VERSIONS`, exactly.
+    CertifiedFullPipeline,
+    /// Anything else: no certificate, an unpinned or absent witness, a
+    /// certificate that does not verify, or one naming a version off the
+    /// allowlist -- including the deterministic-only run and the fail-open
+    /// sidecar v1.
+    NotCertified,
+}
+
+/// K6: whether a certified full pipeline ran for this session.
+///
+/// Reads the version only through [`certified_redaction_pipeline_version`],
+/// which returns it only after the certificate's digest matches the bytes
+/// and its signature recovers to the pinned signer, so a field the
+/// signature does not cover is never consulted. The witness must also be
+/// pinned to a measurement, the same condition the approved-review path in
+/// `submit` puts on a saved certificate: an unpinned signer is a key, not an
+/// enclave.
+///
+/// The comparison is exact membership in the protocol crate's allowlist,
+/// shared with the server: no prefix match, no case folding, no trimming.
+/// Fails closed on everything else.
+pub fn session_redaction(
+    witnessed: Option<&WitnessedEnvelope>,
+    witness: Option<&WitnessSettings>,
+) -> SessionRedaction {
+    let (Some(response), Some(settings)) = (witnessed, witness) else {
+        return SessionRedaction::NotCertified;
+    };
+    if !settings
+        .trust()
+        .map(|trust| trust.is_pinned())
+        .unwrap_or(false)
+    {
+        return SessionRedaction::NotCertified;
+    }
+    match certified_redaction_pipeline_version(response, &settings.signing_address) {
+        Ok(version)
+            if trace_commons_protocol::trace_contribution::is_full_redaction_pipeline_version(
+                &version,
+            ) =>
+        {
+            SessionRedaction::CertifiedFullPipeline
+        }
+        _ => SessionRedaction::NotCertified,
+    }
+}
+
+/// R1's disclosure for a folder, from its automatic sessions' checks.
+///
+/// [`Disclosure::ModelScrubbed`] only when there is at least one session and
+/// every one is [`SessionRedaction::CertifiedFullPipeline`] -- the spec's
+/// "every session in the folder is certified by the enclave". One session
+/// without it and the folder is [`Disclosure::PatternsOnly`], since the
+/// model-scrub wording would then be false for that session. No sessions is
+/// `PatternsOnly` too: nothing has run, so nothing is certified.
+pub fn folder_disclosure<I>(sessions: I) -> Disclosure
+where
+    I: IntoIterator<Item = SessionRedaction>,
+{
+    let mut any = false;
+    for session in sessions {
+        if session != SessionRedaction::CertifiedFullPipeline {
+            return Disclosure::PatternsOnly;
+        }
+        any = true;
+    }
+    if any {
+        Disclosure::ModelScrubbed
+    } else {
+        Disclosure::PatternsOnly
+    }
 }
 
 #[cfg(test)]
@@ -281,8 +364,8 @@ mod tests {
         }
     }
 
-    /// Configuration never earns the model-scrub wording; only a per-session
-    /// check of the certified pipeline would, and there is none yet.
+    /// Configuration never earns the model-scrub wording; only the
+    /// per-session check of the certified pipeline does.
     #[test]
     fn no_configuration_earns_the_model_scrub_disclosure() {
         assert_eq!(disclosure(None), Disclosure::PatternsOnly);
@@ -295,6 +378,193 @@ mod tests {
                     pii
                 ))),
                 Disclosure::PatternsOnly
+            );
+        }
+    }
+
+    fn pinned_witness(signing_address: &str) -> WitnessSettings {
+        serde_json::from_value(serde_json::json!({
+            "url": "https://witness.example",
+            "signing_address": signing_address,
+            "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+        }))
+        .unwrap()
+    }
+
+    fn certified(policy: &str) -> (WitnessedEnvelope, WitnessSettings) {
+        let (response, address) = crate::witness::transport::signed_fixture_with_policy(
+            b"{\"envelope\":1}".to_vec(),
+            policy,
+        );
+        (response, pinned_witness(&address))
+    }
+
+    const NEAR_AI_FULL: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1";
+
+    /// K6: each exact allowlisted version, under a certificate that verifies
+    /// against the pinned signer, is a certified full pipeline.
+    #[test]
+    fn an_allowlisted_version_under_a_verified_certificate_is_certified() {
+        for version in trace_commons_protocol::trace_contribution::FULL_REDACTION_PIPELINE_VERSIONS
+        {
+            let (response, witness) = certified(version);
+            assert_eq!(
+                session_redaction(Some(&response), Some(&witness)),
+                SessionRedaction::CertifiedFullPipeline,
+                "{version}"
+            );
+            assert_eq!(
+                folder_disclosure([session_redaction(Some(&response), Some(&witness))]),
+                Disclosure::ModelScrubbed
+            );
+        }
+    }
+
+    /// Exact membership only: the deterministic-only run, the fail-open
+    /// sidecar v1, an unknown suffix, a prefix, a case change and stray
+    /// whitespace are all off the list, signed or not.
+    #[test]
+    fn a_version_off_the_allowlist_is_not_certified_however_close() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v1",
+            "ironclaw-deterministic-secret-path-v2+privacy-filter-near-ai-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1+extra",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai",
+            "IRONCLAW-DETERMINISTIC-SECRET-PATH-V3+PRIVACY-FILTER-NEAR-AI-V1",
+            "ironclaw-deterministic-secret-path-v3+Privacy-Filter-Near-AI-v1",
+            " ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1\n",
+            "full-pipeline",
+            "deterministic-v1",
+            "",
+        ] {
+            let (response, witness) = certified(version);
+            assert!(
+                crate::witness::transport::verify_certificate(&response, &witness.signing_address)
+                    .is_ok(),
+                "the fixture is validly signed, so only the version refuses it: {version:?}"
+            );
+            assert_eq!(
+                session_redaction(Some(&response), Some(&witness)),
+                SessionRedaction::NotCertified,
+                "{version:?}"
+            );
+        }
+    }
+
+    /// The version is read only from a certificate that verifies. An
+    /// off-list certificate rewritten to name an allowlisted version, one
+    /// with no signature, one signed by another key and one missing the
+    /// field altogether are all refused.
+    #[test]
+    fn an_unverified_version_is_never_read() {
+        let (signed, witness) = certified("ironclaw-deterministic-secret-path-v3");
+
+        let mut tampered = signed.clone();
+        let mut cert: serde_json::Value = serde_json::from_str(&tampered.certificate_json).unwrap();
+        cert["redaction_policy_version"] = serde_json::json!(NEAR_AI_FULL);
+        tampered.certificate_json = cert.to_string();
+        assert_eq!(
+            session_redaction(Some(&tampered), Some(&witness)),
+            SessionRedaction::NotCertified,
+            "tampered"
+        );
+
+        let (allowlisted, _) = certified(NEAR_AI_FULL);
+        let mut unsigned = allowlisted.clone();
+        unsigned.signature_hex = String::new();
+        assert_eq!(
+            session_redaction(Some(&unsigned), Some(&witness)),
+            SessionRedaction::NotCertified,
+            "unsigned"
+        );
+
+        let mut missing = allowlisted.clone();
+        let mut cert: serde_json::Value = serde_json::from_str(&missing.certificate_json).unwrap();
+        cert.as_object_mut()
+            .unwrap()
+            .remove("redaction_policy_version");
+        missing.certificate_json = cert.to_string();
+        assert_eq!(
+            session_redaction(Some(&missing), Some(&witness)),
+            SessionRedaction::NotCertified,
+            "missing"
+        );
+
+        let mut other_bytes = allowlisted.clone();
+        other_bytes.envelope_bytes = b"{\"envelope\":2}".to_vec();
+        assert_eq!(
+            session_redaction(Some(&other_bytes), Some(&witness)),
+            SessionRedaction::NotCertified,
+            "certificate over other bytes"
+        );
+
+        let other_signer = pinned_witness(&format!("0x{}", "cd".repeat(20)));
+        assert_eq!(
+            session_redaction(Some(&allowlisted), Some(&other_signer)),
+            SessionRedaction::NotCertified,
+            "another signer"
+        );
+
+        let mut malformed = allowlisted.clone();
+        malformed.certificate_json = "not json".to_string();
+        assert_eq!(
+            session_redaction(Some(&malformed), Some(&witness)),
+            SessionRedaction::NotCertified,
+            "malformed"
+        );
+
+        // The control: the untouched allowlisted certificate does pass, so
+        // each refusal above is its own check and not a broken fixture.
+        assert_eq!(
+            session_redaction(Some(&allowlisted), Some(&witness)),
+            SessionRedaction::CertifiedFullPipeline
+        );
+    }
+
+    /// No certificate, no witness, or a witness not pinned to a measurement:
+    /// not certified, whatever the certificate says.
+    #[test]
+    fn no_certificate_or_an_unpinned_witness_is_not_certified() {
+        let (response, witness) = certified(NEAR_AI_FULL);
+        assert_eq!(
+            session_redaction(None, Some(&witness)),
+            SessionRedaction::NotCertified
+        );
+        assert_eq!(
+            session_redaction(Some(&response), None),
+            SessionRedaction::NotCertified
+        );
+        let mut unpinned = witness.clone();
+        unpinned.expected_measurements.clear();
+        assert_eq!(
+            session_redaction(Some(&response), Some(&unpinned)),
+            SessionRedaction::NotCertified
+        );
+    }
+
+    /// A folder earns the model-scrub wording only when every session did,
+    /// and an empty folder has earned nothing.
+    #[test]
+    fn a_folder_is_model_scrubbed_only_when_every_session_is_certified() {
+        use SessionRedaction::{CertifiedFullPipeline, NotCertified};
+        assert_eq!(folder_disclosure([]), Disclosure::PatternsOnly);
+        assert_eq!(
+            folder_disclosure([CertifiedFullPipeline, CertifiedFullPipeline]),
+            Disclosure::ModelScrubbed
+        );
+        for sessions in [
+            vec![NotCertified],
+            vec![CertifiedFullPipeline, NotCertified],
+            vec![NotCertified, CertifiedFullPipeline],
+            vec![CertifiedFullPipeline, NotCertified, CertifiedFullPipeline],
+        ] {
+            assert_eq!(
+                folder_disclosure(sessions.clone()),
+                Disclosure::PatternsOnly,
+                "{sessions:?}"
             );
         }
     }

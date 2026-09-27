@@ -159,6 +159,9 @@ fn tauri_commands_project_shared_contributor_copy() {
     let consent = read(&root, "tauri-desktop/src-tauri/src/commands/consent.rs");
     let void_notice = rust_function(&consent, "fn grant_void_notice");
     assert!(void_notice.contains("consent_copy::void_notice_for_wire"));
+    // So does the notice for sessions held on a busy witness, and its count.
+    let capacity_notice = rust_function(&consent, "fn witness_capacity_notice");
+    assert!(capacity_notice.contains("consent_copy::witness_capacity_notice_for_wire"));
 
     let preview = rust_function(&daemon, "fn preview_entry");
     assert!(preview.contains("consent_copy::consent_copy"));
@@ -205,6 +208,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         ),
         ("quit_confirmation_copy", "platform::quit_confirmation_copy"),
         ("grant_void_notice", "consent::grant_void_notice"),
+        (
+            "witness_capacity_notice",
+            "consent::witness_capacity_notice",
+        ),
         (
             "acknowledge_grant_voids",
             "consent::acknowledge_grant_voids",
@@ -271,6 +278,38 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     }
     let shell = read(&root, "tauri-desktop/frontend/src/app/app-shell.tsx");
     assert!(shell.contains("<GrantVoidNotices"));
+
+    // Sessions held on a busy witness are told from the core's words, in
+    // the queue's health panel, from `status.witness_capacity`.
+    assert!(
+        api.contains("invokeTauri(\"witness_capacity_notice\""),
+        "frontend copy adapter no longer invokes `witness_capacity_notice`"
+    );
+    let capacity_notice = read(
+        &root,
+        "tauri-desktop/frontend/src/features/waiting/components/witness-capacity-notice.tsx",
+    );
+    for rendered_copy in [
+        "useWitnessCapacityNotice",
+        "copy.data.title",
+        "copy.data.body",
+        "nextRetryLine(copy.data, capacity)",
+    ] {
+        assert!(
+            capacity_notice.contains(rendered_copy),
+            "the witness capacity notice must use `{rendered_copy}`"
+        );
+    }
+    let panel = read(
+        &root,
+        "tauri-desktop/frontend/src/features/waiting/components/queue-status-panel.tsx",
+    );
+    assert!(panel.contains("<WitnessCapacityNotice"));
+    let waiting = read(
+        &root,
+        "tauri-desktop/frontend/src/features/waiting/waiting-page.tsx",
+    );
+    assert!(waiting.contains("witnessCapacity={status.daemon.witness_capacity}"));
 
     let witness = read(
         &root,

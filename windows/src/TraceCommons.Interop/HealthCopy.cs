@@ -187,6 +187,36 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
         return new HealthCopy(BudgetTitle, detail, null);
     }
 
+    /// <summary>
+    /// The banner for approved sessions held on a busy privacy witness, in
+    /// the Rust's words: its title, its counted body, and the next try in
+    /// local time when the daemon gave one. Null when nothing is waiting or
+    /// there is no notice to show.
+    /// </summary>
+    /// <remarks>
+    /// Not part of <see cref="ForLabel"/> for the reason
+    /// <see cref="ForBudget"/> is not: a higher label can hold the daemon's
+    /// single health slot while these sessions are still waiting. No action
+    /// label: the daemon retries on its own, and there is nothing to press.
+    /// The notice is passed in rather than fetched here, so this stays
+    /// testable without the cdylib; see <see cref="WitnessCapacitySurface"/>.
+    /// </remarks>
+    public static HealthCopy? ForWitnessCapacity(
+        WitnessCapacity? capacity,
+        WitnessCapacityNotice? notice)
+    {
+        if (capacity is null || !capacity.Waiting || notice is null)
+        {
+            return null;
+        }
+
+        var next = capacity.NextRetryAtUtc;
+        var detail = next is null
+            ? notice.Body
+            : $"{notice.Body} {notice.NextCheck}: {next.Value.ToLocalTime():t}.";
+        return new HealthCopy(notice.Title, detail, null);
+    }
+
     public bool Equals(HealthCopy? other) =>
         other is not null
         && Title == other.Title

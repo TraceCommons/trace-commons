@@ -40,6 +40,7 @@ permissions = [
   "allow-set-consent-scopes",
   "allow-acknowledge-near-ai-notice",
   "allow-grant-void-notice",
+  "allow-witness-capacity-notice",
   "allow-acknowledge-grant-voids",
   "allow-automatic-grant",
   "allow-grant-automatic",

@@ -62,6 +62,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         consent::set_consent_scopes,
         consent::acknowledge_near_ai_notice,
         consent::grant_void_notice,
+        consent::witness_capacity_notice,
         consent::acknowledge_grant_voids,
         consent::automatic_grant,
         consent::grant_automatic,
