@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
+use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 
 use crate::config::allowlist_for;
 
@@ -118,28 +119,59 @@ pub enum WithdrawError {
 /// makes no attempt at its own retry-suppression; a caller may call it again
 /// on failure without needing to check whether the first attempt actually
 /// landed.
+///
+/// The route sits behind the server's account middleware, which rotates a
+/// native session once it is old enough and hands the new token back in
+/// [`ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER`] -- on a refusal as well as a
+/// success. The old token outlives that by only a short grace, so the caller
+/// must persist [`WithdrawCall::rotated_token`] whatever the result, or the
+/// contributor is signed out a few minutes later.
 pub async fn call_withdraw(
     ingest_url: &str,
     allowed_hosts: Option<&str>,
     account_session_token: &str,
     submission_id: Uuid,
-) -> Result<WithdrawOutcome, WithdrawError> {
-    let client = Client::builder(ingest_url, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
+) -> WithdrawCall {
+    let client = match Client::builder(ingest_url, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
         .bearer_token(account_session_token)
         .host_allowlist(allowlist_for(allowed_hosts))
         .build()
-        .map_err(|_| WithdrawError::Unavailable)?;
-    let path = format!("/v1/account/traces/{submission_id}/withdraw");
-    match client
-        .call_json::<(), WithdrawResponseBody>(Method::POST, &path, &[], None)
-        .await
     {
-        Ok(body) => Ok(WithdrawOutcome {
-            token_deletion_state: body.token_deletion_state,
-            distribution_reach: body.distribution_reach,
-        }),
-        Err(e) => Err(classify(&e)),
+        Ok(client) => client,
+        Err(_) => {
+            return WithdrawCall {
+                result: Err(WithdrawError::Unavailable),
+                rotated_token: None,
+            };
+        }
+    };
+    let path = format!("/v1/account/traces/{submission_id}/withdraw");
+    let response = client
+        .call_json_with_response_header::<(), WithdrawResponseBody>(
+            Method::POST,
+            &path,
+            &[],
+            None,
+            ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+        )
+        .await;
+    WithdrawCall {
+        result: response
+            .result
+            .map(|body| WithdrawOutcome {
+                token_deletion_state: body.token_deletion_state,
+                distribution_reach: body.distribution_reach,
+            })
+            .map_err(|e| classify(&e)),
+        rotated_token: response.response_header,
     }
+}
+
+/// One withdrawal call: its result, and the rotated account session the
+/// server handed back with it, if it rotated one.
+pub struct WithdrawCall {
+    pub result: Result<WithdrawOutcome, WithdrawError>,
+    pub rotated_token: Option<String>,
 }
 
 /// Tier-aware confirmation copy, verbatim where the design doc gives it.
@@ -283,6 +315,7 @@ mod tests {
         let base = spawn(stub_withdraw(received.clone(), "not_distributed")).await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap();
         assert_eq!(
             outcome.distribution_reach,
@@ -300,6 +333,7 @@ mod tests {
         .await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap();
         assert_eq!(outcome.distribution_reach, DistributionReach::InCommons);
     }
@@ -313,6 +347,7 @@ mod tests {
         .await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap();
         assert_eq!(outcome.distribution_reach, DistributionReach::Distributed);
     }
@@ -326,6 +361,7 @@ mod tests {
         .await;
         let err = call_withdraw(&base, None, "stale-token", Uuid::nil())
             .await
+            .result
             .unwrap_err();
         assert_eq!(err, WithdrawError::SessionInvalid);
     }
@@ -343,6 +379,7 @@ mod tests {
         .await;
         let err = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap_err();
         assert_eq!(err, WithdrawError::NotFound);
     }
@@ -356,6 +393,7 @@ mod tests {
         .await;
         let err = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap_err();
         assert_eq!(err, WithdrawError::Unavailable);
     }

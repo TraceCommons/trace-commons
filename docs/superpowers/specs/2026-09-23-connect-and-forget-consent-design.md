@@ -805,15 +805,20 @@ Linux render stale or hand-written automatic-contribution copy with nothing
 failing.
 
 ```rust
-pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it.";
+pub const AUTO_SCRUB_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Everything else -- names, people, addresses, account numbers, a password typed into a sentence -- is removed when a model recognises it.";
 
-pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover and blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
+pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats they cover. Beyond those, in text they catch only a long, random-looking value right after a word like \"password\" or \"token\", and are blind to everything else. The model is not reliable. Nothing here checks whether either of them was right.";
 
 pub const AUTO_NO_REVIEW: &str = "No one looks at a session before it is sent, including you.";
 ```
 
 `AUTO_NO_REVIEW` is the sentence the product will most want to soften and the
 one that must not be.
+
+`AUTO_SCRUB_SCOPE` and `AUTO_SCRUB_LIMIT` were revised after #1008 so they
+no longer understate the cue-gated contextual-entropy pass or leave bearer
+tokens undescribed. `consent_copy.rs` is authoritative and pins both sentences
+against the redactor's behaviour.
 
 **`AUTO_REVERSAL` is withdrawn rather than reworded.** Rev 2's text gave a
 second, weaker erasure model than the canonical withdrawal copy, which the
