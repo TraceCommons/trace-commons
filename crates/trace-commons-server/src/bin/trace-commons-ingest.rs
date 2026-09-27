@@ -660,6 +660,15 @@ const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
 /// injected one is not production-qualified) rather than booting without one.
 /// See `assemble_ingest_pipeline_runtime`.
 const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED";
+/// Test-and-local-development-only opt-in that lets an injected pipeline
+/// runtime start with a non-production-qualified dependency even though
+/// tenants are routed to it or `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` is
+/// set. Production must never set this. Refused together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` (see
+/// `assemble_ingest_pipeline_runtime`). Documented in
+/// `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
+    "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
 /// Whole-seconds overrides for the per-phase claim lease (decision D4); see
 /// `parse_pipeline_lease_config_from_env`. Unset keeps
 /// `PipelineLeaseConfig::default()`'s value for that phase.
@@ -1250,7 +1259,11 @@ async fn main() -> anyhow::Result<()> {
 /// production distribution must pass an assembler and set
 /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED=true`. Startup then fails closed
 /// if assembly is absent or an injected dependency is not production
-/// qualified.
+/// qualified -- and fails closed on a non-production-qualified dependency
+/// even without that flag once tenants are routed to the pipeline
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`), unless the test-only
+/// `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` opt-in is set. See
+/// `assemble_ingest_pipeline_runtime`.
 pub async fn run_ingest(
     pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
 ) -> anyhow::Result<()> {
@@ -3790,13 +3803,19 @@ impl AppState {
             artifact_store.as_ref(),
         )?;
         let pipeline_runtime_required = env_truthy(TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED);
+        let pipeline_allow_test_dependencies =
+            env_truthy(TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES);
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
+        let pipeline_receipts_tenants_routed =
+            tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
             artifact_store.as_ref(),
             pipeline_runtime_required,
             pipeline_lease_config,
+            pipeline_receipts_tenants_routed,
+            pipeline_allow_test_dependencies,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));

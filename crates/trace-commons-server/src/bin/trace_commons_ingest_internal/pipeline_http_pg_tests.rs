@@ -198,6 +198,16 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
 /// boot uses (`assemble_ingest_pipeline_runtime`), rather than constructing
 /// one directly -- the point of this test is that the router and worker run
 /// against a service assembled exactly the way production assembles one.
+///
+/// This suite's `TestAssembler` builds reference dependencies
+/// (`ReferencePerplexityScorer`, `ReferenceEmbedder`, `IsolatedPipelineIndex`,
+/// `RecordingSettlementAdapter`) that are not production-qualified, and its
+/// only test routes `tenant-a` to the pipeline (see
+/// `real_http_receipt_completes_and_resumes_after_restart`), so both new
+/// fail-closed arguments are set here explicitly: `tenants_routed = true`
+/// reflects that reality rather than hiding it, and `allow_test_dependencies
+/// = true` is the test-only opt-in that lets the unqualified runtime start
+/// anyway (task-6-M3 brief, review comment 4108170553).
 fn assemble_test_pipeline_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
@@ -221,6 +231,8 @@ fn assemble_test_pipeline_service(
         Some(&configured_store),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
+        true,
     )
     .expect("assemble the injected pipeline runtime")
     .expect("an assembler was given, so a service is returned")

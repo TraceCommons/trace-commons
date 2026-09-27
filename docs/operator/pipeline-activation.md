@@ -41,6 +41,37 @@ injects a pipeline runtime. The repository binary injects none.
 
 Activation replaces this list with qualified routing.
 
+## Fail-closed dependency qualification
+
+`assemble_ingest_pipeline_runtime` refuses to start an injected pipeline
+runtime whose scorer, embedder, index, or any registered settlement adapter
+is not production-qualified (`pipeline_runtime_is_production_qualified`),
+with the safe label `pipeline_runtime_dependencies_not_production_qualified`,
+whenever either is true:
+
+- `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` lists at least one tenant, or
+- `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` is set.
+
+Tenants routed to the pipeline is, on its own, enough to trigger the
+refusal -- an assembly that lists tenants without also setting
+`TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` no longer runs real receipts
+through a non-production-qualified dependency (the Reference scorer, the
+in-memory `IsolatedPipelineIndex`, `RecordingSettlementAdapter`, or the
+like) just because that flag was left unset.
+
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is the only way past this
+refusal. **It is for tests and local development only. Production must
+never set it.** Setting it:
+
+- Lets an injected runtime with a non-production-qualified dependency start
+  even when tenants are routed or the runtime is required, and logs one
+  label-only warning (`pipeline_runtime_test_dependencies_allowed`) at
+  startup when it does.
+- Never combines with `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`: both set
+  refuses startup at once with
+  `pipeline_test_dependencies_not_allowed_when_required`, regardless of
+  whether the injected dependency is actually qualified.
+
 ## Per-phase claim lease (decision D4)
 
 Each pipeline phase claims its run under its own lease length, sized for how

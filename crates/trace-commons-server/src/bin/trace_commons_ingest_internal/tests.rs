@@ -10279,6 +10279,8 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         None,
         true,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
     )
     .err()
     .unwrap();
@@ -10513,6 +10515,8 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         Some(&configured_store),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10529,6 +10533,8 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         Some(&configured_store),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
     )
     .unwrap()
     .unwrap();
@@ -10536,6 +10542,401 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         service.object_store_name(),
         TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
     );
+}
+
+/// Wraps `ReferencePerplexityScorer` and overrides `production_qualified` to
+/// `true`. Real production scorers are injected by a proprietary assembler
+/// and never live in this tree (task-6-M3 brief, review comment
+/// 4108170553); this exists only so the fail-closed tests below can prove
+/// the check does not block a genuinely qualified runtime.
+struct QualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for QualifiedTestScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.0.score(plaintext)
+    }
+}
+
+impl trace_commons_server::versioned_pipeline_bundle::IdentifiedPerplexityScorer
+    for QualifiedTestScorer
+{
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_perplexity_scorer"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-test-perplexity-scorer.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `ReferenceEmbedder` the same way `QualifiedTestScorer` wraps the
+/// reference scorer.
+struct QualifiedTestEmbedder(trace_commons_gate_api::ReferenceEmbedder);
+
+impl trace_commons_gate_api::Embedder for QualifiedTestEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.0.embed(plaintext)
+    }
+}
+
+impl trace_commons_server::versioned_pipeline_bundle::IdentifiedEmbedder for QualifiedTestEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_embedder"
+    }
+
+    fn model_id(&self) -> &str {
+        "qualified-test-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-test-embedder.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `IsolatedPipelineIndex` the same way `QualifiedTestScorer` wraps the
+/// reference scorer, for both the reader and the writer half.
+struct QualifiedTestIndex(
+    Arc<trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex>,
+);
+
+impl trace_commons_gate_api::VectorIndexReader for QualifiedTestIndex {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &str,
+        index_id: &str,
+    ) -> anyhow::Result<trace_commons_gate_api::IndexSnapshot> {
+        trace_commons_gate_api::VectorIndexReader::snapshot(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+        )
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &str,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<Uuid>,
+    ) -> anyhow::Result<Vec<trace_commons_gate_api::NearestNeighbor>> {
+        trace_commons_gate_api::VectorIndexReader::nearest(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            embedding,
+            k,
+            exclude_revision,
+        )
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for QualifiedTestIndex {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        trace_commons_gate_api::VectorIndexWriter::upsert(
+            self.0.as_ref(),
+            key,
+            embedding,
+            content_hash,
+        )
+    }
+}
+
+impl trace_commons_server::versioned_pipeline_bundle::IdentifiedIndexReader for QualifiedTestIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_index_reader"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+impl trace_commons_server::versioned_pipeline_bundle::IdentifiedIndexWriter for QualifiedTestIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_index_writer"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A settlement adapter whose `production_qualified` override reports
+/// `true`. `settle` trivially echoes the expected result reference back --
+/// this double is never exercised past assembly in the tests that use it.
+struct QualifiedTestSettlementAdapter {
+    instrument_id: trace_commons_gate_api::pipeline::InstrumentId,
+}
+
+impl trace_commons_server::versioned_pipeline_credit::SettlementAdapter
+    for QualifiedTestSettlementAdapter
+{
+    fn instrument_id(&self) -> &trace_commons_gate_api::pipeline::InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "qualified_test_settlement_adapter"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    fn settle(
+        &self,
+        request: &trace_commons_server::versioned_pipeline_credit::SettlementRequest,
+    ) -> anyhow::Result<String> {
+        Ok(request.expected_result_ref_hash.clone())
+    }
+}
+
+/// A pipeline service whose scorer, embedder, index, and settlement adapter
+/// are all the `Qualified*` test doubles above, so
+/// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
+/// shape as `minimal_pipeline_service`, which stays unqualified (its
+/// settlement adapter registry is empty).
+fn qualified_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::{
+        SettlementAdapter, SettlementAdapterRegistry,
+    };
+
+    let scorer = Arc::new(QualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::new("qualified_test_instrument")?,
+    });
+    let registry = SettlementAdapterRegistry::new(vec![adapter])?;
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Builds an unqualified pipeline service (`minimal_pipeline_service`)
+/// through the `IngestPipelineRuntimeAssembler` seam, passing the configured
+/// object store name through so the M11 store-name check in
+/// `assemble_ingest_pipeline_runtime` passes.
+struct UnqualifiedAssembler;
+
+impl IngestPipelineRuntimeAssembler for UnqualifiedAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        minimal_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// Builds a production-qualified pipeline service (`qualified_pipeline_service`)
+/// through the same seam.
+struct QualifiedAssembler;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// A `TraceCorpusDbConnections` and `ConfiguredTraceArtifactStore` pair over
+/// a database-less backend, for the fail-closed dependency-qualification
+/// tests below -- none of them reaches the database, since the refusal (or
+/// its absence) is decided during assembly, before any query runs.
+async fn pipeline_runtime_fail_closed_fixture(
+    dir: &tempfile::TempDir,
+) -> (TraceCorpusDbConnections, ConfiguredTraceArtifactStore) {
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+    (connections, configured_store)
+}
+
+/// Task 6 (M3), test 1: routed tenants, an unqualified runtime, no
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`, no opt-in -- refused.
+/// Review comment 4108170553: a build that injects an assembler and lists
+/// tenants in `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` must not run real
+/// receipts through test doubles just because
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` was left unset.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_routed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .err()
+    .expect("an unqualified dependency with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+}
+
+/// Task 6 (M3), test 2: the same as above, with the test opt-in set --
+/// starts.
+#[tokio::test]
+async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        true,
+    )
+    .expect("the opt-in lets an unqualified dependency start")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+}
+
+/// Task 6 (M3), test 3: the opt-in together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` -- refused, regardless of
+/// tenant routing or dependency qualification.
+#[tokio::test]
+async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        true,
+        PipelineLeaseConfig::default(),
+        false,
+        true,
+    )
+    .err()
+    .expect("the test opt-in never combines with the required flag");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_test_dependencies_not_allowed_when_required"
+    );
+}
+
+/// Task 6 (M3), test 4: a qualified runtime with routed tenants and no
+/// opt-in -- starts. The fail-closed check must not block a genuinely
+/// production-qualified dependency.
+#[tokio::test]
+async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .expect("assemble a qualified runtime")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// Task 6 (M3), test 5: no routed tenants, no required flag, an unqualified
+/// runtime -- starts, because no receipt can reach it.
+#[tokio::test]
+async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_routed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .expect("no routed tenants and no required flag: an unqualified dependency starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
 }
 
 /// A pipeline service whose PostgreSQL backend points at a loopback port

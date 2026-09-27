@@ -39,16 +39,35 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// which case it fails closed with `pipeline_runtime_required_but_not_injected`
 /// rather than letting ingest boot without a pipeline. Given an assembler,
 /// this resolves the PostgreSQL backend and artifact store it needs from the
-/// DB-mirror and artifact-store configuration ingest already loaded, and --
-/// when `production_required` -- refuses to boot with a dependency that is
-/// not production-qualified.
+/// DB-mirror and artifact-store configuration ingest already loaded.
+///
+/// Fail-closed dependency qualification (review comment 4108170553): a
+/// non-production-qualified dependency (the Reference scorer, the in-memory
+/// `IsolatedPipelineIndex`, `RecordingSettlementAdapter`, or the like) refuses
+/// startup with `pipeline_runtime_dependencies_not_production_qualified`
+/// whenever `tenants_routed` or `production_required` is true -- tenants
+/// routed to the pipeline is exactly the condition under which real receipts
+/// would otherwise be scored and settled by test doubles. This holds whether
+/// or not `production_required` itself is set; `tenants_routed` alone is
+/// enough. `allow_test_dependencies` is the only way past that refusal, is
+/// meant for tests and local development only, and never combines with
+/// `production_required` -- both set refuses startup at once with
+/// `pipeline_test_dependencies_not_allowed_when_required`, regardless of
+/// qualification. The caller resolves both booleans from the environment (or
+/// from the tenant rollout gates); this function reads neither directly.
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
     db_connections: Option<&TraceCorpusDbConnections>,
     artifact_store: Option<&ConfiguredTraceArtifactStore>,
     production_required: bool,
     lease_config: PipelineLeaseConfig,
+    tenants_routed: bool,
+    allow_test_dependencies: bool,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
+    anyhow::ensure!(
+        !(allow_test_dependencies && production_required),
+        "pipeline_test_dependencies_not_allowed_when_required"
+    );
     let Some(assembler) = assembler else {
         anyhow::ensure!(
             !production_required,
@@ -81,11 +100,18 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.lease_config() == lease_config,
         "pipeline_runtime_lease_config_mismatch"
     );
-    if production_required {
+    if (production_required || tenants_routed)
+        && !pipeline_runtime_is_production_qualified(&service)
+    {
         anyhow::ensure!(
-            pipeline_runtime_is_production_qualified(&service),
+            allow_test_dependencies,
             "pipeline_runtime_dependencies_not_production_qualified"
         );
+        // The `ensure!` above already refused the combination of
+        // `allow_test_dependencies` with `production_required`, so reaching
+        // here means the opt-in is what let this specific, otherwise-refused
+        // runtime start.
+        tracing::warn!("pipeline_runtime_test_dependencies_allowed");
     }
     Ok(Some(service))
 }
