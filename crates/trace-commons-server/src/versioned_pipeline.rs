@@ -43,7 +43,8 @@ use crate::trace_corpus_storage::{
 use crate::versioned_pipeline_bundle::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
-    dependency_content_hash, pipeline_operation_ref, pipeline_result_ref,
+    PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, dependency_content_hash, pipeline_operation_ref,
+    pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::{
     PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry,
@@ -286,6 +287,13 @@ pub enum PipelineRunState {
     Pending,
     Leased,
     Retry,
+    /// A run Review quarantined with no human assessment yet
+    /// (`PgPipelineStore::mark_awaiting_review`, label
+    /// `review_assessment_required`). No claim query selects this state, so
+    /// the run does not retry hourly forever while it waits. Moving it back
+    /// to `Pending` once an assessment lands is a later task's route, not
+    /// this one's.
+    AwaitingReview,
     Complete,
     Failed,
 }
@@ -296,6 +304,7 @@ impl PipelineRunState {
             Self::Pending => "pending",
             Self::Leased => "leased",
             Self::Retry => "retry",
+            Self::AwaitingReview => "awaiting_review",
             Self::Complete => "complete",
             Self::Failed => "failed",
         }
@@ -306,6 +315,7 @@ impl PipelineRunState {
             "pending" => Ok(Self::Pending),
             "leased" => Ok(Self::Leased),
             "retry" => Ok(Self::Retry),
+            "awaiting_review" => Ok(Self::AwaitingReview),
             "complete" => Ok(Self::Complete),
             "failed" => Ok(Self::Failed),
             _ => Err(DatabaseError::Serialization(
@@ -1641,6 +1651,46 @@ impl PgPipelineStore {
                             GREATEST(NOW() - phase_started_at, INTERVAL '1 second'),
                             INTERVAL '1 hour'
                         ),
+                        last_error_label = $3, updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $4 AND lease_expires_at > NOW()
+                  RETURNING *",
+                &[&run.tenant_id, &run.run_id, &error_label, &lease_token],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Owner decision (2026-09-27): parks a run Review quarantined with no
+    /// human assessment yet (`PipelineRunState::AwaitingReview`, always the
+    /// label `review_assessment_required`) instead of retrying it under
+    /// `mark_transient_retry`'s hourly backoff forever. No claim query
+    /// selects `awaiting_review`, so a parked run does no further work on
+    /// its own; a later task's review route is the only thing that moves it
+    /// back to `pending` once an assessment lands.
+    ///
+    /// Fenced by the lease exactly like `mark_transient_retry`: the lease
+    /// is cleared and the claim's attempt is given back
+    /// (`attempt_count - 1`, floor 0), since parking is not a charged
+    /// failure. Unlike `mark_transient_retry`, `next_attempt_at` is left
+    /// alone -- nothing reads it while the run is parked, and the review
+    /// route that unparks it will set its own value.
+    pub async fn mark_awaiting_review(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET state = 'awaiting_review', lease_token = NULL, lease_expires_at = NULL,
+                        attempt_count = GREATEST(attempt_count - 1, 0),
                         last_error_label = $3, updated_at = NOW()
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
                     AND lease_token = $4 AND lease_expires_at > NOW()
@@ -4160,8 +4210,23 @@ impl PipelineService {
                 // like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
                     return if policy.is_transient() {
-                        self.mark_transient_retry_or_record_lease_expired(&run, policy.label())
-                            .await
+                        // Owner decision (2026-09-27): a Review quarantine
+                        // waiting on a human assessment parks the run
+                        // instead of joining `mark_transient_retry`'s
+                        // hourly backoff -- the condition never resolves on
+                        // its own, so retrying it costs a worker pass every
+                        // hour for nothing. Every other transient
+                        // `PolicyError`, in Review or any other phase,
+                        // keeps the ordinary uncharged retry.
+                        if policy.label() == PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL
+                            && run.next_phase == Some(Phase::Review)
+                        {
+                            self.mark_awaiting_review_or_record_lease_expired(&run, policy.label())
+                                .await
+                        } else {
+                            self.mark_transient_retry_or_record_lease_expired(&run, policy.label())
+                                .await
+                        }
                     } else {
                         self.mark_retry_or_record_lease_expired(&run, policy.label())
                             .await
@@ -4404,6 +4469,22 @@ impl PipelineService {
         error_label: &str,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         match self.store.mark_transient_retry(run, error_label).await {
+            Ok(updated) => Ok(Some(updated)),
+            Err(error) if is_stale_lease_db_error(&error) => {
+                Ok(self.store.record_lease_expired(run).await?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Case B (D4), the `mark_awaiting_review` shape -- see
+    /// `mark_failed_or_record_lease_expired`.
+    async fn mark_awaiting_review_or_record_lease_expired(
+        &self,
+        run: &PipelineRunRecord,
+        error_label: &str,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        match self.store.mark_awaiting_review(run, error_label).await {
             Ok(updated) => Ok(Some(updated)),
             Err(error) if is_stale_lease_db_error(&error) => {
                 Ok(self.store.record_lease_expired(run).await?)

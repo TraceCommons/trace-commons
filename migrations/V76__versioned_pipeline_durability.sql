@@ -4,8 +4,11 @@
 ALTER TABLE pipeline_runs
     DROP CONSTRAINT pipeline_runs_state_check;
 ALTER TABLE pipeline_runs
+    -- `awaiting_review`: a run Review quarantined with no human assessment
+    -- yet. No claim query selects it (they list only `pending`, `retry`,
+    -- and expired `leased`), so a parked run does not retry hourly forever.
     ADD CONSTRAINT pipeline_runs_state_check CHECK (
-        state IN ('pending', 'leased', 'retry', 'complete', 'failed')
+        state IN ('pending', 'leased', 'retry', 'awaiting_review', 'complete', 'failed')
     ),
     ADD COLUMN lease_token UUID,
     ADD COLUMN lease_expires_at TIMESTAMPTZ,

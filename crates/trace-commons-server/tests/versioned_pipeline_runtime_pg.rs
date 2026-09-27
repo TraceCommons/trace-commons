@@ -2664,11 +2664,14 @@ async fn a_rejected_receipt_records_the_decision_and_creates_no_review_work() {
 
 /// Admission Quarantine (a Medium-risk envelope): the receipt stores the
 /// submission as `quarantined` and records the Quarantine decision; Review
-/// cannot resolve it without a human assessment (PR 3), so each Review
-/// attempt is the uncharged `review_assessment_required` suspension, with
-/// the phase-age backoff -- never a charged retry and never a hot loop.
+/// cannot resolve it without a human assessment (PR 3), so the one Review
+/// attempt it gets is the uncharged `review_assessment_required` suspension
+/// -- but parked in `awaiting_review`, not retried. Owner decision
+/// (2026-09-27): no claim ever selects that state, so the run does no
+/// further work on its own however far the clock moves; a later task's
+/// review route is the only thing that moves it back to `pending`.
 #[tokio::test]
-async fn a_quarantined_receipt_waits_for_review_with_backoff() {
+async fn a_quarantined_receipt_waits_for_review_without_retrying() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -2712,49 +2715,20 @@ async fn a_quarantined_receipt_waits_for_review_with_backoff() {
         other => panic!("expected an Admission Quarantine, got {other:?}"),
     }
 
-    // The first Review attempt waits the one-second floor, uncharged.
-    let waited = service
+    // The one Review attempt this run gets parks it, uncharged -- not a
+    // retry with a backoff.
+    let parked = service
         .process_run(&tenant, created.run_id)
         .await
         .unwrap()
-        .expect("Review runs and waits for a human assessment");
-    assert_eq!(waited.state, PipelineRunState::Retry);
-    assert_eq!(waited.next_phase, Some(Phase::Review));
+        .expect("Review runs and parks the run awaiting a human assessment");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(parked.next_phase, Some(Phase::Review));
     assert_eq!(
-        waited.last_error_label.as_deref(),
+        parked.last_error_label.as_deref(),
         Some("review_assessment_required")
     );
-    assert_eq!(waited.attempt_count, 0);
-    let first_delay = waited.next_attempt_at - waited.updated_at;
-    assert!(first_delay >= chrono::Duration::seconds(1));
-    assert!(
-        service
-            .process_run(&tenant, created.run_id)
-            .await
-            .unwrap()
-            .is_none(),
-        "the run is not claimable again before its backoff elapses"
-    );
-
-    // A minute later the phase is older, so the next wait is longer; the
-    // run is still uncharged and has no Review outcome.
-    age_run(
-        &backend,
-        &tenant,
-        created.run_id,
-        chrono::Duration::seconds(60),
-    )
-    .await;
-    let waited_again = service
-        .process_run(&tenant, created.run_id)
-        .await
-        .unwrap()
-        .expect("Review runs again once the backoff elapses");
-    assert_eq!(waited_again.state, PipelineRunState::Retry);
-    assert_eq!(waited_again.attempt_count, 0);
-    let second_delay = waited_again.next_attempt_at - waited_again.updated_at;
-    assert!(second_delay > first_delay);
-    assert!(second_delay <= chrono::Duration::hours(1));
+    assert_eq!(parked.attempt_count, 0, "parking is not a charged attempt");
     assert!(
         !service
             .store()
@@ -2765,6 +2739,33 @@ async fn a_quarantined_receipt_waits_for_review_with_backoff() {
             .any(|outcome| outcome.phase == Phase::Review),
         "no Review outcome while the quarantine is unresolved"
     );
+
+    // No claim selects `awaiting_review`, at any next_attempt_at and however
+    // far the clock moves -- unlike a retry, this is not a matter of timing.
+    force_due(&backend, &tenant, created.run_id).await;
+    age_run(
+        &backend,
+        &tenant,
+        created.run_id,
+        chrono::Duration::hours(2),
+    )
+    .await;
+    assert!(
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a run awaiting review is never claimed on its own"
+    );
+    let still_parked = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run still exists");
+    assert_eq!(still_parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(still_parked.attempt_count, 0);
 }
 
 #[tokio::test]

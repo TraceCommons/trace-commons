@@ -46,6 +46,10 @@ pub const MINIMAL_INDEX_CHUNK_BYTES: usize = 256;
 pub const PIPELINE_BUNDLE_INVALID_LABEL: &str = "bundle_package_invalid";
 /// Safe label for a dependency whose descriptor the package does not name.
 pub const PIPELINE_DEPENDENCY_MISSING_LABEL: &str = "bundle_dependency_missing";
+/// Safe label for a Review quarantine with no human assessment yet. Owner
+/// decision (2026-09-27): in the Review phase this label parks the run in
+/// `PipelineRunState::AwaitingReview` instead of retrying it hourly forever.
+pub const PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL: &str = "review_assessment_required";
 
 /// A perplexity scorer identified by a content-hashable descriptor, so a
 /// bundle package can name it and a runtime can prove it matched.
@@ -251,7 +255,8 @@ impl ReviewPolicy for MinimalReviewPolicy {
                 // Human assessments arrive in PR 3 (decision D9); until then a
                 // quarantine can only be retried, not resolved.
                 let assessment = input.human_assessment.as_ref().ok_or_else(|| {
-                    PolicyError::transient("review_assessment_required").expect("static label")
+                    PolicyError::transient(PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL)
+                        .expect("static label")
                 })?;
                 if assessment.recommendation == ReviewRecommendation::Reject {
                     let result = PhaseResult {
