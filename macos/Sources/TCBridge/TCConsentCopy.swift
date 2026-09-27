@@ -43,4 +43,17 @@ public enum TCConsentCopy {
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// The notice for approved sessions held on a busy privacy witness, as a
+    /// JSON object, from `status.witness_capacity` (`WitnessCapacity.wireJSON`).
+    /// Decoded by `TCShellCore.WitnessCapacityNotice`.
+    ///
+    /// Nil when nothing is waiting, for an unreadable argument, or on a
+    /// caught panic. The count and its wording are the ABI's.
+    public static func witnessCapacityNoticeJSON(forCapacity wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_witness_capacity_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
 }

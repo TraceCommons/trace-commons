@@ -389,6 +389,11 @@ pub struct WitnessReviewCopy {
     /// exists: it used to arrive as the same word as a reviewer that was
     /// simply down.
     pub failed_receipt_declined: &'static str,
+    /// The reviewer is at capacity and judged nothing (`witness_saturated`).
+    ///
+    /// Apart from [`Self::failed_unreachable`] because it is not a fault:
+    /// the reviewer answered, on purpose, that it is busy.
+    pub failed_busy: &'static str,
     pub immutable: &'static str,
 }
 
@@ -639,6 +644,7 @@ pub fn witness_refusal_line(label: Option<&str>) -> &'static str {
         Some("witness_payload_too_large") => copy.failed_too_large,
         Some("witness_claim_unavailable") => copy.failed_not_connected,
         Some("admission_evidence_refused") => copy.failed_receipt_declined,
+        Some(trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR) => copy.failed_busy,
         _ => copy.failed,
     }
 }
@@ -696,6 +702,7 @@ pub fn witness_copy() -> WitnessCopy {
             failed_too_large: "This session is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this session's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
+            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other sessions. Nothing was sent and nothing has been approved. Try again in a minute or two.",
             immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
         wallet: WalletCopy {
@@ -1062,7 +1069,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            16,
+            17,
             "a field added to WitnessReviewCopy must be counted here"
         );
 
@@ -1073,7 +1080,7 @@ mod tests {
             .collect();
         assert_eq!(
             sentences.len(),
-            8,
+            9,
             "every refusal sentence is a failed_* field"
         );
         for sentence in &sentences {
