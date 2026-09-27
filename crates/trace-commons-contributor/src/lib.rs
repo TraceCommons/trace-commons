@@ -17,6 +17,7 @@ pub mod envelope;
 pub mod harness_state;
 pub mod history_copy;
 pub mod identity;
+pub mod inference_connection;
 pub mod insights;
 pub mod issuer_client;
 pub mod mission_attempt;

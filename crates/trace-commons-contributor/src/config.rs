@@ -43,6 +43,11 @@ pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
 /// this machine the ability to read and withdraw the previous contributor's
 /// traces.
 pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
+/// This device's inference-connection state (`daemon::inference_connection`):
+/// a selection awaiting explicit installation here, and what the last
+/// installation wrote into the config. Belongs to this enrollment, so it is
+/// swept by `wipe()` with the config it describes.
+pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -787,6 +792,7 @@ impl ConfigStore {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -806,6 +812,7 @@ impl ConfigStore {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1381,6 +1388,7 @@ mod tests {
             DAEMON_HISTORY_FILE,
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
+            DAEMON_INFERENCE_CONNECTION_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
