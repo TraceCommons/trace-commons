@@ -1,4 +1,10 @@
+import {
+  type AutomaticGrantCopy,
+  parseAutomaticGrantCopy,
+} from "./automatic-grant-copy";
 import { invokeTauri } from "./core-api";
+
+export type { AutomaticGrantCopy } from "./automatic-grant-copy";
 import {
   type GrantVoidNotice,
   parseGrantVoidNotice,
@@ -250,24 +256,12 @@ export async function getWitnessReviewCopy(): Promise<WitnessReviewCopy> {
   return parseWitnessReview(await invokeTauri("witness_review_copy"));
 }
 
-/** What a contributor is told when granting automatic contribution. */
-export type AutomaticContributionCopy = {
-  auto_scrub_scope: string;
-  auto_scrub_limit: string;
-  auto_no_review: string;
-};
-
-function parseAutomaticContribution(value: unknown): AutomaticContributionCopy {
-  const item = record(value, "automatic contribution copy");
-  return {
-    auto_scrub_scope: string(item, "auto_scrub_scope"),
-    auto_scrub_limit: string(item, "auto_scrub_limit"),
-    auto_no_review: string(item, "auto_no_review"),
-  };
-}
-
-export async function getAutomaticContributionCopy(): Promise<AutomaticContributionCopy> {
-  return parseAutomaticContribution(await invokeTauri("automatic_contribution_copy"));
+/**
+ * What a contributor is told on the Flow 1 grant screens. The core chooses
+ * the scrub wording for this configuration; see `automatic-grant-copy.ts`.
+ */
+export async function getAutomaticGrantCopy(): Promise<AutomaticGrantCopy> {
+  return parseAutomaticGrantCopy(await invokeTauri("automatic_contribution_copy"));
 }
 
 export async function getContributorDisclosureCopy(): Promise<ContributorDisclosureCopy> {

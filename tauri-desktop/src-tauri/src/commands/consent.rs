@@ -1,8 +1,9 @@
 use tauri::State;
+use trace_commons_contributor::config::{ConfigStore, ContributorConfig};
 
 use crate::{
     ipc::{call_daemon, optional_shared_state, shared_state},
-    state::AppState,
+    state::{AppState, state_directory},
 };
 
 #[tauri::command]
@@ -86,9 +87,118 @@ pub(crate) async fn acknowledge_grant_voids(
     .await
 }
 
+/// What the Tauri shell can check before asking for the Flow 1 grant.
+///
+/// The daemon's `grant_automatic` refuses only when there are no terms to
+/// grant under; it does not check R7. So the shell refuses first when the
+/// contributor has not confirmed the grant screens, is not enrolled, or has
+/// no data-use scope saved -- the scope picker has no default, so an empty
+/// list means nobody chose. The labels are fixed and carry no content.
+fn grant_precondition(
+    confirmed: bool,
+    config: Option<&ContributorConfig>,
+) -> Result<(), &'static str> {
+    if !confirmed {
+        return Err("automatic-grant-confirmation-required");
+    }
+    let Some(config) = config else {
+        return Err("automatic-grant-not-enrolled");
+    };
+    if config.consent_scopes.is_empty() {
+        return Err("automatic-grant-scope-required");
+    }
+    Ok(())
+}
+
+pub(crate) fn load_config(
+    state: &State<'_, AppState>,
+) -> Result<Option<ContributorConfig>, String> {
+    let store = ConfigStore::open(state_directory(state)?)
+        .map_err(|_| "contributor-config-unreadable".to_owned())?;
+    store
+        .load_config()
+        .map_err(|_| "contributor-config-unreadable".to_owned())
+}
+
+/// Whether the Flow 1 grant is in force, as the daemon reports it.
+#[tauri::command]
+pub(crate) async fn automatic_grant(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "automatic_grant",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+/// Give the Flow 1 grant: arm projects discovered from now on, never what is
+/// on disk. `confirmed` is the grant screen's button, pressed after the
+/// scope, path and disclosure steps.
+#[tauri::command]
+pub(crate) async fn grant_automatic(
+    state: State<'_, AppState>,
+    confirmed: bool,
+) -> Result<serde_json::Value, String> {
+    grant_precondition(confirmed, load_config(&state)?.as_ref()).map_err(str::to_owned)?;
+    call_daemon(
+        shared_state(&state)?,
+        "grant_automatic",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+/// Withdraw the Flow 1 grant. Projects it armed keep their own modes.
+#[tauri::command]
+pub(crate) async fn withdraw_automatic_grant(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "withdraw_automatic_grant",
+        serde_json::json!({}),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{grant_void_notice, scrubber_pattern_names};
+    use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
+
+    fn config(scopes: &[&str]) -> trace_commons_contributor::config::ContributorConfig {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.invalid",
+            "ingest_url": "https://ingest.invalid",
+            "audience": "aud",
+            "tenant_id": "tenant-1",
+            "instance_id": "instance-1",
+            "user_subject": "alice",
+            "device_key_id": "sha256:aa",
+            "consent_scopes": scopes,
+        }))
+        .expect("a contributor config")
+    }
+
+    #[test]
+    fn the_grant_needs_confirmation_enrollment_and_a_chosen_scope() {
+        let chosen = config(&["debugging_evaluation"]);
+        assert_eq!(
+            grant_precondition(false, Some(&chosen)),
+            Err("automatic-grant-confirmation-required")
+        );
+        assert_eq!(
+            grant_precondition(true, None),
+            Err("automatic-grant-not-enrolled")
+        );
+        assert_eq!(
+            grant_precondition(true, Some(&config(&[]))),
+            Err("automatic-grant-scope-required")
+        );
+        assert_eq!(grant_precondition(true, Some(&chosen)), Ok(()));
+    }
 
     #[test]
     fn a_void_notice_is_the_contributor_cores_copy() {

@@ -6,8 +6,9 @@ import { usePlatformCapabilities } from "../../settings/public";
 import type { OnboardingStepProps } from "./onboarding-step-types";
 
 export function OnboardingDoneStep({
+  onboarding,
   onComplete,
-}: Pick<OnboardingStepProps, "onComplete">) {
+}: Pick<OnboardingStepProps, "onboarding" | "onComplete">) {
   const disclosure = useContributorDisclosureCopy();
   const copy = disclosure.data;
   const platform = usePlatformCapabilities();
@@ -81,6 +82,17 @@ export function OnboardingDoneStep({
         </div>
       ) : (
         <p role="alert">Shared onboarding copy unavailable. Retry loading it.</p>
+      )}
+      {onboarding.granted && !onboarding.withdrawn && (
+        <Button
+          className="mb-3 mr-2.5"
+          type="button"
+          variant="outline"
+          onClick={() => void onboarding.withdrawGrant()}
+          disabled={onboarding.state === "busy"}
+        >
+          Turn off automatic contributing
+        </Button>
       )}
       <Button
         className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"

@@ -140,20 +140,26 @@ pub(crate) fn witness_review_copy() -> Value {
     json!(trace_commons_contributor::witness_copy::witness_copy().review)
 }
 
-/// The sentences a contributor reads when granting automatic contribution.
+/// The sentences a contributor reads on the Flow 1 grant screens.
 ///
-/// Taken from the shared consent payload rather than written here, so this
-/// client says what GTK, macOS and Windows say. Not rendered yet: it exists so
-/// the grant screen, when it is built, reaches for these instead of writing
-/// its own.
+/// Both the words and the choice between them come from the contributor
+/// core: `automatic_gate::disclosure` decides whether a certified full
+/// pipeline ran (R1), and `consent_copy::automatic_grant_copy` carries only
+/// the scrub wording that answer allows. The model-scrub sentences never
+/// reach this client on a route where no model's result is relied on.
 #[tauri::command]
-pub(crate) fn automatic_contribution_copy() -> Value {
-    let copy = trace_commons_contributor::consent_copy::consent_copy();
-    json!({
-        "auto_scrub_scope": copy.auto_scrub_scope,
-        "auto_scrub_limit": copy.auto_scrub_limit,
-        "auto_no_review": copy.auto_no_review,
-    })
+pub(crate) async fn automatic_contribution_copy(
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let config = crate::commands::consent::load_config(&state)?;
+    Ok(automatic_contribution_value(config.as_ref()))
+}
+
+fn automatic_contribution_value(
+    config: Option<&trace_commons_contributor::config::ContributorConfig>,
+) -> Value {
+    let disclosure = trace_commons_contributor::daemon::automatic_gate::disclosure(config);
+    json!(trace_commons_contributor::consent_copy::automatic_grant_copy(disclosure))
 }
 
 #[tauri::command]
@@ -239,7 +245,29 @@ pub(crate) async fn witness_preview_request(
 mod tests {
     use serde_json::Value;
 
-    use super::{contributor_disclosure_copy, near_ai_error_view, wallet_action};
+    use super::{
+        automatic_contribution_value, contributor_disclosure_copy, near_ai_error_view,
+        wallet_action,
+    };
+
+    /// No configuration earns the model-scrub wording today, so the grant
+    /// screen's payload never carries it, enrolled or not.
+    #[test]
+    fn the_grant_copy_is_patterns_only_and_carries_no_model_scrub_wording() {
+        use trace_commons_contributor::consent_copy::{
+            AUTO_NO_REVIEW, AUTO_PATTERNS_ONLY_SCOPE, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE,
+        };
+        let value = automatic_contribution_value(None);
+        assert_eq!(value["disclosure"], "patterns_only");
+        assert!(value["model_scrubbed"].is_null());
+        assert_eq!(value["patterns_only"]["scope"], AUTO_PATTERNS_ONLY_SCOPE);
+        assert_eq!(value["no_review"], AUTO_NO_REVIEW);
+        let wire = value.to_string();
+        for sentence in [AUTO_SCRUB_SCOPE, AUTO_SCRUB_LIMIT] {
+            let escaped = serde_json::to_string(sentence).unwrap();
+            assert!(!wire.contains(escaped.trim_matches('"')));
+        }
+    }
 
     #[test]
     fn private_ai_copy_carries_the_shared_destination_and_its_surrounding_lines() {

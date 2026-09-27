@@ -6,3 +6,4 @@ export { useProjects } from "./hooks/use-projects";
 export { useSettings } from "./hooks/use-settings";
 export { useSourceRoots } from "./hooks/use-source-roots";
 export { usePlatformCapabilities } from "./hooks/use-platform-capabilities";
+export { useWitness } from "./hooks/use-witness";

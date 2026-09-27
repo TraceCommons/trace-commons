@@ -9,24 +9,47 @@ import {
   acknowledgeNearAiNotice,
   enrollWithInvite,
   getConsentOptions,
+  grantAutomatic,
   setConsentScopes,
+  withdrawAutomaticGrant,
 } from "../api/onboarding-api";
 import { onboardingKeys } from "../api/query-keys";
+import {
+  type ContributionPath,
+  type Flow1Progress,
+  grantBlockers,
+  initialFlow1Progress,
+  requestGrant,
+} from "../flow1";
 import { rootsContinueError, rootsReadiness } from "../roots-readiness";
 import type { ConsentOption } from "../types";
 
+// The order is the spec's (connect-and-forget design, R7): source roots are
+// settled before connect, the scope picker runs immediately after connect
+// and before the path question, and the automatic path reaches the grant
+// only through both disclosure screens.
 export type OnboardingStep =
   | "welcome"
   | "roots"
   | "connect"
   | "consent"
+  | "path"
   | "privacy"
+  | "disclosure_scrub"
+  | "disclosure_witness"
+  | "grant"
   | "projects"
   | "done";
+
+function afterPrivacy(path: ContributionPath | null): OnboardingStep {
+  return path === "automatic" ? "disclosure_scrub" : "projects";
+}
 
 function previousStep(
   current: OnboardingStep,
   privacyIncluded: boolean,
+  path: ContributionPath | null,
+  scopesChosen: boolean,
 ): OnboardingStep {
   switch (current) {
     case "roots":
@@ -35,10 +58,19 @@ function previousStep(
       return "roots";
     case "consent":
       return "connect";
-    case "privacy":
+    case "path":
       return "consent";
+    case "privacy":
+      return scopesChosen ? "path" : "consent";
+    case "disclosure_scrub":
+      return privacyIncluded ? "privacy" : "path";
+    case "disclosure_witness":
+      return "disclosure_scrub";
+    case "grant":
+      return "disclosure_witness";
     case "projects":
-      return privacyIncluded ? "privacy" : "consent";
+      if (privacyIncluded) return "privacy";
+      return scopesChosen && path !== null ? "path" : "consent";
     default:
       return current;
   }
@@ -57,18 +89,28 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     alreadyEnrolled ? "consent" : "welcome",
   );
   const [privacyIncluded, setPrivacyIncluded] = useState(false);
+  const [progress, setProgress] = useState<Flow1Progress>(initialFlow1Progress);
   const options = optionsQuery.data ?? [];
+  // Connected is the daemon's answer, never a step the shell remembers.
+  const flow1: Flow1Progress = {
+    ...progress,
+    connected: core.data?.daemon.logged_in === true,
+  };
+  const invalidateAccount = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: coreKeys.status }),
+      queryClient.invalidateQueries({
+        queryKey: settingsKeys.snapshot(core.scope),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: profileKeys.public(core.scope),
+      }),
+    ]);
   const enrollMutation = useMutation({
     mutationFn: (invite: string) => enrollWithInvite(invite.trim()),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: coreKeys.status }),
-        queryClient.invalidateQueries({
-          queryKey: settingsKeys.snapshot(core.scope),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: profileKeys.public(core.scope),
-        }),
+        invalidateAccount(),
         queryClient.invalidateQueries({
           queryKey: onboardingKeys.consentOptions(core.scope),
         }),
@@ -79,15 +121,9 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     mutationFn: (scopes: string[]) => setConsentScopes(scopes),
     onSuccess: async () => {
       await Promise.all([
+        invalidateAccount(),
         queryClient.invalidateQueries({
           queryKey: onboardingKeys.consentOptions(core.scope),
-        }),
-        queryClient.invalidateQueries({ queryKey: coreKeys.status }),
-        queryClient.invalidateQueries({
-          queryKey: settingsKeys.snapshot(core.scope),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: profileKeys.public(core.scope),
         }),
       ]);
     },
@@ -96,16 +132,17 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     mutationFn: async (scan: boolean) => {
       if (scan) await acknowledgeNearAiNotice();
     },
+    onSuccess: invalidateAccount,
+  });
+  const grantMutation = useMutation({
+    mutationFn: (current: Flow1Progress) => requestGrant(current, grantAutomatic),
+    onSuccess: invalidateAccount,
+  });
+  const withdrawMutation = useMutation({
+    mutationFn: withdrawAutomaticGrant,
     onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: coreKeys.status }),
-        queryClient.invalidateQueries({
-          queryKey: settingsKeys.snapshot(core.scope),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: profileKeys.public(core.scope),
-        }),
-      ]);
+      grantMutation.reset();
+      await invalidateAccount();
     },
   });
   // Enrollment needs a running daemon. Continue waits for it rather than
@@ -134,13 +171,7 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     : null;
   const refreshEnrollment = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: coreKeys.status }),
-      queryClient.invalidateQueries({
-        queryKey: settingsKeys.snapshot(core.scope),
-      }),
-      queryClient.invalidateQueries({
-        queryKey: profileKeys.public(core.scope),
-      }),
+      invalidateAccount(),
       queryClient.invalidateQueries({
         queryKey: onboardingKeys.consentOptions(core.scope),
       }),
@@ -149,14 +180,18 @@ export function useOnboarding(alreadyEnrolled: boolean) {
   const state =
     enrollMutation.isPending ||
     consentMutation.isPending ||
-    privacyMutation.isPending
+    privacyMutation.isPending ||
+    grantMutation.isPending ||
+    withdrawMutation.isPending
       ? "busy"
       : optionsQuery.isPending
         ? "loading"
         : optionsQuery.isError ||
             enrollMutation.isError ||
             consentMutation.isError ||
-            privacyMutation.isError
+            privacyMutation.isError ||
+            grantMutation.isError ||
+            withdrawMutation.isError
           ? "error"
           : "ready";
   const error = optionsQuery.isError
@@ -167,7 +202,11 @@ export function useOnboarding(alreadyEnrolled: boolean) {
         ? "Consent choices were not saved. Nothing proceeds until the daemon confirms them."
         : privacyMutation.isError
           ? "Privacy-scan choice was not saved."
-          : null;
+          : grantMutation.isError
+            ? "Automatic contributing was not turned on. Nothing changed."
+            : withdrawMutation.isError
+              ? "Automatic contributing was not turned off. Try again from Settings."
+              : null;
   const startRoots = () => {
     startMutation.reset();
     setStep("roots");
@@ -187,7 +226,14 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     }
   };
   const back = () => {
-    setStep((current) => previousStep(current, privacyIncluded));
+    setStep((current) =>
+      previousStep(
+        current,
+        privacyIncluded,
+        progress.path,
+        progress.scopesSaved !== null,
+      ),
+    );
   };
   const enroll = async (invite: string) => {
     try {
@@ -205,21 +251,74 @@ export function useOnboarding(alreadyEnrolled: boolean) {
       // Query state remains authoritative; do not advance on a stale refresh.
     }
   };
-  const saveConsent = async (scopes: string[], showPrivacy: boolean) => {
+  // The scope picker's Continue: the daemon saves what was chosen, and only
+  // then does the path question appear.
+  const saveConsent = async (scopes: string[]) => {
     try {
       await consentMutation.mutateAsync(scopes);
-      setPrivacyIncluded(showPrivacy);
-      setStep(showPrivacy ? "privacy" : "projects");
+      setProgress((current) => ({
+        ...current,
+        scopesSaved: scopes,
+        path: null,
+        scrubDisclosureSeen: false,
+        witnessDisclosureSeen: false,
+      }));
+      setStep("path");
     } catch {
       // The mutation state supplies the existing error copy.
     }
   };
+  // R7: declining to choose is not a floor-scope grant. Nothing is saved,
+  // no grant is possible, and the contributor lands on Flow 2.
+  const declineScopes = (showPrivacy: boolean) => {
+    setProgress({ ...initialFlow1Progress, path: "ask_first" });
+    setPrivacyIncluded(showPrivacy);
+    setStep(showPrivacy ? "privacy" : "projects");
+  };
+  const choosePath = (path: ContributionPath, showPrivacy: boolean) => {
+    setProgress((current) => ({
+      ...current,
+      path,
+      scrubDisclosureSeen: false,
+      witnessDisclosureSeen: false,
+    }));
+    setPrivacyIncluded(showPrivacy);
+    setStep(showPrivacy ? "privacy" : afterPrivacy(path));
+  };
   const savePrivacy = async (scan: boolean) => {
     try {
       await privacyMutation.mutateAsync(scan);
-      setStep("projects");
+      setStep(afterPrivacy(progress.path));
     } catch {
       // The mutation state supplies the existing error copy.
+    }
+  };
+  const acknowledgeScrubDisclosure = () => {
+    setProgress((current) => ({ ...current, scrubDisclosureSeen: true }));
+    setStep("disclosure_witness");
+  };
+  const acknowledgeWitnessDisclosure = () => {
+    setProgress((current) => ({ ...current, witnessDisclosureSeen: true }));
+    setStep("grant");
+  };
+  const grant = async () => {
+    try {
+      await grantMutation.mutateAsync(flow1);
+      setStep("done");
+    } catch {
+      // The mutation state supplies the error copy; nothing was granted.
+    }
+  };
+  // Leaving the grant screen without granting is Flow 2, not a half grant.
+  const skipGrant = () => {
+    setProgress((current) => ({ ...current, path: "ask_first" }));
+    setStep("projects");
+  };
+  const withdrawGrant = async () => {
+    try {
+      await withdrawMutation.mutateAsync();
+    } catch {
+      // The mutation state supplies the error copy.
     }
   };
   const finishProjects = () => {
@@ -242,12 +341,24 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     enroll,
     markEnrolled,
     saveConsent,
+    declineScopes,
+    choosePath,
     savePrivacy,
+    acknowledgeScrubDisclosure,
+    acknowledgeWitnessDisclosure,
+    grant,
+    grantBlockers: grantBlockers(flow1),
+    granted: grantMutation.data?.granted === true,
+    skipGrant,
+    withdrawGrant,
+    withdrawn: withdrawMutation.data === true,
     finishProjects,
+    progress: flow1,
     setStep,
     optionsQuery,
     enrollMutation,
     consentMutation,
     privacyMutation,
+    grantMutation,
   };
 }

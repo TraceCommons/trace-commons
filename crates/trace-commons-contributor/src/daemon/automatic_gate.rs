@@ -213,8 +213,9 @@ pub enum Disclosure {
     /// `AUTO_SCRUB_*` wording, which says a model removes what it
     /// recognises, is true.
     ModelScrubbed,
-    /// Only the fixed patterns can be relied on. The wording for this is not
-    /// yet written (the spec's Open list).
+    /// Only the fixed patterns can be relied on. The wording for this is
+    /// `consent_copy::AUTO_PATTERNS_ONLY_*`, drafted for the Tauri grant
+    /// screen and not yet approved (the spec's Open list).
     PatternsOnly,
 }
 
