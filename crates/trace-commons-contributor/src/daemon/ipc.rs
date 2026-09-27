@@ -520,6 +520,9 @@ pub struct DaemonShared {
     /// against by `watcher::report_gate` so the level is logged when either
     /// moves, not on every poll.
     pub(crate) gate_held_logged: Mutex<(usize, Vec<&'static str>)>,
+    /// What ingest last said about account admission, for the gate's R3.
+    /// In memory only; see `account_admission`.
+    pub(crate) account_admission: super::account_admission::AccountAdmissionState,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -699,6 +702,7 @@ impl DaemonShared {
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
             gate_held_logged: Mutex::new((0, Vec::new())),
+            account_admission: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
@@ -2264,7 +2268,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             // and says so rather than queueing an unbounded number of asks.
             let mut state = shared.state.lock().expect("state lock");
             let now = chrono::Utc::now();
-            if !state.history_refresh_due_at.is_some_and(|due| due <= now) {
+            if state.history_refresh_due_at.is_none_or(|due| due > now) {
                 state.history_refresh_due_at = Some(now);
                 if state.save(&shared.store).is_err() {
                     return Response::err(
@@ -5635,6 +5639,21 @@ mod tests {
             shared.state.lock().unwrap().history_refresh_due_at,
             Some(first_due)
         );
+    }
+
+    /// A deadline still in the future (set by `note_uploads`) is pulled in
+    /// to now: an explicit ask must not wait behind a later scheduled poll.
+    #[test]
+    fn refresh_history_request_pulls_in_a_later_scheduled_poll() {
+        let shared = shared();
+        let later = chrono::Utc::now() + chrono::Duration::hours(1);
+        shared.state.lock().unwrap().history_refresh_due_at = Some(later);
+
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        let due = shared.state.lock().unwrap().history_refresh_due_at.unwrap();
+        assert!(due < later, "a later deadline must be pulled in, got {due}");
+        assert!(due <= chrono::Utc::now());
     }
 
     /// A queue entry whose session file holds `body`, so

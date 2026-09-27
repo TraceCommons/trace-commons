@@ -13,6 +13,7 @@ import { useDaemonQueryEvents } from "./hooks/use-daemon-query-events";
 import { useDesktopEvents } from "./hooks/use-desktop-events";
 import { QuitConfirmation } from "./quit-confirmation";
 import { DaemonStartupNotice } from "./daemon-startup-notice";
+import { GrantVoidNotices } from "./grant-void-notices";
 import { routeIdFromPath } from "./routes";
 
 export function AppShell() {
@@ -61,6 +62,7 @@ export function AppShell() {
             </p>
           ))}
           <DaemonStartupNotice startup={core.data?.startup} />
+          <GrantVoidNotices grantVoids={core.data?.daemon.grant_voids} />
           <AppRoutes
             requiresOnboarding={requiresOnboarding}
             core={core}
