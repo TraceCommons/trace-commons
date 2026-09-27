@@ -547,6 +547,10 @@ pub struct DaemonShared {
     private_inference_terminating: AtomicBool,
     private_inference_generation: std::sync::atomic::AtomicU64,
     token_review_generation: std::sync::atomic::AtomicU64,
+    /// Serializes the inference-connection handlers' read-modify-write of the
+    /// config and `daemon-inference-connection.json` after their network
+    /// calls. A `std` mutex: it is never held across an await.
+    pub(crate) inference_connection_lock: Mutex<()>,
     /// The credential-change count this daemon has already absorbed.
     ///
     /// See [`super::nearai_credential::ceremony::change_count`] for what the
@@ -725,6 +729,7 @@ impl DaemonShared {
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
+            inference_connection_lock: Mutex::new(()),
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
             private_inference_changed: tokio::sync::Notify::new(),
@@ -11129,6 +11134,8 @@ mod tests {
     /// Through the real dispatcher, as a shell reaches them: with no account
     /// session every inference-connection method refuses with the same label
     /// withdrawal uses, before any network call and whatever its params.
+    /// Disconnect is the one that answers: it removes the local witness
+    /// first, and reports the server step as waiting on that same label.
     #[tokio::test]
     async fn inference_connection_methods_require_an_account_session() {
         let s = shared();
@@ -11140,6 +11147,7 @@ mod tests {
                 "inference_connection_select",
                 serde_json::json!({
                     "offer_id": "near-ai",
+                    "provider_id": "near-ai",
                     "revision": format!("sha256:{}", "a".repeat(64)),
                     "config_digest": format!("sha256:{}", "b".repeat(64)),
                     "disclosure_version":
@@ -11153,10 +11161,6 @@ mod tests {
                     "config_digest": format!("sha256:{}", "b".repeat(64)),
                 }),
             ),
-            (
-                "inference_connection_disconnect",
-                serde_json::json!({ "connection_id": id }),
-            ),
         ] {
             assert!(METHODS.contains(&method), "{method} must be advertised");
             let response = handle_request_async(&s, &req(method, params)).await;
@@ -11168,6 +11172,18 @@ mod tests {
                 "{method}"
             );
         }
+        let method = "inference_connection_disconnect";
+        assert!(METHODS.contains(&method));
+        let response =
+            handle_request_async(&s, &req(method, serde_json::json!({ "connection_id": id })))
+                .await;
+        let result = response.result.expect("disconnect reports its local step");
+        assert_eq!(result["disconnected"], false);
+        assert_eq!(result["server_disconnect"], "pending");
+        assert_eq!(
+            result["server_refusal"],
+            super::super::withdraw::ERR_ACCOUNT_SESSION_REQUIRED
+        );
     }
 
     #[test]

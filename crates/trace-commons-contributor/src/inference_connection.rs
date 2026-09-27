@@ -19,7 +19,13 @@
 //!
 //! Everything the server sends is validated with the protocol crate's
 //! `validate()` and refused on any mismatch, so nothing malformed reaches a
-//! shell or the contributor config. Errors are fixed labels: never a URL, a
+//! shell or the contributor config. The witness material a select returns is
+//! also checked against its digests: the client recomputes `config_digest`
+//! from the URL, signing address, pins and receipt endpoint it was sent, and
+//! `revision` from that digest and the offer it showed, with the protocol
+//! crate's `encode_config` / `encode_revision` -- the functions the server
+//! publishes digests with. A server that answered the chosen digest with other
+//! material is refused (`inference-connection-digest-mismatch`). Errors are fixed labels: never a URL, a
 //! token, or a response body.
 
 use std::time::Duration;
@@ -138,6 +144,9 @@ pub enum ConnectionError {
     NotFound,
     /// A success response that failed validation or did not match the request.
     ResponseInvalid,
+    /// The returned witness material does not hash to the `config_digest`
+    /// (or `revision`) the contributor chose.
+    DigestMismatch,
     /// Transport failure, refused host, or an unrecognized refusal.
     Unavailable,
 }
@@ -155,6 +164,7 @@ impl ConnectionError {
             Self::InvalidSelection => "inference-connection-offer-invalid",
             Self::NotFound => "inference-connection-not-found",
             Self::ResponseInvalid => "inference-connection-response-invalid",
+            Self::DigestMismatch => "inference-connection-digest-mismatch",
             Self::Unavailable => "inference-connection-unavailable",
         }
     }
@@ -273,17 +283,21 @@ pub async fn current_selection(
 }
 
 /// Select exactly `request`: the offer revision, configuration digest and
-/// disclosure version the contributor was shown.
+/// disclosure version the contributor was shown. `provider_id` is that same
+/// offer's provider; it is not sent, but it is bound into the digests the
+/// response is checked against.
 ///
 /// A malformed request is refused before it leaves the machine. The response
 /// must name the same revision, digest and disclosure, and pass validation, or
 /// it is refused: a server answering a different configuration than the one
-/// shown is exactly the silent replacement the operator contract forbids.
+/// shown is exactly the silent replacement the operator contract forbids. Its
+/// witness material must then hash to that digest ([`verify_selected`]).
 pub async fn select(
     endpoint: &Endpoint<'_>,
     request: &SelectInferenceConnection,
+    provider_id: &str,
 ) -> ConnectionCall<SelectedInferenceConnection> {
-    if request.validate().is_err() {
+    if request.validate().is_err() || !valid_identifier(provider_id) {
         return ConnectionCall {
             result: Err(ConnectionError::InvalidSelection),
             rotated_token: None,
@@ -304,8 +318,22 @@ pub async fn select(
         {
             return Err(ConnectionError::ResponseInvalid);
         }
+        verify_selected(&selected, &request.offer_id, provider_id)?;
         Ok(selected)
     })
+}
+
+/// Recompute `selected`'s configuration digest and revision from the witness
+/// material it carries and the offer (`offer_id`, `provider_id`) the
+/// contributor was shown. Checked at select, and again before installing.
+pub fn verify_selected(
+    selected: &SelectedInferenceConnection,
+    offer_id: &str,
+    provider_id: &str,
+) -> Result<(), ConnectionError> {
+    selected
+        .verify_digests(offer_id, provider_id)
+        .map_err(|_| ConnectionError::DigestMismatch)
 }
 
 /// Disconnect `connection_id`. The server stops new use once a cooperating
@@ -371,11 +399,28 @@ pub(crate) mod test_support {
     };
     use uuid::Uuid;
 
+    /// The digest of [`witness`] with `receipt`, as the server computes it.
+    pub fn config_digest_with(receipt: Option<&str>) -> String {
+        trace_commons_protocol::inference_connection::config_digest(
+            "near-ai",
+            super::DISCLOSURE_VERSION,
+            &witness(),
+            receipt,
+        )
+    }
+    pub fn revision_with(receipt: Option<&str>) -> String {
+        trace_commons_protocol::inference_connection::offer_revision(
+            "near-ai",
+            "near-ai",
+            super::DISCLOSURE_VERSION,
+            &config_digest_with(receipt),
+        )
+    }
     pub fn revision() -> String {
-        format!("sha256:{}", "a".repeat(64))
+        revision_with(None)
     }
     pub fn config_digest() -> String {
-        format!("sha256:{}", "b".repeat(64))
+        config_digest_with(None)
     }
 
     pub fn offer() -> InferenceConnectionOffer {
@@ -406,9 +451,17 @@ pub(crate) mod test_support {
         pub select_refusal: Option<(StatusCode, &'static str)>,
         /// Echo a different config digest than the one requested.
         pub select_wrong_digest: bool,
+        /// Echo a different revision than the one requested.
+        pub select_wrong_revision: bool,
+        /// Echo a different disclosure version than the one requested.
+        pub select_wrong_disclosure: bool,
         /// The current route's selection: `None` is "no selection".
         pub current: Option<super::ConnectionStatus>,
         pub disconnect_refusal: Option<(StatusCode, &'static str)>,
+        /// Hold the current route: it signals the first `Notify` on entry and
+        /// waits on the second before reading `current`, so a test can act
+        /// while a call is in flight without depending on timing.
+        pub current_hold: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         pub offers: Vec<InferenceConnectionOffer>,
     }
 
@@ -434,8 +487,8 @@ pub(crate) mod test_support {
                 connection_id: stub.connection_id,
                 state_version: stub.state_version,
                 offer_id: "near-ai".into(),
-                revision: revision(),
-                config_digest: config_digest(),
+                revision: revision_with(stub.receipt.as_deref()),
+                config_digest: config_digest_with(stub.receipt.as_deref()),
                 disclosure_version: super::DISCLOSURE_VERSION.into(),
                 reselection_required,
             }
@@ -464,8 +517,11 @@ pub(crate) mod test_support {
             receipt: None,
             select_refusal: None,
             select_wrong_digest: false,
+            select_wrong_revision: false,
+            select_wrong_disclosure: false,
             current: None,
             disconnect_refusal: None,
+            current_hold: None,
             offers: vec![offer()],
         }));
         let seen = Arc::new(Mutex::new(Seen::default()));
@@ -490,6 +546,11 @@ pub(crate) mod test_support {
                 let (stub, seen) = (stub.clone(), seen.clone());
                 async move {
                     record(&seen, &headers);
+                    let hold = stub.lock().unwrap().current_hold.clone();
+                    if let Some((entered, release)) = hold {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
                     Json(serde_json::json!({
                         "contract_version": "inference-connection-v1",
                         "selection": stub.lock().unwrap().current,
@@ -516,13 +577,21 @@ pub(crate) mod test_support {
                     let selected = SelectedInferenceConnection {
                         connection_id: stub.connection_id,
                         state_version: stub.state_version,
-                        revision: request.revision,
+                        revision: if stub.select_wrong_revision {
+                            format!("sha256:{}", "d".repeat(64))
+                        } else {
+                            request.revision
+                        },
                         config_digest: if stub.select_wrong_digest {
                             format!("sha256:{}", "c".repeat(64))
                         } else {
                             request.config_digest
                         },
-                        disclosure_version: request.disclosure_version,
+                        disclosure_version: if stub.select_wrong_disclosure {
+                            "inference-connection-disclosure-v2".into()
+                        } else {
+                            request.disclosure_version
+                        },
                         witness: stub.witness.clone(),
                         inference_receipt_endpoint: stub.receipt.clone(),
                     };
@@ -603,7 +672,7 @@ mod tests {
         assert_eq!(list_offers(&ep).await.result.unwrap(), vec![offer()]);
         assert!(current_selection(&ep).await.result.unwrap().is_none());
         let id = server.stub.lock().unwrap().connection_id;
-        select(&ep, &request()).await.result.unwrap();
+        select(&ep, &request(), "near-ai").await.result.unwrap();
         disconnect(&ep, id).await.result.unwrap();
         let seen = server.seen.lock().unwrap();
         assert_eq!(seen.auth.len(), 4);
@@ -618,7 +687,10 @@ mod tests {
     async fn select_sends_exactly_the_shown_revision_digest_and_disclosure() {
         let server = spawn().await;
         let sent = request();
-        let selected = select(&endpoint(&server.base), &sent).await.result.unwrap();
+        let selected = select(&endpoint(&server.base), &sent, "near-ai")
+            .await
+            .result
+            .unwrap();
         assert_eq!(selected.witness, witness());
         let seen = server.seen.lock().unwrap();
         assert_eq!(
@@ -632,15 +704,74 @@ mod tests {
     async fn a_response_for_a_different_configuration_is_refused() {
         let server = spawn().await;
         server.stub.lock().unwrap().select_wrong_digest = true;
-        let result = select(&endpoint(&server.base), &request()).await.result;
+        let result = select(&endpoint(&server.base), &request(), "near-ai")
+            .await
+            .result;
         assert_eq!(result.unwrap_err(), ConnectionError::ResponseInvalid);
+    }
+
+    #[tokio::test]
+    async fn a_response_echoing_another_revision_is_refused() {
+        let server = spawn().await;
+        server.stub.lock().unwrap().select_wrong_revision = true;
+        let result = select(&endpoint(&server.base), &request(), "near-ai")
+            .await
+            .result;
+        // The echo check, not the digest check: the label says which.
+        assert_eq!(result.unwrap_err(), ConnectionError::ResponseInvalid);
+    }
+
+    #[tokio::test]
+    async fn a_response_echoing_another_disclosure_is_refused() {
+        let server = spawn().await;
+        server.stub.lock().unwrap().select_wrong_disclosure = true;
+        let result = select(&endpoint(&server.base), &request(), "near-ai")
+            .await
+            .result;
+        assert_eq!(result.unwrap_err(), ConnectionError::ResponseInvalid);
+    }
+
+    #[tokio::test]
+    async fn witness_material_that_does_not_hash_to_the_chosen_digest_is_refused() {
+        type Tamper = fn(&mut Stub);
+        let tampers: [Tamper; 5] = [
+            |stub| stub.witness.url = "https://other-witness.example/v1".into(),
+            |stub| stub.witness.signing_address = format!("0x{}", "cd".repeat(20)),
+            |stub| stub.witness.expected_measurements = vec![format!("mrtd={}", "cd".repeat(48))],
+            |stub| {
+                stub.witness
+                    .expected_measurements
+                    .push(format!("rtmr3={}", "cd".repeat(48)))
+            },
+            |stub| stub.receipt = Some("https://receipt.example/v1".into()),
+        ];
+        for tamper in tampers {
+            let server = spawn().await;
+            tamper(&mut server.stub.lock().unwrap());
+            let result = select(&endpoint(&server.base), &request(), "near-ai")
+                .await
+                .result;
+            assert_eq!(result.unwrap_err(), ConnectionError::DigestMismatch);
+        }
+        // The provider the shell showed is bound into the digest too.
+        let server = spawn().await;
+        let result = select(&endpoint(&server.base), &request(), "other-provider")
+            .await
+            .result;
+        assert_eq!(result.unwrap_err(), ConnectionError::DigestMismatch);
+        assert_eq!(
+            ConnectionError::DigestMismatch.label(),
+            "inference-connection-digest-mismatch"
+        );
     }
 
     #[tokio::test]
     async fn a_malformed_witness_in_the_response_is_refused() {
         let server = spawn().await;
         server.stub.lock().unwrap().witness.url = "http://witness.example".into();
-        let result = select(&endpoint(&server.base), &request()).await.result;
+        let result = select(&endpoint(&server.base), &request(), "near-ai")
+            .await
+            .result;
         assert_eq!(result.unwrap_err(), ConnectionError::ResponseInvalid);
     }
 
@@ -649,7 +780,9 @@ mod tests {
         let server = spawn().await;
         let mut bad = request();
         bad.disclosure_version = "other".into();
-        let result = select(&endpoint(&server.base), &bad).await.result;
+        let result = select(&endpoint(&server.base), &bad, "near-ai")
+            .await
+            .result;
         assert_eq!(result.unwrap_err(), ConnectionError::InvalidSelection);
         assert!(server.seen.lock().unwrap().selects.is_empty());
     }
@@ -659,7 +792,9 @@ mod tests {
         let server = spawn().await;
         server.stub.lock().unwrap().select_refusal =
             Some((StatusCode::CONFLICT, "connection_reselection_required"));
-        let result = select(&endpoint(&server.base), &request()).await.result;
+        let result = select(&endpoint(&server.base), &request(), "near-ai")
+            .await
+            .result;
         assert_eq!(result.unwrap_err(), ConnectionError::ReselectionRequired);
         assert_eq!(
             ConnectionError::ReselectionRequired.label(),
@@ -672,7 +807,9 @@ mod tests {
         let server = spawn().await;
         server.stub.lock().unwrap().select_refusal =
             Some((StatusCode::FORBIDDEN, "account session required"));
-        let result = select(&endpoint(&server.base), &request()).await.result;
+        let result = select(&endpoint(&server.base), &request(), "near-ai")
+            .await
+            .result;
         assert_eq!(result.unwrap_err(), ConnectionError::SessionInvalid);
         assert_eq!(
             ConnectionError::SessionInvalid.label(),
