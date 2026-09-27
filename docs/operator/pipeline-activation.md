@@ -72,7 +72,7 @@ never set it.** Setting it:
   `pipeline_test_dependencies_not_allowed_when_required`, regardless of
   whether the injected dependency is actually qualified.
 
-## Per-phase claim lease (decision D4)
+## Per-phase claim lease
 
 Each pipeline phase claims its run under its own lease length, sized for how
 long that phase can actually run rather than one fixed lease every phase
@@ -120,6 +120,18 @@ work and not implemented yet. It is what will close both gaps above -- a
 live worker renewing its lease before it expires, rather than a phase
 finding out only after the fact (or a crash never finding out at all).
 
+## Quarantined runs awaiting review
+
+A run Review quarantines with no human assessment yet is parked in the
+`awaiting_review` state, with `last_error_label = review_assessment_required`.
+No claim query selects that state, so a parked run is not claimed and does
+not retry hourly forever, and it is not charged: parking gives the claim's
+attempt back the same way a transient retry does. Nothing in this release
+moves a parked run back to `pending` -- the human review route that reads
+the assessment and unparks the run comes later. A parked run whose
+submission is later withdrawn, expired, or purged stays parked; that later
+route must itself handle an inoperable submission when it runs.
+
 ## Settle failures and settlement legs
 
 A run waits in `retry` without a charge to its attempts when the failure is
@@ -152,15 +164,19 @@ or `index_key_conflict`), no leg stays open:
   worker that fails the run. A result equal to the selected result
   reference makes the leg `complete`. Any other outcome makes it `failed`
   with `settlement_unreconciled`. The worker does not make the call when
-  the submission is no longer operable, the adapter or cap is missing, or
-  the amount is above the cap.
+  the submission is no longer operable, the adapter or cap is missing, the
+  amount is above the cap, or the persisted selection has no result for the
+  leg (it was never seeded with one).
 - When the next claim fails a crashed worker's run (`attempts_exhausted`
   after its lease expired), no worker can call the adapter. Every
   dispatched leg of another instrument is then `settlement_unreconciled`.
 
 `settlement_unreconciled` means the external payment may have happened.
 Find the leg's `operation_ref_hash` in the adapter's records and reconcile
-it by hand. Nothing retries it.
+it by hand. Nothing retries it once the run has failed. On a run that is
+still live, Settle dispatches a `settlement_unreconciled` leg again on its
+next attempt -- the label only means the *last* reconciling call did not
+confirm a match, not that the leg is done being tried.
 
 ## Receipt staging and the orphan sweep
 
@@ -173,6 +189,17 @@ staging) has passed, it deletes the object and then the row. If a delete
 fails, the row stays for the next pass and the worker logs
 `pipeline_receipt_sweep_delete_failed`. A failed receipt stays counted against
 the quota. A retry with the same submission id is not counted again.
+
+A tenant removed from `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` stops
+being swept the same pass it stops being worked: the sweep runs only over
+listed tenants. Its staged objects (and their rows) stay exactly as they
+were until the tenant is listed again or an operator removes them by hand.
+
+After a failed receipt attempt leaves a staged row, a later receipt with the
+same idempotency key and different content is refused with the
+content-conflict 409 until the sweeper removes that staged row -- up to
+about one hour after it was staged. A retry with the *same* content is
+unaffected: it replays once the run commits.
 
 ## Submission quota at switch-over
 
