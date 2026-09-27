@@ -2007,7 +2007,7 @@ impl SealedIndexCommand {
         entry: &SealedIndexEntry,
     ) -> crate::vector_index::IndexEntryKey {
         crate::vector_index::IndexEntryKey {
-            tenant_storage_ref: tenant.as_str().to_string(),
+            tenant_storage_ref: tenant.clone(),
             index_id: self.index_id.clone(),
             revision_id: self.revision_id,
             projection_id: self.projection_id.clone(),
@@ -3857,10 +3857,7 @@ mod tests {
             keys.iter().map(|key| key.chunk).collect::<Vec<_>>(),
             vec![3, 7]
         );
-        assert!(
-            keys.iter()
-                .all(|key| key.tenant_storage_ref == tenant.as_str())
-        );
+        assert!(keys.iter().all(|key| key.tenant_storage_ref == tenant));
         assert!(
             keys.iter()
                 .all(|key| key.model_id == "reference-embedder-v1")

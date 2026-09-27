@@ -1,6 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use crate::pipeline::TenantStorageRef;
 use uuid::Uuid;
 
 /// A nearest-neighbor result. `entry_id` is the `(tenant, entry_id)` UUID;
@@ -42,7 +43,7 @@ pub struct VectorIndexSnapshot {
 /// Deterministic identity for one index entry that Settle writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IndexEntryKey {
-    pub tenant_storage_ref: String,
+    pub tenant_storage_ref: TenantStorageRef,
     pub index_id: String,
     pub revision_id: Uuid,
     pub projection_id: String,
@@ -58,7 +59,7 @@ impl IndexEntryKey {
             output.extend_from_slice(value.as_bytes());
         }
         let mut bytes = b"trace-commons-index-entry-key\0".to_vec();
-        string(&mut bytes, &self.tenant_storage_ref);
+        string(&mut bytes, self.tenant_storage_ref.as_str());
         string(&mut bytes, &self.index_id);
         bytes.extend_from_slice(self.revision_id.as_bytes());
         string(&mut bytes, &self.projection_id);
@@ -98,11 +99,15 @@ pub enum IndexWriteError {
 /// Read-only index capability. Score receives this and never a writer.
 /// Every call is keyed by the tenant's derived storage reference.
 pub trait VectorIndexReader: Send + Sync {
-    fn snapshot(&self, tenant_storage_ref: &str, index_id: &str) -> anyhow::Result<IndexSnapshot>;
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<IndexSnapshot>;
 
     fn nearest(
         &self,
-        tenant_storage_ref: &str,
+        tenant_storage_ref: &TenantStorageRef,
         index_id: &str,
         embedding: &[f32],
         k: usize,
@@ -182,7 +187,10 @@ mod pipeline_index_tests {
 
     fn key() -> IndexEntryKey {
         IndexEntryKey {
-            tenant_storage_ref: "tenant_sha256:00112233445566778899aabbccddeeff".to_string(),
+            tenant_storage_ref: TenantStorageRef::new(
+                "tenant_sha256:00112233445566778899aabbccddeeff",
+            )
+            .unwrap(),
             index_id: "pipeline-test-index-v1".to_string(),
             revision_id: Uuid::nil(),
             projection_id: "pipeline-test-projection-v1".to_string(),
@@ -207,7 +215,8 @@ mod pipeline_index_tests {
         let base = key().entry_id();
         let mut changes = Vec::new();
         let mut value = key();
-        value.tenant_storage_ref = "tenant_sha256:ffeeddccbbaa99887766554433221100".to_string();
+        value.tenant_storage_ref =
+            TenantStorageRef::new("tenant_sha256:ffeeddccbbaa99887766554433221100").unwrap();
         changes.push(value);
         let mut value = key();
         value.index_id = "pipeline-test-index-v2".to_string();
