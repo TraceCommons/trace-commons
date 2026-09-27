@@ -11334,10 +11334,12 @@ async fn zero_credit_runs_read_as_zero_not_pending() {
     assert_eq!(entries[0].credit_microcredits, 0);
 }
 
-/// Task 13: `operational_summary` counts runs per (phase, state) bucket
-/// across every state a tenant's runs can be in -- including a run parked
-/// awaiting a human assessment (`review_assessment_required`) and a retry
-/// run -- and separately rolls up the retryable- and terminal-error counts.
+/// Task 13: `operational_summary` counts runs per (phase, state,
+/// reason_label) bucket across every state a tenant's runs can be in --
+/// including a run parked awaiting a human assessment
+/// (`review_assessment_required`), a retry run (`embedder_unavailable`), and
+/// a run that exhausted its attempts (`attempts_exhausted`) -- and
+/// separately rolls up the retryable- and terminal-error counts.
 #[tokio::test]
 async fn operational_summary_counts_runs_by_state_and_label() {
     let Some(backend) = runtime_backend(4).await else {
@@ -11387,6 +11389,16 @@ async fn operational_summary_counts_runs_by_state_and_label() {
         .await
         .unwrap()
         .expect("Review waits for a human assessment");
+    let quarantined = store
+        .get_run(&tenant, created_quarantine.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        quarantined.last_error_label.as_deref(),
+        Some("review_assessment_required"),
+        "the fixture's parked run must actually carry the label the summary is expected to surface"
+    );
 
     // Retry: an uncharged transient failure, labeled `embedder_unavailable`,
     // same technique as
@@ -11456,27 +11468,47 @@ async fn operational_summary_counts_runs_by_state_and_label() {
     let product = PipelineProductStore::new(backend.clone());
     let summary = product.operational_summary(&tenant).await.unwrap();
 
-    let count_for_state = |state: &str| -> u64 {
-        summary
-            .work
-            .iter()
-            .filter(|bucket| bucket.state == state)
-            .map(|bucket| bucket.count)
-            .sum()
-    };
-    assert_eq!(count_for_state("pending"), 1, "the seeded run is pending");
-    assert_eq!(
-        count_for_state("awaiting_review"),
-        1,
-        "the quarantined run is parked awaiting review with review_assessment_required"
-    );
-    assert_eq!(
-        count_for_state("retry"),
-        1,
-        "the transient failure is retrying with embedder_unavailable"
-    );
-    assert_eq!(count_for_state("complete"), 1);
-    assert_eq!(count_for_state("failed"), 1);
+    // Exact (phase, state, reason_label, count) buckets: grouping only by
+    // (phase, state) would let a retry or a failure surface under any
+    // reason label -- including no label at all -- and still pass, which is
+    // exactly the regression the label column exists to catch.
+    let mut buckets: Vec<(String, String, Option<String>, u64)> = summary
+        .work
+        .iter()
+        .map(|bucket| {
+            (
+                bucket.phase.clone(),
+                bucket.state.clone(),
+                bucket.reason_label.clone(),
+                bucket.count,
+            )
+        })
+        .collect();
+    buckets.sort();
+    let mut expected = vec![
+        ("review".to_string(), "pending".to_string(), None, 1u64),
+        (
+            "review".to_string(),
+            "awaiting_review".to_string(),
+            Some("review_assessment_required".to_string()),
+            1u64,
+        ),
+        (
+            "review".to_string(),
+            "retry".to_string(),
+            Some("embedder_unavailable".to_string()),
+            1u64,
+        ),
+        ("none".to_string(), "complete".to_string(), None, 1u64),
+        (
+            "review".to_string(),
+            "failed".to_string(),
+            Some("attempts_exhausted".to_string()),
+            1u64,
+        ),
+    ];
+    expected.sort();
+    assert_eq!(buckets, expected);
     assert_eq!(summary.retryable_error_count, 1);
     assert_eq!(summary.terminal_error_count, 1);
 

@@ -167,6 +167,11 @@ pub struct PipelineLifecycleSummary {
 pub struct PipelineWorkSummary {
     pub phase: String,
     pub state: String,
+    /// The run's `last_error_label` for this bucket, matching
+    /// `^[a-z0-9_]{1,64}$` -- a retry or a suspension always carries a safe
+    /// reason label here, so the bucket stays label-only, never a raw
+    /// message.
+    pub reason_label: Option<String>,
     pub count: u64,
     pub oldest_age_seconds: u64,
 }
@@ -588,15 +593,15 @@ impl PipelineProductStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let work_rows = tx
             .query(
-                "SELECT next_phase, state, COUNT(*) AS item_count,
+                "SELECT next_phase, state, last_error_label, COUNT(*) AS item_count,
                         GREATEST(
                             0,
                             EXTRACT(EPOCH FROM (NOW() - MIN(phase_started_at)))::bigint
                         ) AS oldest_age_seconds
                    FROM pipeline_runs
                   WHERE tenant_id = $1
-                  GROUP BY next_phase, state
-                  ORDER BY next_phase, state",
+                  GROUP BY next_phase, state, last_error_label
+                  ORDER BY next_phase, state, last_error_label",
                 &[&tenant_id],
             )
             .await?;
@@ -686,6 +691,7 @@ impl PipelineProductStore {
                 Ok(PipelineWorkSummary {
                     phase: row.get("next_phase"),
                     state: row.get("state"),
+                    reason_label: row.get("last_error_label"),
                     count: count_from_row(row, "item_count")?,
                     oldest_age_seconds: u64::try_from(row.get::<_, i64>("oldest_age_seconds"))
                         .map_err(|_| {
