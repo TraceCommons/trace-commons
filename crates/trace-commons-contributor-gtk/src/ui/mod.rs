@@ -1102,26 +1102,14 @@ impl App {
     }
 
     fn render_health(self: &Rc<Self>, status: &Status) {
-        // Two independent conditions, and the banner shows both. The health
-        // slot carries one label at a time by design, and `daily-cap-reached`
-        // is last in its precedence order -- so a spent upload budget behind
-        // a full queue was reported by neither, and the window looked simply
-        // broken. The budget line is therefore drawn from
-        // `status.daily_budget` rather than waiting for the label.
-        let mut lines: Vec<String> = Vec::new();
-        if let Some(label) = status.health.last_error_label.as_deref() {
-            // The label's own sentence, except when it IS the cap: the
-            // budget line below says the same thing with real numbers.
-            if label != "daily-cap-reached" || !status.daily_budget.blocked {
-                lines.push(copy::health_sentence(label).to_string());
-            }
-        }
-        if status.daily_budget.blocked {
-            lines.push(copy::daily_cap_sentence(
-                status.daily_budget.blocked_entries,
-                status.daily_budget.resets_at,
-            ));
-        }
+        // Independent conditions, and the banner shows each. The health slot
+        // carries one label at a time by design, and `daily-cap-reached` is
+        // last in its precedence order -- so a spent upload budget behind a
+        // full queue was reported by neither, and the window looked simply
+        // broken. The budget and witness lines are therefore drawn from
+        // their own status objects rather than waiting for the label; see
+        // `Status::health_banner_lines`.
+        let lines = status.health_banner_lines();
         if lines.is_empty() {
             self.health_banner.set_visible(false);
             return;
