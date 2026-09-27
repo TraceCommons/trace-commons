@@ -15,11 +15,21 @@ use crate::trace_corpus_storage::{
 use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
+pub mod postgres_inference_connection;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
 
 pub use postgres::InviteRedemption;
+
+/// Result of redeeming a durable invite into an authenticated account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountInviteRedemption {
+    Invited { trust_version: i64 },
+    InvalidInvite,
+    AccountIneligible,
+    IdempotencyConflict,
+}
 
 /// Insert payload for an invite grant. Mirrors `InviteEntry` minus
 /// `revoked_at`, which is only ever set by `revoke_invite_grant`.
@@ -184,6 +194,50 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    async fn select_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
+        _catalog: &crate::inference_connection::OperatorInferenceConnection,
+    ) -> Result<postgres_inference_connection::InferenceSelectionOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn current_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _catalog: &[crate::inference_connection::OperatorInferenceConnection],
+    ) -> Result<Option<postgres_inference_connection::InferenceConnectionStatus>, DatabaseError>
+    {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn disconnect_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _connection_id: uuid::Uuid,
+    ) -> Result<postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn redeem_account_invite(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _invite_hash: &str,
+        _idempotency_key: uuid::Uuid,
+    ) -> Result<AccountInviteRedemption, DatabaseError> {
+        Err(DatabaseError::Pool("account_invite_unavailable".into()))
+    }
     async fn get_reward_offer(
         &self,
         _program: uuid::Uuid,
@@ -251,6 +305,16 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<String>, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
     }
+    async fn get_near_provisioned_account(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+    async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
@@ -261,6 +325,24 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _submission: uuid::Uuid,
         _body_hash: &str,
     ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn legacy_admission_record(
+        &self,
+        _tenant: &str,
+        _submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn resume_legacy_admission(
+        &self,
+        _tenant: &str,
+        _anchor: &str,
+        _submission: uuid::Uuid,
+        _body_hash: &str,
+        _lease: uuid::Uuid,
+        _lease_seconds: i64,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
     async fn acquire_admission_processing_lock(
@@ -294,6 +376,53 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _request: &crate::admission_ledger::AdmissionReservation,
     ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn account_admission_record(
+        &self,
+        _tenant: &str,
+        _submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
+    }
+    async fn reserve_account_admission(
+        &self,
+        _request: &crate::admission_ledger::AccountAdmissionReservation,
+    ) -> Result<crate::admission_ledger::AccountAdmissionResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
+    }
+    async fn record_account_trust_fact(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _source: crate::account_trust::TrustFactSource,
+    ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
+        Err(DatabaseError::Pool("account_trust_fact_unavailable".into()))
+    }
+    async fn account_admission_status(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _principal: &str,
+        _policy: &crate::account_trust::BoundedPolicy,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionStatus>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
+    }
+    async fn transition_account_admission(
+        &self,
+        _tenant: &str,
+        _principal: &str,
+        _account: uuid::Uuid,
+        _submission: uuid::Uuid,
+        _lease: uuid::Uuid,
+        _next: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
     }
     async fn transition_submission_admission(
         &self,

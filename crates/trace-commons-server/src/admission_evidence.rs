@@ -541,6 +541,24 @@ pub fn verify_admission_evidence(
     Ok(())
 }
 
+/// Recovery may repeat authentic signed evidence after first-use expiry.
+/// This verifies signature and shape only. Callers must compare their ledger's
+/// account/body binding and any stored challenge/receipt before resuming.
+pub fn verify_stored_admission_signature(
+    evidence: &AdmissionEvidence,
+    signature: &str,
+    witness_pin: &WitnessPin,
+) -> Result<(), AdmissionEvidenceError> {
+    let bytes = evidence
+        .signing_bytes()
+        .map_err(|_| AdmissionEvidenceError)?;
+    if witness_pin.verifies_detached(&bytes, signature) {
+        Ok(())
+    } else {
+        Err(AdmissionEvidenceError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

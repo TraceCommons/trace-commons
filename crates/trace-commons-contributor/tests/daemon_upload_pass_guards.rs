@@ -110,6 +110,7 @@ impl Harness {
         store
             .save_config(&ContributorConfig {
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
                 inference_receipt_check_attestation: false,
                 schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                 issuer_url: issuer,
@@ -436,6 +437,7 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
     store
         .save_config(&ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: issuer,
@@ -552,7 +554,11 @@ async fn an_entry_claimed_for_upload_can_no_longer_be_cancelled() {
     let entry_id = h.only_entry().entry_id;
 
     assert!(
-        h.shared.queue.lock().unwrap().claim_for_upload(entry_id),
+        h.shared
+            .queue
+            .lock()
+            .unwrap()
+            .claim_for_upload(entry_id, chrono::Utc::now()),
         "an approved entry must be claimable"
     );
 

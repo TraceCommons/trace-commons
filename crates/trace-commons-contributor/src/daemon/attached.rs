@@ -21,24 +21,15 @@
 //! watcher is not running while their watcher is running. The daemon they
 //! want is up; this is how a shell reaches it.
 //!
-//! # UNIX ONLY, AND NOT AN OVERSIGHT
+//! # PERSISTENT TRANSPORTS
 //!
 //! This holds one connection open and reads it from a background thread
-//! while other threads write requests to it. On Unix that is a `UnixStream`,
-//! where the two directions are independent.
+//! while other threads write requests to it. On Unix that is a `UnixStream`.
 //!
-//! The Windows endpoint is a named pipe opened as a plain `std::fs::File` --
-//! a synchronous handle. A blocking read parked on it does not run in
-//! parallel with a write to it, so the first real round trip never
-//! completes: the CI job for that platform ran one subscribe past sixty
-//! seconds and was killed at forty-five minutes. `client::try_call` is
-//! unaffected because it writes and then reads, never both at once.
-//!
-//! Making this work on Windows needs overlapped I/O -- a tokio
-//! `NamedPipeClient` -- not a `cfg`. No Windows or GTK shell calls attach
-//! today, so [`AttachedDaemon::connect`] reports
-//! [`AttachError::UnsupportedTransport`] there rather than shipping a client
-//! that deadlocks on first use.
+//! On Windows, a Tokio `NamedPipeClient` supplies overlapped I/O. The
+//! one-shot `client::try_call` still uses a synchronous file handle because
+//! it writes and reads sequentially; this persistent client must read and
+//! write concurrently to carry pushed events.
 //!
 //! WHAT AN ATTACHED CLIENT MAY NOT DO. It must not stop the daemon. The
 //! process on the other end may be a `trace-commons-contributor daemon` under
@@ -52,9 +43,13 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
+use std::net::Shutdown;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex, mpsc};
+#[cfg(unix)]
+use std::time::Duration;
 
 #[cfg(unix)]
 use super::client::{PlatformStream, connect_for_attach};
@@ -77,11 +72,13 @@ pub enum AttachError {
     /// The daemon accepted the connection and then stopped answering.
     #[error("the attached daemon closed the connection")]
     Disconnected,
+    #[error("the attached daemon did not answer in time")]
+    TimedOut,
     /// Asking an attached client to stop a daemon it did not start.
     #[error("an attached shell may not stop a daemon it did not start")]
     StopRefused,
     /// This platform's daemon endpoint cannot carry a held-open connection.
-    /// See the module doc: the Windows named pipe is a synchronous handle.
+    /// See the module doc for the supported Unix and Windows transports.
     #[error("this platform's daemon transport cannot be attached to")]
     UnsupportedTransport,
     #[error("attached daemon transport: {0}")]
@@ -98,7 +95,7 @@ pub struct AttachedDaemon {
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Response>>>>,
     /// Pushed frames go here. `None` until `subscribe` installs a sink, so a
     /// client that never subscribes costs nothing to feed.
-    sink: Arc<Mutex<Option<Box<dyn Fn(Event) + Send + 'static>>>>,
+    sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>>,
     next_id: AtomicU64,
     closed: Arc<AtomicBool>,
 }
@@ -127,7 +124,7 @@ impl AttachedDaemon {
 
         let pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Response>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let sink: Arc<Mutex<Option<Box<dyn Fn(Event) + Send + 'static>>>> =
+        let sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>> =
             Arc::new(Mutex::new(None));
         let closed = Arc::new(AtomicBool::new(false));
 
@@ -153,8 +150,9 @@ impl AttachedDaemon {
                         continue;
                     }
                     if let Ok(event) = serde_json::from_str::<Event>(&line) {
-                        if let Some(sink) = reader_sink.lock().unwrap().as_ref() {
-                            sink(event);
+                        let callback = reader_sink.lock().unwrap().clone();
+                        if let Some(sink) = callback {
+                            (sink.lock().unwrap())(event);
                         }
                     }
                 }
@@ -183,6 +181,16 @@ impl AttachedDaemon {
 
     /// Send one request and wait for its answer.
     pub fn call(&self, method: &str, params: &serde_json::Value) -> Result<Response, AttachError> {
+        self.call_with_timeout(method, params, Duration::from_secs(60))
+    }
+
+    /// Status checks use a shorter bound so a silent daemon cannot freeze the shell.
+    pub fn call_with_timeout(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Response, AttachError> {
         if method == METHOD_SHUTDOWN {
             return Err(AttachError::StopRefused);
         }
@@ -212,7 +220,15 @@ impl AttachedDaemon {
         // The reader clears `pending` when the connection drops, which drops
         // this sender and ends the wait -- so a disconnect surfaces as
         // `Disconnected` rather than as a hang.
-        rx.recv().map_err(|_| AttachError::Disconnected)
+        match rx.recv_timeout(timeout) {
+            Ok(response) => Ok(response),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(AttachError::Disconnected),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.pending.lock().unwrap().remove(&id);
+                self.close();
+                Err(AttachError::TimedOut)
+            }
+        }
     }
 
     /// Stop delivering pushed events.
@@ -225,6 +241,17 @@ impl AttachedDaemon {
         *self.sink.lock().unwrap() = None;
     }
 
+    /// Close this client connection without sending the daemon's shutdown
+    /// method. This is for a shell that is exiting after attaching to a
+    /// daemon it did not start; closing the socket wakes the subscription
+    /// reader and leaves the daemon running for its owner.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        if let Ok(stream) = self.tx.lock() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+
     /// Install the sink pushed events are delivered to, then subscribe.
     ///
     /// Ordering matters: the daemon answers `subscribe` and then begins
@@ -234,24 +261,270 @@ impl AttachedDaemon {
     where
         F: Fn(Event) + Send + 'static,
     {
-        *self.sink.lock().unwrap() = Some(Box::new(sink));
+        *self.sink.lock().unwrap() = Some(Arc::new(Mutex::new(Box::new(sink))));
         self.call("subscribe", &serde_json::json!({}))
     }
 }
 
-/// The same surface on a platform whose endpoint cannot be held open.
+/// Windows implementation. Tokio's named-pipe client uses overlapped I/O,
+/// allowing one task to keep the event stream open while accepting writes
+/// from synchronous callers.
+#[cfg(windows)]
+mod windows_attached {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+    use tokio::sync::mpsc as tokio_mpsc;
+    use tokio::time::Instant;
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    use super::{AttachError, ConfigStore, Event, Response};
+
+    const METHOD_SHUTDOWN: &str = "shutdown";
+    const PIPE_OPEN_RETRY_WINDOW: Duration = Duration::from_millis(500);
+    const PIPE_OPEN_RETRY_DELAY: Duration = Duration::from_millis(25);
+
+    enum Command {
+        Call {
+            id: u64,
+            line: String,
+            waiter: mpsc::Sender<Response>,
+        },
+        Close,
+    }
+
+    /// A live, persistent connection to a daemon running in another process.
+    pub struct AttachedDaemon {
+        commands: tokio_mpsc::UnboundedSender<Command>,
+        sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>>,
+        next_id: AtomicU64,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl AttachedDaemon {
+        /// Attach to the daemon listening on `store`'s named pipe.
+        pub fn connect(store: &ConfigStore) -> Result<Self, AttachError> {
+            let pipe_name = super::super::win_pipe::pipe_name(store);
+            let (commands, command_rx) = tokio_mpsc::unbounded_channel();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>> =
+                Arc::new(Mutex::new(None));
+            let closed = Arc::new(AtomicBool::new(false));
+
+            let thread_sink = Arc::clone(&sink);
+            let thread_closed = Arc::clone(&closed);
+            std::thread::Builder::new()
+                .name("tc-attached-pipe".into())
+                .spawn(move || {
+                    let runtime = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(AttachError::Transport(error.to_string())));
+                            return;
+                        }
+                    };
+
+                    let client = match runtime.block_on(open_pipe(&pipe_name)) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            let attach_error = if error.kind() == std::io::ErrorKind::NotFound {
+                                AttachError::NotListening
+                            } else {
+                                AttachError::Transport(error.to_string())
+                            };
+                            let _ = ready_tx.send(Err(attach_error));
+                            return;
+                        }
+                    };
+
+                    if ready_tx.send(Ok(())).is_err() {
+                        return;
+                    }
+                    runtime.block_on(run_connection(
+                        client,
+                        command_rx,
+                        thread_sink,
+                        thread_closed,
+                    ));
+                })
+                .map_err(|error| AttachError::Transport(error.to_string()))?;
+
+            match ready_rx.recv() {
+                Ok(Ok(())) => Ok(Self {
+                    commands,
+                    sink,
+                    next_id: AtomicU64::new(1),
+                    closed,
+                }),
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(AttachError::Transport(error.to_string())),
+            }
+        }
+
+        /// Whether the connection has dropped.
+        pub fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
+        /// Send one request and wait for its answer.
+        pub fn call(
+            &self,
+            method: &str,
+            params: &serde_json::Value,
+        ) -> Result<Response, AttachError> {
+            self.call_with_timeout(method, params, Duration::from_secs(60))
+        }
+
+        /// Status checks use a shorter bound so a silent daemon cannot freeze the shell.
+        pub fn call_with_timeout(
+            &self,
+            method: &str,
+            params: &serde_json::Value,
+            timeout: Duration,
+        ) -> Result<Response, AttachError> {
+            if method == METHOD_SHUTDOWN {
+                return Err(AttachError::StopRefused);
+            }
+            if self.is_closed() {
+                return Err(AttachError::Disconnected);
+            }
+
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let (waiter, response) = mpsc::channel();
+            let mut line = serde_json::to_string(&serde_json::json!({
+                "id": id,
+                "method": method,
+                "params": params,
+            }))
+            .map_err(|error| AttachError::Transport(error.to_string()))?;
+            line.push('\n');
+            self.commands
+                .send(Command::Call { id, line, waiter })
+                .map_err(|_| AttachError::Disconnected)?;
+
+            match response.recv_timeout(timeout) {
+                Ok(response) => Ok(response),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(AttachError::Disconnected),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.close();
+                    Err(AttachError::TimedOut)
+                }
+            }
+        }
+
+        /// Stop delivering pushed events while leaving the connection usable.
+        pub fn clear_sink(&self) {
+            *self.sink.lock().unwrap() = None;
+        }
+
+        /// Close this client without asking the daemon to stop.
+        pub fn close(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+            let _ = self.commands.send(Command::Close);
+        }
+
+        /// Install the sink before subscribing so the initial snapshot is delivered.
+        pub fn subscribe<F>(&self, sink: F) -> Result<Response, AttachError>
+        where
+            F: Fn(Event) + Send + 'static,
+        {
+            *self.sink.lock().unwrap() = Some(Arc::new(Mutex::new(Box::new(sink))));
+            self.call("subscribe", &serde_json::json!({}))
+        }
+    }
+
+    impl Drop for AttachedDaemon {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    async fn open_pipe(name: &str) -> std::io::Result<NamedPipeClient> {
+        let started = Instant::now();
+        loop {
+            match ClientOptions::new().open(name) {
+                Err(error)
+                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                        && started.elapsed() < PIPE_OPEN_RETRY_WINDOW =>
+                {
+                    tokio::time::sleep(PIPE_OPEN_RETRY_DELAY).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn run_connection(
+        client: NamedPipeClient,
+        mut commands: tokio_mpsc::UnboundedReceiver<Command>,
+        sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>>,
+        closed: Arc<AtomicBool>,
+    ) {
+        let (read_half, mut write_half) = tokio::io::split(client);
+        let mut lines = BufReader::new(read_half).lines();
+        let mut pending = HashMap::<u64, mpsc::Sender<Response>>::new();
+
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) if !line.trim().is_empty() => {
+                            if let Ok(response) = serde_json::from_str::<Response>(&line) {
+                                if let Some(waiter) = pending.remove(&response.id) {
+                                    let _ = waiter.send(response);
+                                }
+                            } else if let Ok(event) = serde_json::from_str::<Event>(&line) {
+                                let callback = sink.lock().unwrap().clone();
+                                if let Some(sink) = callback {
+                                    (sink.lock().unwrap())(event);
+                                }
+                            }
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                command = commands.recv() => {
+                    match command {
+                        Some(Command::Call { id, line, waiter }) => {
+                            pending.insert(id, waiter);
+                            if write_half.write_all(line.as_bytes()).await.is_err()
+                                || write_half.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Some(Command::Close) | None => break,
+                    }
+                }
+            }
+        }
+
+        closed.store(true, Ordering::SeqCst);
+        // Dropping pending senders wakes all synchronous callers as disconnected.
+    }
+}
+
+#[cfg(windows)]
+pub use windows_attached::AttachedDaemon;
+
+/// The same surface on an otherwise unsupported platform.
 ///
 /// A type rather than a `cfg` at every call site: the FFI reads one field and
 /// branches once, and it should not have to know which platforms can attach.
-/// Nothing constructs this -- `connect` is the only way in and it always
-/// refuses -- so the other methods exist to satisfy the shape and are
-/// unreachable.
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 pub struct AttachedDaemon {
     _never: std::convert::Infallible,
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 impl AttachedDaemon {
     pub fn connect(_store: &ConfigStore) -> Result<Self, AttachError> {
         Err(AttachError::UnsupportedTransport)
@@ -262,6 +535,10 @@ impl AttachedDaemon {
     }
 
     pub fn clear_sink(&self) {
+        match self._never {}
+    }
+
+    pub fn close(&self) {
         match self._never {}
     }
 
@@ -281,10 +558,13 @@ impl AttachedDaemon {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::daemon::start_embedded;
+    #[cfg(windows)]
+    use std::sync::Arc;
+    use std::sync::mpsc;
 
     /// The whole point: a second starter is refused the lock, and attaches
     /// instead of reporting a daemon that is plainly running as absent.
@@ -344,6 +624,37 @@ mod tests {
             seen.ok().as_deref(),
             Some(super::super::ipc::EVENT_SNAPSHOT),
             "subscribing over the socket did not deliver a snapshot push"
+        );
+        embedded.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn callback_can_clear_its_sink_without_deadlocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_a = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let embedded = start_embedded(store_a).await.unwrap();
+
+        let store_b = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let cleared = tokio::task::spawn_blocking(move || {
+            let attached = Arc::new(AttachedDaemon::connect(&store_b).unwrap());
+            let weak = Arc::downgrade(&attached);
+            let (tx, rx) = mpsc::channel();
+            attached
+                .subscribe(move |_| {
+                    if let Some(attached) = weak.upgrade() {
+                        attached.clear_sink();
+                    }
+                    let _ = tx.send(());
+                })
+                .unwrap();
+            rx.recv_timeout(std::time::Duration::from_secs(3))
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            cleared.is_ok(),
+            "event callback deadlocked while clearing its sink"
         );
         embedded.close();
     }

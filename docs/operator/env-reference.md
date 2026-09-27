@@ -512,6 +512,27 @@ credentials and adds two of its own. See
 | `TRACE_COMMONS_NEAR_AI_PCCS_URL` | optional | `https://api.trustedservices.intel.com` | Where Intel DCAP collateral is fetched from. Defaults to Intel's own PCS rather than a caching mirror: the collateral is what a quote is verified against. |
 | `TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS` | optional | `60` | Shared with the gate scorer; bounds each of the drill's four calls. |
 
+## Account contribution admission (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED` | optional | `false` | Explicit replacement switch. Off retains legacy evidence behavior. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` | R when enabled | (none) | Reviewed policy version allowed at startup. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule: none`. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS` | R when enabled | (none) | Positive processing lease, at most 86400 seconds. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_PROVIDER_SIGNERS` | See below | (none) | Comma-separated trusted provider-TEE signer keys. At least this or gateway signers must be configured. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_GATEWAY_SIGNERS` | See below | (none) | Comma-separated trusted gateway signer keys; optional when provider signers are configured. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_ACCEPTED_MODELS` | R with provider signers | (none) | Comma-separated accepted provider-TEE models. Not required for gateway-only evidence. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_MIN_REQUEST_BYTES` | R for independent evidence policy | (none) | Explicit positive minimum request-byte floor. |
+
+If any `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_*` variable is set, only that
+namespace is used: a partial policy fails closed, without borrowing legacy values.
+With none set, a complete legacy `TRACE_COMMONS_ADMISSION_*` evidence policy is
+required instead. Evidence verification is required whenever account admission
+is enabled; the legacy minimum-byte setting does not toggle it on or off.
+
+See [account trust](./account-trust.md) for the activation and response contract.
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.

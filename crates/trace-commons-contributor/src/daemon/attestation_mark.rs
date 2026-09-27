@@ -1,4 +1,4 @@
-//! Does this session carry proof of the model call that produced it?
+//! Does this session carry proof of its last model call?
 //!
 //! # Two questions, one classification
 //!
@@ -7,7 +7,7 @@
 //! silent for them. Underneath it, though, is a second question that every
 //! contributor has, all of the time:
 //!
-//! > Does this trace carry a verbatim copy of the model call it came from,
+//! > Does this trace carry a verbatim copy of its last model call,
 //! > of the kind a witness can check a receipt against?
 //!
 //! That is a fact about the **trace**, not about the contributor's

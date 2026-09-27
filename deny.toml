@@ -66,6 +66,12 @@ ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained with no fixed release and no successor named by the advisory. A proc-macro crate that expands at compile time and ships no runtime code, reached via the ML stack under near-ai-scorer and local-gpu-models. Revisit if its dependents drop it." },
     { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained with no fixed release. A non-cryptographic hash function with no known vulnerability, reached only under local-gpu-models-cuda via the ML stack, which production does not build. Revisit if its dependents move to rustc-hash." },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.2.0 is unmaintained; the advisory states no safe upgrade is available. Reached only under gcp-kms, via tonic 0.12.3 via google-cloud-kms 0.6.0. The migration target is rustls-pki-types' PemObject trait, which is tonic's call to make, not ours. Revisit when google-cloud-kms moves to a tonic release that has migrated." },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained with no fixed release. Tauri 2.11.5 reaches it only as a build-time macro through GTK 3's glib-macros on Linux; it ships no runtime code. Revisit when Tauri's Linux stack leaves GTK 3 or glib-macros removes it." },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range is unmaintained with no fixed release. Tauri 2.11.5 reaches it through urlpattern 0.3.0 and tauri-utils 2.9.3. Revisit when tauri-utils replaces that parser stack." },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common is unmaintained with no fixed release. Tauri 2.11.5 reaches it through urlpattern 0.3.0 and tauri-utils 2.9.3. Revisit when tauri-utils replaces that parser stack." },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property is unmaintained with no fixed release. Tauri 2.11.5 reaches it through urlpattern 0.3.0 and tauri-utils 2.9.3. Revisit when tauri-utils replaces that parser stack." },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version is unmaintained with no fixed release. Tauri 2.11.5 reaches it through urlpattern 0.3.0 and tauri-utils 2.9.3. Revisit when tauri-utils replaces that parser stack." },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident is unmaintained with no fixed release. Tauri 2.11.5 reaches it through urlpattern 0.3.0 and tauri-utils 2.9.3. Revisit when tauri-utils replaces that parser stack." },
 ]
 
 [sources]

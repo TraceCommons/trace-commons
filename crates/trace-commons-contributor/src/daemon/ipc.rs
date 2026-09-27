@@ -289,8 +289,13 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "acknowledge_grant_voids",
     "acknowledge_near_ai_notice",
     "approve",
+    "automatic_grant",
+    "grant_automatic",
+    "withdraw_automatic_grant",
+    "certificate_detail",
     "cancel",
     "clear_public_profile",
     "consent_options",
@@ -323,6 +328,11 @@ pub const METHODS: &[&str] = &[
     "hello",
     "history_detail",
     "history_rollup",
+    "inference_connection_offers",
+    "inference_connection_current",
+    "inference_connection_select",
+    "inference_connection_install",
+    "inference_connection_disconnect",
     "list_audit",
     "list_history",
     "list_pending",
@@ -451,6 +461,13 @@ struct RoutingSnapshot {
     derived: bool,
 }
 
+/// `status.witness_capacity`: see [`DaemonShared::witness_capacity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessCapacity {
+    pub waiting_sessions: usize,
+    pub next_retry_at: Option<chrono::DateTime<Utc>>,
+}
+
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
     pub store: ConfigStore,
@@ -510,6 +527,14 @@ pub struct DaemonShared {
     /// "has rows". Compared against on every refresh so a transition is
     /// reported once, not on every poll -- see [`Self::routing_transition`].
     routing_had_rows: AtomicBool,
+    /// How many sessions the last full pass reported the automatic gate as
+    /// holding, and the unmet reasons (labels) it held them for. Compared
+    /// against by `watcher::report_gate` so the level is logged when either
+    /// moves, not on every poll.
+    pub(crate) gate_held_logged: Mutex<(usize, Vec<&'static str>)>,
+    /// What ingest last said about account admission, for the gate's R3.
+    /// In memory only; see `account_admission`.
+    pub(crate) account_admission: super::account_admission::AccountAdmissionState,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -522,6 +547,10 @@ pub struct DaemonShared {
     private_inference_terminating: AtomicBool,
     private_inference_generation: std::sync::atomic::AtomicU64,
     token_review_generation: std::sync::atomic::AtomicU64,
+    /// Serializes the inference-connection handlers' read-modify-write of the
+    /// config and `daemon-inference-connection.json` after their network
+    /// calls. A `std` mutex: it is never held across an await.
+    pub(crate) inference_connection_lock: Mutex<()>,
     /// The credential-change count this daemon has already absorbed.
     ///
     /// See [`super::nearai_credential::ceremony::change_count`] for what the
@@ -688,6 +717,8 @@ impl DaemonShared {
             routing,
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
+            gate_held_logged: Mutex::new((0, Vec::new())),
+            account_admission: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
@@ -698,6 +729,7 @@ impl DaemonShared {
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
+            inference_connection_lock: Mutex::new(()),
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
             private_inference_changed: tokio::sync::Notify::new(),
@@ -1388,6 +1420,26 @@ impl DaemonShared {
         super::uploader::budget_snapshot(&approved, &state, &settings, now)
     }
 
+    /// How many approved sessions are held because the witness is at
+    /// capacity, and the earliest instant one of them will be tried again.
+    ///
+    /// Derived from the queue on every call rather than kept beside it, so
+    /// it cannot disagree with the rows it counts. Approved rows are never on
+    /// `list_pending`, so, like `daily_budget`, this is the only place a
+    /// shell can learn the condition.
+    pub fn witness_capacity(&self) -> WitnessCapacity {
+        let queue = self.queue.lock().expect("queue lock");
+        let waiting: Vec<&super::queue::QueueEntry> = queue
+            .all()
+            .iter()
+            .filter(|e| e.waiting_on_witness_capacity())
+            .collect();
+        WitnessCapacity {
+            waiting_sessions: waiting.len(),
+            next_retry_at: waiting.iter().filter_map(|e| e.retry_after).min(),
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
         let now = Utc::now();
@@ -1401,6 +1453,11 @@ impl DaemonShared {
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
         let private_inference = self.private_inference_value();
+        // Before the queue lock too: it takes the policy lock and then the
+        // queue lock, the order `list_projects` takes them in.
+        let grant_voids = self.grant_voids_value();
+        // Before the queue lock: it takes the queue lock itself.
+        let witness_capacity = self.witness_capacity();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1439,7 +1496,66 @@ impl DaemonShared {
             // routing is about reading a proxy's ledger, this is about
             // whether this daemon is hosting one.
             "private_inference_state": private_inference,
+            // Additive. Grants R6 voided that no shell has shown yet: the
+            // void notice the connect-and-forget design makes a ship
+            // condition. Beside `health` rather than in it, because the
+            // health slot holds one label and a void must not be masked by
+            // an outage, nor mask one. An empty list, never absent, so a
+            // shell can tell "nothing to show" from a daemon too old to say.
+            "grant_voids": grant_voids,
+            // Additive. Approved sessions held because the witness is at
+            // capacity, and when the first of them is tried again. Beside
+            // `health` for the reason `daily_budget` is: the health slot
+            // holds one label, and a busy witness must still be sayable
+            // while something outranks it. Always present, zero when none.
+            "witness_capacity": {
+                "waiting_sessions": witness_capacity.waiting_sessions,
+                "next_retry_at": witness_capacity.next_retry_at,
+            },
         })
+    }
+
+    /// The `grant_voids` list of [`Self::status_value`].
+    ///
+    /// Each project void is named the way `list_projects` names the project
+    /// -- `project_id` and the disambiguated label -- and never by its key,
+    /// which is a local path. The Flow 1 grant's void has neither. `reasons`
+    /// are the fixed labels the audit records; a shell turns them into words
+    /// with `consent_copy::void_notice`, never by itself.
+    fn grant_voids_value(&self) -> serde_json::Value {
+        let policy = self.policy.lock().expect("policy lock");
+        if policy.grant_voids.is_empty() {
+            return serde_json::json!([]);
+        }
+        let queue = self.queue.lock().expect("queue lock");
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let voids: Vec<serde_json::Value> = policy
+            .grant_voids
+            .iter()
+            .map(|notice| match notice.project_key.as_deref() {
+                Some(key) => serde_json::json!({
+                    "id": notice.id,
+                    "kind": "project",
+                    "voided_at": notice.voided_at,
+                    "project_id": project_id_for(key),
+                    "project_label": disambiguated_label(
+                        key,
+                        policy.projects.get(key).and_then(|e| e.display_path.as_deref()),
+                        &known,
+                    ),
+                    "reasons": notice.reasons,
+                }),
+                None => serde_json::json!({
+                    "id": notice.id,
+                    "kind": "automatic_grant",
+                    "voided_at": notice.voided_at,
+                    "project_id": serde_json::Value::Null,
+                    "project_label": serde_json::Value::Null,
+                    "reasons": notice.reasons,
+                }),
+            })
+            .collect();
+        serde_json::Value::Array(voids)
     }
 
     /// The `routing` sub-object of [`Self::status_value`].
@@ -1756,7 +1872,7 @@ pub fn entry_value(
     // evidence, stored as one artifact under one pin.
     //
     // This is NOT `attestation` below. That says whether the session carries
-    // proof of the model call that produced it; this says whether we hold a
+    // proof of its last model call; this says whether we hold a
     // witness certificate over the reviewed bytes. A session can have either
     // without the other.
     value["holds_certificate"] = serde_json::Value::Bool(e.holds_witness_certificate());
@@ -1781,7 +1897,7 @@ pub fn entry_value(
     // The opposite rule to `eligibility` above, and deliberately. That field
     // answers whether this contributor may send this session, which is a
     // question only an evidence-admitted contributor has. This one answers
-    // whether the session carries proof of the model call that produced it,
+    // whether the session carries proof of its last model call,
     // which is a fact about the trace -- and there is no contributor for whom
     // that is not worth knowing. It is about to be worth more than that: the
     // credit scoring function is expected to weight attestations, and a
@@ -1818,6 +1934,84 @@ macro_rules! try_response {
     };
 }
 
+/// Return only the signed certificate claims that are safe and useful for a
+/// review surface. Raw envelope bytes, signature bytes and certificate JSON
+/// never cross this boundary.
+fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
+    let id = try_response!(entry_id_param(req));
+    let entry = try_response!(entry_by_id(shared, req, id));
+    let Some(pin) = entry.previewed_envelope_digest.as_deref() else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "certificate-not-held");
+    };
+    if !entry.holds_witness_certificate() {
+        return Response::err(req.id, ERR_BAD_PARAMS, "certificate-not-held");
+    }
+    let artifact = match super::approved_envelope::load_witnessed(&shared.store, id) {
+        Ok(Some(artifact)) => artifact,
+        Ok(None) | Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+        }
+    };
+    if artifact.digest().ok().as_deref() != Some(pin) {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-stale");
+    }
+    let response = artifact.response();
+    let certificate: serde_json::Value = match serde_json::from_str(&response.certificate_json) {
+        Ok(value) => value,
+        Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+        }
+    };
+    let Some(redacted_sha256) = certificate.get("redacted_sha256").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(residual_risk_verdict) = certificate
+        .get("residual_risk_verdict")
+        .and_then(|v| v.as_str())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(redaction_policy_version) = certificate
+        .get("redaction_policy_version")
+        .and_then(|v| v.as_str())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(witness_measurement) = certificate
+        .get("witness_measurement")
+        .and_then(|v| v.as_str())
+    else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let Some(issued_at) = certificate.get("timestamp").and_then(|v| v.as_i64()) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+    };
+    let signer = match crate::witness::transport::recover_certificate_signer(response) {
+        Ok(signer) => signer,
+        Err(_) => {
+            return Response::err(req.id, ERR_UNAVAILABLE, "certificate-detail-unavailable");
+        }
+    };
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "state": "held",
+            "verification": "verified_at_review",
+            "redacted_sha256": redacted_sha256,
+            "residual_risk_verdict": residual_risk_verdict,
+            "redaction_policy_version": redaction_policy_version,
+            "witness_measurement": witness_measurement,
+            "issued_at": issued_at,
+            "expires_at": null,
+            "expiry_state": "not_issued",
+            "signer": signer,
+            "signature_present": !response.signature_hex.is_empty(),
+            "admission_evidence_present": response.admission.is_some(),
+            "inference_receipt": artifact.attested_inference(),
+        }),
+    )
+}
+
 /// The methods the synchronous dispatcher cannot answer, paired with the
 /// refusal label each one sends.
 ///
@@ -1849,6 +2043,26 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("enroll", "enroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
+    (
+        "inference_connection_offers",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_current",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_select",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_install",
+        "inference-connection-requires-async",
+    ),
+    (
+        "inference_connection_disconnect",
+        "inference-connection-requires-async",
+    ),
     ("history_detail", "session-detail-requires-async"),
     ("skill_candidate", "skill-candidate-requires-async"),
     ("skill_evaluate", "skill-evaluation-requires-async"),
@@ -1894,6 +2108,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }),
         ),
         "status" => Response::ok(req.id, shared.status_value()),
+        "certificate_detail" => handle_certificate_detail(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         // The one project worth offering to arm right now, or nothing.
@@ -1953,6 +2168,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
         "set_project_mode" => handle_set_project_mode(shared, req),
+        "grant_automatic" => handle_grant_automatic(shared, req),
+        "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
+        "withdraw_automatic_grant" => handle_withdraw_automatic_grant(shared, req),
+        "automatic_grant" => Response::ok(req.id, automatic_grant_value(shared)),
         "dismiss" => {
             let id = try_response!(entry_id_param(req));
             // A dismissed entry is never previewed again, so drop any
@@ -2115,6 +2334,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "refresh_history" => {
             // The poller owns the network. This only asks it to run sooner,
             // and says so rather than queueing an unbounded number of asks.
+            let mut state = shared.state.lock().expect("state lock");
+            let now = chrono::Utc::now();
+            if state.history_refresh_due_at.is_none_or(|due| due > now) {
+                state.history_refresh_due_at = Some(now);
+                if state.save(&shared.store).is_err() {
+                    return Response::err(
+                        req.id,
+                        ERR_UNAVAILABLE,
+                        "history-refresh-request-failed",
+                    );
+                }
+            }
             Response::ok(req.id, serde_json::json!({ "requested": true }))
         }
         "token_storage_status" => handle_token_storage(shared, req),
@@ -2410,6 +2641,193 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
 // are supported, deliberately, rather than one replacing the other.
 //
 // `project_id` wins when both are sent.
+/// The Flow 1 grant as a client may see it: whether one is in force, when it
+/// was given, and whether what was on disk has been recorded yet (until it
+/// is, the grant arms nothing). No paths and no counts of them.
+fn automatic_grant_value(shared: &DaemonShared) -> serde_json::Value {
+    let policy = shared.policy.lock().expect("policy lock");
+    match &policy.automatic_grant {
+        Some(grant) => serde_json::json!({
+            "granted": true,
+            "granted_at": grant.granted_at,
+            // A source recorded, not every source: each is recorded on its
+            // own first successful discovery under the grant.
+            "on_disk_recorded": !grant.recorded_sources.is_empty(),
+        }),
+        None => serde_json::json!({ "granted": false }),
+    }
+}
+
+/// `grant_automatic` refused: the saved consent scopes were never chosen
+/// through `set_consent_scopes` (R7). An enrollment saves the floor scope
+/// with nobody having picked it, so a non-empty list is not a choice.
+pub const ERR_GRANT_SCOPES_NOT_CHOSEN: &str = "automatic-grant-scopes-not-chosen";
+/// `grant_automatic` refused: the caller did not say which witness the
+/// contributor was shown (`witness_signing_address`, a string or `null`).
+pub const ERR_GRANT_WITNESS_REQUIRED: &str = "automatic-grant-witness-required";
+/// `grant_automatic` refused: the witness configured now is not the one the
+/// contributor was shown.
+pub const ERR_GRANT_WITNESS_CHANGED: &str = "automatic-grant-witness-changed";
+
+/// Why the Flow 1 grant may not be given under `cfg`, given the witness
+/// signing address the caller says the contributor was shown. `None` when it
+/// may. The labels are fixed and carry no content.
+fn grant_automatic_refusal(
+    cfg: &crate::config::ContributorConfig,
+    params: &serde_json::Value,
+) -> Option<&'static str> {
+    // R7: a scope nobody chose never carries a standing grant.
+    if !cfg.consent_scopes_chosen {
+        return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
+    }
+    // The witness shown on the disclosure screen, or `null` for none. It
+    // must be stated: a caller that omits it has shown nothing to compare.
+    let shown = match params.get("witness_signing_address") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(address)) => Some(address.as_str()),
+        _ => return Some(ERR_GRANT_WITNESS_REQUIRED),
+    };
+    let configured = cfg.witness.as_ref().map(|w| w.signing_address.as_str());
+    if shown != configured {
+        return Some(ERR_GRANT_WITNESS_CHANGED);
+    }
+    None
+}
+
+// Give the Flow 1 grant: arm projects discovered from now on (K3), never
+// anything already on disk (K4). Refused without terms to grant under, like
+// arming one project, and recorded before it takes effect. Refused, too,
+// unless the contributor chose the scopes (R7) and the witness configured
+// now is the one the disclosure screen showed.
+fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
+    let Ok(Some(cfg)) = shared.store.load_config() else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    };
+    if let Some(refusal) = grant_automatic_refusal(&cfg, &req.params) {
+        return Response::err(req.id, ERR_BAD_PARAMS, refusal);
+    }
+    // From the config just checked, not a second read, so the witness
+    // compared is the witness the grant is given under.
+    let terms = super::grant_terms::GrantTerms::in_force_for(shared, &cfg);
+    let now = Utc::now();
+    if audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: now,
+            action: "automatic-granted".to_string(),
+            project_label: None,
+            detail: None,
+        },
+    )
+    .is_err()
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.automatic_grant.clone();
+        policy.grant_automatic(now, terms);
+        if policy.save(&shared.store).is_err() {
+            policy.automatic_grant = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+    }
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    Response::ok(req.id, automatic_grant_value(shared))
+}
+
+// Record that a shell showed these void notices, so none shows them again.
+//
+// `ids` is required and names exactly the notices shown. There is no "all":
+// a void raised between the shell drawing and the contributor pressing the
+// button would be cleared unseen, which is the silent void R6 forbids.
+//
+// Audited, like `acknowledge_near_ai_notice`, because it asserts on the
+// caller's word that someone was shown something. The audit goes first: a
+// notice cleared with no record of who cleared it is the worse failure, and
+// an acknowledgement that cannot be recorded leaves the notice showing.
+fn handle_acknowledge_grant_voids(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(ids) = req
+        .params
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .and_then(|list| {
+            list.iter()
+                .map(serde_json::Value::as_u64)
+                .collect::<Option<Vec<u64>>>()
+        })
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "ids-required");
+    };
+    let outstanding = {
+        let policy = shared.policy.lock().expect("policy lock");
+        policy
+            .grant_voids
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .count()
+    };
+    if outstanding == 0 {
+        return Response::ok(req.id, serde_json::json!({ "acknowledged": 0 }));
+    }
+    if audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "grant-voids-acknowledged".to_string(),
+            project_label: None,
+            detail: Some(outstanding.to_string()),
+        },
+    )
+    .is_err()
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    let acknowledged = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.grant_voids.clone();
+        let acknowledged = policy.acknowledge_grant_voids(&ids);
+        if acknowledged > 0 && policy.save(&shared.store).is_err() {
+            policy.grant_voids = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        acknowledged
+    };
+    if acknowledged > 0 {
+        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    Response::ok(req.id, serde_json::json!({ "acknowledged": acknowledged }))
+}
+
+// Withdraw the Flow 1 grant. Projects it armed keep their own entries.
+fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Response {
+    let withdrawn = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.automatic_grant.clone();
+        let withdrawn = policy.withdraw_automatic_grant();
+        if withdrawn && policy.save(&shared.store).is_err() {
+            policy.automatic_grant = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        withdrawn
+    };
+    if withdrawn {
+        // After the withdrawal, not before: a record that fails to write
+        // must not leave the grant in force.
+        let _ = audit::append(
+            &shared.store,
+            &AuditEntry {
+                at: Utc::now(),
+                action: "automatic-grant-withdrawn".to_string(),
+                project_label: None,
+                detail: None,
+            },
+        );
+        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    Response::ok(req.id, serde_json::json!({ "withdrawn": withdrawn }))
+}
+
 fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     let id_param = req.params.get("project_id").and_then(|v| v.as_str());
     let key_param = req.params.get("project_key").and_then(|v| v.as_str());
@@ -2433,6 +2851,11 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // sinks this crate's label-only rule exists to protect. The
     // label is now derived from the key inside `set_mode`.
     // Lock order is policy before queue, as everywhere else.
+    // The terms an arming is granted under, read before the policy lock is
+    // taken so this adds no lock ordering. See `grant_terms`.
+    let arming_terms = (mode == ProjectMode::AutoUpload)
+        .then(|| super::grant_terms::GrantTerms::in_force(shared))
+        .flatten();
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
@@ -2461,6 +2884,20 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let label = disambiguated_label(&key, shown.as_deref(), &known);
         (key, label)
     };
+
+    // Every refusal comes before the audit record below, so a refusal
+    // records nothing. The unknown bucket first, for its own reason: it can
+    // never be armed, terms or not.
+    if let Err(e) = ProjectPolicy::check_mode(&key, mode) {
+        return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    // Fail closed: a grant needs terms to be a grant of. Arming with none --
+    // no config yet, or one that could not be read -- would leave the next
+    // watcher pass to adopt whatever config then exists as what was agreed,
+    // for example after enrolling with a different commons.
+    if mode == ProjectMode::AutoUpload && arming_terms.is_none() {
+        return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
+    }
 
     // The audit entry goes down FIRST, before anything is armed,
     // the way `acknowledge_near_ai_notice` does it.
@@ -2506,6 +2943,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
+    if let Some(terms) = arming_terms {
+        policy.record_grant_terms(&key, terms);
+    }
     if let Err(_e) = policy.save(&shared.store) {
         return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
     }
@@ -2521,7 +2961,8 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // the CLI all get it: before this, ignoring from Settings left
     // the contributor staring at the cards they had just declined.
     //
-    // Pending only. See `refuse_pending_for_project`.
+    // Pending entries, plus approvals the watcher made unattended.
+    // See `refuse_pending_for_project` and `retract_unattended_for_project`.
     //
     // Leaving `Ignore` undoes exactly that, and only that: see
     // `clear_project_ignored`, which is what makes the
@@ -2541,12 +2982,40 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // reads the *new* policy, so the queue cannot be written first --
     // and a real fix wants both files under one atomic write, which
     // the store does not offer.
-    let (queue_changed, purged) = {
+    let (queue_changed, purged, retracted) = {
         let mut queue = shared.queue.lock().expect("queue lock");
         let purged = if mode == ProjectMode::Ignore {
+            // Both halves. `refuse_pending_for_project` covers entries
+            // nobody has decided yet; `retract_unattended_for_project`
+            // covers ones the watcher approved under a standing
+            // `auto_upload` opt-in, which are decisions the contributor
+            // never made and which `drain_approved` would otherwise keep
+            // sending after they said no. Contributor-made approvals are
+            // still left alone by both.
             queue.refuse_pending_for_project(&key)
         } else {
             0
+        };
+        // Counted separately, not folded into `purged`.
+        //
+        // `purged` is the number of *waiting* entries removed, and the shells
+        // compare it with the cards they had on screen: a mismatch is how
+        // they decide to say the queue changed while the contributor was
+        // deciding (`macos/Sources/TCShellCore/ProjectIgnoreCopy.swift:64`).
+        // Unattended approvals were never waiting cards, so adding them to
+        // that number reports a change that did not happen -- "7 waiting
+        // traces were removed, not 2", where the other five were never on
+        // screen. A shell may render this or ignore it.
+        //
+        // For `Ignore` they are refused; for ask-first they go back to
+        // waiting, because turning automatic off means "ask me", not "never".
+        // Either way they stop being sent without the contributor deciding.
+        let retracted = match mode {
+            ProjectMode::Ignore => queue.retract_unattended_for_project(&key),
+            ProjectMode::NotifyOnly => {
+                queue.return_unattended_to_waiting_for_project(&key, Utc::now())
+            }
+            ProjectMode::AutoUpload => 0,
         };
         let restored = if mode == ProjectMode::Ignore {
             0
@@ -2554,18 +3023,21 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
             queue.clear_project_ignored(&key)
         };
         let relabelled = relabel_queue_entries(&policy, &mut queue);
-        if relabelled || purged > 0 || restored > 0 {
+        if relabelled || purged > 0 || retracted > 0 || restored > 0 {
             if let Err(_e) = queue.save(&shared.store) {
                 return Response::err(req.id, ERR_UNAVAILABLE, "queue-write-failed");
             }
         }
-        (relabelled || restored > 0, purged)
+        (relabelled || restored > 0, purged, retracted)
     };
     drop(policy);
-    if queue_changed || purged > 0 {
+    if queue_changed || purged > 0 || retracted > 0 {
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
-    Response::ok(req.id, serde_json::json!({ "ok": true, "purged": purged }))
+    Response::ok(
+        req.id,
+        serde_json::json!({ "ok": true, "purged": purged, "retracted": retracted }),
+    )
 }
 
 fn handle_pause(shared: &DaemonShared, req: &Request) -> Response {
@@ -2860,6 +3332,21 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "inference_connection_offers" => {
+            super::inference_connection::handle_offers(shared, req).await
+        }
+        "inference_connection_current" => {
+            super::inference_connection::handle_current(shared, req).await
+        }
+        "inference_connection_select" => {
+            super::inference_connection::handle_select(shared, req).await
+        }
+        "inference_connection_install" => {
+            super::inference_connection::handle_install(shared, req).await
+        }
+        "inference_connection_disconnect" => {
+            super::inference_connection::handle_disconnect(shared, req).await
+        }
         "history_detail" => super::public_run::handle_detail(shared, req).await,
         "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
         "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
@@ -3065,6 +3552,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // than infer it from a count that came back smaller than the one it drew
     // a button for.
     let mut excluded_ineligible: u64 = 0;
+    // How many pending entries a group selector left out because they are
+    // held for a person's review. See `queue::REASONS_NEEDING_A_PERSON`.
+    let mut excluded_held: u64 = 0;
     let project_id = req.params.get("project_id").and_then(|v| v.as_str());
     // Three mutually exclusive selectors; `all` wins over `project_id` wins
     // over `entry_id` when more than one is sent -- same precedence rule as
@@ -3081,8 +3571,9 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // the same reason. Filtering it here as well as the project path is
         // deliberate: leaving it out would keep the defect alive behind a
         // different button.
-        let (ids, excluded) = group_selection(queue.pending().iter().copied(), group_filters);
+        let (ids, excluded, held) = group_selection(queue.pending().iter().copied(), group_filters);
         excluded_ineligible = excluded;
+        excluded_held = held;
         (ids, None)
     } else if let Some(pid) = project_id {
         // An id naming no project the daemon knows is refused, exactly as
@@ -3108,7 +3599,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         };
         // Only `Pending`: an entry already approved has had its terms
         // fixed, and a project-wide call must not silently re-pin them.
-        let (ids, excluded) = group_selection(
+        let (ids, excluded, held) = group_selection(
             queue
                 .pending()
                 .iter()
@@ -3117,6 +3608,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             group_filters,
         );
         excluded_ineligible = excluded;
+        excluded_held = held;
         // The unknown-cwd sentinel resolves here like any other project.
         // Approving what is already in that bucket is an ordinary consent
         // decision about entries the contributor can see; it is *arming*
@@ -3477,6 +3969,13 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     if group_filters && (all || project_id.is_some()) {
         result["excluded_ineligible"] = serde_json::Value::from(excluded_ineligible);
     }
+    // Present on every group call, because the held filter always runs on
+    // one; absent on a single-entry call, where it does not. Kept apart from
+    // `approved` and from `excluded_ineligible` so neither count changes
+    // what it has always meant.
+    if all || project_id.is_some() {
+        result["excluded_held"] = serde_json::Value::from(excluded_held);
+    }
     Response::ok(req.id, result)
 }
 
@@ -3487,10 +3986,20 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
 fn group_selection<'a>(
     entries: impl Iterator<Item = &'a super::queue::QueueEntry>,
     filters: bool,
-) -> (Vec<Uuid>, u64) {
+) -> (Vec<Uuid>, u64, u64) {
     let mut ids = Vec::new();
     let mut excluded = 0u64;
+    let mut held = 0u64;
     for entry in entries {
+        // Always, not only when the evidence filter runs. A held entry needs
+        // a person to act on that one session, and a group control is by
+        // definition not that. Counted apart from the ineligible ones, which
+        // are a different answer: those cannot be sent, these can once
+        // someone looks.
+        if entry.held_for_review() {
+            held += 1;
+            continue;
+        }
         if filters
             && !super::contribution_eligibility::contributable_in_a_group(
                 entry.eligibility.as_deref(),
@@ -3501,7 +4010,7 @@ fn group_selection<'a>(
         }
         ids.push(entry.entry_id);
     }
-    (ids, excluded)
+    (ids, excluded, held)
 }
 
 /// The socket's `"preview"` handler -- the queue-card summary.
@@ -5233,6 +5742,47 @@ mod tests {
         DaemonShared::load(store).unwrap()
     }
 
+    /// `shared()` with a config saved, for tests that arm a project: arming
+    /// records the terms in force and is refused without a config.
+    fn enrolled_shared() -> DaemonShared {
+        let s = shared();
+        s.store
+            .save_config(&crate::commands::unenrolled_preview_config())
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn refresh_history_request_schedules_poll_without_postponing_earlier_request() {
+        let shared = shared();
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        let first_due = shared.state.lock().unwrap().history_refresh_due_at.unwrap();
+        assert!(first_due <= chrono::Utc::now());
+
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        assert_eq!(
+            shared.state.lock().unwrap().history_refresh_due_at,
+            Some(first_due)
+        );
+    }
+
+    /// A deadline still in the future (set by `note_uploads`) is pulled in
+    /// to now: an explicit ask must not wait behind a later scheduled poll.
+    #[test]
+    fn refresh_history_request_pulls_in_a_later_scheduled_poll() {
+        let shared = shared();
+        let later = chrono::Utc::now() + chrono::Duration::hours(1);
+        shared.state.lock().unwrap().history_refresh_due_at = Some(later);
+
+        let response = handle_request(&shared, &req("refresh_history", serde_json::json!({})));
+        assert_eq!(response.result.unwrap()["requested"], true);
+        let due = shared.state.lock().unwrap().history_refresh_due_at.unwrap();
+        assert!(due < later, "a later deadline must be pulled in, got {due}");
+        assert!(due <= chrono::Utc::now());
+    }
+
     /// A queue entry whose session file holds `body`, so
     /// `search_original` has something real to read.
     fn shared_with_session(body: &str) -> (DaemonShared, Uuid, tempfile::TempDir) {
@@ -5929,7 +6479,7 @@ mod tests {
         // would in fact be a worse channel for an attacker than doing it
         // itself (rate-limited, capped, redacted, delivered somewhere it
         // cannot read back). See the module doc's "Authorization" section.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         let r = handle_request(
             &s,
@@ -5950,7 +6500,7 @@ mod tests {
         // The audit log is what replaced the removed gate: not a control,
         // but a local record a contributor can read to see when autonomy
         // was granted.
-        let s = shared();
+        let s = enrolled_shared();
         let r = handle_request(
             &s,
             &req(
@@ -6506,7 +7056,7 @@ mod tests {
         // `daemon-audit.jsonl` -- the two sinks the label-only rule exists
         // to protect. The label is now derived from the key; the param is
         // accepted and ignored.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("myproj");
         let injected = "ghp_fakeinjectedtoken/and/a/path";
         let r = handle_request(
@@ -6651,6 +7201,438 @@ mod tests {
                 .iter()
                 .any(|s| s["entry_id"] == serde_json::json!(eligible)),
             "the eligible row was selected: {result}"
+        );
+    }
+
+    /// A group approve leaves a held session for a person, and says so in its
+    /// own count.
+    ///
+    /// For an invited contributor too: the evidence filter does not run for
+    /// them, but the hold is not about evidence, so it runs regardless.
+    /// `excluded_ineligible` stays absent -- that filter did not run -- and
+    /// `excluded_held` is reported beside it rather than folded into it.
+    #[tokio::test]
+    async fn a_group_approve_leaves_held_sessions_for_a_person() {
+        let s = shared();
+        let key = "/tmp/heldproj";
+        let open = seed_entry_with_eligibility(&s, key, None);
+        let held = seed_entry_with_eligibility(&s, key, None);
+        s.queue.lock().unwrap().set_state(
+            held,
+            super::super::queue::QueueState::Pending,
+            Some(super::super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string()),
+        );
+
+        let r = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({ "project_id": project_id_for(key) }),
+            ),
+        )
+        .await;
+        let result = r.result.expect("approve answers");
+
+        assert_eq!(result["excluded_held"], 1, "{result}");
+        assert!(
+            result.get("excluded_ineligible").is_none(),
+            "that filter did not run for an invited contributor: {result}"
+        );
+        let selected = result["skipped"].as_array().expect("a skipped list");
+        assert!(
+            selected
+                .iter()
+                .all(|e| e["entry_id"] != serde_json::json!(held)),
+            "the held session was not selected: {result}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|e| e["entry_id"] == serde_json::json!(open)),
+            "the other session was: {result}"
+        );
+
+        // A single-entry approve runs no group filter and reports none.
+        let one =
+            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": open })))
+                .await
+                .result
+                .expect("approve answers");
+        assert!(one.get("excluded_held").is_none(), "{one}");
+    }
+
+    /// Arming over the socket records the terms it was granted under, so a
+    /// later widening can be compared against what was actually agreed
+    /// rather than against a baseline taken afterwards.
+    #[test]
+    fn arming_a_project_records_the_terms_it_was_granted_under() {
+        let s = shared();
+        s.store
+            .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
+                inference_receipt_check_attestation: false,
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
+                issuer_url: "https://issuer.invalid".to_string(),
+                ingest_url: "https://ingest.invalid".to_string(),
+                audience: "aud".to_string(),
+                tenant_id: "tenant-1".to_string(),
+                instance_id: "instance-1".to_string(),
+                user_subject: "alice".to_string(),
+                device_key_id: "sha256:aa".to_string(),
+                consent_scopes: vec!["debugging_evaluation".to_string()],
+                pii_filter: None,
+                allowed_hosts: None,
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness: None,
+            })
+            .unwrap();
+        let key = "/tmp/armedproj";
+        seed_entry_with_eligibility(&s, key, None);
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let policy = s.policy.lock().unwrap();
+        let terms = policy
+            .projects
+            .values()
+            .find(|e| e.mode == ProjectMode::AutoUpload)
+            .and_then(|e| e.armed_under.clone())
+            .expect("the grant's terms are recorded at arming");
+        assert!(terms.consent_scopes.contains("debugging_evaluation"));
+        assert_eq!(terms.tenant_id, "tenant-1");
+    }
+
+    /// Arm `key` over the socket, move the destination, and sweep: the
+    /// state a witness rollout or a config change leaves behind.
+    fn armed_then_voided(key: &str) -> DaemonShared {
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let mut moved = s.store.load_config().unwrap().unwrap();
+        moved.ingest_url = "https://elsewhere.invalid".to_string();
+        s.store.save_config(&moved).unwrap();
+        let current = crate::daemon::grant_terms::GrantTerms::in_force(&s).unwrap();
+        let sweep = s.policy.lock().unwrap().sweep_grants(&current, Utc::now());
+        assert_eq!(sweep.voided.len(), 1);
+        s
+    }
+
+    /// R6's ship condition, on the wire: `status` carries every void not yet
+    /// shown, by the project's `project_id` and label as `list_projects`
+    /// gives them, with the reason labels -- and never the key, which is a
+    /// local path.
+    #[test]
+    fn status_reports_a_void_by_project_id_and_label_without_a_path() {
+        let key = "/tmp/voidedproj";
+        let s = armed_then_voided(key);
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .expect("status answers");
+        let voids = status["grant_voids"].as_array().expect("grant_voids");
+        assert_eq!(voids.len(), 1, "{voids:?}");
+        let void = &voids[0];
+        assert_eq!(void["kind"], "project");
+        assert_eq!(void["project_id"], project_id_for(key));
+        assert_eq!(void["project_label"], "voidedproj");
+        assert_eq!(void["reasons"], serde_json::json!(["destination-changed"]));
+        assert!(void["id"].is_u64());
+        assert!(void["voided_at"].is_string());
+        let wire = serde_json::to_string(&status["grant_voids"]).unwrap();
+        assert!(!wire.contains("/tmp"), "a path crossed the socket: {wire}");
+        // The shells' copy reads exactly this shape.
+        let notice = crate::consent_copy::void_notice_for_wire(void).expect("the copy reads it");
+        assert_eq!(
+            notice.title,
+            "Automatic contributing stopped for voidedproj"
+        );
+
+        let projects = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        let row = projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["project_id"] == void["project_id"])
+            .expect("the same project_id list_projects gives");
+        assert_eq!(row["project_label"], void["project_label"]);
+    }
+
+    /// The notice's "Turn back on", end to end: a shell sends
+    /// `set_project_mode` with the element's `project_id`, exactly as it
+    /// arms a project by hand. The project is armed under the terms now in
+    /// force, the audit gets the same `armed-auto-upload` row as manual
+    /// arming, and the notice is gone from `status`.
+    #[test]
+    fn rearming_from_the_notice_arms_audits_and_clears_it() {
+        let key = "/tmp/rearmproj";
+        let s = armed_then_voided(key);
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        let void = status["grant_voids"][0].clone();
+        let notice = crate::consent_copy::void_notice_for_wire(&void).unwrap();
+        assert!(
+            notice.rearm_action.is_some(),
+            "the notice offers the button"
+        );
+        let actions = |s: &DaemonShared| -> Vec<String> {
+            audit::load(&s.store)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.action)
+                .collect()
+        };
+        let before = actions(&s);
+
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": void["project_id"], "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            status["grant_voids"],
+            serde_json::json!([]),
+            "re-arming clears it"
+        );
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(key), ProjectMode::AutoUpload);
+        let terms = policy.projects[key]
+            .armed_under
+            .clone()
+            .expect("armed under terms");
+        assert_eq!(
+            terms.ingest_url, "https://elsewhere.invalid",
+            "the new terms"
+        );
+        drop(policy);
+        // Exactly one entry more, and it is the manual-arming row.
+        let after = actions(&s);
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        let count = |list: &[String]| list.iter().filter(|a| *a == "armed-auto-upload").count();
+        assert_eq!(
+            count(&after),
+            count(&before) + 1,
+            "the same trail as manual arming"
+        );
+        assert!(
+            ProjectPolicy::load(&s.store)
+                .unwrap()
+                .grant_voids
+                .is_empty()
+        );
+    }
+
+    /// A refused re-arm changes nothing: with no config there are no terms
+    /// to arm under, so `set_project_mode` refuses with
+    /// `arming-terms-unavailable`, the project still asks first, and the
+    /// notice stays for the contributor.
+    #[test]
+    fn a_refused_rearm_keeps_the_notice_and_the_project_asking() {
+        let key = "/tmp/rearmrefused";
+        let s = armed_then_voided(key);
+        let id = project_id_for(key);
+        std::fs::remove_file(s.store.dir().join("contributor.json")).unwrap();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": id, "mode": "auto_upload" }),
+            ),
+        );
+        let err = r.error.expect("refused without terms");
+        assert_eq!(err.message, "arming-terms-unavailable");
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(key), ProjectMode::NotifyOnly);
+        assert_eq!(policy.grant_voids.len(), 1, "the notice stays");
+    }
+
+    /// The unknown bucket can never be armed, so a re-arm naming it is
+    /// refused and leaves every outstanding notice where it was.
+    #[test]
+    fn a_rearm_of_the_unknown_bucket_is_refused_and_clears_nothing() {
+        let s = armed_then_voided("/tmp/rearmunknown");
+        seed_entry_with_eligibility(&s, UNKNOWN_PROJECT_KEY, None);
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": project_id_for(UNKNOWN_PROJECT_KEY),
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        assert!(r.error.is_some());
+        assert_eq!(s.policy.lock().unwrap().grant_voids.len(), 1);
+    }
+
+    /// A healthy daemon reports an empty list, not a missing key, so a shell
+    /// can tell "nothing to show" from "a daemon too old to say".
+    #[test]
+    fn status_reports_no_voids_as_an_empty_list() {
+        let s = enrolled_shared();
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(status["grant_voids"], serde_json::json!([]));
+    }
+
+    /// Acknowledging clears the notices named, audits it, and tells every
+    /// other shell through `status_changed` so a notice shown in one is not
+    /// shown again in another.
+    #[test]
+    fn acknowledging_grant_voids_clears_audits_and_publishes() {
+        let s = armed_then_voided("/tmp/ackproj");
+        let id = s.policy.lock().unwrap().grant_voids[0].id;
+        let mut rx = s.events.subscribe();
+
+        let r = handle_request(
+            &s,
+            &req(
+                "acknowledge_grant_voids",
+                serde_json::json!({ "ids": [id] }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["acknowledged"], 1);
+        assert!(s.policy.lock().unwrap().grant_voids.is_empty());
+        let persisted = ProjectPolicy::load(&s.store).unwrap();
+        assert!(persisted.grant_voids.is_empty(), "the clear is saved");
+
+        let audit = audit::load(&s.store).unwrap();
+        let entry = audit
+            .iter()
+            .find(|e| e.action == "grant-voids-acknowledged")
+            .expect("the acknowledgement is audited");
+        assert_eq!(entry.detail.as_deref(), Some("1"));
+        assert!(entry.project_label.is_none());
+
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "other shells are told");
+    }
+
+    /// `ids` is required and must be a list of ids: an acknowledgement that
+    /// names nothing cannot be read as "all of them", which would clear a
+    /// notice raised after the shell drew.
+    #[test]
+    fn acknowledging_grant_voids_requires_the_ids_shown() {
+        let s = armed_then_voided("/tmp/ackbad");
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({ "ids": "all" }),
+            serde_json::json!({ "ids": [-1] }),
+            serde_json::json!({ "all": true }),
+        ] {
+            let r = handle_request(&s, &req("acknowledge_grant_voids", params.clone()));
+            let err = r.error.unwrap_or_else(|| panic!("{params} accepted"));
+            assert_eq!(err.code, ERR_BAD_PARAMS, "{params}");
+        }
+        assert_eq!(s.policy.lock().unwrap().grant_voids.len(), 1);
+        assert!(METHODS.contains(&"acknowledge_grant_voids"));
+    }
+
+    /// Arming over the socket and then widening voids: the comparison is
+    /// against the terms recorded at arming. Were they not recorded, the
+    /// next sweep would baseline the new destination as if it had been
+    /// agreed.
+    #[test]
+    fn a_grant_armed_over_the_socket_is_voided_when_its_destination_moves() {
+        let s = enrolled_shared();
+        let key = "/tmp/armedthenmoved";
+        seed_entry_with_eligibility(&s, key, None);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let mut moved = s.store.load_config().unwrap().unwrap();
+        moved.ingest_url = "https://elsewhere.invalid".to_string();
+        s.store.save_config(&moved).unwrap();
+        let current = crate::daemon::grant_terms::GrantTerms::in_force(&s).unwrap();
+
+        let mut policy = s.policy.lock().unwrap();
+        let sweep = policy.sweep_grants(&current, Utc::now());
+        assert_eq!(sweep.baselined, 0, "the grant already had its terms");
+        assert_eq!(sweep.voided.len(), 1);
+        assert_eq!(
+            sweep.voided[0].reasons,
+            vec![crate::daemon::grant_terms::VOID_DESTINATION]
+        );
+        assert_eq!(policy.resolve(key), ProjectMode::NotifyOnly);
+    }
+
+    /// Turning automatic off stops what it had approved and not yet sent.
+    ///
+    /// Before this, only `Ignore` retracted unattended approvals, so moving a
+    /// project to ask-first -- the ordinary way to turn automatic off -- left
+    /// every session it had already approved uploading. They now go back to
+    /// waiting. A session the contributor approved themselves is theirs and
+    /// is left alone; `purged` keeps meaning waiting cards removed.
+    #[test]
+    fn turning_automatic_off_returns_its_unsent_approvals_to_waiting() {
+        let s = shared();
+        let key = "/tmp/armedproj";
+        let unattended = seed_entry_with_eligibility(&s, key, None);
+        let theirs = seed_entry_with_eligibility(&s, key, None);
+        {
+            let mut q = s.queue.lock().unwrap();
+            assert!(q.approve_unattended(unattended, &[], None));
+            assert!(q.approve(theirs, &[], None, None, None, None));
+        }
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "notify_only" }),
+            ),
+        );
+        let result = r.result.expect("set_project_mode answers");
+        assert_eq!(result["retracted"], 1, "{result}");
+        assert_eq!(result["purged"], 0, "no waiting card was removed: {result}");
+
+        let q = s.queue.lock().unwrap();
+        let back = q.all().iter().find(|e| e.entry_id == unattended).unwrap();
+        assert_eq!(back.state, super::super::queue::QueueState::Pending);
+        assert!(!back.approved_unattended);
+        let kept = q.all().iter().find(|e| e.entry_id == theirs).unwrap();
+        assert_eq!(
+            kept.state,
+            super::super::queue::QueueState::Approved,
+            "the contributor's own approval stands"
         );
     }
 
@@ -6906,7 +7888,7 @@ mod tests {
 
     #[test]
     fn a_project_id_from_list_projects_is_accepted_by_set_project_mode() {
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         seed_entry(&s, &key);
 
@@ -7147,6 +8129,41 @@ mod tests {
         );
     }
 
+    /// Reviewed on #1024: arming the unknown bucket is refused before the
+    /// arming is recorded, so the audit log never shows an arming that did
+    /// not happen.
+    #[test]
+    fn arming_the_unresolvable_bucket_is_refused_before_it_is_recorded() {
+        let s = enrolled_shared();
+        seed_entry(&s, UNKNOWN_PROJECT_KEY);
+        let resp = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_id": project_id_for(UNKNOWN_PROJECT_KEY),
+                    "mode": "auto_upload",
+                }),
+            ),
+        );
+        let err = resp.error.expect("arming the bucket is refused");
+        assert_eq!(err.code, ERR_BAD_PARAMS);
+        assert!(
+            !crate::daemon::audit::load(&s.store)
+                .unwrap()
+                .iter()
+                .any(|e| e.action == "armed-auto-upload"),
+            "a refused arming leaves no audit record"
+        );
+        assert!(
+            !s.policy
+                .lock()
+                .unwrap()
+                .projects
+                .contains_key(UNKNOWN_PROJECT_KEY)
+        );
+    }
+
     #[test]
     fn the_unresolvable_flag_survives_being_ruled_on() {
         // A contributor can silence the bucket even though it can never be
@@ -7185,7 +8202,7 @@ mod tests {
         // The original injection fix must survive the new entry point: the
         // id path resolves to a key the daemon already holds, so the label
         // is still derived and a caller's strings still reach neither sink.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("myproj");
         seed_entry(&s, &key);
         let id = super::super::policy::project_id_for(&key);
@@ -7249,7 +8266,7 @@ mod tests {
         // terminal-only restriction. A best-effort append reduced a
         // disk-full or permissions failure to a warning while the call
         // still returned success, silently defeating the whole replacement.
-        let s = shared();
+        let s = enrolled_shared();
         let key = tmp_project("p");
         break_the_audit_log(&s.store);
 
@@ -8584,6 +9601,35 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn certificate_detail_returns_claims_without_raw_artifact_bytes() {
+        let (s, id, _dir, review) = recorded_witness_review().await;
+        let pin = review.summary.envelope_digest.clone();
+        super::super::approved_envelope::save_witnessed(&s.store, id, &review.artifact).unwrap();
+        {
+            let mut queue = s.queue.lock().unwrap();
+            assert!(queue.record_previewed_envelope(
+                id,
+                &pin,
+                review.artifact.attested_inference().cloned()
+            ));
+            queue.save(&s.store).unwrap();
+        }
+
+        let response = handle_request(
+            &s,
+            &req("certificate_detail", serde_json::json!({"entry_id": id})),
+        );
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let detail = response.result.unwrap();
+        assert_eq!(detail["state"], "held");
+        assert_eq!(detail["verification"], "verified_at_review");
+        assert!(detail["signer"].as_str().unwrap().starts_with("0x"));
+        assert!(detail.get("certificate_json").is_none());
+        assert!(detail.get("signature_hex").is_none());
+        assert!(detail.get("envelope_bytes").is_none());
+    }
+
     #[test]
     fn a_bad_entry_id_is_a_param_error_not_a_panic() {
         let s = shared();
@@ -9865,7 +10911,7 @@ mod tests {
 
     #[test]
     fn list_audit_reads_back_what_set_project_mode_appended() {
-        let s = shared();
+        let s = enrolled_shared();
         handle_request(
             &s,
             &req(
@@ -9883,7 +10929,7 @@ mod tests {
     fn list_audit_honors_a_limit_and_reports_the_most_recent_entries() {
         // The log is append-by-whole-file-rewrite and otherwise unbounded,
         // same reason list_history caps.
-        let s = shared();
+        let s = enrolled_shared();
         for key in [tmp_project("a"), tmp_project("b"), tmp_project("c")] {
             handle_request(
                 &s,
@@ -9903,7 +10949,7 @@ mod tests {
 
     #[test]
     fn list_audit_caps_an_oversize_limit_at_one_thousand() {
-        let s = shared();
+        let s = enrolled_shared();
         handle_request(
             &s,
             &req(
@@ -9928,6 +10974,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -10130,10 +11177,65 @@ mod tests {
         }
     }
 
+    /// Through the real dispatcher, as a shell reaches them: with no account
+    /// session every inference-connection method refuses with the same label
+    /// withdrawal uses, before any network call and whatever its params.
+    /// Disconnect is the one that answers: it removes the local witness
+    /// first, and reports the server step as waiting on that same label.
+    #[tokio::test]
+    async fn inference_connection_methods_require_an_account_session() {
+        let s = shared();
+        let id = uuid::Uuid::new_v4().to_string();
+        for (method, params) in [
+            ("inference_connection_offers", serde_json::json!({})),
+            ("inference_connection_current", serde_json::json!({})),
+            (
+                "inference_connection_select",
+                serde_json::json!({
+                    "offer_id": "near-ai",
+                    "provider_id": "near-ai",
+                    "revision": format!("sha256:{}", "a".repeat(64)),
+                    "config_digest": format!("sha256:{}", "b".repeat(64)),
+                    "disclosure_version":
+                        trace_commons_protocol::inference_connection::DISCLOSURE_VERSION,
+                }),
+            ),
+            (
+                "inference_connection_install",
+                serde_json::json!({
+                    "connection_id": id,
+                    "config_digest": format!("sha256:{}", "b".repeat(64)),
+                }),
+            ),
+        ] {
+            assert!(METHODS.contains(&method), "{method} must be advertised");
+            let response = handle_request_async(&s, &req(method, params)).await;
+            let error = response.error.expect("refused without a session");
+            assert_eq!(error.code, ERR_UNAVAILABLE, "{method}");
+            assert_eq!(
+                error.message,
+                super::super::withdraw::ERR_ACCOUNT_SESSION_REQUIRED,
+                "{method}"
+            );
+        }
+        let method = "inference_connection_disconnect";
+        assert!(METHODS.contains(&method));
+        let response =
+            handle_request_async(&s, &req(method, serde_json::json!({ "connection_id": id })))
+                .await;
+        let result = response.result.expect("disconnect reports its local step");
+        assert_eq!(result["disconnected"], false);
+        assert_eq!(result["server_disconnect"], "pending");
+        assert_eq!(
+            result["server_refusal"],
+            super::super::withdraw::ERR_ACCOUNT_SESSION_REQUIRED
+        );
+    }
+
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 27);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 32);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -10562,8 +11664,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 41, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 34, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

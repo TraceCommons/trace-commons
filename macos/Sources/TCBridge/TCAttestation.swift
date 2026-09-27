@@ -18,7 +18,7 @@ import Foundation
 /// `TCContributionEligibility`'s rule and it is deliberate: eligibility asks
 /// whether somebody may send a session, and an invited contributor is not
 /// being asked; the mark says whether the session carries a checkable copy
-/// of the model call it came from, which is true or false of the trace
+/// of its last model call, which is true or false of the trace
 /// whoever holds it.
 ///
 /// **There is no `tc_contribution_attestation_control`.** The mark describes

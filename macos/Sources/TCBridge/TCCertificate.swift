@@ -21,8 +21,8 @@ import Foundation
 /// and therefore has NO invite. Passing `!flag` here would swap both
 /// readings and compile.
 ///
-/// Not `TCAttestation`. That answers whether a session carries a copy of the
-/// model call that produced it; this answers whether a certificate is held
+/// Not `TCAttestation`. That answers whether a session carries a copy of its
+/// last model call; this answers whether a certificate is held
 /// over the reviewed bytes. A session can have either without the other.
 public enum TCCertificate {
     /// The sentence for one row of the list.

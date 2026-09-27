@@ -115,8 +115,10 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
             calls.lock().unwrap().push("collateral".into());
             include_str!("../../../trace-commons-attestation/tests/fixtures/near_ai_attestation_collateral.json")
         }}}))
-        .route("/v1/witness", post({let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();move |Json(request):Json<serde_json::Value>|{let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();async move{
+        .route("/v1/witness", post({let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();move |headers: axum::http::HeaderMap, Json(request):Json<serde_json::Value>|{let calls=calls.clone();let exact=exact.clone();let certified_headers=certified_headers.clone();let cfg=cfg.clone();async move{
             calls.lock().unwrap().push("witness".into());
+            // A review a person asked for is not background work (#1014).
+            assert!(headers.get(trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER).is_none());
             let raw=serde_json::from_value(request["raw_contribution"].clone()).unwrap();
             let redactor=crate::envelope::build_redactor_with(&cfg,None,None).unwrap();
             let mut envelope=crate::envelope::redact_to_envelope(&redactor,raw).await.unwrap();

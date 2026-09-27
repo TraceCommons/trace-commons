@@ -39,6 +39,7 @@ the link.
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
 | Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
+| Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
@@ -51,6 +52,7 @@ the link.
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
 | Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
 | Re-deriving the dedup simhash and reclustering the corpus | [`./dedup-recluster.md`](./dedup-recluster.md) |
+| Measuring how many submissions pass R1 (certified full redaction pipeline) | [`./r1-pipeline-measurement.md`](./r1-pipeline-measurement.md) |
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
 | Recovering a corrupted vector index | [`./vector-replay.md`](./vector-replay.md) |
 | Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
@@ -59,8 +61,10 @@ the link.
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
+| Operating explicit contributor inference connection selection | [`./inference-connection.md`](./inference-connection.md) |
 | Taking attested inference from dormant to enforced | [`./attested-inference.md`](./attested-inference.md) |
 | Switching on invite-free (uninvited, receipt-backed) contribution | [`./invite-free-admission.md`](./invite-free-admission.md) |
+| Preparing authenticated account contribution admission | [`./account-trust.md`](./account-trust.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
@@ -203,6 +207,10 @@ Every runbook in this directory, with a one-line description.
 - [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) —
   contributor-facing setup flow for invite code, workload JWT, Ironclaw
   opt-in, profile handle registration, and leaderboard expectations.
+- [`./r1-pipeline-measurement.md`](./r1-pipeline-measurement.md) — read-only
+  SQL counting submissions whose stored witness certificate names a pipeline
+  on the R1 allowlist, by version, witness presence and tenant namespace;
+  works on schemas before V76 and says which source it used.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —

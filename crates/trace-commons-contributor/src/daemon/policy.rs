@@ -15,7 +15,7 @@
 //! normalized trajectory files land there. Since the daemon cannot tell which
 //! project such a session belongs to, it cannot honour any opt-in for it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
@@ -95,6 +95,20 @@ pub struct ProjectEntry {
     /// not spelled the way the disk spells it.
     #[serde(default)]
     pub display_path: Option<String>,
+    /// The terms this project was armed under, while it is `AutoUpload`.
+    ///
+    /// Compared on every watcher pass with the terms now in force; a change
+    /// that widens who sees its sessions, or what leaves with them, voids the
+    /// grant and returns the project to ask-first. See `grant_terms`.
+    ///
+    /// `None` for a project that is not armed, and for one armed before this
+    /// field existed or by a route that could not read the config at the
+    /// time. The watcher records the terms in force on its first pass over
+    /// such a project -- a baseline, not a void, because there is no record
+    /// of what was agreed to compare against. `#[serde(default)]` so an older
+    /// policy file still loads.
+    #[serde(default)]
+    pub armed_under: Option<super::grant_terms::GrantTerms>,
 }
 
 /// How many times a project must have contributed before the app offers to
@@ -113,6 +127,57 @@ pub const ARMING_SUGGESTION_THRESHOLD: u32 = 5;
 /// that never lifts would make those words a lie. Settings remains the way
 /// to arm a project at any point in between, without being asked.
 pub const ARMING_DECLINE_COOLDOWN_DAYS: i64 = 30;
+
+/// What [`ProjectPolicy::sweep_grants`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantSweep {
+    /// Projects returned to ask-first because their grant was widened.
+    pub voided: Vec<VoidedGrant>,
+    /// Why the Flow 1 grant itself was voided, if it was.
+    pub automatic_grant_voided: Option<Vec<&'static str>>,
+    /// Armed projects that had no recorded terms and now do.
+    pub baselined: usize,
+}
+
+impl GrantSweep {
+    /// Whether the policy changed and must be saved.
+    pub fn changed(&self) -> bool {
+        !self.voided.is_empty() || self.baselined > 0 || self.automatic_grant_voided.is_some()
+    }
+}
+
+/// One grant voided by a sweep, and why. Labels only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoidedGrant {
+    pub project_label: String,
+    pub reasons: Vec<&'static str>,
+}
+
+/// A void the contributor has not been shown yet.
+///
+/// R6 makes a void notice a ship condition: a grant that stops must say so
+/// in every shell, not only in the audit. A sweep records one of these for
+/// each project it returns to ask-first and one for the Flow 1 grant, and it
+/// stays until a shell reports it shown (`acknowledge_grant_voids`) or the
+/// contributor acts on what it is about -- sets that project's mode, or
+/// gives the grant again -- which makes it stale.
+///
+/// Kept in the policy file, beside the grants it describes, so a void
+/// during a pass no shell was watching is still shown at the next launch.
+/// `project_key` is the policy's own key (a local path, as every key in this
+/// file is); it never crosses the socket, which carries the `project_id` and
+/// label derived from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantVoidNotice {
+    /// Unique within this policy file, so a shell acknowledges exactly the
+    /// notices it showed and never one that arrived after it drew.
+    pub id: u64,
+    pub voided_at: DateTime<Utc>,
+    /// The project voided, or `None` for the Flow 1 grant itself.
+    pub project_key: Option<String>,
+    /// Fixed reason labels, as `grant_terms::widening_from` gives them.
+    pub reasons: Vec<String>,
+}
 
 /// A project the app should offer to arm, and the evidence for offering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +207,63 @@ pub struct ProjectPolicy {
     /// When the contributor last said "Not now" to arming a project.
     #[serde(default)]
     pub arming_declined_at: BTreeMap<String, DateTime<Utc>>,
+    /// The Flow 1 grant, if one is in force: arm projects discovered after
+    /// it. See [`AutomaticGrant`].
+    #[serde(default)]
+    pub automatic_grant: Option<AutomaticGrant>,
+    /// Every session path any automatic grant found on disk, per source, when
+    /// it recorded that source. Kept after the grant is withdrawn or voided,
+    /// because a project the grant armed stays armed and must still never
+    /// send what predates the grant. Cleared only with the rest of this file,
+    /// at logout.
+    #[serde(default)]
+    pub sessions_on_disk_at_grant: BTreeSet<String>,
+    /// Projects an automatic grant armed, as opposed to the contributor.
+    /// A session in `sessions_on_disk_at_grant` is never approved unattended
+    /// in one of these, whichever project it reads as now. Leaves the set when
+    /// the contributor sets the project's mode themselves.
+    #[serde(default)]
+    pub armed_by_grant: BTreeSet<String>,
+    /// Voids not yet shown to the contributor. See [`GrantVoidNotice`].
+    #[serde(default)]
+    pub grant_voids: Vec<GrantVoidNotice>,
+    /// The id the next [`GrantVoidNotice`] gets. Never reused, so an
+    /// acknowledgement naming an old id cannot clear a newer notice.
+    #[serde(default)]
+    pub next_grant_void_id: u64,
+}
+
+/// The Flow 1 grant: "contribute automatically from projects discovered from
+/// now on".
+///
+/// **It arms nothing already on disk** (the spec's logout rule), recorded
+/// **per source**. A source's first successful discovery under the grant
+/// records its sessions and their projects and arms nothing from that pass;
+/// until a source is recorded none of its sessions arms anything. So a
+/// harness connected after the grant -- the normal onboarding order -- or
+/// pointed at another root, or whose discovery failed on the first pass, is
+/// recorded before it can arm, rather than having its history counted as
+/// new. A project with a session on disk in any recorded source keeps asking,
+/// and a session on disk at a grant is never approved unattended in a project
+/// the grant armed (`sessions_on_disk_at_grant`, `armed_by_grant`).
+///
+/// That is also what makes a re-grant after logout safe. Logout wipes this
+/// file, a Never folder's decision with it; the re-grant records the disk
+/// again, so every folder that already had sessions asks rather than being
+/// counted as new.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomaticGrant {
+    pub granted_at: DateTime<Utc>,
+    /// The terms the grant was given under. A widening voids the grant
+    /// itself as well as the projects it armed (R6), or it would go on arming
+    /// new projects under terms nobody agreed to.
+    pub granted_under: super::grant_terms::GrantTerms,
+    /// Sources recorded so far, by name and root.
+    #[serde(default)]
+    pub recorded_sources: BTreeSet<String>,
+    /// Projects with a session on disk in a recorded source.
+    #[serde(default)]
+    pub projects_on_disk: BTreeSet<String>,
 }
 
 impl Default for ProjectPolicy {
@@ -157,7 +279,104 @@ impl ProjectPolicy {
             projects: BTreeMap::new(),
             contributed: BTreeMap::new(),
             arming_declined_at: BTreeMap::new(),
+            automatic_grant: None,
+            sessions_on_disk_at_grant: BTreeSet::new(),
+            armed_by_grant: BTreeSet::new(),
+            grant_voids: Vec::new(),
+            next_grant_void_id: 0,
         }
+    }
+
+    /// Give the Flow 1 grant, replacing any earlier one. Arms nothing until
+    /// a source has been recorded, and then nothing from that source's
+    /// recording pass.
+    pub fn grant_automatic(&mut self, now: DateTime<Utc>, terms: super::grant_terms::GrantTerms) {
+        // Giving the grant again answers a notice that it had stopped.
+        self.grant_voids.retain(|n| n.project_key.is_some());
+        self.automatic_grant = Some(AutomaticGrant {
+            granted_at: now,
+            granted_under: terms,
+            recorded_sources: BTreeSet::new(),
+            projects_on_disk: BTreeSet::new(),
+        });
+    }
+
+    /// Withdraw the Flow 1 grant. Projects it already armed keep their own
+    /// entries, and still never send what was on disk at it; withdrawing a
+    /// project is `set_mode`. Returns whether one was in force.
+    pub fn withdraw_automatic_grant(&mut self) -> bool {
+        self.automatic_grant.take().is_some()
+    }
+
+    /// Which grant is in force, by the instant it was given. A pass reads
+    /// this before it lists anything, and records only for the grant it
+    /// read, so a grant given while discovery was walking the disk is
+    /// recorded from a later listing, not that one.
+    pub fn grant_id(&self) -> Option<DateTime<Utc>> {
+        self.automatic_grant.as_ref().map(|g| g.granted_at)
+    }
+
+    /// Whether `source_key` still has to be recorded for the grant `grant`.
+    pub fn needs_source_record(&self, grant: DateTime<Utc>, source_key: &str) -> bool {
+        self.automatic_grant
+            .as_ref()
+            .is_some_and(|g| g.granted_at == grant && !g.recorded_sources.contains(source_key))
+    }
+
+    /// Record what one source had on disk, for the grant `grant` only, and
+    /// only once per source. Returns whether anything was recorded.
+    pub fn record_source(
+        &mut self,
+        grant: DateTime<Utc>,
+        source_key: &str,
+        sessions: BTreeSet<String>,
+        projects: BTreeSet<String>,
+    ) -> bool {
+        match self.automatic_grant.as_mut() {
+            Some(g) if g.granted_at == grant && !g.recorded_sources.contains(source_key) => {
+                g.recorded_sources.insert(source_key.to_string());
+                g.projects_on_disk.extend(projects);
+                self.sessions_on_disk_at_grant.extend(sessions);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the grant arms `project_key` on seeing the session at
+    /// `session_path` from `source_key`: a recorded source, a real project
+    /// with no entry of its own, and neither the project nor the session on
+    /// disk when the grant recorded it.
+    pub fn arms_by_default(&self, project_key: &str, session_path: &str, source_key: &str) -> bool {
+        let Some(grant) = self.automatic_grant.as_ref() else {
+            return false;
+        };
+        grant.recorded_sources.contains(source_key)
+            && project_key != UNKNOWN_PROJECT_KEY
+            && !self.projects.contains_key(project_key)
+            && !grant.projects_on_disk.contains(project_key)
+            && !self.sessions_on_disk_at_grant.contains(session_path)
+    }
+
+    /// Whether the session at `session_path` must not be approved unattended
+    /// in `project_key`: the grant armed the project, and the session was on
+    /// disk at a grant. It waits for the contributor instead.
+    pub fn holds_back_unattended(&self, project_key: &str, session_path: &str) -> bool {
+        self.armed_by_grant.contains(project_key)
+            && self.sessions_on_disk_at_grant.contains(session_path)
+    }
+
+    /// Arm `project_key` on the grant's behalf.
+    pub fn arm_by_grant(
+        &mut self,
+        project_key: &str,
+        now: DateTime<Utc>,
+        terms: super::grant_terms::GrantTerms,
+    ) -> Result<()> {
+        self.set_mode(project_key, ProjectMode::AutoUpload, now)?;
+        self.record_grant_terms(project_key, terms);
+        self.armed_by_grant.insert(project_key.to_string());
+        Ok(())
     }
 
     /// Count one successful upload against its project.
@@ -249,12 +468,19 @@ impl ProjectPolicy {
                     existing.added_at = existing.added_at.min(entry.added_at);
                     existing.label = label.clone();
                     existing.display_path = shown.clone();
+                    // Terms only mean anything while the merged project is
+                    // still armed. When it is, the surviving entry's terms
+                    // stand; when the merge made it ask-first, they go.
+                    if existing.mode != ProjectMode::AutoUpload {
+                        existing.armed_under = None;
+                    }
                 })
                 .or_insert(ProjectEntry {
                     mode: entry.mode,
                     added_at: entry.added_at,
                     label,
                     display_path: shown,
+                    armed_under: entry.armed_under,
                 });
         }
         self.projects = projects;
@@ -323,6 +549,123 @@ impl ProjectPolicy {
         stored
     }
 
+    /// Record the terms an armed project was granted under.
+    ///
+    /// Called where the arming happens, with the terms in force at that
+    /// moment. A project that is not `AutoUpload` has no grant to record.
+    pub fn record_grant_terms(
+        &mut self,
+        project_key: &str,
+        terms: super::grant_terms::GrantTerms,
+    ) -> bool {
+        match self.projects.get_mut(project_key) {
+            Some(entry) if entry.mode == ProjectMode::AutoUpload => {
+                entry.armed_under = Some(terms);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Void every armed project whose grant no longer covers the terms in
+    /// force, and record terms for any armed project that has none.
+    ///
+    /// A voided project returns to `NotifyOnly`: it asks again rather than
+    /// carrying on under terms nobody agreed to, and arming it again records
+    /// the new terms. A project with no recorded terms is baselined rather
+    /// than voided, because there is nothing to compare against -- see
+    /// [`ProjectEntry::armed_under`].
+    pub fn sweep_grants(
+        &mut self,
+        current: &super::grant_terms::GrantTerms,
+        now: DateTime<Utc>,
+    ) -> GrantSweep {
+        let mut sweep = GrantSweep::default();
+        let mut voided_keys: Vec<(String, Vec<&'static str>)> = Vec::new();
+        for (key, entry) in self.projects.iter_mut() {
+            if entry.mode != ProjectMode::AutoUpload {
+                continue;
+            }
+            match &entry.armed_under {
+                None => {
+                    entry.armed_under = Some(current.clone());
+                    sweep.baselined += 1;
+                }
+                Some(granted) => {
+                    let reasons = current.widening_from(granted);
+                    if !reasons.is_empty() {
+                        entry.mode = ProjectMode::NotifyOnly;
+                        entry.armed_under = None;
+                        voided_keys.push((key.clone(), reasons.clone()));
+                        sweep.voided.push(VoidedGrant {
+                            project_label: entry.label.clone(),
+                            reasons,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(grant) = &self.automatic_grant {
+            let reasons = current.widening_from(&grant.granted_under);
+            if !reasons.is_empty() {
+                self.automatic_grant = None;
+                sweep.automatic_grant_voided = Some(reasons);
+            }
+        }
+        // Recorded with the void, in the same save, so a void is never
+        // written without the notice that tells the contributor about it.
+        for (key, reasons) in voided_keys {
+            self.push_grant_void(Some(key), &reasons, now);
+        }
+        if let Some(reasons) = sweep.automatic_grant_voided.clone() {
+            self.push_grant_void(None, &reasons, now);
+        }
+        sweep
+    }
+
+    /// Record a notice, replacing any still outstanding for the same grant:
+    /// the newer one says everything the contributor now needs to know.
+    fn push_grant_void(
+        &mut self,
+        project_key: Option<String>,
+        reasons: &[&'static str],
+        now: DateTime<Utc>,
+    ) {
+        self.grant_voids.retain(|n| n.project_key != project_key);
+        let id = self.next_grant_void_id;
+        self.next_grant_void_id = id.saturating_add(1);
+        self.grant_voids.push(GrantVoidNotice {
+            id,
+            voided_at: now,
+            project_key,
+            reasons: reasons.iter().map(|r| (*r).to_string()).collect(),
+        });
+    }
+
+    /// Drop the notices a shell reports it has shown. Returns how many went;
+    /// an id that is not outstanding is ignored rather than refused, since a
+    /// second shell may have acknowledged it first.
+    pub fn acknowledge_grant_voids(&mut self, ids: &[u64]) -> usize {
+        let before = self.grant_voids.len();
+        self.grant_voids.retain(|n| !ids.contains(&n.id));
+        before - self.grant_voids.len()
+    }
+
+    /// Whether `mode` may be set on `project_key` at all, before anything is
+    /// recorded: the unknown bucket can never be armed. `set_mode` applies
+    /// it too; a caller that records an arming first asks here first, so a
+    /// refusal leaves no record of an arming that never happened.
+    pub fn check_mode(project_key: &str, mode: ProjectMode) -> Result<()> {
+        if project_key == UNKNOWN_PROJECT_KEY && mode == ProjectMode::AutoUpload {
+            bail!(
+                "unknown-project sessions cannot be set to auto_upload: \
+                 their working directory could not be resolved, so no \
+                 per-project opt-in can apply to them"
+            );
+        }
+        Ok(())
+    }
+
     /// Record a mode for `project_key`.
     ///
     /// The label is **derived here**, from the key, and is never a caller
@@ -344,13 +687,13 @@ impl ProjectPolicy {
         mode: ProjectMode,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        if project_key == UNKNOWN_PROJECT_KEY && mode == ProjectMode::AutoUpload {
-            bail!(
-                "unknown-project sessions cannot be set to auto_upload: \
-                 their working directory could not be resolved, so no \
-                 per-project opt-in can apply to them"
-            );
-        }
+        Self::check_mode(project_key, mode)?;
+        // A mode set here is the contributor's own decision about the project,
+        // not the grant's; `arm_by_grant` re-adds it after calling this.
+        self.armed_by_grant.remove(project_key);
+        // And it answers any notice that this project's grant had stopped.
+        self.grant_voids
+            .retain(|n| n.project_key.as_deref() != Some(project_key));
         let shown = display_path_for_key(project_key);
         self.projects.insert(
             project_key.to_string(),
@@ -359,6 +702,9 @@ impl ProjectPolicy {
                 added_at: now,
                 label: project_label_for(shown.as_deref().unwrap_or(project_key)),
                 display_path: shown,
+                // A fresh entry on every mode change: leaving automatic
+                // clears the terms, and re-arming records new ones.
+                armed_under: None,
             },
         );
         Ok(())
@@ -709,6 +1055,7 @@ mod tests {
                 added_at: now(),
                 label: "unknown".into(),
                 display_path: None,
+                armed_under: None,
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -964,6 +1311,289 @@ mod tests {
         );
     }
 
+    fn grant_terms_with(ingest_url: &str) -> super::super::grant_terms::GrantTerms {
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.ingest_url = ingest_url.to_string();
+        super::super::grant_terms::GrantTerms::current(&cfg, None, false, "none")
+    }
+
+    const SRC: &str = "claude-code /root";
+
+    fn set_of(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn granted_with_disk(projects: &[&str], sessions: &[&str]) -> ProjectPolicy {
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-09-25T00:00:00Z");
+        p.grant_automatic(at, grant_terms_with("https://ingest.invalid"));
+        assert!(p.record_source(at, SRC, set_of(sessions), set_of(projects)));
+        p
+    }
+
+    /// The grant arms only a real project, new since the grant, with no
+    /// entry of its own, from a source it has recorded.
+    #[test]
+    fn the_grant_arms_only_a_project_new_since_it() {
+        let mut p = ProjectPolicy::new();
+        p.grant_automatic(
+            t("2026-09-25T00:00:00Z"),
+            grant_terms_with("https://ingest.invalid"),
+        );
+        assert!(
+            !p.arms_by_default("/w/new", "/s/new.jsonl", SRC),
+            "not before a record"
+        );
+
+        let mut p = granted_with_disk(&["/w/old"], &["/s/live.jsonl"]);
+        assert!(p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
+        assert!(
+            !p.arms_by_default("/w/old", "/s/other.jsonl", SRC),
+            "on disk at the grant"
+        );
+        assert!(
+            !p.arms_by_default("/w/moved", "/s/live.jsonl", SRC),
+            "a session on disk at the grant, whatever project it reads as now"
+        );
+        assert!(!p.arms_by_default(UNKNOWN_PROJECT_KEY, "/s/u.jsonl", SRC));
+        p.set_mode("/w/new", ProjectMode::Ignore, t("2026-09-25T01:00:00Z"))
+            .unwrap();
+        assert!(
+            !p.arms_by_default("/w/new", "/s/new2.jsonl", SRC),
+            "its own entry wins"
+        );
+    }
+
+    /// Per source: a source the grant has not recorded -- connected after
+    /// it, re-rooted, or whose discovery failed -- arms nothing, and
+    /// recording it later puts its history on disk rather than counting it
+    /// as new.
+    #[test]
+    fn a_source_arms_nothing_until_it_is_recorded() {
+        let mut p = granted_with_disk(&[], &[]);
+        let at = p.grant_id().unwrap();
+        let late = "codex /other-root";
+        assert!(!p.arms_by_default("/w/codex-proj", "/c/old.jsonl", late));
+        assert!(p.needs_source_record(at, late));
+        assert!(p.record_source(
+            at,
+            late,
+            set_of(&["/c/old.jsonl"]),
+            set_of(&["/w/codex-proj"])
+        ));
+        assert!(!p.needs_source_record(at, late));
+        assert!(
+            !p.arms_by_default("/w/codex-proj", "/c/new.jsonl", late),
+            "its project was on disk"
+        );
+        assert!(
+            !p.record_source(at, late, BTreeSet::new(), BTreeSet::new()),
+            "once per source"
+        );
+    }
+
+    /// A pass records only for the grant it read before listing anything, so
+    /// a grant given during discovery is not recorded from that listing.
+    #[test]
+    fn a_record_is_only_for_the_grant_read_before_the_listing() {
+        let mut p = granted_with_disk(&[], &[]);
+        let earlier = p.grant_id().unwrap();
+        p.grant_automatic(
+            t("2026-09-25T02:00:00Z"),
+            grant_terms_with("https://ingest.invalid"),
+        );
+        assert!(!p.needs_source_record(earlier, SRC));
+        assert!(!p.record_source(earlier, SRC, BTreeSet::new(), BTreeSet::new()));
+        assert!(
+            !p.arms_by_default("/w/new", "/s/new.jsonl", SRC),
+            "the new grant is unrecorded"
+        );
+    }
+
+    /// A session on disk at the grant is never approved unattended in a
+    /// project the grant armed, even after the grant is withdrawn; a project
+    /// the contributor armed themselves is theirs to send.
+    #[test]
+    fn a_pre_grant_session_is_held_back_in_a_project_the_grant_armed() {
+        let mut p = granted_with_disk(&["/w/old"], &["/s/pre.jsonl"]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.arm_by_grant("/w/new", now, grant_terms_with("https://ingest.invalid"))
+            .unwrap();
+        assert!(p.holds_back_unattended("/w/new", "/s/pre.jsonl"));
+        assert!(!p.holds_back_unattended("/w/new", "/s/fresh.jsonl"));
+        assert!(p.withdraw_automatic_grant());
+        assert!(
+            p.holds_back_unattended("/w/new", "/s/pre.jsonl"),
+            "outlives the grant"
+        );
+
+        p.set_mode("/w/new", ProjectMode::AutoUpload, now).unwrap();
+        assert!(
+            !p.holds_back_unattended("/w/new", "/s/pre.jsonl"),
+            "armed by the contributor"
+        );
+    }
+
+    /// R6 reaches the grant itself: widened terms void it, so it cannot go
+    /// on arming new projects under terms nobody agreed to. Unchanged terms
+    /// keep it.
+    #[test]
+    fn widening_the_terms_voids_the_automatic_grant() {
+        let mut p = granted_with_disk(&[], &[]);
+        let same = p.sweep_grants(
+            &grant_terms_with("https://ingest.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        assert!(same.automatic_grant_voided.is_none());
+        assert!(p.automatic_grant.is_some());
+
+        let moved = p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        assert_eq!(
+            moved.automatic_grant_voided,
+            Some(vec![super::super::grant_terms::VOID_DESTINATION])
+        );
+        assert!(moved.changed());
+        assert!(p.automatic_grant.is_none());
+        assert!(!p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
+    }
+
+    /// A policy with `/w/api` armed under `ingest`'s terms and the Flow 1
+    /// grant given under the same terms.
+    fn armed_and_granted(ingest: &str) -> ProjectPolicy {
+        let mut p = granted_with_disk(&[], &[]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        assert!(p.record_grant_terms("/w/api", grant_terms_with(ingest)));
+        p
+    }
+
+    /// R6's ship condition, in the policy: every void leaves a notice for
+    /// the shells, one per project returned to ask-first and one for the
+    /// Flow 1 grant, carrying the same reason labels as the audit.
+    #[test]
+    fn a_void_leaves_a_notice_for_each_grant_it_stopped() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        let at = t("2026-09-25T04:00:00Z");
+
+        p.sweep_grants(&grant_terms_with("https://ingest.invalid"), at);
+        assert!(p.grant_voids.is_empty(), "nothing voided, nothing to say");
+
+        p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), at);
+        assert_eq!(p.grant_voids.len(), 2, "{:?}", p.grant_voids);
+        let project = p
+            .grant_voids
+            .iter()
+            .find(|n| n.project_key.is_some())
+            .expect("a notice for the project");
+        assert_eq!(project.project_key.as_deref(), Some("/w/api"));
+        assert_eq!(project.reasons, vec!["destination-changed".to_string()]);
+        assert_eq!(project.voided_at, at);
+        let grant = p
+            .grant_voids
+            .iter()
+            .find(|n| n.project_key.is_none())
+            .expect("a notice for the automatic grant");
+        assert_eq!(grant.reasons, vec!["destination-changed".to_string()]);
+        assert_ne!(
+            project.id, grant.id,
+            "each notice is its own to acknowledge"
+        );
+    }
+
+    /// What the grant's notice says about projects (`VOID_GRANT_PROJECTS`)
+    /// is what the sweep does: a project armed under terms that still cover
+    /// what is in force stays armed and gets no notice, while the grant
+    /// armed under older terms is voided.
+    #[test]
+    fn voiding_the_grant_leaves_a_project_whose_terms_still_cover_it() {
+        let mut p = granted_with_disk(&[], &[]);
+        let now = t("2026-09-25T03:00:00Z");
+        p.set_mode("/w/new", ProjectMode::AutoUpload, now).unwrap();
+        p.record_grant_terms("/w/new", grant_terms_with("https://elsewhere.invalid"));
+
+        let sweep = p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
+        assert!(sweep.automatic_grant_voided.is_some());
+        assert!(sweep.voided.is_empty());
+        assert_eq!(p.resolve("/w/new"), ProjectMode::AutoUpload);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(p.grant_voids[0].project_key.is_none());
+    }
+
+    /// A shell acknowledges exactly the notices it showed. An id it did not
+    /// name stays, and a stale or unknown id is not an error.
+    #[test]
+    fn acknowledging_clears_only_the_notices_named() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        let ids: Vec<u64> = p.grant_voids.iter().map(|n| n.id).collect();
+        assert_eq!(ids.len(), 2);
+
+        assert_eq!(p.acknowledge_grant_voids(&[ids[0], 9_999]), 1);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert_eq!(p.grant_voids[0].id, ids[1]);
+        assert_eq!(p.acknowledge_grant_voids(&[ids[0]]), 0, "already gone");
+        assert_eq!(p.acknowledge_grant_voids(&[ids[1]]), 1);
+        assert!(p.grant_voids.is_empty());
+    }
+
+    /// Ids are never reused, so an acknowledgement for an old notice cannot
+    /// clear one raised after the shell drew.
+    #[test]
+    fn a_later_void_never_reuses_an_acknowledged_id() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        let first: Vec<u64> = p.grant_voids.iter().map(|n| n.id).collect();
+        assert_eq!(p.acknowledge_grant_voids(&first), 2);
+
+        let now = t("2026-09-25T05:00:00Z");
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        p.record_grant_terms("/w/api", grant_terms_with("https://elsewhere.invalid"));
+        p.sweep_grants(&grant_terms_with("https://third.invalid"), now);
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(!first.contains(&p.grant_voids[0].id));
+        assert_eq!(p.acknowledge_grant_voids(&first), 0);
+        assert_eq!(p.grant_voids.len(), 1);
+    }
+
+    /// Acting on what a notice is about makes it stale: setting that
+    /// project's mode clears its notice, and giving the grant again clears
+    /// the grant's. Neither touches the other.
+    #[test]
+    fn acting_on_a_voided_grant_clears_its_notice() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        let now = t("2026-09-25T04:00:00Z");
+        p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
+        assert_eq!(p.grant_voids.len(), 2);
+
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        assert_eq!(p.grant_voids.len(), 1);
+        assert!(p.grant_voids[0].project_key.is_none());
+
+        p.grant_automatic(now, grant_terms_with("https://elsewhere.invalid"));
+        assert!(p.grant_voids.is_empty());
+    }
+
+    /// A policy file written before notices existed still loads, with none.
+    #[test]
+    fn a_policy_file_without_notices_loads_with_none() {
+        let mut value = serde_json::to_value(ProjectPolicy::new()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("grant_voids");
+        object.remove("next_grant_void_id");
+        let p: ProjectPolicy = serde_json::from_value(value).unwrap();
+        assert!(p.grant_voids.is_empty());
+        assert_eq!(p.next_grant_void_id, 0);
+    }
+
     fn armed_policy() -> ProjectPolicy {
         let mut p = ProjectPolicy::new();
         for _ in 0..ARMING_SUGGESTION_THRESHOLD {
@@ -1128,6 +1758,7 @@ mod tests {
                 added_at: now(),
                 label: "repo".to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
         p.projects.insert(
@@ -1137,6 +1768,7 @@ mod tests {
                 added_at: now(),
                 label: "inner".to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
 
@@ -1208,6 +1840,7 @@ mod tests {
                 added_at: now(),
                 label: "sub".to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
         p.save(&store).unwrap();
@@ -1228,6 +1861,7 @@ mod tests {
                 added_at: now(),
                 label: UNKNOWN_PROJECT_KEY.to_string(),
                 display_path: None,
+                armed_under: None,
             },
         );
         p.rekey();

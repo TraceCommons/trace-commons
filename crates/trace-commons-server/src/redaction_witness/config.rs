@@ -183,6 +183,50 @@ pub fn witness_bypass_config_from_env()
     )
 }
 
+/// Build the verification pin whenever its controls are configured, even if
+/// the independent PII-backstop bypass switch is off. A half-configured pin
+/// refuses boot rather than silently yielding unverified provenance.
+pub fn witness_capture_pin_from_env() -> Result<Option<WitnessPin>, WitnessBypassConfigError> {
+    witness_capture_pin_from_values(
+        std::env::var(SIGNING_ADDRESS_ENV).ok().as_deref(),
+        std::env::var(EXPECTED_MEASUREMENTS_ENV).ok().as_deref(),
+        std::env::var(CERTIFICATE_MAX_AGE_ENV).ok().as_deref(),
+    )
+}
+
+pub fn witness_capture_pin_from_values(
+    signing_address: Option<&str>,
+    measurements: Option<&str>,
+    certificate_max_age: Option<&str>,
+) -> Result<Option<WitnessPin>, WitnessBypassConfigError> {
+    let address = non_blank(signing_address);
+    let measurements = comma_separated(measurements);
+    if address.is_none() && measurements.is_empty() {
+        return Ok(None);
+    }
+    let address = address.ok_or(WitnessBypassConfigError::MissingControl {
+        control: SIGNING_ADDRESS_CONTROL,
+    })?;
+    if measurements.is_empty() {
+        return Err(WitnessBypassConfigError::MissingControl {
+            control: EXPECTED_MEASUREMENT_CONTROL,
+        });
+    }
+    let max_age_seconds = match non_blank(certificate_max_age) {
+        None => DEFAULT_CERTIFICATE_MAX_AGE_SECONDS,
+        Some(raw) => raw
+            .parse::<i64>()
+            .map_err(|_| WitnessBypassConfigError::CertificateMaxAgeMalformed)?,
+    };
+    let freshness =
+        WitnessFreshness::new(max_age_seconds).map_err(WitnessBypassConfigError::Freshness)?;
+    Ok(Some(
+        WitnessPin::new(address, measurements)
+            .map_err(WitnessBypassConfigError::Pin)?
+            .with_freshness(freshness),
+    ))
+}
+
 /// Decide the bypass configuration from four raw values.
 ///
 /// `Ok(None)` means the switch is off. It is not an acceptance: with it off
@@ -288,6 +332,20 @@ fn comma_separated(value: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_pin_is_independent_of_bypass_switch_and_policy_aliases() {
+        let pin = witness_capture_pin_from_values(Some(ADDRESS), Some(MEASUREMENT), None)
+            .unwrap()
+            .expect("pin present");
+        assert_eq!(pin.pinned_measurement_count(), 1);
+        assert!(
+            witness_capture_pin_from_values(None, None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(witness_capture_pin_from_values(Some(ADDRESS), None, None).is_err());
+    }
 
     /// The four controls these tests are about, with the freshness window
     /// left unset.

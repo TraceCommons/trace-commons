@@ -78,6 +78,7 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // receipt fetch would disclose an exchange to the provider for a
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: false,
     }
 }
@@ -192,6 +193,7 @@ pub(crate) async fn enroll_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -1570,6 +1572,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");
             }
+            // Only the daemon asks for a hold; listed so a CLI run that ever
+            // got one says so rather than failing to compile it away.
+            SubmitOutcome::HeldForReview { reason_label, .. } => {
+                println!("{preview_prefix}held ({reason_label})");
+            }
         }
     }
 
@@ -2168,6 +2175,7 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2313,6 +2321,7 @@ mod tests {
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2833,6 +2842,7 @@ async fn enroll_with_invite_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -4056,6 +4066,8 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
+        // Arming records the terms in force, so it needs a config.
+        store.save_config(&unenrolled_preview_config()).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false).unwrap();
         let key = std::fs::canonicalize(project.path())

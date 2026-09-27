@@ -42,6 +42,7 @@
 
 use axum::http::HeaderMap;
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
+use trace_commons_protocol::witness_provenance::InferenceProvenance;
 
 use super::certificate::{CertificateDetails, WitnessCertificate};
 
@@ -134,7 +135,6 @@ pub fn witness_headers(
     let object = value
         .as_object()
         .ok_or(WitnessHeaderError::CertificateNotJson)?;
-
     // Named fields, one at a time. See the module doc for why this is not a
     // derive: the signing bytes are length-prefixed and field-ordered, and
     // that only protects both sides if both sides name their fields.
@@ -147,16 +147,55 @@ pub fn witness_headers(
         .and_then(serde_json::Value::as_i64)
         .ok_or(WitnessHeaderError::CertificateFieldMalformed { field: "timestamp" })?;
 
+    let v2 = match object.get("version") {
+        None => {
+            if object.contains_key("inference_provenance") || object.len() != 5 {
+                return Err(WitnessHeaderError::CertificateFieldMalformed { field: "version" });
+            }
+            None
+        }
+        Some(serde_json::Value::Number(version)) if version.as_u64() == Some(2) => {
+            if object.len() != 7 {
+                return Err(WitnessHeaderError::CertificateFieldMalformed {
+                    field: "inference_provenance",
+                });
+            }
+            let provenance: InferenceProvenance =
+                serde_json::from_value(object.get("inference_provenance").cloned().ok_or(
+                    WitnessHeaderError::CertificateFieldMalformed {
+                        field: "inference_provenance",
+                    },
+                )?)
+                .map_err(|_| WitnessHeaderError::CertificateFieldMalformed {
+                    field: "inference_provenance",
+                })?;
+            Some(provenance)
+        }
+        _ => return Err(WitnessHeaderError::CertificateFieldMalformed { field: "version" }),
+    };
+
     Ok(Some((
-        WitnessCertificate::from_wire(
-            redacted_sha256,
-            CertificateDetails {
-                residual_risk_verdict,
-                redaction_policy_version,
-                witness_measurement,
-                timestamp,
-            },
-        ),
+        match v2 {
+            Some(provenance) => WitnessCertificate::from_wire_v2(
+                redacted_sha256,
+                CertificateDetails {
+                    residual_risk_verdict,
+                    redaction_policy_version,
+                    witness_measurement,
+                    timestamp,
+                },
+                provenance,
+            ),
+            None => WitnessCertificate::from_wire(
+                redacted_sha256,
+                CertificateDetails {
+                    residual_risk_verdict,
+                    redaction_policy_version,
+                    witness_measurement,
+                    timestamp,
+                },
+            ),
+        },
         signature.to_string(),
     )))
 }
@@ -243,6 +282,47 @@ mod tests {
             headers.insert(SIGNATURE_HEADER, signature.parse().expect("a header value"));
         }
         headers
+    }
+
+    #[test]
+    fn v2_requires_a_closed_version_and_provenance_pair() {
+        use crate::redaction_witness::certificate::CertificateVersion;
+        let mut v2 = certificate_json();
+        v2["version"] = serde_json::json!(2);
+        v2["inference_provenance"] = serde_json::json!({"status":"unattested"});
+        let headers = headers_with(Some(&encoded(&v2)), Some("0x00"));
+        let (certificate, _) = witness_headers(&headers).expect("v2 parses").expect("pair");
+        assert_eq!(
+            certificate.version(),
+            &CertificateVersion::V2(InferenceProvenance::Unattested)
+        );
+
+        let mut malformed = Vec::new();
+        let mut case = v2.clone();
+        case.as_object_mut().unwrap().remove("version");
+        malformed.push(case);
+        let mut case = v2.clone();
+        case["version"] = serde_json::json!(3);
+        malformed.push(case);
+        let mut case = v2.clone();
+        case.as_object_mut().unwrap().remove("inference_provenance");
+        malformed.push(case);
+        let mut case = v2.clone();
+        case["inference_provenance"]["extra"] = serde_json::json!(1);
+        malformed.push(case);
+        let mut case = v2.clone();
+        case["inference_provenance"] = serde_json::json!({"status":"attested"});
+        malformed.push(case);
+        let mut case = v2.clone();
+        case["extra"] = serde_json::json!(1);
+        malformed.push(case);
+        for case in malformed {
+            let headers = headers_with(Some(&encoded(&case)), Some("0x00"));
+            assert!(
+                witness_headers(&headers).is_err(),
+                "malformed v2 certificate accepted"
+            );
+        }
     }
 
     #[test]
