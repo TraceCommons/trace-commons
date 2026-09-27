@@ -27720,6 +27720,394 @@ async fn db_reconciliation_drill_without_db_mirror_returns_operator_error() {
     );
 }
 
+/// Asserts the DB audit table is an exact mirror of the file audit log: the
+/// same events, in the same order, with the same ids and chain fields, and
+/// every row's canonical payload is its file event. Returns the DB rows.
+async fn assert_db_audit_mirrors_file_log(
+    backend: &PgBackend,
+    root: &Path,
+    context: &str,
+) -> Vec<StorageTraceAuditEventRecord> {
+    let file_events = read_all_audit_events(root, "tenant-a").expect("file audit log");
+    let db_events = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB audit rows");
+    assert_eq!(
+        db_events
+            .iter()
+            .map(|row| (
+                row.audit_event_id,
+                row.previous_event_hash.clone(),
+                row.event_hash.clone()
+            ))
+            .collect::<Vec<_>>(),
+        file_events
+            .iter()
+            .map(|event| (
+                event.event_id,
+                event.previous_event_hash.clone(),
+                event.event_hash.clone()
+            ))
+            .collect::<Vec<_>>(),
+        "{context}: DB rows are the file events, in order, with their chain fields \
+         (file kinds: {:?})",
+        file_events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (row, event) in db_events.iter().zip(&file_events) {
+        assert!(
+            event.event_hash.is_some(),
+            "{context}: file event is chained"
+        );
+        let canonical: TraceCommonsAuditEvent = serde_json::from_str(
+            row.canonical_event_json
+                .as_deref()
+                .expect("mirrored row carries its canonical payload"),
+        )
+        .expect("canonical payload parses");
+        assert_eq!(canonical.kind, event.kind, "{context}");
+        assert_eq!(canonical.reason, event.reason, "{context}");
+    }
+    let projection_failures = collect_db_audit_canonical_projection_failures(&db_events)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(
+        projection_failures.is_empty(),
+        "{context}: {projection_failures:?}"
+    );
+    let chain_failures = collect_db_audit_hash_chain_failures(&db_events)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(chain_failures.is_empty(), "{context}: {chain_failures:?}");
+    db_events
+}
+
+/// The file audit log is canonical and the DB audit table mirrors it exactly,
+/// in both dual-write modes: every event the submit, remediation, idempotent
+/// retry, operator re-scrub, review and revocation paths write is one row
+/// with the file event's id, chain fields and canonical payload, and the DB
+/// holds no audit row the file log lacks.
+#[tokio::test]
+async fn db_audit_table_mirrors_the_file_audit_log_in_both_dual_write_modes() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for require_db_mirror_writes in [false, true] {
+        let context = format!("require_db_mirror_writes={require_db_mirror_writes}");
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        {
+            let state_mut = Arc::make_mut(&mut state);
+            state_mut.require_db_mirror_writes = require_db_mirror_writes;
+            state_mut.accept_medium_risk_submissions = false;
+        }
+
+        // First landing, quarantined; then a remediation re-POST and an
+        // idempotent retry of the remediated body.
+        let mut first = sample_envelope().await;
+        make_metadata_only_low_risk(&mut first);
+        first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(first.clone()),
+        )
+        .await
+        .expect("first submission");
+        let mut corrected = first.clone();
+        corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(corrected.clone()),
+        )
+        .await
+        .expect("remediation");
+        let _ = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(corrected),
+        )
+        .await
+        .expect("idempotent retry");
+
+        // A second quarantined submission, re-scrubbed twice by an operator
+        // (it stays quarantined), then reviewed.
+        let mut second = sample_envelope().await;
+        second.events[0].redacted_content =
+            Some("late leak at /tmp/ironclaw/private/token.txt".to_string());
+        let Json(receipt) = submit_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            submit_body(second.clone()),
+        )
+        .await
+        .expect("second submission");
+        assert_eq!(receipt.status, "quarantined", "{context}");
+        for _ in 0..2 {
+            let _ = review_quarantine_rescrub_handler(
+                State(state.clone()),
+                auth_headers("review-token-a"),
+                AxumPath(second.submission_id),
+                Json(TraceQuarantineRescrubRequest {
+                    reason: Some("operator free text that must not reach the DB".into()),
+                }),
+            )
+            .await
+            .expect("operator rescrub");
+        }
+        let _ = review_decision_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(second.submission_id),
+            Json(TraceReviewDecisionRequest {
+                decision: TraceReviewDecision::Approve,
+                reason: Some("reviewer free text that must not reach the DB".to_string()),
+                credit_points_pending: None,
+            }),
+        )
+        .await
+        .expect("review decision");
+
+        // And the first submission is revoked.
+        let revoked = revoke_trace_handler(
+            State(state.clone()),
+            auth_headers("token-a"),
+            AxumPath(first.submission_id),
+        )
+        .await
+        .expect("revocation");
+        assert_eq!(revoked, StatusCode::NO_CONTENT);
+
+        let db_events = assert_db_audit_mirrors_file_log(&backend, temp.path(), &context).await;
+        let kinds = read_all_audit_events(temp.path(), "tenant-a")
+            .expect("file audit log")
+            .into_iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>();
+        for expected in [
+            "submitted",
+            "quarantine_remediated",
+            "idempotent_submit",
+            "quarantine_operator_rescrub",
+            "review_decision",
+            "revoked",
+            "revocation_artifact_invalidation",
+        ] {
+            assert!(
+                kinds.iter().any(|kind| kind == expected),
+                "{context}: {expected} in {kinds:?}"
+            );
+        }
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "quarantine_operator_rescrub")
+                .count(),
+            2,
+            "{context}: a second re-scrub records a row of its own"
+        );
+        // Hash-only: the free text reached neither the rows nor their payloads.
+        for row in &db_events {
+            let row_text = format!("{:?} {:?}", row.reason, row.canonical_event_json.as_deref());
+            assert!(
+                !row_text.contains("free text"),
+                "{context}: free text leaked into audit row {}",
+                row.audit_event_id
+            );
+        }
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Concurrent submissions: the append lock orders each event's chain fields,
+/// its DB row and its file line together, so both logs hold one unforked
+/// chain in the same order, in both dual-write modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    for require_db_mirror_writes in [false, true] {
+        let context = format!("require_db_mirror_writes={require_db_mirror_writes}");
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_mirror: Arc<dyn Database> = backend.clone();
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).require_db_mirror_writes = require_db_mirror_writes;
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let mut envelope = sample_envelope().await;
+            make_metadata_only_low_risk(&mut envelope);
+            let state = state.clone();
+            tasks.push(tokio::spawn(async move {
+                submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
+                    .await
+                    .map(|_| ())
+                    .map_err(|(status, _)| status)
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("submission task joins")
+                .unwrap_or_else(|status| panic!("{context}: submission failed with {status}"));
+        }
+
+        let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
+        assert_eq!(file_events.len(), 8, "{context}");
+        let mut previous = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+        for event in &file_events {
+            assert_eq!(
+                event.previous_event_hash.as_deref(),
+                Some(previous.as_str()),
+                "{context}: the file chain does not fork"
+            );
+            previous = event.event_hash.clone().expect("chained");
+        }
+        assert_db_audit_mirrors_file_log(&backend, temp.path(), &context).await;
+    }
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// A submit row written before the DB mirrored the file event -- the id
+/// derived from the submission, no chain fields, no canonical payload -- is
+/// counted as legacy, with its file `submitted` event, and neither is drift.
+#[tokio::test]
+async fn reconciliation_counts_legacy_submit_audit_rows_apart_from_drift() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission");
+
+    // Replace the mirrored row with the row the old scheme wrote.
+    let file_event = read_all_audit_events(temp.path(), "tenant-a")
+        .expect("file audit log")
+        .into_iter()
+        .find(|event| event.kind == "submitted")
+        .expect("submitted event");
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw client");
+    client
+        .execute(
+            "DELETE FROM trace_audit_events WHERE tenant_id = 'tenant-a' AND audit_event_id = $1",
+            &[&file_event.event_id],
+        )
+        .await
+        .expect("mirrored row removed");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let legacy_id = deterministic_trace_uuid("submit-audit", &record);
+    backend
+        .append_trace_audit_event(StorageTraceAuditEventWrite {
+            audit_event_id: legacy_id,
+            tenant_id: "tenant-a".to_string(),
+            actor_principal_ref: record.auth_principal_ref.clone(),
+            actor_role: "contributor".to_string(),
+            action: StorageTraceAuditAction::Submit,
+            reason: Some("auth_method=static_token".to_string()),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: StorageTraceAuditSafeMetadata::Submission {
+                status: storage_corpus_status(record.status),
+                privacy_risk: serde_storage_string(&record.privacy_risk).expect("risk"),
+            },
+        })
+        .await
+        .expect("legacy row writes");
+
+    let Json(response) = maintenance_handler(
+        State(state),
+        auth_headers("admin-token-a"),
+        Json(TraceMaintenanceRequest {
+            purpose: Some("legacy_submit_audit_reconcile".to_string()),
+            dry_run: true,
+            backfill_db_mirror: false,
+            index_vectors: false,
+            reconcile_db_mirror: true,
+            verify_audit_chain: false,
+            prune_export_cache: false,
+            max_export_age_hours: None,
+            purge_expired_before: None,
+        }),
+    )
+    .await
+    .expect("maintenance reconciles");
+    let report = response
+        .db_reconciliation
+        .expect("reconciliation report exists");
+    assert_eq!(report.legacy_submit_audit_row_count, 1);
+    assert!(
+        report.missing_audit_event_ids_in_db.is_empty(),
+        "{:?}",
+        report.missing_audit_event_ids_in_db
+    );
+    assert!(report.missing_audit_event_ids_in_files.is_empty());
+    assert!(
+        !report
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap.starts_with("missing_audit_event_ids")),
+        "{:?}",
+        report.blocking_gaps
+    );
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 #[tokio::test]
 async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     use axum::body::Body;
@@ -27752,6 +28140,20 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     )
     .await
     .expect("submission mirrors to DB");
+    // An accepted submission is indexed by the vector worker; reconciliation
+    // reports one without an active vector entry as a gap, so index it first,
+    // as a deployment's worker would.
+    let _ = vector_index_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceVectorIndexRequest {
+            purpose: Some("reconciliation drill vector index".to_string()),
+            dry_run: false,
+            limit: None,
+        }),
+    )
+    .await
+    .expect("vector worker indexes the accepted submission");
 
     let response = app(state.clone())
         .oneshot(
@@ -30510,6 +30912,330 @@ async fn revocation_enqueues_worker_queue_invalidation_and_drill_verifies_comple
     assert!(!body_text.contains("token-a"));
     assert!(!body_text.contains("Please inspect the workspace"));
 
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// An object-primary state backed by a filesystem "remote" artifact store,
+/// with DB mirror writes required.
+fn object_primary_revocation_test_state(
+    root: &Path,
+    remote_root: &Path,
+    backend: Arc<PgBackend>,
+) -> Arc<AppState> {
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+        Some("file_system"),
+        Some(remote_root.to_str().expect("utf8 temp path")),
+        Some("test-kms-key-ref"),
+        Some("test-credential-ref"),
+    )
+    .expect("filesystem remote config parses");
+    let artifact_store =
+        ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+            .expect("filesystem remote service store builds");
+    let mut state =
+        test_state_with_configured_artifact_store_policies_export_guardrails_and_required_db_writes(
+            root.to_path_buf(),
+            Some(backend),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+            true,
+            false,
+        );
+    {
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.db_reviewer_require_object_refs = true;
+        state_mut.tenant_rollout_gates = TraceTenantRolloutGates {
+            tenant_ids_by_feature: Arc::new(BTreeMap::from([(
+                TraceTenantRolloutFeature::ObjectPrimarySubmitReview,
+                BTreeSet::from(["tenant-a".to_string()]),
+            )])),
+        };
+    }
+    state
+}
+
+async fn submit_object_primary_revocation_fixture(state: &Arc<AppState>) -> Uuid {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("object-primary submission mirrors to DB");
+    submission_id
+}
+
+/// Revocation deletes an object-primary submission's envelope at once. The
+/// envelope's object ref must say so, and its queued delete item must be
+/// complete with a physical-delete receipt -- otherwise the revocation worker
+/// later finds an active ref for an object that is gone and fails the item
+/// on every attempt.
+#[tokio::test]
+async fn revoking_an_object_primary_submission_marks_its_envelope_ref_deleted() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let state =
+        object_primary_revocation_test_state(temp.path(), remote_temp.path(), backend.clone());
+    let submission_id = submit_object_primary_revocation_fixture(&state).await;
+
+    let revoked = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("contributor revokes");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
+
+    let envelope_ref = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read")
+        .into_iter()
+        .find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope
+        })
+        .expect("submitted envelope ref");
+    assert!(
+        envelope_ref.deleted_at.is_some(),
+        "revocation deleted the envelope, so its object ref is marked deleted"
+    );
+    let items = backend
+        .list_trace_revocation_propagation_items("tenant-a", submission_id)
+        .await
+        .expect("propagation items read");
+    let delete_item = items
+        .iter()
+        .find(|item| {
+            item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id }
+                        if object_ref_id == envelope_ref.object_ref_id
+                )
+        })
+        .expect("the envelope's delete item");
+    assert_eq!(
+        delete_item.status,
+        StorageTraceRevocationPropagationItemStatus::Done,
+        "the envelope's queued delete is complete"
+    );
+    assert!(delete_item.evidence_hash.is_some());
+    assert!(
+        items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(object_ref_id),
+                        ..
+                    } if object_ref_id == envelope_ref.object_ref_id
+                )
+        }),
+        "a physical-delete receipt records the envelope's deletion"
+    );
+
+    // The worker has nothing left to fail on for the envelope.
+    let Json(worker) = revocation_propagation_worker_handler(
+        State(state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("revocation_envelope_ref_deleted".to_string()),
+            dry_run: false,
+            limit: 20,
+        }),
+    )
+    .await
+    .expect("revocation worker runs");
+    assert_eq!(worker.failed, 0);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// Backstop: an object that is already gone is deleted, and the worker
+/// completes its item with a receipt. An object that is present but fails
+/// verification is not: that stays a failure, with no receipt.
+#[tokio::test]
+async fn revocation_worker_treats_a_missing_object_as_deleted_but_not_a_failing_one() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let state =
+        object_primary_revocation_test_state(temp.path(), remote_temp.path(), backend.clone());
+    let submission_id = submit_object_primary_revocation_fixture(&state).await;
+    let tenant_ref = tenant_storage_ref("tenant-a");
+    let store = state.artifact_store.as_ref().expect("artifact store");
+
+    // A second service-owned object for the submission that exists but will
+    // fail verification: its ref records a different ciphertext hash.
+    let tampered_receipt = store
+        .put_json(
+            &tenant_ref,
+            TraceArtifactKind::ContributionEnvelope,
+            "revocation-backstop-review-snapshot",
+            &serde_json::json!({ "artifact": "review_snapshot" }),
+        )
+        .expect("review snapshot artifact writes");
+    let tampered_ref_id = deterministic_trace_uuid_for_external_ref(
+        "revocation-backstop-tampered-object-ref",
+        "tenant-a",
+        submission_id,
+        "review_snapshot",
+    );
+    backend
+        .append_trace_object_ref(StorageTraceObjectRefWrite {
+            object_ref_id: tampered_ref_id,
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ReviewSnapshot,
+            object_store: store.object_store_name().to_string(),
+            object_key: tampered_receipt.object_key,
+            content_sha256: sha256_prefixed("not the stored ciphertext"),
+            encryption_key_ref: format!("tenant:{tenant_ref}"),
+            size_bytes: 128,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("tampered object ref writes");
+
+    // The envelope's object disappears before revocation reaches it, so the
+    // revocation path has nothing to delete and leaves its ref active.
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope_receipt = record
+        .artifact_receipt
+        .clone()
+        .expect("object-primary receipt");
+    assert!(
+        store
+            .delete_artifact(&tenant_ref, &envelope_receipt)
+            .expect("envelope object deletes"),
+        "the envelope object existed"
+    );
+
+    let revoked = revoke_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        AxumPath(submission_id),
+    )
+    .await
+    .expect("contributor revokes");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
+    let envelope_ref_id = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read")
+        .into_iter()
+        .find(|object_ref| {
+            object_ref.artifact_kind == StorageTraceObjectArtifactKind::SubmittedEnvelope
+        })
+        .expect("submitted envelope ref")
+        .object_ref_id;
+
+    let Json(worker) = revocation_propagation_worker_handler(
+        State(state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("revocation_missing_object_backstop".to_string()),
+            dry_run: false,
+            limit: 20,
+        }),
+    )
+    .await
+    .expect("revocation worker runs");
+    assert_eq!(worker.failed, 1, "only the tampered object fails");
+
+    let object_refs = backend
+        .list_trace_object_refs("tenant-a", submission_id)
+        .await
+        .expect("object refs read");
+    let envelope_ref = object_refs
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == envelope_ref_id)
+        .expect("envelope ref");
+    assert!(
+        envelope_ref.deleted_at.is_some(),
+        "an already-missing object is marked deleted"
+    );
+    let tampered_ref = object_refs
+        .iter()
+        .find(|object_ref| object_ref.object_ref_id == tampered_ref_id)
+        .expect("tampered ref");
+    assert!(
+        tampered_ref.deleted_at.is_none(),
+        "an object that fails verification is not deleted"
+    );
+
+    let items = backend
+        .list_trace_revocation_propagation_items("tenant-a", submission_id)
+        .await
+        .expect("propagation items read");
+    let receipt_for = |object_ref_id: Uuid| {
+        items.iter().any(|item| {
+            item.action == StorageTraceRevocationPropagationAction::RecordPhysicalDeleteReceipt
+                && matches!(
+                    item.target,
+                    StorageTraceRevocationPropagationTarget::PhysicalDeleteReceipt {
+                        object_ref_id: Some(receipt_ref),
+                        ..
+                    } if receipt_ref == object_ref_id
+                )
+        })
+    };
+    assert!(
+        receipt_for(envelope_ref_id),
+        "a receipt records the missing object"
+    );
+    assert!(
+        !receipt_for(tampered_ref_id),
+        "no receipt for an object that failed verification"
+    );
+    let delete_item_status = |object_ref_id: Uuid| {
+        items
+            .iter()
+            .find(|item| {
+                item.action == StorageTraceRevocationPropagationAction::DeleteObjectPayload
+                    && matches!(
+                        item.target,
+                        StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id: target }
+                            if target == object_ref_id
+                    )
+            })
+            .map(|item| item.status)
+    };
+    assert_eq!(
+        delete_item_status(envelope_ref_id),
+        Some(StorageTraceRevocationPropagationItemStatus::Done)
+    );
+    assert_ne!(
+        delete_item_status(tampered_ref_id),
+        Some(StorageTraceRevocationPropagationItemStatus::Done)
+    );
+    let tampered_path_count = count_files_under_dir(remote_temp.path());
+    assert!(
+        tampered_path_count >= 1,
+        "the object that failed verification is still stored"
+    );
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
@@ -35275,7 +36001,8 @@ async fn vector_index_worker_uses_configured_vector_searcher_after_server_valida
         vec![first_trace_id.to_string()]
     );
     assert_eq!(second_entry.duplicate_score, Some(0.92));
-    assert_eq!(second_entry.novelty_score, Some(0.08000004));
+    // f32 arithmetic, as the worker computes it: 1.0 - 0.92 is 0.07999998.
+    assert_eq!(second_entry.novelty_score, Some(1.0_f32 - 0.92));
     assert!(
         second_entry
             .cluster_id
