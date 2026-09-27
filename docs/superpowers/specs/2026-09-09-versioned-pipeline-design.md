@@ -448,6 +448,7 @@ its membership decision.
 ```json
 {
   "decision": {
+    "bundle_id": "sha256:bundle-identifier",
     "awards": [
       {
         "instrument_id": "trace_credit",

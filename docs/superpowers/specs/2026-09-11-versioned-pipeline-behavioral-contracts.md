@@ -622,16 +622,13 @@ and shadow comparison. No active index mutation can occur.
   under the `trace-commons-instrument-awards-v2` domain tag.
 - Each award MUST name an instrument that the bound bundle pins. Before the
   Score outcome commits, the runner MUST check the Score decision against the
-  run's bound manifest. The check requires an equal bundle identifier and a
-  pin for every award.
+  run's bound manifest: an equal bundle identifier and a pin for every award.
 - A usable Score decision MUST be built only through the constructor that
   takes the bundle manifest. The constructor MUST refuse an award for an
   unpinned instrument, and it MUST record the bundle identifier.
 - A stored Score decision MUST load without a manifest, but only as an
   unverified decision.
-- Settle MUST accept only a Score decision that was checked against the run's
-  bound manifest. The check requires an equal bundle identifier and a pin for
-  every award.
+- Settle MUST accept only a Score decision that passed this check.
 - The constructor rule gives way at load. The check against the bound
   manifest restores it.
 - An empty collection MUST remain distinct from an incomplete Score phase.
