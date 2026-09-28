@@ -550,6 +550,15 @@ pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted t
 // chosen by `witness_origin_line` from the daemon's `route_disclosure`
 // facts. See "The disclosure screens" below.
 
+/// Shown under an armed project when its disclosure (K6,
+/// `automatic_gate::project_disclosure`) could not be read.
+///
+/// Approved by Zaki on #1075. It names no wording as a fallback: a shell
+/// that cannot read the core's answer shows neither scrub disclosure,
+/// rather than guessing one.
+pub const AUTO_PROJECT_DISCLOSURE_UNAVAILABLE: &str =
+    "What is removed from this project could not be loaded.";
+
 /// Why the scope picker blocks the grant (R7), and what declining means.
 ///
 /// **DRAFT, NEEDS APPROVAL.** R7: the picker has no default, and a

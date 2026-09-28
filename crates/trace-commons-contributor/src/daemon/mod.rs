@@ -955,6 +955,7 @@ async fn drain_approved(
             uploader::UploadDecision::Uploaded {
                 submission_id,
                 receipt,
+                unattended_redaction,
             } => {
                 // The submission shipped; now make the attestation mark tell
                 // the truth about the receipt that did or did not come with
@@ -983,9 +984,15 @@ async fn drain_approved(
                 // A failed save is not worth failing an upload that already
                 // succeeded: the worst outcome is that an offer arrives one
                 // contribution later than it might have.
+                //
+                // The same save records what redaction an unattended session
+                // had, which decides the armed project's disclosure (K6).
                 if newly_uploaded {
                     let mut policy = shared.policy.lock().expect("policy lock");
                     policy.record_contribution(&entry.project_key);
+                    if let Some(redaction) = unattended_redaction {
+                        policy.record_automatic_redaction(&entry.project_key, redaction);
+                    }
                     let _ = policy.save(&shared.store);
                 }
             }

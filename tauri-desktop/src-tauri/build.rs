@@ -69,6 +69,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "automatic_contribution_copy",
+    "project_automatic_contribution_copy",
     "set_private_inference",
     "set_inference_evidence",
     "set_token_contribution",

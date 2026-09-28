@@ -109,6 +109,29 @@ pub struct ProjectEntry {
     /// policy file still loads.
     #[serde(default)]
     pub armed_under: Option<super::grant_terms::GrantTerms>,
+    /// What redaction each session sent from this project on the
+    /// contributor's behalf had, since it was last armed (R1, K6). Decides
+    /// which arming disclosure the project gets: see
+    /// `automatic_gate::project_disclosure`.
+    ///
+    /// Reset with the rest of the entry on every mode change, so it covers
+    /// one arming only. Counts, never session identities: the policy file
+    /// is not a history. `#[serde(default)]` so an older policy file loads,
+    /// as "nothing recorded", which earns only the deterministic-only
+    /// wording.
+    #[serde(default)]
+    pub automatic_redaction: AutomaticRedactionTally,
+}
+
+/// How many unattended sessions from one armed project had a certified full
+/// redaction pipeline, and how many did not. See
+/// [`ProjectEntry::automatic_redaction`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomaticRedactionTally {
+    #[serde(default)]
+    pub certified_full_pipeline: u32,
+    #[serde(default)]
+    pub not_certified: u32,
 }
 
 /// How many times a project must have contributed before the app offers to
@@ -435,6 +458,35 @@ impl ProjectPolicy {
         *self.contributed.entry(project_key.to_string()).or_insert(0) += 1;
     }
 
+    /// Record what one session sent from `project_key` on the contributor's
+    /// behalf had for redaction (K6).
+    ///
+    /// Only while the project is armed: a session approved unattended in a
+    /// project that has since left automatic says nothing about the next
+    /// arming, which starts from nothing.
+    pub fn record_automatic_redaction(
+        &mut self,
+        project_key: &str,
+        redaction: super::automatic_gate::SessionRedaction,
+    ) {
+        use super::automatic_gate::SessionRedaction;
+        let Some(entry) = self.projects.get_mut(project_key) else {
+            return;
+        };
+        if entry.mode != ProjectMode::AutoUpload {
+            return;
+        }
+        let tally = &mut entry.automatic_redaction;
+        match redaction {
+            SessionRedaction::CertifiedFullPipeline => {
+                tally.certified_full_pipeline = tally.certified_full_pipeline.saturating_add(1);
+            }
+            SessionRedaction::NotCertified => {
+                tally.not_certified = tally.not_certified.saturating_add(1);
+            }
+        }
+    }
+
     /// Record a "Not now" against one project.
     pub fn decline_arming(&mut self, project_key: &str, now: DateTime<Utc>) {
         self.arming_declined_at.insert(project_key.to_string(), now);
@@ -518,6 +570,24 @@ impl ProjectPolicy {
                     if existing.mode != ProjectMode::AutoUpload {
                         existing.armed_under = None;
                     }
+                    // Both halves' sessions are now this project's, so both
+                    // records count: one uncertified session in either keeps
+                    // the merged project off the model-scrub wording. A merge
+                    // that left it ask-first starts the next arming clean.
+                    existing.automatic_redaction = if existing.mode == ProjectMode::AutoUpload {
+                        AutomaticRedactionTally {
+                            certified_full_pipeline: existing
+                                .automatic_redaction
+                                .certified_full_pipeline
+                                .saturating_add(entry.automatic_redaction.certified_full_pipeline),
+                            not_certified: existing
+                                .automatic_redaction
+                                .not_certified
+                                .saturating_add(entry.automatic_redaction.not_certified),
+                        }
+                    } else {
+                        AutomaticRedactionTally::default()
+                    };
                 })
                 .or_insert(ProjectEntry {
                     mode: entry.mode,
@@ -525,6 +595,7 @@ impl ProjectPolicy {
                     label,
                     display_path: shown,
                     armed_under: entry.armed_under,
+                    automatic_redaction: entry.automatic_redaction,
                 });
         }
         self.projects = projects;
@@ -640,6 +711,7 @@ impl ProjectPolicy {
                     if !reasons.is_empty() {
                         entry.mode = ProjectMode::NotifyOnly;
                         entry.armed_under = None;
+                        entry.automatic_redaction = AutomaticRedactionTally::default();
                         voided_keys.push((key.clone(), reasons.clone()));
                         sweep.voided.push(VoidedGrant {
                             project_label: entry.label.clone(),
@@ -845,6 +917,8 @@ impl ProjectPolicy {
                 // A fresh entry on every mode change: leaving automatic
                 // clears the terms, and re-arming records new ones.
                 armed_under: None,
+                // And the redaction record: it covers one arming only.
+                automatic_redaction: AutomaticRedactionTally::default(),
             },
         );
         Ok(())
@@ -1196,6 +1270,7 @@ mod tests {
                 label: "unknown".into(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -1598,6 +1673,75 @@ mod tests {
         assert!(moved.changed());
         assert!(p.automatic_grant.is_none());
         assert!(!p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
+    }
+
+    /// K6: a void (R6) returns the project to ask-first and clears what its
+    /// sessions had for redaction, so a later arming starts from nothing and
+    /// cannot inherit the model-scrub wording.
+    #[test]
+    fn a_voided_grant_clears_the_projects_redaction_record() {
+        use super::super::automatic_gate::SessionRedaction;
+        let mut p = armed_and_granted("https://ingest.invalid");
+        p.record_automatic_redaction("/w/api", SessionRedaction::CertifiedFullPipeline);
+        assert_eq!(
+            p.projects["/w/api"]
+                .automatic_redaction
+                .certified_full_pipeline,
+            1
+        );
+        let sweep = p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        assert_eq!(sweep.voided.len(), 1);
+        assert_eq!(
+            p.projects["/w/api"].automatic_redaction,
+            AutomaticRedactionTally::default()
+        );
+    }
+
+    /// K6: normalization that merges two armed entries keeps both records,
+    /// so an uncertified session in either half is not forgotten.
+    #[test]
+    fn a_merge_keeps_both_halves_redaction_records() {
+        use super::super::automatic_gate::SessionRedaction;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        for key in [&root, &sub] {
+            p.projects.insert(
+                key.to_string_lossy().to_string(),
+                ProjectEntry {
+                    mode: ProjectMode::AutoUpload,
+                    added_at: now(),
+                    label: "repo".into(),
+                    display_path: None,
+                    armed_under: None,
+                    automatic_redaction: AutomaticRedactionTally::default(),
+                },
+            );
+        }
+        p.record_automatic_redaction(&root.to_string_lossy(), SessionRedaction::NotCertified);
+        p.record_automatic_redaction(
+            &sub.to_string_lossy(),
+            SessionRedaction::CertifiedFullPipeline,
+        );
+        p.rekey();
+        assert_eq!(p.projects.len(), 1, "the two entries merge");
+        let merged = p.projects.values().next().unwrap().automatic_redaction;
+        assert_eq!(
+            merged,
+            AutomaticRedactionTally {
+                certified_full_pipeline: 1,
+                not_certified: 1,
+            },
+            "the uncertified session survives the merge"
+        );
     }
 
     /// A policy with `/w/api` armed under `ingest`'s terms and the Flow 1
@@ -2054,6 +2198,7 @@ mod tests {
                 label: "repo".to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         p.projects.insert(
@@ -2064,6 +2209,7 @@ mod tests {
                 label: "inner".to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
 
@@ -2136,6 +2282,7 @@ mod tests {
                 label: "sub".to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         p.save(&store).unwrap();
@@ -2157,6 +2304,7 @@ mod tests {
                 label: UNKNOWN_PROJECT_KEY.to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         p.rekey();

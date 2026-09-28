@@ -566,14 +566,32 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
 /// never recorded without the notice that tells the contributor. Audit and
 /// log carry labels only.
 fn sweep_arming_wording(shared: &DaemonShared, ctx: &PassContext) {
-    // The words in force for a folder follow its disclosure. Today that is
-    // the contributor-level `automatic_gate::disclosure`, the same for every
-    // folder; K6's per-folder disclosure replaces it here when it lands, and
-    // nothing else in this sweep changes.
-    let claim_now = super::arming_wording::project_arming_claim(ctx.disclosure);
+    // The words in force for each folder follow that folder's own
+    // disclosure (K6's `automatic_gate::project_disclosure`, through
+    // `arming_wording::claim_in_force`), read under the same lock as the
+    // sweep so the tally cannot move between the two.
     let reworded = {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let reworded = policy.sweep_arming_claims(|_| claim_now, ctx.now);
+        let in_force: std::collections::BTreeMap<String, super::arming_wording::ArmingClaim> =
+            policy
+                .projects
+                .keys()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        super::arming_wording::claim_in_force(&policy, key),
+                    )
+                })
+                .collect();
+        let reworded = policy.sweep_arming_claims(
+            |key| {
+                in_force
+                    .get(key)
+                    .copied()
+                    .unwrap_or(super::arming_wording::ArmingClaim::ModelScrubbed)
+            },
+            ctx.now,
+        );
         if !reworded.is_empty() && policy.save(&shared.store).is_err() {
             tracing::warn!("could not persist an arming rewording");
         }
@@ -665,8 +683,10 @@ struct PassContext {
     /// with the config, because every requirement it checks today is about
     /// the contributor rather than a particular session.
     gate: super::automatic_gate::GateVerdict,
-    /// R1's disclosure for this contributor, from the same config: which
-    /// arming wording is in force. See `sweep_arming_wording`.
+    /// R1's disclosure for this contributor, from the same config: what the
+    /// Flow 1 grant screen claimed, recorded when the grant arms a project.
+    /// The K5 sweep reads each folder's own disclosure instead; see
+    /// `sweep_arming_wording`.
     disclosure: super::automatic_gate::Disclosure,
     /// The grant terms in force, from the same config and settings this pass
     /// reads. `None` without a config. See `sweep_grants`.
@@ -2455,6 +2475,55 @@ mod tests {
                 .resolve(&persisted.arming_rewordings[0].project_key),
             ProjectMode::AutoUpload,
             "the folder stays armed"
+        );
+    }
+
+    /// K5 on the folder's own disclosure, through a pass: an uncertified
+    /// automatic send recorded under "will be scrubbed" is told exactly
+    /// once, audited and on `status`; a folder whose sends were all
+    /// certified is told nothing.
+    #[tokio::test]
+    async fn an_uncertified_automatic_send_is_told_once_through_the_watcher() {
+        use super::super::automatic_gate::SessionRedaction;
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("clean", "22222222-2222-2222-2222-222222222222", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.set_mode("clean", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(
+            f.shared.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
+
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let keys: Vec<String> = policy.projects.keys().cloned().collect();
+            for key in keys {
+                let redaction = if policy.projects[&key].label == "proj" {
+                    SessionRedaction::NotCertified
+                } else {
+                    SessionRedaction::CertifiedFullPipeline
+                };
+                policy.record_automatic_redaction(&key, redaction);
+            }
+        }
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+
+        let list = f.shared.status_value()["arming_rewordings"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!(list[0]["project_label"], "proj");
+        let audit = super::super::audit::load(&f.shared.store).unwrap();
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|e| e.action == "arming-reworded")
+                .count(),
+            1
         );
     }
 

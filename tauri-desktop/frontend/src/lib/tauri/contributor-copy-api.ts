@@ -161,6 +161,8 @@ export type ContributorDisclosureCopy = {
   };
   credential_cost: string;
   credential_wallet_notice: string;
+  /** Under an armed project whose disclosure could not be read (K6). */
+  project_automatic_unavailable: string;
   near_ai_enroll: {
     title: string;
     what: string;
@@ -290,6 +292,19 @@ export async function getAutomaticGrantCopy(): Promise<AutomaticGrantCopy> {
   return parseAutomaticGrantCopy(await invokeTauri("automatic_contribution_copy"));
 }
 
+/**
+ * What an armed project is told about its sessions. The core chooses the
+ * scrub wording from that project's own certificates (K6); this parses the
+ * one shape it sends, and refuses anything else.
+ */
+export async function getProjectAutomaticCopy(
+  projectId: string,
+): Promise<AutomaticGrantCopy> {
+  return parseAutomaticGrantCopy(
+    await invokeTauri("project_automatic_contribution_copy", { projectId }),
+  );
+}
+
 export async function getContributorDisclosureCopy(): Promise<ContributorDisclosureCopy> {
   const value = record(
     await invokeTauri("contributor_disclosure_copy"),
@@ -344,6 +359,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       offer_asked_once: string(privateInference, "offer_asked_once"),
     },
     credential_cost: string(value, "credential_cost"),
+    project_automatic_unavailable: string(value, "project_automatic_unavailable"),
     credential_wallet_notice: string(value, "credential_wallet_notice"),
     near_ai_enroll: {
       title: string(value, "near_ai_enroll_title"),

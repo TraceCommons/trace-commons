@@ -64,6 +64,10 @@ pub enum UploadDecision {
         /// correct the attestation mark on a row whose receipt did not
         /// arrive. See `attestation_mark::writeback_after_upload`.
         receipt: crate::submit::ReceiptShipped,
+        /// For a session approved on the contributor's behalf, what its
+        /// certificate shows about the redaction it had (K6), for the armed
+        /// project's disclosure. `None` for one a person approved.
+        unattended_redaction: Option<super::automatic_gate::SessionRedaction>,
     },
     /// Already delivered previously; nothing sent.
     AlreadySubmitted { submission_id: Uuid },
@@ -280,6 +284,7 @@ fn decision_for(
         SubmitOutcome::Submitted { submission_id, .. } => UploadDecision::Uploaded {
             submission_id,
             receipt,
+            unattended_redaction: None,
         },
         SubmitOutcome::AlreadySubmitted { submission_id, .. } => {
             UploadDecision::AlreadySubmitted { submission_id }
@@ -643,6 +648,25 @@ impl Uploader<'_, '_> {
                 self.ctx.last_witness_retry_after(),
             ),
         };
+        // K6: checked on this session's own certificate, the one it was
+        // sent with, and only for a session nobody looked at.
+        let decision = match decision {
+            UploadDecision::Uploaded {
+                submission_id,
+                receipt,
+                ..
+            } if entry.approved_unattended => {
+                let (witnessed, witness) = self.ctx.last_sent_witness();
+                UploadDecision::Uploaded {
+                    submission_id,
+                    receipt,
+                    unattended_redaction: Some(super::automatic_gate::session_redaction(
+                        witnessed, witness,
+                    )),
+                }
+            }
+            other => other,
+        };
 
         match &decision {
             UploadDecision::Uploaded { .. } => {
@@ -978,6 +1002,7 @@ mod tests {
         let d = UploadDecision::Uploaded {
             submission_id: Uuid::nil(),
             receipt: crate::submit::ReceiptShipped::NoCall,
+            unattended_redaction: None,
         };
         assert_eq!(health_label_for(&d), None);
     }

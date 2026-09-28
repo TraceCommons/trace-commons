@@ -81,6 +81,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private ArmingOffer? _armingOffer;
     private HealthCopy? _budget;
     private HealthCopy? _witness;
+    private GateHeldNotice? _gateHeld;
     private HistoryRollup _rollup = new();
 
     /// <summary>
@@ -154,6 +155,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// acknowledged must go, not linger saying something stopped.
     /// </summary>
     public ObservableCollection<GrantVoidCard> GrantVoidCards { get; } = new();
+
+    /// <summary>
+    /// One card per armed folder whose arming wording no longer claims a
+    /// model scrubs it, not yet shown by any shell (K5). Rebuilt from every
+    /// status read, as the void cards are.
+    /// </summary>
+    public ObservableCollection<ArmingRewordingCard> ArmingRewordingCards { get; } = new();
+
+    /// <summary>Whether the automatic-contribution gate is holding armed folders.</summary>
+    public bool HasGateHeldBanner => _gateHeld is not null;
+
+    /// <summary>The held notice, in the Rust's words, or null when nothing is held.</summary>
+    public GateHeldNotice? GateHeld => _gateHeld;
 
     /// <summary>
     /// This entry as the queue describes it NOW, or null if it has left the
@@ -1500,8 +1514,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // Likewise the witness banner, which SetHealth steps the bare
                 // witness-saturated line aside for.
                 SetWitnessCapacity(parsedStatus.WitnessCapacity);
+                // And the held notice, which SetHealth steps the bare
+                // automatic-contribution-held line aside for.
+                SetGateHeld(SwitchOnNotices.Held(parsedStatus.AutomaticContributionHeld));
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
                 SetGrantVoids(GrantVoidNotices.Cards(parsedStatus.GrantVoids));
+                SetArmingRewordings(SwitchOnNotices.RewordingCards(parsedStatus.ArmingRewordings));
             }
 
             DaemonResponse rollup = await _host
@@ -1627,6 +1645,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         HealthCopy? next = (_budget is not null && label == "daily-cap-reached")
             || (_witness is not null && label == "witness-saturated")
+            || (_gateHeld is not null && label == SwitchOnNotices.GateHeldLabel)
             ? null
             : HealthCopy.ForLabel(label);
         _healthNavigation = next is null ? HealthNavigationTarget.None : HealthNavigation.ForLabel(label);
@@ -1704,6 +1723,77 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// refusal changes nothing, and the notice stays with the core's
     /// refusal line shown.
     /// </summary>
+    private void SetArmingRewordings(IReadOnlyList<ArmingRewordingCard> cards)
+    {
+        ArmingRewordingCards.Clear();
+        foreach (ArmingRewordingCard card in cards)
+        {
+            ArmingRewordingCards.Add(card);
+        }
+    }
+
+    /// <summary>
+    /// Takes the held notice and re-renders its banner. Compared by value
+    /// before raising, as the other banners are.
+    /// </summary>
+    private void SetGateHeld(GateHeldNotice? next)
+    {
+        if (Equals(_gateHeld, next)
+            || (_gateHeld is not null && next is not null
+                && _gateHeld.Title == next.Title && _gateHeld.Body == next.Body
+                && _gateHeld.Release == next.Release && _gateHeld.AskFirst == next.AskFirst
+                && _gateHeld.Reasons.SequenceEqual(next.Reasons)
+                && _gateHeld.Projects.SequenceEqual(next.Projects)))
+        {
+            return;
+        }
+
+        _gateHeld = next;
+        Raise(nameof(HasGateHeldBanner));
+        Raise(nameof(GateHeld));
+    }
+
+    /// <summary>
+    /// The button on one rewording notice: records that this notice was
+    /// shown, then re-reads status so the daemon's own list decides what
+    /// stays.
+    /// </summary>
+    public async Task AcknowledgeArmingRewordingAsync(ArmingRewordingCard card)
+    {
+        ArgumentNullException.ThrowIfNull(card);
+        if (card.Id is not { } id)
+        {
+            return;
+        }
+
+        await _host
+            .CallAsync(
+                DaemonProtocol.Methods.AcknowledgeArmingRewordings,
+                JsonSerializer.Serialize(
+                    new Dictionary<string, ulong[]> { ["ids"] = new[] { id } }))
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// "Ask me first" on a rewording or held-folder notice: the Settings
+    /// call, unchanged, which also answers a rewording notice. A refusal
+    /// changes nothing, and <paramref name="failed"/>, the core's refusal
+    /// line, is shown.
+    /// </summary>
+    public async Task AskFirstAsync(string projectId, string? failed)
+    {
+        ArgumentNullException.ThrowIfNull(projectId);
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.SetProjectMode, SwitchOnNotices.AskFirstParams(projectId))
+            .ConfigureAwait(true);
+
+        Notice = response.IsError ? failed ?? string.Empty : string.Empty;
+
+        await RefreshAsync().ConfigureAwait(true);
+    }
+
     public async Task RearmGrantVoidAsync(GrantVoidCard card)
     {
         ArgumentNullException.ThrowIfNull(card);
