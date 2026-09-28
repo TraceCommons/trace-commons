@@ -76,6 +76,21 @@ private final class OnboardingSessionDaemon: DaemonCalling {
     }
 }
 
+/// Holds the credential section's provider choice outside the view, so a test
+/// can see and make the change the picker makes.
+private final class ProviderSelection: ObservableObject {
+    @Published var provider = "github"
+}
+
+private struct ProviderSelectionHost: View {
+    @ObservedObject var selection: ProviderSelection
+    let copy: PrivateInferenceCopy
+
+    var body: some View {
+        CredentialSection(copy: copy, requiresSession: true, providerSelection: $selection.provider)
+    }
+}
+
 final class NearAiOnboardingSessionTests: XCTestCase {
     @MainActor
     func testNativePickerOffersNearWithoutStartingSignIn() async throws {
@@ -87,7 +102,19 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         await awaitSession(model, state: "absent") { model.refreshNearAiCredential() }
 
-        let content = CredentialSection(copy: copy, requiresSession: true)
+        // The picker is drawn only when the Cloud session is the thing to
+        // obtain; a legacy inference key must not hide it.
+        XCTAssertEqual(
+            CredentialSurface.action(CredentialStatus(state: model.credentialStatus.sessionState),
+                                     calls: model.credentialCalls),
+            .obtain)
+        let options = CredentialSection.providerOptions(copy)
+        XCTAssertEqual(options.map(\.title),
+                       [copy.credentialProviderGithub, copy.credentialProviderGoogle, copy.credentialProviderNear])
+        XCTAssertEqual(options.map(\.tag), ["github", "google", "near"])
+
+        let selection = ProviderSelection()
+        let content = ProviderSelectionHost(selection: selection, copy: copy)
             .environmentObject(model)
             .padding(24)
             .frame(width: 375)
@@ -99,16 +126,33 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         defer { window.close() }
         await Task.yield()
         hosting.layoutSubtreeIfNeeded()
-        let picker = try XCTUnwrap(descendants(hosting).compactMap { $0 as? NSPopUpButton }.first)
-        XCTAssertEqual(picker.itemTitles, [copy.credentialProviderGithub, copy.credentialProviderGoogle, copy.credentialProviderNear])
-        picker.selectItem(at: 2)
-        picker.sendAction(picker.action, to: picker.target)
-        await Task.yield()
+
+        // Where SwiftUI backs the picker with AppKit (macOS 26, the CI
+        // runner), choose NEAR through the real control, as a person does.
+        // On macOS 27 SwiftUI draws the picker itself: there is no
+        // NSPopUpButton to find and no accessibility node in an offscreen
+        // host, so the choice goes through the binding the picker writes.
+        // Either way the view sees the same change of selection, which is
+        // what must not start a sign-in.
+        if let picker = descendants(hosting).compactMap({ $0 as? NSPopUpButton }).first {
+            XCTAssertEqual(picker.itemTitles, options.map(\.title))
+            picker.selectItem(at: 2)
+            picker.sendAction(picker.action, to: picker.target)
+            await Task.yield()
+            hosting.layoutSubtreeIfNeeded()
+            XCTAssertEqual(picker.titleOfSelectedItem, copy.credentialProviderNear)
+        } else {
+            selection.provider = "near"
+            await Task.yield()
+            hosting.layoutSubtreeIfNeeded()
+        }
+        XCTAssertEqual(selection.provider, "near")
+        // A sign-in the change started would be a Task, not a synchronous
+        // call: give it time to reach the daemon before asserting it did not.
+        await fulfillment(of: [unexpected], timeout: 0.2)
         hosting.layoutSubtreeIfNeeded()
-        XCTAssertEqual(picker.titleOfSelectedItem, copy.credentialProviderNear)
         XCTAssertFalse(daemon.calls.contains { $0.method == "near_ai_credential_start" })
         XCTAssertFalse(model.status.loggedIn)
-        await fulfillment(of: [unexpected], timeout: 0.2)
     }
 
     @MainActor
