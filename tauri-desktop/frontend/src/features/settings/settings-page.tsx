@@ -35,7 +35,12 @@ function settingValue(
   return value === undefined || value === null ? fallback : String(value);
 }
 
-export function SettingsPage() {
+export function SettingsPage({
+  onTurnOnAutomaticContributing,
+}: {
+  /** Opens the Flow 1 grant screens again (K10). */
+  onTurnOnAutomaticContributing?: () => void;
+} = {}) {
   const settings = useSettings();
   const core = useCoreStatus();
   const daemon = useDaemonControl();
@@ -168,6 +173,7 @@ export function SettingsPage() {
             withdrawn={automaticGrant.withdrawn}
             onRefresh={automaticGrant.refresh}
             onWithdraw={automaticGrant.withdraw}
+            onTurnOn={onTurnOnAutomaticContributing}
           />
           <ProjectsPanel
             projects={projects.projects}
