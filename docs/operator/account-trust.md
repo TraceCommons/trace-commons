@@ -139,7 +139,52 @@ sum spending across versions sharing the same duration and bucket. A version bum
 inside that bucket does not refresh the allowance. Changing period mode/duration
 is a separate reviewed policy change, not an implicit lifetime reset. Lease liveness uses PostgreSQL time.
 
-Trust facts remain an unused storage seam; no production worker records them.
+Trust facts are recorded for the earned-trust shadow and are still read by no
+admission path. `POST /v1/admin/record-account-trust-facts?limit=N&dry_run=true`
+(admin bearer, fail-closed without a DB mirror) records missing facts for open
+accounts in anchored tenants and returns label-only counts; a re-run records
+nothing new. The login running it needs the NOLOGIN role
+`trace_account_trust_worker` (V85), which carries EXECUTE on three definer
+functions and no table privilege; do not grant it to
+`trace_account_admission_runtime`. See
+`docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
+
+Earned-trust evaluation runs in shadow only. Admission never reads it, the
+production policy keeps `"growth_rule": "none"`, and V86's write function
+refuses every mode but `shadow`. A candidate growth policy is supplied
+separately: `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON` (a base policy
+with `"growth_rule": "tiered-v1"` and a `growth` object) and
+`TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION`. Both absent is off. One
+without the other, or a malformed policy, refuses startup. With it set, each
+of these takes the admin bearer:
+
+- `POST /v1/admin/evaluate-account-trust?limit=N&as_of=RFC3339`: stores a
+  `shadow` evaluation for each account with facts, and appends a hash-only
+  `account_trust_tier_changed` row (outcome `shadow`) to `trace_account_audit`
+  when the tier moves. Run it on a schedule: decay takes effect only when it
+  runs.
+- `GET /v1/admin/account-trust/explain?account_ref=sha256:<hex>`: returns the
+  stored and recomputed evaluation side by side, with `reproduced`. The ref is
+  `sha256("trace-account-trust-ref.v1\n" || tenant_id || "\n" || account_id)`.
+- `POST /v1/admin/account-trust-drill` (`{"record_evidence": true}`): reproduces
+  every stored shadow evaluation and records `account_trust_explain`
+  rollout-smoke evidence. It passes only if at least one evaluation was
+  checked and every one reproduced. A later dedup rederive or a change to
+  credit quality legitimately breaks reproduction until the next evaluation
+  run. The check is not in the required rollout-smoke set while growth is
+  shadow-only.
+
+An account merge carries the absorbed account's trust facts to the survivor
+(V87), each source once. Evaluations are not carried: the next evaluation run
+re-evaluates the survivor over the union of facts. Each account reservation
+row has nullable `earned_tier` and `trust_evaluation_digest` columns (V88).
+They are NULL on every reservation while growth is shadow-only. When a
+reservation is refused as `account_limit_reached` and the account's fresh
+shadow evaluation would have fitted it under the candidate policy, ingest logs
+the label-only line `account_trust_shadow_would_admit` with a process-local
+running count. That is the number the switch-on decision turns on. It never
+changes the refusal.
+
 The runtime can insert trust rows and can update only authority, version, and
 timestamp, including demotion after invite revocation. An inserted or updated
 authority field alone cannot grant invited admission: reserve and

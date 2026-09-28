@@ -6158,6 +6158,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
+        account_trust_shadow_policy: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -27551,6 +27552,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
+        account_trust_shadow_policy: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -27855,6 +27857,390 @@ async fn rollback_drill_without_db_mirror_returns_operator_error() {
             .as_str()
             .expect("error is string")
             .contains("TRACE_COMMONS_DB_DUAL_WRITE")
+    );
+}
+
+/// Earned-trust worker routes (decision 7 of the earned-trust spec): admin
+/// only during shadow, and fail closed without a DB mirror.
+#[tokio::test]
+async fn account_trust_worker_routes_require_admin_and_a_db_mirror() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let good_ref = format!("sha256:{}", "a".repeat(64));
+    let explain = format!("/v1/admin/account-trust/explain?account_ref={good_ref}");
+    for (method, uri, body) in [
+        ("POST", "/v1/admin/record-account-trust-facts?limit=5", None),
+        ("POST", "/v1/admin/evaluate-account-trust?limit=5", None),
+        ("GET", explain.as_str(), None),
+        (
+            "POST",
+            "/v1/admin/account-trust-drill",
+            Some(serde_json::json!({"purpose": "earned trust drill"})),
+        ),
+    ] {
+        for (token, expected) in [
+            ("Bearer token-a", StatusCode::FORBIDDEN),
+            ("Bearer review-token-a", StatusCode::FORBIDDEN),
+            ("Bearer utility-worker-token-a", StatusCode::FORBIDDEN),
+            ("Bearer admin-token-a", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let state = test_state(temp.path().to_path_buf());
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(AUTHORIZATION, token);
+            let body = match &body {
+                Some(json) => {
+                    request = request.header(CONTENT_TYPE, "application/json");
+                    Body::from(json.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = app(state)
+                .oneshot(request.body(body).expect("request builds"))
+                .await
+                .expect("route responds");
+            assert_eq!(response.status(), expected, "{uri} with {token}");
+        }
+    }
+}
+
+/// Shadow only: the evaluator refuses any mode but `shadow`, and explain
+/// takes only a hash-shaped account ref. Both are refused before any
+/// database is touched.
+#[tokio::test]
+async fn account_trust_evaluator_is_shadow_only_and_explain_takes_a_hash() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, uri, expected) in [
+        (
+            "POST",
+            "/v1/admin/evaluate-account-trust?mode=applied".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            "/v1/admin/evaluate-account-trust?as_of=not-a-time".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "GET",
+            "/v1/admin/account-trust/explain?account_ref=near-abc".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "GET",
+            format!(
+                "/v1/admin/account-trust/explain?account_ref=sha256:{}",
+                "A".repeat(64)
+            ),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+        assert_eq!(response.status(), expected, "{uri}");
+    }
+}
+
+/// The earned-trust shadow worker, end to end over HTTP against PostgreSQL:
+/// record facts, evaluate, explain by hash-only ref, and a drill that records
+/// `account_trust_explain` evidence. Self-skips without a database.
+#[tokio::test]
+async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let admin = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("admin connection");
+    let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let owner = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let account = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",
+            &[&tenant, &account, &owner],
+        )
+        .await
+        .unwrap();
+    for day in [0_i64, 8] {
+        let at = Utc::now() - chrono::Duration::days(30 - day);
+        let submission = Uuid::new_v4();
+        let trace = Uuid::new_v4();
+        admin
+            .execute(
+                "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+                    schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+                    redaction_pipeline_version,redaction_hash,received_at)
+                 VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5,$6)",
+                &[&tenant, &submission, &trace, &owner, &"a".repeat(64), &at],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,
+                    credit_account_ref,event_type,points_delta,reason,actor_principal_ref,
+                    actor_role,settlement_state,occurred_at)
+                 VALUES($1,$2,$3,$4,'fixture','accepted','0','fixture',$5,'system','pending',$6)",
+                &[&tenant, &Uuid::new_v4(), &submission, &trace, &owner, &at],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,
+                    gate_policy_version,gate_version_hash,perplexity_micros,tail_fraction_micros,
+                    perplexity_passed,novelty_score_micros,nearest_neighbor_hash,novelty_passed,
+                    embedding_evidence_hash,attestation_chain_hash,decided_at,dedup_cluster_id,
+                    dedup_signal_version)
+                 VALUES($1,$2,$3,'gate-v1',$4,1,1,TRUE,1,$4,TRUE,$4,$4,$5,$6,'events.v2+simhash.v2')",
+                &[&tenant, &Uuid::new_v4(), &submission, &"a".repeat(64), &at, &Uuid::new_v4()],
+            )
+            .await
+            .unwrap();
+    }
+
+    // A policy version unique to this run, so the drill checks only its rows.
+    let version = format!("e2e-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let policy = serde_json::json!({
+        "version": version,
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "lifetime"},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 90 * 86400,
+            "weekly_cap": 5,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 200,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 2, "active_weeks": 2, "age_seconds": 0, "multiplier": 2}
+            ]
+        }
+    })
+    .to_string();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .account_trust_shadow_policy = Some(Arc::new(
+        trace_commons_server::account_trust_rule::parse_shadow_growth_policy(
+            &policy,
+            &[version.as_str()],
+        )
+        .expect("policy"),
+    ));
+    let call = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
+        let state = state.clone();
+        async move {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(AUTHORIZATION, "Bearer admin-token-a");
+            let body = match body {
+                Some(json) => {
+                    request = request.header(CONTENT_TYPE, "application/json");
+                    Body::from(json.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = app(state)
+                .oneshot(request.body(body).expect("request"))
+                .await
+                .expect("response");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+
+    let (status, recorded) = call(
+        "POST",
+        "/v1/admin/record-account-trust-facts?limit=10000".into(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    assert!(
+        recorded["recorded_by_outcome"]["accepted"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 2
+    );
+
+    let (status, evaluated) = call(
+        "POST",
+        "/v1/admin/evaluate-account-trust?limit=10000".into(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{evaluated}");
+    assert_eq!(evaluated["mode"], "shadow");
+    assert!(evaluated["tier_distribution"]["1"].as_u64().unwrap_or(0) >= 1);
+    for body in [&recorded, &evaluated] {
+        let text = body.to_string();
+        assert!(!text.contains(&tenant) && !text.contains(&account.to_string()));
+    }
+
+    let trust = backend
+        .list_account_trust_worker_accounts(None, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.tenant_id() == tenant && a.account_id() == account)
+        .expect("enumerated");
+    let account_ref = trace_commons_server::account_trust_growth::account_trust_ref(&trust);
+    let (status, explained) = call(
+        "GET",
+        format!("/v1/admin/account-trust/explain?account_ref={account_ref}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{explained}");
+    assert_eq!(explained["reproduced"], true);
+    assert_eq!(explained["stored"]["tier"], 1);
+    assert_eq!(explained["stored"]["effective_allowance"], 200);
+    assert!(!explained.to_string().contains(&account.to_string()));
+    let (status, _) = call(
+        "GET",
+        format!(
+            "/v1/admin/account-trust/explain?account_ref=sha256:{}",
+            "0".repeat(64)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, drill) = call(
+        "POST",
+        "/v1/admin/account-trust-drill".into(),
+        Some(serde_json::json!({"purpose": "earned trust e2e", "record_evidence": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{drill}");
+    assert_eq!(drill["passed"], true, "{drill}");
+    assert_eq!(drill["summary"]["not_reproduced"], 0);
+    assert_eq!(
+        drill["recorded_evidence"]["check_name"],
+        "account_trust_explain"
+    );
+    assert_eq!(drill["recorded_evidence"]["status"], "passed");
+
+    // Admission is untouched: the tier appears nowhere it could be applied.
+    let reservations: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(reservations, 0);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[test]
+fn account_trust_shadow_policy_is_optional_but_never_silently_malformed() {
+    let policy = serde_json::json!({
+        "version": "shadow-v1",
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "lifetime"},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 2419200,
+            "weekly_cap": 5,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 200,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [{"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1}]
+        }
+    })
+    .to_string();
+    let read = |json: Option<&str>, version: Option<&str>| {
+        let json = json.map(str::to_string);
+        let version = version.map(str::to_string);
+        account_trust_growth_routes::shadow_policy_from_values(|key| match key {
+            "TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON" => {
+                json.clone().ok_or(std::env::VarError::NotPresent)
+            }
+            "TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION" => {
+                version.clone().ok_or(std::env::VarError::NotPresent)
+            }
+            _ => Err(std::env::VarError::NotPresent),
+        })
+    };
+    assert!(read(None, None).unwrap().is_none(), "absent is off");
+    let parsed = read(Some(&policy), Some("shadow-v1")).unwrap().unwrap();
+    assert_eq!(parsed.version(), "shadow-v1");
+    assert!(read(Some(&policy), None).is_err(), "no reviewed version");
+    assert!(read(Some(&policy), Some("other-v1")).is_err());
+    assert!(read(Some("{"), Some("shadow-v1")).is_err());
+    assert!(
+        read(None, Some("shadow-v1")).is_err(),
+        "a version with no policy is a half-configured control"
+    );
+    // The production admission policy parser never accepts it.
+    assert!(
+        trace_commons_server::account_trust::parse_bounded_policy(&policy, &["shadow-v1"]).is_err()
     );
 }
 
@@ -29852,7 +30238,7 @@ async fn revocation_propagation_audit_reason_hashes_worker_purpose() {
         state.as_ref(),
         &auth,
         &TraceRevocationPropagationWorkerResponse {
-            purpose: purpose.to_string(),
+            purpose_hash: sha256_prefixed(purpose),
             dry_run: false,
             checked: 3,
             completed: 1,
@@ -31302,6 +31688,15 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     assert_eq!(value["completed"], serde_json::json!(0));
     assert_eq!(value["failed"], serde_json::json!(0));
     assert_eq!(value["skipped"], serde_json::json!(1));
+    // Hash-only: the worker response carries the purpose hash, never the text.
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed(revocation_purpose))
+    );
+    assert!(
+        value.get("purpose").is_none(),
+        "worker response echoed purpose"
+    );
 
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     for secret in [
@@ -31553,6 +31948,15 @@ async fn revocation_worker_deletes_disabled_remote_object_payload_with_configure
     assert_eq!(value["completed"], serde_json::json!(1));
     assert_eq!(value["failed"], serde_json::json!(0));
     assert_eq!(value["skipped"], serde_json::json!(0));
+    // Hash-only: the worker response carries the purpose hash, never the text.
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed("configured remote deleter revocation"))
+    );
+    assert!(
+        value.get("purpose").is_none(),
+        "worker response echoed purpose"
+    );
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     for secret in [
         "revocation-worker-token-a",
@@ -34786,6 +35190,200 @@ async fn drill_responses_carry_purpose_hash_not_operator_purpose_text() {
     );
 }
 
+/// Every `/v1/workers/*` route plus the admin maintenance route, in the order
+/// the router declares them. The canary test below walks all of them.
+const WORKER_AND_MAINTENANCE_ROUTES: &[&str] = &[
+    "/v1/workers/benchmark-convert",
+    "/v1/workers/benchmark-evaluations/run",
+    "/v1/workers/benchmark-registry-publications/run",
+    "/v1/workers/benchmark-registry-outbox/submit",
+    "/v1/workers/benchmark-registry-outbox/confirm",
+    "/v1/workers/replay-export",
+    "/v1/workers/export/jobs/claim-next",
+    "/v1/workers/export/jobs/claim-and-run",
+    "/v1/workers/export/jobs/run-queued",
+    "/v1/workers/export/jobs/retry-failed",
+    "/v1/workers/ranker/training-candidates",
+    "/v1/workers/ranker/training-pairs",
+    "/v1/admin/maintenance",
+    "/v1/workers/credit-settlements/run",
+    "/v1/workers/credit-cycle/run",
+    "/v1/workers/credit-cycle/scheduler/run",
+    "/v1/workers/retention-maintenance",
+    "/v1/workers/revocation-propagation",
+    "/v1/workers/register-stats/refresh",
+    "/v1/workers/vector-index",
+    "/v1/workers/gate/evaluate",
+    "/v1/workers/utility-credit",
+    "/v1/workers/utility-attestations",
+    "/v1/workers/near-credit-outbox/submit",
+    "/v1/workers/near-credit-outbox/confirm",
+    "/v1/workers/near-credit-outbox/mark-status",
+    "/v1/workers/benchmark-registry-outbox/mark-status",
+    "/v1/workers/ranking/features",
+    "/v1/workers/ranking/features/run",
+    "/v1/workers/ranking/predictions",
+    "/v1/workers/ranking/prediction-credit",
+    "/v1/workers/ranking/prediction-credit/run",
+    "/v1/workers/ranking/model-promotions/run",
+    "/v1/workers/ranking/labels",
+    "/v1/workers/ranking/preference-labels",
+    "/v1/workers/ranking/calibration-runs",
+    "/v1/workers/ranking/calibration-runs/run",
+    "/v1/workers/process-evaluation",
+    "/v1/workers/process-evaluations/run",
+];
+
+/// Worker routes whose 200 response IS an export data product (replay-export
+/// manifest, ranker training export, benchmark conversion artifact) that
+/// records the operator's `purpose` verbatim as provenance. The same value is
+/// persisted in the stored manifest/artifact and in the export job and grant
+/// rows, and is served again by the non-worker `/v1/datasets/replay`,
+/// `/v1/ranker/*` and `/v1/benchmarks/*` routes. Hashing it is a storage and
+/// consumer contract change, not a response-echo fix, so it is left for an
+/// explicit decision. Listed exactly, so the set can only shrink on purpose
+/// and a new echo anywhere else fails the test.
+const EXPORT_ARTIFACT_ROUTES_CARRYING_PURPOSE: &[&str] = &[
+    "GET /v1/workers/ranker/training-candidates (200 OK)",
+    "GET /v1/workers/ranker/training-pairs (200 OK)",
+    "GET /v1/workers/replay-export (200 OK)",
+    "POST /v1/workers/benchmark-convert (200 OK)",
+    "POST /v1/workers/ranker/training-candidates (200 OK)",
+    "POST /v1/workers/ranker/training-pairs (200 OK)",
+    "POST /v1/workers/replay-export (200 OK)",
+];
+
+/// Posts `purpose` to every worker and maintenance route under every scoped
+/// credential the test state holds (the handler picks the one it accepts),
+/// as a JSON body and, for the GET-capable routes, as a query parameter.
+/// Asserts no response body contains the text (outside the export-artifact
+/// routes listed above), and that every 200 response
+/// which carries the purpose at all carries it as `purpose_hash`. Returns the
+/// `(method, route)` pairs that answered 200 with a `purpose_hash`.
+async fn assert_worker_routes_do_not_echo_purpose(
+    state: Arc<AppState>,
+    purpose: &str,
+) -> BTreeSet<(String, String)> {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    const TOKENS: &[&str] = &[
+        "admin-token-a",
+        "export-worker-token-a",
+        "retention-worker-token-a",
+        "vector-worker-token-a",
+        "benchmark-worker-token-a",
+        "utility-worker-token-a",
+        "process-eval-worker-token-a",
+        "revocation-worker-token-a",
+        "competition-read-worker-token-a",
+    ];
+    const GET_ROUTES: &[&str] = &[
+        "/v1/workers/replay-export",
+        "/v1/workers/ranker/training-candidates",
+        "/v1/workers/ranker/training-pairs",
+    ];
+    let expected_hash = serde_json::json!(sha256_prefixed(purpose));
+    let encoded = purpose.replace(' ', "%20");
+    let mut hashed = BTreeSet::new();
+    let mut echoed = BTreeSet::new();
+    for route in WORKER_AND_MAINTENANCE_ROUTES {
+        let mut requests = vec![("POST", route.to_string())];
+        if GET_ROUTES.contains(route) {
+            requests.push(("GET", format!("{route}?purpose={encoded}")));
+        }
+        for (method, uri) in requests {
+            for token in TOKENS {
+                let body = if method == "POST" {
+                    Body::from(
+                        serde_json::json!({ "purpose": purpose, "dry_run": true }).to_string(),
+                    )
+                } else {
+                    Body::empty()
+                };
+                let response = app(state.clone())
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header(AUTHORIZATION, format!("Bearer {token}"))
+                            .header(CONTENT_TYPE, "application/json")
+                            .body(body)
+                            .expect("request builds"),
+                    )
+                    .await
+                    .expect("worker response");
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .expect("body reads");
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains(purpose) {
+                    echoed.insert(format!("{method} {route} ({status})"));
+                }
+                if status == StatusCode::OK {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        if let Some(hash) = value.get("purpose_hash") {
+                            assert_eq!(
+                                hash, &expected_hash,
+                                "{method} {route} must carry the purpose as its hash"
+                            );
+                            hashed.insert((method.to_string(), route.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let expected_echo: BTreeSet<String> = EXPORT_ARTIFACT_ROUTES_CARRYING_PURPOSE
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect();
+    assert_eq!(
+        echoed, expected_echo,
+        "only the export-artifact routes may carry the operator purpose text; \
+         anything else must return purpose_hash"
+    );
+    hashed
+}
+
+/// Worker and maintenance routes take the same operator free-text `purpose`
+/// as the drills, and the same hash-only rule applies: the response carries
+/// `purpose_hash` (the hash already written to evidence), never the text.
+/// Extends `drill_responses_carry_purpose_hash_not_operator_purpose_text`
+/// to every `/v1/workers/*` route and `/v1/admin/maintenance`.
+///
+/// This PostgreSQL-free state drives six of them to a 200. Of the others,
+/// `revocation-propagation` and `vector-index` refuse here for want of a DB
+/// mirror; their `purpose_hash` is asserted in the PostgreSQL-backed route
+/// tests instead. Most of the rest take no `purpose` at all and reject this
+/// body for a missing required field; they are walked anyway, so one that
+/// starts accepting and echoing a purpose fails here.
+#[tokio::test]
+async fn worker_and_maintenance_responses_carry_purpose_hash_not_operator_purpose_text() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let purpose = "operator worker purpose canary 7c2a";
+    let hashed = assert_worker_routes_do_not_echo_purpose(state, purpose).await;
+    // Pin which routes this state actually drives to a 200 with a hash, so
+    // the hash assertion cannot silently stop running for all of them.
+    let hashed: Vec<(&str, &str)> = hashed
+        .iter()
+        .map(|(method, route)| (method.as_str(), route.as_str()))
+        .collect();
+    assert_eq!(
+        hashed,
+        vec![
+            ("POST", "/v1/admin/maintenance"),
+            ("POST", "/v1/workers/benchmark-registry-outbox/confirm"),
+            ("POST", "/v1/workers/benchmark-registry-outbox/submit"),
+            ("POST", "/v1/workers/near-credit-outbox/confirm"),
+            ("POST", "/v1/workers/near-credit-outbox/submit"),
+            ("POST", "/v1/workers/retention-maintenance"),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn key_rotation_drill_records_failed_evidence_for_bridge_token_config() {
     use axum::body::Body;
@@ -35604,11 +36202,56 @@ async fn audit_drills_accept_the_legacy_prefix_of_a_deployment_upgraded_across_t
         reconciliation.blocking_gaps
     );
     assert_eq!(reconciliation.db_audit_legacy_prefix_row_count, 3);
-    // Not asserting `ready`: the recent-sample reader parity check compares
-    // chain fields too, and still differs while a legacy row is among the
-    // latest 16. That gap predates the cutover and is not this rule's.
+    // Fewer than 16 post-cutover events, so the legacy rows are still in the
+    // recent-sample reader parity window: they are compared without the
+    // chain fields they never had, and everything else still matches.
+    assert!(reconciliation.ready, "{:?}", reconciliation.blocking_gaps);
 
-    // A real break after the first hashed row still fails both drills.
+    // Any other field of a legacy row is still compared.
+    let tamper_legacy_principal = |principal: String| {
+        let backend = backend.clone();
+        let audit_event_id = legacy_rows[2].audit_event_id;
+        async move {
+            let mut client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("owner connection");
+            let tx = client.transaction().await.expect("tamper transaction");
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&"tenant-a"],
+            )
+            .await
+            .expect("set tamper tenant context");
+            let updated = tx
+                .execute(
+                    "UPDATE trace_audit_events SET actor_principal_ref = $3
+                      WHERE tenant_id = $1 AND audit_event_id = $2",
+                    &[&"tenant-a", &audit_event_id, &principal],
+                )
+                .await
+                .expect("owner edits a legacy row");
+            assert_eq!(updated, 1);
+            tx.commit().await.expect("tamper commits");
+        }
+    };
+    tamper_legacy_principal("someone-else".to_string()).await;
+    let (_, reconciliation) = run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(
+        reconciliation
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap == "audit_reader_sample_parity=failed"),
+        "{:?}",
+        reconciliation.blocking_gaps
+    );
+    tamper_legacy_principal(legacy_rows[2].actor_principal_ref.clone()).await;
+    let (_, reconciliation) = run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(reconciliation.ready, "{:?}", reconciliation.blocking_gaps);
+
+    // A real break after the first hashed row still fails both drills, and a
+    // hashed row's chain fields are still part of reader parity.
     {
         let mut client = backend
             .raw_pool_for_tests_and_diagnostics()
@@ -35656,6 +36299,14 @@ async fn audit_drills_accept_the_legacy_prefix_of_a_deployment_upgraded_across_t
             .blocking_gaps
             .iter()
             .any(|gap| gap == "db_audit_hash_chain_failures=1"),
+        "{:?}",
+        reconciliation.blocking_gaps
+    );
+    assert!(
+        reconciliation
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap == "audit_reader_sample_parity=failed"),
         "{:?}",
         reconciliation.blocking_gaps
     );
@@ -36914,6 +37565,15 @@ async fn vector_index_worker_honors_limit_without_retention_side_effects() {
     assert_eq!(value["vector_entries_indexed"], serde_json::json!(1));
     assert_eq!(value["checked_count"], serde_json::json!(1));
     assert_eq!(value["pending_after_count"], serde_json::json!(2));
+    // Hash-only: the worker response carries the purpose hash, never the text.
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed("bounded vector worker pass"))
+    );
+    assert!(
+        value.get("purpose").is_none(),
+        "worker response echoed purpose"
+    );
     assert!(
         value.get("records_marked_expired").is_none(),
         "vector worker response should not expose retention maintenance counts"
@@ -66093,7 +66753,7 @@ fn operational_summary_promotion_gate_log_fields_capture_blockers_and_warnings()
 fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceNearCreditOutboxSubmitWorkerResponse {
-        purpose: "review settlement for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("review settlement for frontier lab batch 42"),
         dry_run: false,
         checked: 5,
         submitted: 3,
@@ -66105,7 +66765,10 @@ fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
     let fields = near_credit_outbox_submit_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("review settlement for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(!fields.dry_run);
@@ -66120,7 +66783,7 @@ fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
 fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceNearCreditOutboxConfirmWorkerResponse {
-        purpose: "confirm settlement for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("confirm settlement for frontier lab batch 42"),
         dry_run: true,
         checked: 4,
         confirmed: 2,
@@ -66132,7 +66795,10 @@ fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
     let fields = near_credit_outbox_confirm_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("confirm settlement for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(fields.dry_run);
@@ -66147,7 +66813,7 @@ fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
 fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
-        purpose: "publish benchmark artifact for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("publish benchmark artifact for frontier lab batch 42"),
         dry_run: false,
         checked: 7,
         submitted: 4,
@@ -66159,7 +66825,10 @@ fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
     let fields = benchmark_registry_outbox_submit_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("publish benchmark artifact for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(!fields.dry_run);
@@ -66174,7 +66843,7 @@ fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
 fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
-        purpose: "confirm benchmark artifact for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("confirm benchmark artifact for frontier lab batch 42"),
         dry_run: true,
         checked: 6,
         confirmed: 5,
@@ -66186,7 +66855,10 @@ fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
     let fields = benchmark_registry_outbox_confirm_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("confirm benchmark artifact for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(fields.dry_run);
@@ -66201,7 +66873,7 @@ fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
 fn revocation_propagation_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceRevocationPropagationWorkerResponse {
-        purpose: "propagate revocation for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("propagate revocation for frontier lab batch 42"),
         dry_run: false,
         checked: 8,
         completed: 4,
@@ -66214,7 +66886,10 @@ fn revocation_propagation_worker_log_fields_hash_sensitive_values() {
     let fields = revocation_propagation_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("propagate revocation for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(!fields.dry_run);
@@ -94248,7 +94923,7 @@ fn a_credit_cycle_whose_outbox_submits_all_failed_is_a_failed_tick() {
 
     fn submit(submitted: usize, failed: usize) -> TraceNearCreditOutboxSubmitWorkerResponse {
         TraceNearCreditOutboxSubmitWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox"),
             dry_run: false,
             checked: submitted + failed,
             submitted,
@@ -94259,7 +94934,7 @@ fn a_credit_cycle_whose_outbox_submits_all_failed_is_a_failed_tick() {
     }
     fn confirm(confirmed: usize, failed: usize) -> TraceNearCreditOutboxConfirmWorkerResponse {
         TraceNearCreditOutboxConfirmWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox_confirm"),
             dry_run: false,
             checked: confirmed + failed,
             confirmed,
@@ -94742,7 +95417,7 @@ fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleW
             settlement_policy_excluded_reason_counts: BTreeMap::new(),
         },
         near_outbox_submit: TraceNearCreditOutboxSubmitWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox"),
             dry_run: false,
             checked: failed,
             submitted: 0,
@@ -94751,7 +95426,7 @@ fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleW
             pending: failed,
         },
         near_outbox_confirm: TraceNearCreditOutboxConfirmWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox_confirm"),
             dry_run: false,
             checked: 0,
             confirmed: 0,

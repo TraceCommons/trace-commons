@@ -644,6 +644,100 @@ async fn a_refused_finish_writes_no_anchor_row() {
     );
 }
 
+/// A device key a legacy invite already registered under a `tenant-...`
+/// tenant cannot complete the NEAR AI ceremony: the finish is refused, the key
+/// stays with the legacy tenant, and no anchor is written. `device_key_id` is
+/// a global primary key, so success here would have meant a NEAR AI session
+/// whose device keeps authenticating into the legacy tenant.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_device_key_registered_to_another_tenant_is_refused() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let state = ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (_dir, identity) = device();
+    let (verifier, challenge) = challenge_pair();
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&identity.public_key_b64)
+            .unwrap(),
+    );
+    let legacy_tenant = format!("tenant-legacy-{}", uuid::Uuid::new_v4().simple());
+    let admin = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,$4,'invite')",
+            &[
+                &device_key_id,
+                &legacy_tenant,
+                &identity.public_key_b64,
+                &format!("sha256:{}", "cd".repeat(32)),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/start",
+        start_payload(&challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let signature = device_proof_for_ceremony(
+        &identity,
+        started["ceremony_id"].as_str().unwrap(),
+        started["nonce"].as_str().unwrap(),
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("a valid proof");
+    let before = anchor_rows(&db).await;
+
+    let (status, body) = post_json(
+        &state,
+        "/v1/account/near-ai/provision/finish",
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": identity.public_key_b64,
+            "device_signature": signature,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a device held by another tenant was provisioned: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        anchor_rows(&db).await,
+        before,
+        "a refused finish wrote an anchor"
+    );
+    let holders: Vec<String> = admin
+        .query(
+            "SELECT tenant_id FROM device_keys WHERE device_key_id=$1",
+            &[&device_key_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(holders, vec![legacy_tenant]);
+}
+
 /// A client-asserted account is refused at the parse boundary.
 ///
 /// The server half made this structural with `#[serde(deny_unknown_fields)]`

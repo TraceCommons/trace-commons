@@ -48,6 +48,23 @@ pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
 /// installation wrote into the config. Belongs to this enrollment, so it is
 /// swept by `wipe()` with the config it describes.
 pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
+/// The reference to the second device key a legacy invite migration stages
+/// for the NEAR AI identity it is moving to (`daemon::legacy_migration`).
+/// Swept by `wipe()`: a logout mid-migration ends the migration.
+pub const STAGED_DEVICE_KEY_FILE: &str = "device.staged.pk8";
+/// The in-progress record of a legacy invite identity switch: what to put
+/// back if it does not finish. Holds credential references and the old
+/// config, never a secret. Swept by `wipe()`.
+pub const IDENTITY_SWITCH_JOURNAL_FILE: &str = "identity-switch.json";
+/// The countersigned legacy invite link record and the migration notice
+/// (`daemon::legacy_migration`). Belongs to this enrollment; swept by
+/// `wipe()`.
+pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
+/// The subject hash of the invite this device was enrolled with, saved at
+/// invite enrollment so a later move to a NEAR AI account can name it
+/// without asking the issuer or the contributor. A hash, never the code.
+/// Swept by `wipe()`.
+pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -161,6 +178,149 @@ pub struct ContributorConfig {
     /// existed has no such key, and reads as not chosen.
     #[serde(default)]
     pub consent_scopes_chosen: bool,
+    /// How [`Self::witness`] got here, for the disclosure screens (K11).
+    ///
+    /// Written only beside the witness it describes, by
+    /// [`Self::set_witness`] or a constructor that knows the answer, and it
+    /// names that witness by digest: a witness changed later by a path that
+    /// records nothing reads as [`WitnessOriginView::NotRecorded`] rather
+    /// than inheriting a stale answer. Absent on every config written before
+    /// it existed, which reads the same way. Never an input to anything a
+    /// session's bytes or a grant depends on (`NON_ENVELOPE_CONFIG_FIELDS`).
+    ///
+    /// Skipped when absent, so a config with no witness serializes exactly
+    /// as it did before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_origin: Option<WitnessOriginRecord>,
+}
+
+/// How a witness came to be configured on this device.
+///
+/// The spec's point 2 under "The disclosure": a NEAR AI or wallet join writes
+/// the witness the commons publishes, without asking, and that is a different
+/// fact from a witness the contributor chose by connecting inference or typed
+/// into Settings. A screen can say which only if the write says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WitnessOrigin {
+    /// Published by the commons and saved at a NEAR AI or wallet join.
+    PublishedAtJoin,
+    /// Installed by the contributor from a connected inference selection
+    /// (`inference_connection_install`).
+    ConnectedInference,
+    /// Entered in an app's Settings on this device.
+    Settings,
+    /// Read from `TRACE_COMMONS_WITNESS_*` environment variables when this
+    /// device enrolled.
+    Environment,
+}
+
+/// The stored record: an origin, and the digest of the witness it is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessOriginRecord {
+    pub origin: WitnessOrigin,
+    /// [`WitnessSettings::identity_sha256`] of the witness when the origin
+    /// was recorded. A digest, so the record repeats no URL or address.
+    pub witness_sha256: String,
+}
+
+impl WitnessOriginRecord {
+    /// The record for `witness`, arriving by `origin`.
+    #[must_use]
+    pub fn for_witness(witness: &WitnessSettings, origin: WitnessOrigin) -> Self {
+        Self {
+            origin,
+            witness_sha256: witness.identity_sha256(),
+        }
+    }
+}
+
+/// What a screen may say about where the configured witness came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitnessOriginView {
+    /// The record matches the witness configured now.
+    Recorded(WitnessOrigin),
+    /// No record, or a record written for a different witness. Never
+    /// resolved to a guess.
+    NotRecorded,
+}
+
+impl WitnessOriginView {
+    /// The wire label: the origin's own name, or `not_recorded`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Recorded(WitnessOrigin::PublishedAtJoin) => "published_at_join",
+            Self::Recorded(WitnessOrigin::ConnectedInference) => "connected_inference",
+            Self::Recorded(WitnessOrigin::Settings) => "settings",
+            Self::Recorded(WitnessOrigin::Environment) => "environment",
+            Self::NotRecorded => "not_recorded",
+        }
+    }
+
+    /// The view a wire label names, or `None` for one this build does not
+    /// know. `None` rather than `NotRecorded`: an unknown label is a newer
+    /// daemon's answer, not this one's.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "published_at_join" => Self::Recorded(WitnessOrigin::PublishedAtJoin),
+            "connected_inference" => Self::Recorded(WitnessOrigin::ConnectedInference),
+            "settings" => Self::Recorded(WitnessOrigin::Settings),
+            "environment" => Self::Recorded(WitnessOrigin::Environment),
+            "not_recorded" => Self::NotRecorded,
+            _ => return None,
+        })
+    }
+}
+
+impl Serialize for WitnessOriginView {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for WitnessOriginView {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let label = String::deserialize(deserializer)?;
+        Self::from_label(&label).ok_or_else(|| serde::de::Error::custom("unknown witness origin"))
+    }
+}
+
+/// The origin record for a witness an enrollment read from the environment
+/// ([`witness_settings_from_env`]), or `None` when it read none.
+#[must_use]
+pub fn environment_witness_origin(
+    witness: Option<&WitnessSettings>,
+) -> Option<WitnessOriginRecord> {
+    witness.map(|w| WitnessOriginRecord::for_witness(w, WitnessOrigin::Environment))
+}
+
+impl ContributorConfig {
+    /// Configure `witness`, recording how it arrived.
+    pub fn set_witness(&mut self, witness: WitnessSettings, origin: WitnessOrigin) {
+        self.witness_origin = Some(WitnessOriginRecord::for_witness(&witness, origin));
+        self.witness = Some(witness);
+    }
+
+    /// Remove the witness and its origin record.
+    pub fn clear_witness(&mut self) {
+        self.witness = None;
+        self.witness_origin = None;
+    }
+
+    /// Where the configured witness came from, or `None` when there is no
+    /// witness to ask about.
+    #[must_use]
+    pub fn witness_origin_view(&self) -> Option<WitnessOriginView> {
+        let witness = self.witness.as_ref()?;
+        Some(match &self.witness_origin {
+            Some(record) if record.witness_sha256 == witness.identity_sha256() => {
+                WitnessOriginView::Recorded(record.origin)
+            }
+            _ => WitnessOriginView::NotRecorded,
+        })
+    }
 }
 
 /// Where the redaction witness is, and what this client will accept from it.
@@ -196,6 +356,17 @@ pub struct WitnessSettings {
 }
 
 impl WitnessSettings {
+    /// A digest of which witness this is: its URL, signing address and pins,
+    /// and not `admission_evidence`, which is a mode of the same witness.
+    #[must_use]
+    pub fn identity_sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical =
+            serde_json::json!([self.url, self.signing_address, self.expected_measurements,]);
+        let digest = Sha256::digest(canonical.to_string().as_bytes());
+        format!("sha256:{}", hex::encode(digest))
+    }
+
     /// Parse the pinned measurement sets into a [`WitnessTrust`].
     ///
     /// A malformed entry is an error rather than a skipped line: a silently
@@ -772,9 +943,7 @@ impl ConfigStore {
     /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
         use crate::daemon::commons_credentials::{self, Kind};
-        commons_credentials::clear_with(self, &[Kind::Device, Kind::Account], || {
-            self.wipe_files()
-        })?;
+        commons_credentials::clear_with(self, &Kind::ALL, || self.wipe_files())?;
         // The local state is gone even if the native service is locked. Keep
         // its cleanup journal for retry rather than restoring either secret.
         let _ = commons_credentials::cleanup(self);
@@ -807,6 +976,10 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -827,6 +1000,10 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1263,6 +1440,7 @@ mod tests {
         ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
@@ -1653,5 +1831,153 @@ mod tests {
 
         set_attestation_env(None);
         assert!(!inference_receipt_check_attestation_from_env());
+    }
+
+    // -----------------------------------------------------------------
+    // Where the witness came from (K11 of the connect-and-forget design)
+    // -----------------------------------------------------------------
+
+    fn origin_witness(url: &str) -> WitnessSettings {
+        WitnessSettings {
+            admission_evidence: false,
+            url: url.into(),
+            signing_address: "0xab".into(),
+            expected_measurements: vec!["mrtd=aa".into()],
+        }
+    }
+
+    #[test]
+    fn no_witness_has_no_origin() {
+        assert_eq!(sample_config().witness_origin_view(), None);
+    }
+
+    #[test]
+    fn a_witness_set_with_an_origin_reports_that_origin() {
+        for origin in [
+            WitnessOrigin::PublishedAtJoin,
+            WitnessOrigin::ConnectedInference,
+            WitnessOrigin::Settings,
+            WitnessOrigin::Environment,
+        ] {
+            let mut cfg = sample_config();
+            cfg.set_witness(origin_witness("https://w.example"), origin);
+            assert_eq!(
+                cfg.witness_origin_view(),
+                Some(WitnessOriginView::Recorded(origin))
+            );
+        }
+    }
+
+    /// A config written before the record existed, or a witness written by
+    /// a path that does not record one, is not attributed to anything.
+    #[test]
+    fn a_witness_without_a_record_is_not_recorded_never_guessed() {
+        let mut cfg = sample_config();
+        cfg.witness = Some(origin_witness("https://w.example"));
+        assert_eq!(
+            cfg.witness_origin_view(),
+            Some(WitnessOriginView::NotRecorded)
+        );
+    }
+
+    /// The record names the witness it was written for. A witness changed
+    /// by a path that does not record an origin must not inherit the old
+    /// one: that would tell a contributor the commons published a witness
+    /// somebody typed in.
+    #[test]
+    fn a_witness_changed_behind_the_record_is_not_recorded() {
+        let mut cfg = sample_config();
+        cfg.set_witness(
+            origin_witness("https://w.example"),
+            WitnessOrigin::PublishedAtJoin,
+        );
+        for change in [
+            |w: &mut WitnessSettings| w.url = "https://other.example".into(),
+            |w: &mut WitnessSettings| w.signing_address = "0xcd".into(),
+            |w: &mut WitnessSettings| w.expected_measurements.push("mrtd=bb".into()),
+        ] {
+            let mut changed = cfg.clone();
+            change(changed.witness.as_mut().unwrap());
+            assert_eq!(
+                changed.witness_origin_view(),
+                Some(WitnessOriginView::NotRecorded)
+            );
+        }
+        // Admission evidence is a mode of the same witness, not a new one.
+        let mut toggled = cfg.clone();
+        toggled.witness.as_mut().unwrap().admission_evidence = true;
+        assert_eq!(
+            toggled.witness_origin_view(),
+            Some(WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin))
+        );
+    }
+
+    #[test]
+    fn an_environment_witness_is_recorded_as_environment() {
+        assert_eq!(environment_witness_origin(None), None);
+        let witness = origin_witness("https://w.example");
+        let mut cfg = sample_config();
+        cfg.witness_origin = environment_witness_origin(Some(&witness));
+        cfg.witness = Some(witness);
+        assert_eq!(
+            cfg.witness_origin_view(),
+            Some(WitnessOriginView::Recorded(WitnessOrigin::Environment))
+        );
+    }
+
+    #[test]
+    fn origin_labels_round_trip_and_an_unknown_one_is_not_guessed() {
+        for view in [
+            WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin),
+            WitnessOriginView::Recorded(WitnessOrigin::ConnectedInference),
+            WitnessOriginView::Recorded(WitnessOrigin::Settings),
+            WitnessOriginView::Recorded(WitnessOrigin::Environment),
+            WitnessOriginView::NotRecorded,
+        ] {
+            let wire = serde_json::to_value(view).unwrap();
+            assert_eq!(wire, serde_json::json!(view.label()));
+            assert_eq!(
+                serde_json::from_value::<WitnessOriginView>(wire).unwrap(),
+                view
+            );
+        }
+        assert_eq!(WitnessOriginView::from_label("operator"), None);
+    }
+
+    #[test]
+    fn clearing_the_witness_clears_its_origin() {
+        let mut cfg = sample_config();
+        cfg.set_witness(origin_witness("https://w.example"), WitnessOrigin::Settings);
+        cfg.clear_witness();
+        assert!(cfg.witness.is_none());
+        assert!(cfg.witness_origin.is_none());
+        assert_eq!(cfg.witness_origin_view(), None);
+    }
+
+    #[test]
+    fn the_origin_record_round_trips_and_is_absent_from_an_old_file() {
+        let (_d, store) = store();
+        let mut cfg = sample_config();
+        cfg.set_witness(
+            origin_witness("https://w.example"),
+            WitnessOrigin::ConnectedInference,
+        );
+        store.save_config(&cfg).unwrap();
+        let loaded = store.load_config().unwrap().unwrap();
+        assert_eq!(
+            loaded.witness_origin_view(),
+            Some(WitnessOriginView::Recorded(
+                WitnessOrigin::ConnectedInference
+            ))
+        );
+        // A config with no witness writes no key, so a file an older
+        // release reads is byte-for-byte what it would have written.
+        let plain = serde_json::to_value(sample_config()).unwrap();
+        assert!(plain.get("witness_origin").is_none());
+        // The record holds a digest, never the URL or signing address.
+        let value = serde_json::to_value(&cfg).unwrap();
+        let record = value["witness_origin"].to_string();
+        assert!(!record.contains("w.example"), "{record}");
+        assert!(!record.contains("0xab"), "{record}");
     }
 }

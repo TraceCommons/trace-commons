@@ -223,7 +223,56 @@ async fn enroll(
     if shared.store.load_config()?.is_some() {
         bail!("near_ai_enroll_already_enrolled")
     }
+    let prepared = prepare(shared, ingest_url).await?;
+    let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
+    let provisioned = provision(shared, api, prepared, &identity).await?;
 
+    let store = shared.store.clone();
+    let ingest_url = ingest_url.to_string();
+    tokio::task::spawn_blocking(move || {
+        persist(
+            &store,
+            Commons {
+                ingest_url: &ingest_url,
+                issuer_url: &provisioned.issuer_url,
+                audience: &provisioned.audience,
+                witness: provisioned.witness,
+                receipt_endpoint: provisioned.receipt_endpoint,
+            },
+            &identity,
+            provisioned.finished,
+            Some(&expected),
+        )
+    })
+    .await
+    .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+}
+
+/// Everything checked before a device key is chosen or the refresh token is
+/// spent: the address, the retained NEAR AI login, and the commons's own
+/// facts. Shared by enrollment and by the legacy invite migration, which
+/// provisions a staged key against the commons the daemon is already
+/// enrolled in.
+pub(super) struct Prepared {
+    commons: trace_commons_operator_client::Client,
+    session: super::settings::NearAiSession,
+    issuer_url: String,
+    audience: String,
+    witness: crate::config::WitnessSettings,
+    receipt_endpoint: Option<String>,
+}
+
+/// A finished ceremony and the commons facts it ran against. Not yet
+/// validated: `persist` and `provisioned_account` each check `finished`.
+pub(super) struct Provisioned {
+    issuer_url: String,
+    audience: String,
+    witness: crate::config::WitnessSettings,
+    receipt_endpoint: Option<String>,
+    finished: Finished,
+}
+
+pub(super) async fn prepare(shared: &DaemonShared, ingest_url: &str) -> Result<Prepared> {
     // Refuse the address before spending the refresh token. The exchange
     // retires the token that authenticated it, so a rotation burned against an
     // endpoint we were never going to accept costs the contributor a
@@ -273,8 +322,32 @@ async fn enroll(
                 anyhow!("near_ai_enroll_commons_unsupported")
             }
         })?;
+    Ok(Prepared {
+        commons,
+        session,
+        issuer_url,
+        audience,
+        witness,
+        receipt_endpoint,
+    })
+}
 
-    let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
+/// Run the ceremony for `identity`: start, device proof, token exchange,
+/// finish. The refresh token is spent only here, after every local check.
+pub(super) async fn provision(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    prepared: Prepared,
+    identity: &DeviceIdentity,
+) -> Result<Provisioned> {
+    let Prepared {
+        commons,
+        session,
+        issuer_url,
+        audience,
+        witness,
+        receipt_endpoint,
+    } = prepared;
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -290,7 +363,7 @@ async fn enroll(
         .map_err(|_| anyhow!("near_ai_enroll_start_failed"))?;
 
     let device_signature = device_proof_for_ceremony(
-        &identity,
+        identity,
         &started.ceremony_id,
         &started.nonce,
         &code_challenge,
@@ -322,26 +395,53 @@ async fn enroll(
         )
         .await
         .map_err(|_| anyhow!("near_ai_enroll_verification_failed"))?;
-
-    let store = shared.store.clone();
-    let ingest_url = ingest_url.to_string();
-    tokio::task::spawn_blocking(move || {
-        persist(
-            &store,
-            Commons {
-                ingest_url: &ingest_url,
-                issuer_url: &issuer_url,
-                audience: &audience,
-                witness,
-                receipt_endpoint,
-            },
-            &identity,
-            finished,
-            Some(&expected),
-        )
+    Ok(Provisioned {
+        issuer_url,
+        audience,
+        witness,
+        receipt_endpoint,
+        finished,
     })
-    .await
-    .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+}
+
+/// The account a ceremony provisioned `identity` into, for a caller that is
+/// not enrolling from nothing: the legacy invite migration. Checked exactly
+/// as `persist` checks it, plus the account id the link statement names.
+pub(super) fn provisioned_account(
+    provisioned: Provisioned,
+    identity: &DeviceIdentity,
+) -> Result<super::legacy_migration::ProvisionedAccount> {
+    validate_finished(&provisioned.finished, identity)?;
+    let account_id = uuid::Uuid::parse_str(&provisioned.finished.account_id)
+        .map_err(|_| anyhow!("near_ai_enroll_invalid"))?;
+    Ok(super::legacy_migration::ProvisionedAccount {
+        tenant_id: provisioned.finished.tenant_id,
+        account_id,
+        access_token: provisioned.finished.access_token,
+        expires_in_secs: provisioned.finished.expires_in_secs,
+        issuer_url: provisioned.issuer_url,
+        audience: provisioned.audience,
+    })
+}
+
+fn validate_finished(result: &Finished, identity: &DeviceIdentity) -> Result<()> {
+    if result.token_type != "Bearer"
+        || !result.access_token.starts_with("tcn1_")
+        || result.expires_in_secs <= 0
+        || result.expires_in_secs > 43200
+        || result.device_key_id != identity.device_key_id
+        || !result.anchor_hash.starts_with("sha256:")
+        || result.anchor_hash.len() != 71
+        || !result.anchor_hash[7..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || !is_near_ai_tenant_id(&result.tenant_id)
+        || result.account_id.is_empty()
+        || result.account_id.len() > 256
+    {
+        bail!("near_ai_enroll_invalid")
+    }
+    Ok(())
 }
 
 fn random() -> Result<String> {
@@ -375,22 +475,7 @@ fn persist(
     result: Finished,
     expected: Option<&super::commons_credentials::Snapshot>,
 ) -> Result<serde_json::Value> {
-    if result.token_type != "Bearer"
-        || !result.access_token.starts_with("tcn1_")
-        || result.expires_in_secs <= 0
-        || result.expires_in_secs > 43200
-        || result.device_key_id != identity.device_key_id
-        || !result.anchor_hash.starts_with("sha256:")
-        || result.anchor_hash.len() != 71
-        || !result.anchor_hash[7..]
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !is_near_ai_tenant_id(&result.tenant_id)
-        || result.account_id.is_empty()
-        || result.account_id.len() > 256
-    {
-        bail!("near_ai_enroll_invalid")
-    }
+    validate_finished(&result, identity)?;
 
     let dir = store.dir().to_path_buf();
     let store = ConfigStore::open(dir.clone())?;
@@ -415,6 +500,10 @@ fn persist(
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness_origin: Some(crate::config::WitnessOriginRecord::for_witness(
+            &commons.witness,
+            crate::config::WitnessOrigin::PublishedAtJoin,
+        )),
         witness: Some(commons.witness),
         inference_receipt_endpoint: commons.receipt_endpoint,
         consent_scopes_chosen: false,
@@ -654,6 +743,13 @@ mod tests {
         assert_eq!(
             written.witness.as_ref().map(|w| w.url.as_str()),
             Some("https://witness.example")
+        );
+        // K11: the join says where the witness came from.
+        assert_eq!(
+            written.witness_origin_view(),
+            Some(crate::config::WitnessOriginView::Recorded(
+                crate::config::WitnessOrigin::PublishedAtJoin
+            ))
         );
         assert_eq!(
             written.inference_receipt_endpoint.as_deref(),

@@ -20,7 +20,6 @@ export type AutomaticGrantCopy = {
   path_automatic: string;
   path_ask_first: string;
   raw_send: string;
-  witness_origin: string;
 };
 
 type RecordValue = Record<string, unknown>;
@@ -79,7 +78,6 @@ export function parseAutomaticGrantCopy(value: unknown): AutomaticGrantCopy {
     path_automatic: text(item, "path_automatic"),
     path_ask_first: text(item, "path_ask_first"),
     raw_send: text(item, "raw_send"),
-    witness_origin: text(item, "witness_origin"),
   };
 }
 

@@ -226,7 +226,7 @@ fn witness_is(cfg: &ContributorConfig, witness: &ConnectionWitnessConfig) -> boo
 fn remove_installed(cfg: &mut ContributorConfig, installed: &Installed) -> bool {
     let mut changed = false;
     if witness_is(cfg, &installed.witness) {
-        cfg.witness = None;
+        cfg.clear_witness();
         changed = true;
     }
     if installed.inference_receipt_endpoint.is_some()
@@ -721,7 +721,7 @@ fn apply(
             .map_err(|_| ERR_RECEIPT_REFUSED)?;
         next.inference_receipt_endpoint = Some(endpoint.to_string());
     }
-    next.witness = Some(witness);
+    next.set_witness(witness, crate::config::WitnessOrigin::ConnectedInference);
     Ok(())
 }
 
@@ -1115,6 +1115,13 @@ mod tests {
         let after = config(&s);
         let returned = test_support::witness();
         let witness = after.witness.clone().expect("a witness");
+        // K11: the install says where the witness came from.
+        assert_eq!(
+            after.witness_origin_view(),
+            Some(crate::config::WitnessOriginView::Recorded(
+                crate::config::WitnessOrigin::ConnectedInference
+            ))
+        );
         assert_eq!(witness.url, returned.url);
         assert_eq!(witness.signing_address, returned.signing_address);
         assert_eq!(
@@ -1124,6 +1131,13 @@ mod tests {
         assert!(!witness.admission_evidence);
         let mut expected = serde_json::to_value(&before).unwrap();
         expected["witness"] = serde_json::to_value(&witness).unwrap();
+        // And the record of where it came from, for the disclosure screens.
+        expected["witness_origin"] =
+            serde_json::to_value(crate::config::WitnessOriginRecord::for_witness(
+                &witness,
+                crate::config::WitnessOrigin::ConnectedInference,
+            ))
+            .unwrap();
         assert_eq!(serde_json::to_value(&after).unwrap(), expected);
         assert_eq!(
             audit_actions(&s),
