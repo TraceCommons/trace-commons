@@ -949,6 +949,14 @@ fn recorded_migration_state(
     }
 }
 
+/// The `MIGRATIONS` table below, exposed (hidden) so
+/// `tests/migration_atomicity_pg.rs` can stop a database part-way, the way a
+/// deployment sits between two releases, and apply the rest later.
+#[doc(hidden)]
+pub fn registered_migrations() -> &'static [(i32, &'static str, &'static str)] {
+    MIGRATIONS
+}
+
 /// Every migration in `migrations/`, in the order `run_migrations` applies
 /// them: `(version, recorded name, SQL text)`. The recorded name is the file
 /// stem and the SQL is the file itself, embedded at compile time.
@@ -1442,6 +1450,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         89,
         "trace_credit_witness_provenance_class",
         include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
+    ),
+    (
+        90,
+        "ingest_runtime_grants",
+        include_str!("../../../../migrations/V90__ingest_runtime_grants.sql"),
     ),
 ];
 
