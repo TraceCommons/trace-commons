@@ -152,6 +152,29 @@ not the trace's fault:
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
 
+The adapter's answer decides what happens to a dispatched leg:
+
+- A receipt that answers the request completes the leg. The leg records the
+  receipt's result reference and, for an effect with an external record,
+  its `external_receipt_hash`. One external receipt answers one leg of a
+  tenant.
+- `settlement_adapter_unavailable`: the adapter could not complete the
+  effect now, or cannot say whether it did. The leg waits in `retry`, the
+  run retries without a charge, and the next attempt sends the same
+  request.
+- `settlement_request_conflict` or `settlement_request_rejected`: the
+  adapter says no effect happened and the operation must not be sent
+  again. The leg is `failed` with that label.
+- `settlement_result_mismatch`: the receipt does not answer the request (a
+  different result reference, or an external receipt another leg already
+  recorded). The effect is unknown. The leg is `failed` with that label.
+
+A leg `failed` with one of the last three labels is never dispatched again.
+While one exists, every Settle attempt is charged, so the other legs still
+settle and the run's attempts run out. A request that cannot be formed
+(`settlement_request_invalid`) is refused before any adapter call, and the
+attempt is charged.
+
 Before each adapter call, the leg moves to `leased` under the run's lease,
 and `dispatched_at` records that the leg was sent. When a Settle run fails
 (`attempts_exhausted`, or a terminal label such as `bundle_package_invalid`
@@ -160,8 +183,13 @@ or `index_key_conflict`), no leg stays open:
 - A leg that was never dispatched is `forfeited` with `run_failed`. So is a
   Trace Credit leg: it pays only through the ledger row that commits with
   its completion.
-- A dispatched leg of another instrument gets one more adapter call from the
-  worker that fails the run. A result equal to the selected result
+- A leg `failed` with `settlement_request_conflict` or
+  `settlement_request_rejected` is `forfeited` and keeps its label: no
+  effect happened. A leg `failed` with `settlement_result_mismatch` stays
+  `failed` with its label: its effect is unknown. Neither gets another
+  adapter call.
+- Any other dispatched leg of another instrument gets one more adapter call
+  from the worker that fails the run. A result equal to the selected result
   reference makes the leg `complete`. Any other outcome makes it `failed`
   with `settlement_unreconciled`. The worker does not make the call when
   the submission is no longer operable, the adapter or cap is missing, the
@@ -172,9 +200,17 @@ or `index_key_conflict`), no leg stays open:
   after its lease expired), no worker can call the adapter. Every
   dispatched leg of another instrument is then `settlement_unreconciled`.
 
-`settlement_unreconciled` means the external payment may have happened.
-Find the leg's `operation_ref_hash` in the adapter's records and reconcile
-it by hand. Nothing retries it once the run has failed. On a run that is
+`settlement_unreconciled` and `settlement_result_mismatch` mean the
+external payment may have happened. Find the leg's `operation_ref_hash` in
+the adapter's records and reconcile it by hand. Nothing retries it once the
+run has failed.
+
+A withdrawal forfeits every leg that is not `complete` without an adapter
+call, including a leg that was already dispatched (`retry` after
+`settlement_adapter_unavailable`, `leased`, or `failed` with
+`settlement_result_mismatch`). The external payment for such a leg may
+have happened: the leg keeps its `dispatched_at`, and only the adapter's
+records for its `operation_ref_hash` show whether it did. On a run that is
 still live, Settle dispatches a `settlement_unreconciled` leg again on its
 next attempt -- the label only means the *last* reconciling call did not
 confirm a match, not that the leg is done being tried.

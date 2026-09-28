@@ -17,8 +17,9 @@ use trace_commons_gate_api::pipeline::{
     SettleEvidence, TRACE_CREDIT_DECIMALS,
 };
 use trace_commons_gate_api::{
-    Embedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder, ReferencePerplexityScorer,
-    VectorIndexWriter,
+    Embedder, IdentifiedEmbedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder,
+    ReferencePerplexityScorer, SettlementAdapter, SettlementError, SettlementReceipt,
+    SettlementRequest, VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
@@ -38,13 +39,12 @@ use trace_commons_server::trace_corpus_storage::{
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_bundle::{
-    IdentifiedEmbedder, MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle,
-    PipelineBundleConfig, PipelineInstrumentAwardConfig, dependency_content_hash,
-    pipeline_operation_ref, pipeline_result_ref,
+    MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
+    PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
+    pipeline_result_ref,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry, SettlementRequest,
-    credit_account_hash,
+    RecordingSettlementAdapter, SettlementAdapterRegistry, credit_account_hash,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 
@@ -1926,6 +1926,7 @@ struct MismatchingSettlementAdapter {
     instrument_id: InstrumentId,
 }
 
+#[async_trait::async_trait]
 impl SettlementAdapter for MismatchingSettlementAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         &self.instrument_id
@@ -1939,8 +1940,75 @@ impl SettlementAdapter for MismatchingSettlementAdapter {
         "none"
     }
 
-    fn settle(&self, _request: &SettlementRequest) -> anyhow::Result<String> {
-        Ok(format!("sha256:{}", "f".repeat(64)))
+    async fn settle(
+        &self,
+        _request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        Ok(SettlementReceipt::internal(format!("sha256:{}", "f".repeat(64))).unwrap())
+    }
+}
+
+/// An adapter that answers every call with the same `SettlementError`: a
+/// `Conflict` or `Rejected` says no effect happened and the operation must
+/// not be sent again.
+struct RefusingSettlementAdapter {
+    instrument_id: InstrumentId,
+    error: SettlementError,
+}
+
+#[async_trait::async_trait]
+impl SettlementAdapter for RefusingSettlementAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "refusing_test_only"
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        _request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        Err(self.error)
+    }
+}
+
+/// An adapter whose effect has an external record: it delegates to a
+/// recording adapter (so a repeated operation is one logical effect) and
+/// answers with an external receipt whose hash is `receipt_hash`.
+struct ExternalReceiptAdapter {
+    inner: Arc<RecordingSettlementAdapter>,
+    receipt_hash: String,
+}
+
+#[async_trait::async_trait]
+impl SettlementAdapter for ExternalReceiptAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        self.inner.instrument_id()
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "external_receipt_test_only"
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        let receipt = self.inner.settle(request).await?;
+        Ok(
+            SettlementReceipt::external(receipt.result_ref_hash(), self.receipt_hash.clone())
+                .unwrap(),
+        )
     }
 }
 
@@ -1958,8 +2026,6 @@ enum CreditInterruption {
 /// A Trace Credit adapter that delegates to a recording adapter (so a
 /// repeated operation is still one logical effect) and, on its first call
 /// only, applies one `CreditInterruption` in the database before it returns.
-/// `settle` is synchronous, so the database write runs through
-/// `block_in_place`; a test using it runs on a multi-thread runtime.
 struct InterruptingCreditAdapter {
     inner: Arc<RecordingSettlementAdapter>,
     backend: Arc<PgBackend>,
@@ -1968,6 +2034,7 @@ struct InterruptingCreditAdapter {
     armed: std::sync::atomic::AtomicBool,
 }
 
+#[async_trait::async_trait]
 impl SettlementAdapter for InterruptingCreditAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         self.inner.instrument_id()
@@ -1981,39 +2048,37 @@ impl SettlementAdapter for InterruptingCreditAdapter {
         "none"
     }
 
-    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
-        let result = self.inner.settle(request)?;
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        let receipt = self.inner.settle(request).await?;
         if self.armed.swap(false, Ordering::SeqCst) {
-            let backend = self.backend.clone();
             let tenant_id = self.tenant_id.clone();
-            let run_id = request.run_id;
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    match &self.interruption {
-                        CreditInterruption::ExpireLease => {
-                            let mut client = backend.trace_pool_for_test().get().await.unwrap();
-                            let tx = tenant_tx(&mut client, &tenant_id).await;
-                            tx.execute(
-                                "UPDATE pipeline_runs
-                                    SET lease_expires_at = NOW() - INTERVAL '1 second'
-                                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
-                                &[&tenant_id, &run_id],
-                            )
-                            .await
-                            .unwrap();
-                            tx.commit().await.unwrap();
-                        }
-                        CreditInterruption::PlaceHold(hold) => {
-                            backend
-                                .upsert_trace_credit_hold(hold.clone())
-                                .await
-                                .unwrap();
-                        }
-                    }
-                })
-            });
+            let run_id = request.run_id();
+            match &self.interruption {
+                CreditInterruption::ExpireLease => {
+                    let mut client = self.backend.trace_pool_for_test().get().await.unwrap();
+                    let tx = tenant_tx(&mut client, &tenant_id).await;
+                    tx.execute(
+                        "UPDATE pipeline_runs
+                            SET lease_expires_at = NOW() - INTERVAL '1 second'
+                          WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                        &[&tenant_id, &run_id],
+                    )
+                    .await
+                    .unwrap();
+                    tx.commit().await.unwrap();
+                }
+                CreditInterruption::PlaceHold(hold) => {
+                    self.backend
+                        .upsert_trace_credit_hold(hold.clone())
+                        .await
+                        .unwrap();
+                }
+            }
         }
-        Ok(result)
+        Ok(receipt)
     }
 }
 
@@ -5789,6 +5854,11 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
         .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
         .expect("trace_credit row seeded");
     assert_eq!(rebate_row.operation_state, "retry");
+    assert_eq!(
+        rebate_row.last_error_label.as_deref(),
+        Some(SettlementError::Unavailable.label()),
+        "an `Unavailable` answer leaves the leg waiting under the adapter's own label"
+    );
     assert_eq!(credit_row.operation_state, "complete");
     let expected_credit_result = pipeline_result_ref(
         run.run_id,
@@ -5834,6 +5904,12 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
         "the already-complete leg was never dispatched again"
     );
     assert_eq!(
+        rebate.requests().len(),
+        1,
+        "every retry after an `Unavailable` answer sent the same request: the recording \
+         adapter refuses changed content for one operation as a conflict"
+    );
+    assert_eq!(
         count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
         1,
         "exactly one credit ledger row for the run"
@@ -5874,7 +5950,9 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
     assert_eq!(operations[1].instrument_id().as_str(), "trace_credit");
     for operation in operations {
         match operation.outcome() {
-            InstrumentSettlementOutcome::Completed { result_ref_hash } => {
+            InstrumentSettlementOutcome::Completed {
+                result_ref_hash, ..
+            } => {
                 assert!(!result_ref_hash.is_empty());
             }
             InstrumentSettlementOutcome::Forfeited { .. } => {
@@ -6444,6 +6522,7 @@ struct WithdrawOnCreditSettleAdapter {
     triggered: AtomicBool,
 }
 
+#[async_trait::async_trait]
 impl SettlementAdapter for WithdrawOnCreditSettleAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         self.inner.instrument_id()
@@ -6457,8 +6536,11 @@ impl SettlementAdapter for WithdrawOnCreditSettleAdapter {
         "none"
     }
 
-    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
-        let result = self.inner.settle(request)?;
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        let receipt = self.inner.settle(request).await?;
         if !self.triggered.swap(true, Ordering::SeqCst) {
             let runtime_url = self.runtime_url.clone();
             let tenant_id = self.tenant_id.clone();
@@ -6485,7 +6567,7 @@ impl SettlementAdapter for WithdrawOnCreditSettleAdapter {
             .join()
             .expect("withdrawal thread completes");
         }
-        Ok(result)
+        Ok(receipt)
     }
 }
 
@@ -6653,7 +6735,9 @@ async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award(
                 }
             },
             "storage_rebate" => match operation.outcome() {
-                InstrumentSettlementOutcome::Completed { result_ref_hash } => {
+                InstrumentSettlementOutcome::Completed {
+                    result_ref_hash, ..
+                } => {
                     assert!(!result_ref_hash.is_empty());
                 }
                 InstrumentSettlementOutcome::Forfeited { .. } => {
@@ -6730,16 +6814,17 @@ async fn two_runs_for_one_account_never_share_a_credit_event_across_batches() {
 /// The expected result comes from the persisted selection, not from
 /// whatever the adapter hands back. An adapter that returns a well-formed
 /// but different result reference fails the row closed rather than being
-/// trusted.
+/// trusted, and the leg is never dispatched again: the next attempt skips
+/// it and stays charged.
 #[tokio::test]
 async fn adapter_result_that_differs_from_the_selection_fails_closed() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let mismatching = Arc::new(MismatchingSettlementAdapter {
+    let mismatching = CountingSettlementAdapter::new(Arc::new(MismatchingSettlementAdapter {
         instrument_id: InstrumentId::new("storage_rebate").unwrap(),
-    });
+    }));
     let trace_credit_adapter = RecordingSettlementAdapter::new(
         InstrumentId::trace_credit(),
         "recording_trace_credit_test_only",
@@ -6750,8 +6835,8 @@ async fn adapter_result_that_differs_from_the_selection_fails_closed() {
         artifact_store(&dir),
         scored_config(false),
         vec![
-            mismatching as Arc<dyn SettlementAdapter>,
-            trace_credit_adapter as Arc<dyn SettlementAdapter>,
+            mismatching.clone() as Arc<dyn SettlementAdapter>,
+            trace_credit_adapter.clone() as Arc<dyn SettlementAdapter>,
         ],
     )
     .await;
@@ -6768,7 +6853,7 @@ async fn adapter_result_that_differs_from_the_selection_fails_closed() {
         result.last_error_label.as_deref(),
         Some("settlement_operation_retry")
     );
-    // FR3: unlike an adapter call error, a result that differs from the
+    // Unlike an adapter call error, a result that differs from the
     // selection fails closed and stays charged.
     assert_eq!(result.attempt_count, run.attempt_count + 1);
 
@@ -6787,6 +6872,40 @@ async fn adapter_result_that_differs_from_the_selection_fails_closed() {
         Some("settlement_result_mismatch")
     );
     assert_eq!(rebate_row.result_ref_hash, None);
+    assert_eq!(rebate_row.external_receipt_hash, None);
+    assert_eq!(mismatching.calls(), 1);
+
+    // The next attempt does not dispatch the mismatched leg again, and it
+    // is charged again while that leg exists.
+    force_due(&backend, &tenant, run.run_id).await;
+    let again = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle retries again");
+    assert_eq!(again.state, PipelineRunState::Retry);
+    assert_eq!(
+        again.last_error_label.as_deref(),
+        Some("settlement_operation_retry")
+    );
+    assert_eq!(again.attempt_count, run.attempt_count + 2);
+    assert_eq!(
+        mismatching.calls(),
+        1,
+        "a mismatched leg is never dispatched again"
+    );
+    assert_eq!(
+        trace_credit_adapter.requests().len(),
+        1,
+        "the other leg completed on the first attempt and is not repeated"
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some("settlement_result_mismatch")
+    );
+    assert_eq!(leg_state(&rows, "trace_credit"), "complete");
 
     let outcomes = service
         .store()
@@ -7519,7 +7638,9 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
                 &credit_award
             };
             match operation.outcome() {
-                InstrumentSettlementOutcome::Completed { result_ref_hash } => {
+                InstrumentSettlementOutcome::Completed {
+                    result_ref_hash, ..
+                } => {
                     assert_eq!(
                         result_ref_hash.as_str(),
                         pipeline_result_ref(run_id, expected_award).as_str(),
@@ -7594,6 +7715,7 @@ impl CountingSettlementAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl SettlementAdapter for CountingSettlementAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         self.inner.instrument_id()
@@ -7607,9 +7729,12 @@ impl SettlementAdapter for CountingSettlementAdapter {
         self.inner.payout_rail()
     }
 
-    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.settle(request)
+        self.inner.settle(request).await
     }
 }
 
@@ -7627,6 +7752,7 @@ impl OutageThenRecordingAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl SettlementAdapter for OutageThenRecordingAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         self.inner.instrument_id()
@@ -7640,7 +7766,10 @@ impl SettlementAdapter for OutageThenRecordingAdapter {
         "none"
     }
 
-    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
         let failing = self
             .failures_left
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -7648,9 +7777,9 @@ impl SettlementAdapter for OutageThenRecordingAdapter {
             })
             .is_ok();
         if failing {
-            anyhow::bail!("settlement_adapter_unavailable");
+            return Err(SettlementError::Unavailable);
         }
-        self.inner.settle(request)
+        self.inner.settle(request).await
     }
 }
 
@@ -7666,8 +7795,7 @@ struct InFlightLeg {
 /// its own settlement row and the run row (as JSON, so it reads the lease
 /// columns and `dispatched_at` without depending on the record type), and
 /// on its first call only expires the run's lease: "the adapter call
-/// outlived the lease". `settle` is synchronous, so the database work runs
-/// through `block_in_place`; a test using it runs on a multi-thread runtime.
+/// outlived the lease".
 struct ObservingLeaseExpiringAdapter {
     inner: Arc<RecordingSettlementAdapter>,
     backend: Arc<PgBackend>,
@@ -7686,6 +7814,7 @@ impl ObservingLeaseExpiringAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl SettlementAdapter for ObservingLeaseExpiringAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         self.inner.instrument_id()
@@ -7699,47 +7828,47 @@ impl SettlementAdapter for ObservingLeaseExpiringAdapter {
         "none"
     }
 
-    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
         let first_call = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
-        let result = self.inner.settle(request)?;
-        let backend = self.backend.clone();
+        let receipt = self.inner.settle(request).await?;
         let tenant_id = self.tenant_id.clone();
-        let run_id = request.run_id;
-        let instrument_id = request.instrument_id.as_str().to_string();
-        let observed = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                let mut client = backend.trace_pool_for_test().get().await.unwrap();
-                let tx = tenant_tx(&mut client, &tenant_id).await;
-                let row = tx
-                    .query_one(
-                        "SELECT to_jsonb(s) AS leg, to_jsonb(p) AS run
-                           FROM pipeline_run_settlements s
-                           JOIN pipeline_runs p
-                             ON p.tenant_id = s.tenant_id AND p.run_id = s.run_id
-                          WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3",
-                        &[&tenant_id, &run_id, &instrument_id],
-                    )
-                    .await
-                    .unwrap();
-                if first_call {
-                    tx.execute(
-                        "UPDATE pipeline_runs
-                            SET lease_expires_at = NOW() - INTERVAL '1 second'
-                          WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
-                        &[&tenant_id, &run_id],
-                    )
-                    .await
-                    .unwrap();
-                }
-                tx.commit().await.unwrap();
-                InFlightLeg {
-                    leg: row.get("leg"),
-                    run: row.get("run"),
-                }
-            })
-        });
+        let run_id = request.run_id();
+        let instrument_id = request.instrument_id().as_str().to_string();
+        let observed = {
+            let mut client = self.backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, &tenant_id).await;
+            let row = tx
+                .query_one(
+                    "SELECT to_jsonb(s) AS leg, to_jsonb(p) AS run
+                       FROM pipeline_run_settlements s
+                       JOIN pipeline_runs p
+                         ON p.tenant_id = s.tenant_id AND p.run_id = s.run_id
+                      WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3",
+                    &[&tenant_id, &run_id, &instrument_id],
+                )
+                .await
+                .unwrap();
+            if first_call {
+                tx.execute(
+                    "UPDATE pipeline_runs
+                        SET lease_expires_at = NOW() - INTERVAL '1 second'
+                      WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                    &[&tenant_id, &run_id],
+                )
+                .await
+                .unwrap();
+            }
+            tx.commit().await.unwrap();
+            InFlightLeg {
+                leg: row.get("leg"),
+                run: row.get("run"),
+            }
+        };
         self.observed.lock().unwrap().push(observed);
-        Ok(result)
+        Ok(receipt)
     }
 }
 
@@ -7804,7 +7933,10 @@ fn leg_dispatched(rows: &BTreeMap<String, serde_json::Value>, instrument: &str) 
 fn leg_is_resolved(rows: &BTreeMap<String, serde_json::Value>, instrument: &str) -> bool {
     match leg_state(rows, instrument) {
         "complete" | "forfeited" => true,
-        "failed" => leg_label(rows, instrument) == Some("settlement_unreconciled"),
+        "failed" => matches!(
+            leg_label(rows, instrument),
+            Some("settlement_unreconciled" | "settlement_result_mismatch")
+        ),
         _ => false,
     }
 }
@@ -8189,11 +8321,12 @@ async fn a_stale_lease_after_the_adapter_call_is_recorded_and_the_leg_settles_on
 
 /// The exhausted `mark_retry` path: a Settle run that runs out of
 /// attempts resolves every open leg before it fails. The leg whose adapter
-/// always returns a different result is charged each attempt; at the end
-/// its reconciling call differs again (`failed`, `settlement_unreconciled`).
-/// The leg whose adapter errored on every attempt succeeds on the
-/// reconciling call (`complete`). The held Trace Credit leg is forfeited
-/// (`run_failed`) without reaching its adapter.
+/// returns a different result fails closed on the first attempt and is
+/// never dispatched again, not by the reconciling call either: it ends
+/// `failed` / `settlement_result_mismatch`, and every attempt while it
+/// exists is charged. The leg whose adapter was `Unavailable` on every
+/// attempt succeeds on the reconciling call (`complete`). The held Trace
+/// Credit leg is forfeited (`run_failed`) without reaching its adapter.
 #[tokio::test]
 async fn a_settle_run_that_exhausts_its_attempts_resolves_every_leg() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8295,15 +8428,21 @@ async fn a_settle_run_that_exhausts_its_attempts_resolves_every_leg() {
     assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
     assert_eq!(
         leg_label(&rows, "storage_rebate"),
-        Some("settlement_unreconciled")
+        Some("settlement_result_mismatch")
     );
+    assert!(leg_dispatched(&rows, "storage_rebate"));
     assert_eq!(leg_state(&rows, "trace_credit"), "forfeited");
     assert_eq!(leg_label(&rows, "trace_credit"), Some("run_failed"));
     assert!(!leg_dispatched(&rows, "trace_credit"));
 
-    // One call per Settle attempt, plus exactly one reconciling call.
+    // The outage leg: one call per Settle attempt, plus exactly one
+    // reconciling call. The mismatched leg: its first call only.
     assert_eq!(storage_bonus.calls(), settle_attempts as usize + 1);
-    assert_eq!(storage_rebate.calls(), settle_attempts as usize + 1);
+    assert_eq!(
+        storage_rebate.calls(),
+        1,
+        "a mismatched leg is never dispatched again, not by the reconciling call either"
+    );
     assert_eq!(bonus_outage.inner.requests().len(), 1);
     assert_eq!(
         trace_credit.calls(),
@@ -8544,12 +8683,10 @@ async fn the_claim_sweep_resolves_the_legs_of_an_exhausted_settle_run() {
     }
 }
 
-/// A settlement adapter that always returns a result different from the
-/// selection's, and on its `expire_on_call`-th call (1-based) expires the
-/// calling run's lease before it returns. `settle` is synchronous, so the
-/// database write runs through `block_in_place`; a test using it runs on a
-/// multi-thread runtime.
-struct LeaseExpiringMismatchAdapter {
+/// A settlement adapter that answers every call `Unavailable`, and on its
+/// `expire_on_call`-th call (1-based) expires the calling run's lease before
+/// it returns.
+struct LeaseExpiringOutageAdapter {
     instrument_id: InstrumentId,
     backend: Arc<PgBackend>,
     tenant_id: String,
@@ -8557,42 +8694,40 @@ struct LeaseExpiringMismatchAdapter {
     expire_on_call: AtomicUsize,
 }
 
-impl SettlementAdapter for LeaseExpiringMismatchAdapter {
+#[async_trait::async_trait]
+impl SettlementAdapter for LeaseExpiringOutageAdapter {
     fn instrument_id(&self) -> &InstrumentId {
         &self.instrument_id
     }
 
     fn adapter_identity(&self) -> &str {
-        "lease_expiring_mismatch_test_only"
+        "lease_expiring_outage_test_only"
     }
 
     fn payout_rail(&self) -> &str {
         "none"
     }
 
-    fn settle(&self, request: &SettlementRequest) -> anyhow::Result<String> {
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call == self.expire_on_call.load(Ordering::SeqCst) {
-            let backend = self.backend.clone();
-            let tenant_id = self.tenant_id.clone();
-            let run_id = request.run_id;
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    let mut client = backend.trace_pool_for_test().get().await.unwrap();
-                    let tx = tenant_tx(&mut client, &tenant_id).await;
-                    tx.execute(
-                        "UPDATE pipeline_runs
-                            SET lease_expires_at = NOW() - INTERVAL '1 second'
-                          WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
-                        &[&tenant_id, &run_id],
-                    )
-                    .await
-                    .unwrap();
-                    tx.commit().await.unwrap();
-                })
-            });
+            let run_id = request.run_id();
+            let mut client = self.backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, &self.tenant_id).await;
+            tx.execute(
+                "UPDATE pipeline_runs
+                    SET lease_expires_at = NOW() - INTERVAL '1 second'
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'",
+                &[&self.tenant_id, &run_id],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
         }
-        Ok(format!("sha256:{}", "f".repeat(64)))
+        Err(SettlementError::Unavailable)
     }
 }
 
@@ -8602,6 +8737,11 @@ impl SettlementAdapter for LeaseExpiringMismatchAdapter {
 /// uncharged: the run is not failed and no leg is resolved under the stale
 /// lease. The next attempt repeats the charged failure and then resolves
 /// the leg.
+///
+/// Three legs: `storage_bonus` answers with a result that differs from the
+/// selection (a charged blocker that is never dispatched again),
+/// `storage_rebate` is `Unavailable` on every call (the dispatched leg the
+/// failure path reconciles), and `trace_credit` settles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8609,18 +8749,22 @@ async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
     };
     let dir = tempfile::tempdir().unwrap();
     let tenant = format!("settle-stale-resolution-{}", uuid::Uuid::new_v4());
-    let storage_rebate = Arc::new(LeaseExpiringMismatchAdapter {
+    let storage_bonus = CountingSettlementAdapter::new(Arc::new(MismatchingSettlementAdapter {
+        instrument_id: InstrumentId::new("storage_bonus").unwrap(),
+    }));
+    let storage_rebate = Arc::new(LeaseExpiringOutageAdapter {
         instrument_id: InstrumentId::new("storage_rebate").unwrap(),
         backend: backend.clone(),
         tenant_id: tenant.clone(),
         calls: AtomicUsize::new(0),
         expire_on_call: AtomicUsize::new(0),
     });
-    let service = test_service_with_adapters(
+    let service = test_service_with_adapters_and_caps(
         backend.clone(),
         artifact_store(&dir),
-        scored_config(false),
+        three_leg_config(),
         vec![
+            storage_bonus.clone() as Arc<dyn SettlementAdapter>,
             storage_rebate.clone() as Arc<dyn SettlementAdapter>,
             RecordingSettlementAdapter::new(
                 InstrumentId::trace_credit(),
@@ -8628,11 +8772,12 @@ async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
                 "none",
             ) as Arc<dyn SettlementAdapter>,
         ],
+        three_leg_caps(),
     )
     .await;
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
-    // One mismatching call per Settle attempt; the call after the last one
-    // is the reconciling call, and it outlives the lease.
+    // One outage call per Settle attempt; the call after the last one is the
+    // reconciling call, and it outlives the lease.
     let settle_attempts = run.max_attempts - run.attempt_count;
     storage_rebate
         .expire_on_call
@@ -8655,11 +8800,16 @@ async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
         "the attempt whose resolution lost its lease is given back"
     );
     let rows = settlement_rows(&backend, &tenant, run.run_id).await;
-    assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+    assert_eq!(leg_state(&rows, "storage_rebate"), "retry");
     assert_eq!(
         leg_label(&rows, "storage_rebate"),
-        Some("settlement_result_mismatch"),
+        Some("settlement_adapter_unavailable"),
         "nothing is resolved under a stale lease"
+    );
+    assert_eq!(leg_state(&rows, "storage_bonus"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_bonus"),
+        Some("settlement_result_mismatch")
     );
     assert_eq!(leg_state(&rows, "trace_credit"), "complete");
 
@@ -8680,12 +8830,458 @@ async fn a_stale_lease_during_the_failure_resolution_is_recorded_not_charged() {
         leg_label(&rows, "storage_rebate"),
         Some("settlement_unreconciled")
     );
+    assert_eq!(leg_state(&rows, "storage_bonus"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_bonus"),
+        Some("settlement_result_mismatch")
+    );
     assert_eq!(
         leg_state(&rows, "trace_credit"),
         "complete",
         "a completed leg never changes"
     );
+    // The outage leg: one call per Settle attempt, the interrupted
+    // reconciling call, then the next attempt's call and its reconciling
+    // call. The mismatched leg: its first call only.
+    assert_eq!(
+        storage_rebate.calls.load(Ordering::SeqCst),
+        settle_attempts as usize + 3
+    );
+    assert_eq!(storage_bonus.calls(), 1);
     assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "failed run").await;
+}
+
+/// A `Conflict` or `Rejected` answer says no effect happened and the
+/// operation must not be sent again. The leg fails under the adapter's own
+/// label, is never dispatched again (not by the reconciling call either),
+/// and every attempt while it exists is charged, so the other legs still
+/// settle and the run's attempts run out. The failure path then forfeits
+/// both legs under their own labels.
+#[tokio::test]
+async fn conflict_and_rejected_legs_fail_under_their_labels_and_are_never_dispatched_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage_bonus = CountingSettlementAdapter::new(Arc::new(RefusingSettlementAdapter {
+        instrument_id: InstrumentId::new("storage_bonus").unwrap(),
+        error: SettlementError::Conflict,
+    }));
+    let storage_rebate = CountingSettlementAdapter::new(Arc::new(RefusingSettlementAdapter {
+        instrument_id: InstrumentId::new("storage_rebate").unwrap(),
+        error: SettlementError::Rejected,
+    }));
+    let trace_credit = CountingSettlementAdapter::new(RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    ));
+    let service = test_service_with_adapters_and_caps(
+        backend.clone(),
+        artifact_store(&dir),
+        three_leg_config(),
+        vec![
+            storage_bonus.clone() as Arc<dyn SettlementAdapter>,
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            trace_credit.clone() as Arc<dyn SettlementAdapter>,
+        ],
+        three_leg_caps(),
+    )
+    .await;
+    let tenant = format!("settle-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let settle_attempts = run.max_attempts - run.attempt_count;
+    assert!(settle_attempts >= 2, "the fixture leaves Settle a retry");
+
+    for attempt in 1..=settle_attempts {
+        force_due(&backend, &tenant, run.run_id).await;
+        let processed = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("the Settle attempt runs");
+        if attempt < settle_attempts {
+            assert_eq!(
+                processed.state,
+                PipelineRunState::Retry,
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                processed.last_error_label.as_deref(),
+                Some("settlement_operation_retry"),
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                processed.attempt_count,
+                run.attempt_count + attempt,
+                "attempt {attempt}: the retry is charged"
+            );
+            let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+            assert_eq!(leg_state(&rows, "storage_bonus"), "failed");
+            assert_eq!(
+                leg_label(&rows, "storage_bonus"),
+                Some(SettlementError::Conflict.label())
+            );
+            assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+            assert_eq!(
+                leg_label(&rows, "storage_rebate"),
+                Some(SettlementError::Rejected.label())
+            );
+            assert_eq!(
+                leg_state(&rows, "trace_credit"),
+                "complete",
+                "the other leg settles"
+            );
+        }
+        assert_eq!(storage_bonus.calls(), 1, "attempt {attempt}");
+        assert_eq!(storage_rebate.calls(), 1, "attempt {attempt}");
+        assert_eq!(trace_credit.calls(), 1, "attempt {attempt}");
+    }
+
+    let failed = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_bonus"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_bonus"),
+        Some(SettlementError::Conflict.label())
+    );
+    assert_eq!(leg_state(&rows, "storage_rebate"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(SettlementError::Rejected.label())
+    );
+    assert_eq!(leg_state(&rows, "trace_credit"), "complete");
+    for instrument in ["storage_bonus", "storage_rebate", "trace_credit"] {
+        assert!(leg_holds_no_lease(&rows, instrument), "{instrument}");
+        assert!(leg_dispatched(&rows, instrument), "{instrument}");
+    }
+    assert_eq!(
+        storage_bonus.calls(),
+        1,
+        "no reconciling call for a leg that is never dispatched again"
+    );
+    assert_eq!(storage_rebate.calls(), 1);
+    assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "refused legs").await;
+    assert!(
+        !service
+            .store()
+            .list_outcomes(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "a failed run commits no Settle outcome"
+    );
+}
+
+/// A leg whose adapter answers with an external receipt records the
+/// receipt's hash when it completes, and the committed Settle outcome
+/// carries it in the leg's operation and progress. One external receipt
+/// answers one leg: a second run's leg answered with the same receipt hash
+/// fails closed as `settlement_result_mismatch`, pays nothing, and is never
+/// dispatched again.
+#[tokio::test]
+async fn an_external_receipt_is_recorded_on_its_leg_and_answers_only_that_leg() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let receipt_hash = dependency_content_hash(b"external-receipt-for-one-leg");
+    let storage_rebate = CountingSettlementAdapter::new(Arc::new(ExternalReceiptAdapter {
+        inner: RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_test_only",
+            "none",
+        ),
+        receipt_hash: receipt_hash.clone(),
+    }));
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_test_only",
+                "none",
+            ) as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let tenant = format!("settle-external-receipt-{}", uuid::Uuid::new_v4());
+
+    let (first, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let settled = service
+        .process_run(&tenant, first.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, first.run_id)
+        .await
+        .unwrap();
+    let rebate_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == "storage_rebate")
+        .expect("storage_rebate row");
+    assert_eq!(rebate_row.operation_state, "complete");
+    assert_eq!(
+        rebate_row.external_receipt_hash.as_deref(),
+        Some(receipt_hash.as_str())
+    );
+    let credit_row = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit row");
+    assert_eq!(credit_row.operation_state, "complete");
+    assert_eq!(
+        credit_row.external_receipt_hash, None,
+        "an internal receipt records no external hash"
+    );
+
+    let settle_outcome = service
+        .store()
+        .list_outcomes(&tenant, first.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    for operation in decision.settlement_operations() {
+        let expected = match operation.instrument_id().as_str() {
+            "storage_rebate" => Some(receipt_hash.as_str()),
+            _ => None,
+        };
+        assert_eq!(
+            operation.external_receipt_hash(),
+            expected,
+            "{}",
+            operation.instrument_id().as_str()
+        );
+    }
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    for progress in &evidence.settlement_progress {
+        let expected = match progress.instrument_id.as_str() {
+            "storage_rebate" => Some(receipt_hash.as_str()),
+            _ => None,
+        };
+        assert_eq!(
+            progress.external_receipt_hash.as_deref(),
+            expected,
+            "{}",
+            progress.instrument_id.as_str()
+        );
+    }
+
+    // A second run of the same tenant: its leg is answered with the receipt
+    // the first run's leg already recorded.
+    let (second, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let calls_before = storage_rebate.calls();
+    let retried = service
+        .process_run(&tenant, second.run_id)
+        .await
+        .unwrap()
+        .expect("Settle retries after the reused receipt");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+    assert_eq!(
+        retried.last_error_label.as_deref(),
+        Some("settlement_operation_retry")
+    );
+    assert_eq!(
+        retried.attempt_count,
+        second.attempt_count + 1,
+        "a reused receipt fails closed and is charged"
+    );
+    let rows = settlement_rows(&backend, &tenant, second.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL)
+    );
+    assert!(leg_field(&rows, "storage_rebate", "external_receipt_hash").is_null());
+    assert!(leg_field(&rows, "storage_rebate", "result_ref_hash").is_null());
+    assert_eq!(leg_state(&rows, "trace_credit"), "complete");
+    assert_eq!(storage_rebate.calls(), calls_before + 1);
+
+    force_due(&backend, &tenant, second.run_id).await;
+    let again = service
+        .process_run(&tenant, second.run_id)
+        .await
+        .unwrap()
+        .expect("Settle retries again");
+    assert_eq!(again.state, PipelineRunState::Retry);
+    assert_eq!(
+        storage_rebate.calls(),
+        calls_before + 1,
+        "the leg is never dispatched again"
+    );
+    let first_rows = settlement_rows(&backend, &tenant, first.run_id).await;
+    assert_eq!(
+        leg_field(&first_rows, "storage_rebate", "external_receipt_hash").as_str(),
+        Some(receipt_hash.as_str()),
+        "the first leg keeps its receipt"
+    );
+}
+
+/// The database holds the external receipt hash to its contract: only a
+/// `complete` leg carries one, it is a lowercase SHA-256 reference, one hash
+/// answers one leg of a tenant (another tenant may record the same hash),
+/// and a recorded hash never changes.
+#[tokio::test]
+async fn external_receipt_hashes_are_checked_by_the_database() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tenant = format!("external-receipt-db-{}", uuid::Uuid::new_v4());
+    let other_tenant = format!("external-receipt-db-other-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let other_run = seed_run(&backend, &other_tenant, uuid::Uuid::new_v4()).await;
+    let receipt_hash = dependency_content_hash(b"external-receipt-db-check");
+
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for the external receipt test");
+
+    const INSERT: &str = "INSERT INTO pipeline_run_settlements (
+        tenant_id, run_id, instrument_id, atomic_units, operation_ref_hash,
+        result_ref_hash, operation_state, dispatched_at, payout_rail, external_receipt_hash
+    ) VALUES ($1,$2,$3,5,$4,$5,$6,NOW(),'none',$7)";
+    let insert = |instrument: &'static str, state: &'static str, external: String| {
+        let result_ref = (state == "complete")
+            .then(|| dependency_content_hash(format!("result:{instrument}").as_bytes()));
+        (
+            instrument,
+            dependency_content_hash(format!("operation:{instrument}").as_bytes()),
+            result_ref,
+            state,
+            external,
+        )
+    };
+
+    // A complete leg with a well-formed hash is accepted.
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let (instrument, operation, result, state, external) =
+        insert("storage_rebate", "complete", receipt_hash.clone());
+    tx.execute(
+        INSERT,
+        &[
+            &tenant,
+            &run.run_id,
+            &instrument,
+            &operation,
+            &result,
+            &state,
+            &external,
+        ],
+    )
+    .await
+    .expect("a complete leg records its external receipt hash");
+    tx.commit().await.unwrap();
+
+    // Refused: a hash on a leg that is not complete, a malformed hash, and a
+    // second leg of the tenant with the same hash.
+    for (instrument, state, external, code, constraint) in [
+        (
+            "storage_bonus",
+            "pending",
+            dependency_content_hash(b"external-receipt-pending"),
+            tokio_postgres::error::SqlState::CHECK_VIOLATION,
+            "pipeline_run_settlements_external_receipt_shape",
+        ),
+        (
+            "storage_bonus",
+            "complete",
+            "0xabc".to_string(),
+            tokio_postgres::error::SqlState::CHECK_VIOLATION,
+            "pipeline_run_settlements_external_receipt_shape",
+        ),
+        (
+            "storage_bonus",
+            "complete",
+            receipt_hash.clone(),
+            tokio_postgres::error::SqlState::UNIQUE_VIOLATION,
+            "pipeline_run_settlements_external_receipt_unique",
+        ),
+    ] {
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let (instrument, operation, result, state, external) = insert(instrument, state, external);
+        let error = tx
+            .execute(
+                INSERT,
+                &[
+                    &tenant,
+                    &run.run_id,
+                    &instrument,
+                    &operation,
+                    &result,
+                    &state,
+                    &external,
+                ],
+            )
+            .await
+            .expect_err("the database refuses the leg");
+        let db = error.as_db_error().expect("database refusal");
+        assert_eq!(db.code(), &code, "{state} {external}");
+        assert_eq!(db.constraint(), Some(constraint), "{db:?}");
+        tx.rollback().await.unwrap();
+    }
+
+    // Another tenant may record the same hash.
+    let tx = tenant_tx(&mut client, &other_tenant).await;
+    let (instrument, operation, result, state, external) =
+        insert("storage_rebate", "complete", receipt_hash.clone());
+    tx.execute(
+        INSERT,
+        &[
+            &other_tenant,
+            &other_run.run_id,
+            &instrument,
+            &operation,
+            &result,
+            &state,
+            &external,
+        ],
+    )
+    .await
+    .expect("the uniqueness is per tenant");
+    tx.commit().await.unwrap();
+
+    // A recorded hash never changes.
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let error = tx
+        .execute(
+            "UPDATE pipeline_run_settlements
+                SET external_receipt_hash = $3
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'storage_rebate'",
+            &[
+                &tenant,
+                &run.run_id,
+                &dependency_content_hash(b"external-receipt-replacement"),
+            ],
+        )
+        .await
+        .expect_err("a recorded external receipt hash is immutable");
+    assert_eq!(
+        db_error_message(&error),
+        "pipeline settlement identity is immutable"
+    );
+    tx.rollback().await.unwrap();
 }
 
 /// A `settlement_unreconciled` leg on a run that is still live -- left

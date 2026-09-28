@@ -119,6 +119,10 @@ CREATE TABLE pipeline_run_settlements (
         result_ref_hash IS NULL
         OR result_ref_hash ~ '^sha256:[0-9a-f]{64}$'
     ),
+    -- The adapter's evidence of an external effect: a SHA-256 reference over
+    -- the external system's receipt, recorded when the leg completes. NULL
+    -- for an effect with no external record.
+    external_receipt_hash TEXT,
     operation_state TEXT NOT NULL DEFAULT 'pending' CHECK (
         operation_state IN (
             'pending',
@@ -232,8 +236,21 @@ CREATE TABLE pipeline_run_settlements (
     CONSTRAINT pipeline_run_settlements_result_shape CHECK (
         (operation_state = 'complete' AND result_ref_hash IS NOT NULL)
         OR (operation_state <> 'complete' AND result_ref_hash IS NULL)
+    ),
+    -- Only a complete leg carries an external receipt hash.
+    CONSTRAINT pipeline_run_settlements_external_receipt_shape CHECK (
+        external_receipt_hash IS NULL
+        OR (
+            operation_state = 'complete'
+            AND external_receipt_hash ~ '^sha256:[0-9a-f]{64}$'
+        )
     )
 );
+
+-- One external receipt answers one leg of a tenant.
+CREATE UNIQUE INDEX pipeline_run_settlements_external_receipt_unique
+    ON pipeline_run_settlements (tenant_id, external_receipt_hash)
+    WHERE external_receipt_hash IS NOT NULL;
 
 CREATE FUNCTION reject_pipeline_run_settlement_identity_mutation()
 RETURNS TRIGGER
@@ -248,6 +265,10 @@ BEGIN
        OR (
            OLD.result_ref_hash IS NOT NULL
            AND NEW.result_ref_hash IS DISTINCT FROM OLD.result_ref_hash
+       )
+       OR (
+           OLD.external_receipt_hash IS NOT NULL
+           AND NEW.external_receipt_hash IS DISTINCT FROM OLD.external_receipt_hash
        )
        OR (
            OLD.dispatched_at IS NOT NULL

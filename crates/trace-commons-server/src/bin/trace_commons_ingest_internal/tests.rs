@@ -10556,9 +10556,7 @@ impl trace_commons_gate_api::PerplexityScorer for QualifiedTestScorer {
     }
 }
 
-impl trace_commons_server::versioned_pipeline_bundle::IdentifiedPerplexityScorer
-    for QualifiedTestScorer
-{
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for QualifiedTestScorer {
     fn dependency_identity(&self) -> &str {
         "qualified_test_perplexity_scorer"
     }
@@ -10582,7 +10580,7 @@ impl trace_commons_gate_api::Embedder for QualifiedTestEmbedder {
     }
 }
 
-impl trace_commons_server::versioned_pipeline_bundle::IdentifiedEmbedder for QualifiedTestEmbedder {
+impl trace_commons_gate_api::IdentifiedEmbedder for QualifiedTestEmbedder {
     fn dependency_identity(&self) -> &str {
         "qualified_test_embedder"
     }
@@ -10655,7 +10653,7 @@ impl trace_commons_gate_api::VectorIndexWriter for QualifiedTestIndex {
     }
 }
 
-impl trace_commons_server::versioned_pipeline_bundle::IdentifiedIndexReader for QualifiedTestIndex {
+impl trace_commons_gate_api::IdentifiedIndexReader for QualifiedTestIndex {
     fn dependency_identity(&self) -> &str {
         "qualified_test_index_reader"
     }
@@ -10665,7 +10663,7 @@ impl trace_commons_server::versioned_pipeline_bundle::IdentifiedIndexReader for 
     }
 }
 
-impl trace_commons_server::versioned_pipeline_bundle::IdentifiedIndexWriter for QualifiedTestIndex {
+impl trace_commons_gate_api::IdentifiedIndexWriter for QualifiedTestIndex {
     fn dependency_identity(&self) -> &str {
         "qualified_test_index_writer"
     }
@@ -10676,15 +10674,15 @@ impl trace_commons_server::versioned_pipeline_bundle::IdentifiedIndexWriter for 
 }
 
 /// A settlement adapter whose `production_qualified` override reports
-/// `true`. `settle` trivially echoes the expected result reference back --
-/// this double is never exercised past assembly in the tests that use it.
+/// `true`. `settle` answers with an internal receipt for the expected result
+/// reference -- this double is never exercised past assembly in the tests
+/// that use it.
 struct QualifiedTestSettlementAdapter {
     instrument_id: trace_commons_gate_api::pipeline::InstrumentId,
 }
 
-impl trace_commons_server::versioned_pipeline_credit::SettlementAdapter
-    for QualifiedTestSettlementAdapter
-{
+#[async_trait::async_trait]
+impl trace_commons_gate_api::SettlementAdapter for QualifiedTestSettlementAdapter {
     fn instrument_id(&self) -> &trace_commons_gate_api::pipeline::InstrumentId {
         &self.instrument_id
     }
@@ -10701,11 +10699,13 @@ impl trace_commons_server::versioned_pipeline_credit::SettlementAdapter
         "none"
     }
 
-    fn settle(
+    async fn settle(
         &self,
-        request: &trace_commons_server::versioned_pipeline_credit::SettlementRequest,
-    ) -> anyhow::Result<String> {
-        Ok(request.expected_result_ref_hash.clone())
+        request: &trace_commons_gate_api::SettlementRequest,
+    ) -> Result<trace_commons_gate_api::SettlementReceipt, trace_commons_gate_api::SettlementError>
+    {
+        trace_commons_gate_api::SettlementReceipt::internal(request.expected_result_ref_hash())
+            .map_err(|_| trace_commons_gate_api::SettlementError::Rejected)
     }
 }
 
@@ -10719,14 +10719,13 @@ fn qualified_pipeline_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
 ) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
     use trace_commons_server::versioned_pipeline_bundle::{
         MinimalPolicyBundle, PipelineBundleConfig,
     };
-    use trace_commons_server::versioned_pipeline_credit::{
-        SettlementAdapter, SettlementAdapterRegistry,
-    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
 
     let scorer = Arc::new(QualifiedTestScorer(
         trace_commons_gate_api::ReferencePerplexityScorer::new(),

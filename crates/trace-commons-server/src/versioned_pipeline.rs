@@ -13,7 +13,6 @@ use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
-use trace_commons_gate_api::IndexWriteError;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
     BundlePackage, IndexMembershipDecision, InstrumentAward, InstrumentAwards, InstrumentId,
@@ -22,6 +21,10 @@ use trace_commons_gate_api::pipeline::{
     ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision,
     ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision,
     SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef,
+};
+use trace_commons_gate_api::{
+    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
+    IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
 };
 use trace_commons_protocol::trace_contribution::{
     ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope, retention_policy_for_trace,
@@ -41,14 +44,13 @@ use crate::trace_corpus_storage::{
     TraceSubmissionWrite, safe_residual_risk_basis_labels,
 };
 use crate::versioned_pipeline_bundle::{
-    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
     PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, dependency_content_hash, pipeline_operation_ref,
     pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::{
     PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry,
-    SettlementRequest, credit_account_hash, issuer_approval_hash, microcredits_to_settled_i64,
+    credit_account_hash, issuer_approval_hash, microcredits_to_settled_i64,
     pipeline_credit_event_id, pipeline_ledger_source_key, pipeline_settlement_batch_id,
     source_list_hash,
 };
@@ -104,6 +106,28 @@ pub const PIPELINE_SETTLEMENT_RUN_FAILED_LABEL: &str = "run_failed";
 /// external effect may have happened; an operator reconciles it against the
 /// adapter by `operation_ref_hash`.
 pub const PIPELINE_SETTLEMENT_UNRECONCILED_LABEL: &str = "settlement_unreconciled";
+/// The label on a leg whose adapter returned a receipt that does not answer
+/// the leg's request: a result reference other than the one the persisted
+/// selection expects, or an external receipt that another leg already
+/// recorded (one external receipt answers one leg). The effect is unknown.
+/// The leg is never dispatched again, and a failed run leaves it `failed`
+/// with this label for an operator to reconcile by `operation_ref_hash`.
+pub const PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL: &str = "settlement_result_mismatch";
+/// The label on a leg whose settlement request cannot be formed:
+/// `SettlementRequest::new` refuses its references or its amount. No adapter
+/// is called, and the run's retry is charged.
+pub const PIPELINE_SETTLEMENT_REQUEST_INVALID_LABEL: &str = "settlement_request_invalid";
+/// The labels of a `failed` leg that is never dispatched again: Step 6 skips
+/// it, and the reconciling call a worker makes before it fails the run never
+/// calls the adapter for it. `settlement_result_mismatch` is a receipt that
+/// did not answer the request. The other two are the adapter's own
+/// `SettlementError::Conflict` and `SettlementError::Rejected` labels: no
+/// effect happened, and the operation must not be retried.
+const TERMINAL_SETTLEMENT_FAILURE_LABELS: [&str; 3] = [
+    PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL,
+    "settlement_request_conflict",
+    "settlement_request_rejected",
+];
 /// The refusal a leg write (`mark_settlement_leased`,
 /// `record_settlement_reconciliation`) returns under a lease that is still
 /// live when the leg is not in a state that write may change, or does not
@@ -129,26 +153,90 @@ const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_fai
 const UNRESOLVED_SETTLEMENT_LEG_SQL: &str = "(s.operation_state NOT IN ('complete', 'forfeited')
       AND NOT (
           s.operation_state = 'failed'
-          AND s.last_error_label IS NOT DISTINCT FROM 'settlement_unreconciled'
+          AND s.last_error_label IN ('settlement_unreconciled', 'settlement_result_mismatch')
       ))";
 
 /// Whether a failure path still has to resolve a leg. `complete` and
-/// `forfeited` never change; a leg `failed` as `settlement_unreconciled` is
-/// the resolved end state of a dispatched external leg on a failed run. A
-/// leg `failed` for any other reason (a result mismatch, an amount over the
-/// cap) is one Step 6 retries, so it is unresolved.
-/// `UNRESOLVED_SETTLEMENT_LEG_SQL` is the same rule in SQL. (Step 6 itself
-/// dispatches every leg that is not `complete` or `forfeited`: a
-/// `settlement_unreconciled` leg on a run that is still live -- a failure
-/// path interrupted by a stale lease or a database error before it failed
-/// the run -- is dispatched again, since the run did not fail.)
+/// `forfeited` never change. A leg `failed` as `settlement_unreconciled` or
+/// `settlement_result_mismatch` is resolved: the adapter may have taken
+/// effect, and only its records can say. A leg `failed` as
+/// `settlement_request_conflict` or `settlement_request_rejected` is
+/// unresolved: no effect happened, and the failure path forfeits it under
+/// its own label. A leg `failed` for any other reason (an amount over the
+/// cap, a request that cannot be formed) is one Step 6 retries, so it is
+/// unresolved. `UNRESOLVED_SETTLEMENT_LEG_SQL` is the same rule in SQL.
 fn settlement_leg_is_unresolved(operation_state: &str, last_error_label: Option<&str>) -> bool {
     match operation_state {
         "complete" | "forfeited" => false,
-        "failed" => last_error_label != Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+        "failed" => !matches!(
+            last_error_label,
+            Some(
+                PIPELINE_SETTLEMENT_UNRECONCILED_LABEL | PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL
+            )
+        ),
         _ => true,
     }
 }
+
+/// The SQL form of `settlement_leg_is_open_to_dispatch`, over a row aliased
+/// `s`.
+const SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL: &str =
+    "(s.operation_state NOT IN ('complete', 'forfeited')
+      AND NOT (
+          s.operation_state = 'failed'
+          AND s.last_error_label IN (
+              'settlement_result_mismatch',
+              'settlement_request_conflict',
+              'settlement_request_rejected'
+          )
+      ))";
+
+/// Whether an adapter call may still be made for a leg. `complete` and
+/// `forfeited` legs are done, and a `failed` leg with a label in
+/// `TERMINAL_SETTLEMENT_FAILURE_LABELS` is never dispatched again. Every
+/// other leg is dispatched by Step 6, including a `settlement_unreconciled`
+/// leg on a run that is still live (a failure path interrupted by a stale
+/// lease or a database error before it failed the run): the run did not
+/// fail, so the leg is tried again. `SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL` is
+/// the same rule in SQL.
+fn settlement_leg_is_open_to_dispatch(
+    operation_state: &str,
+    last_error_label: Option<&str>,
+) -> bool {
+    match operation_state {
+        "complete" | "forfeited" => false,
+        "failed" => !last_error_label
+            .is_some_and(|label| TERMINAL_SETTLEMENT_FAILURE_LABELS.contains(&label)),
+        _ => true,
+    }
+}
+
+/// The unique index that holds one external receipt to one leg per tenant.
+const EXTERNAL_RECEIPT_UNIQUE_INDEX: &str = "pipeline_run_settlements_external_receipt_unique";
+
+/// Whether `error` is the database refusing an external receipt hash that
+/// another leg of the tenant already recorded.
+fn is_external_receipt_reuse(error: &tokio_postgres::Error) -> bool {
+    error.as_db_error().is_some_and(|db| {
+        db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION
+            && db.constraint() == Some(EXTERNAL_RECEIPT_UNIQUE_INDEX)
+    })
+}
+
+/// `is_external_receipt_reuse` for an error from a leg write, however the
+/// caller wrapped it.
+fn is_external_receipt_reuse_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<tokio_postgres::Error>()
+            .is_some_and(is_external_receipt_reuse)
+            || matches!(
+                cause.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::Postgres(inner)) if is_external_receipt_reuse(inner)
+            )
+    })
+}
+
 /// An attempt whose own phase lease has already gone stale, discovered
 /// when *that same attempt* -- the worker still holding its own claim's
 /// lease token -- writes again (the phase's own commit, or a follow-up
@@ -407,6 +495,10 @@ pub struct PipelineSettlementRecord {
     pub atomic_units: AtomicUnits,
     pub operation_ref_hash: String,
     pub result_ref_hash: Option<String>,
+    /// The adapter's external receipt hash, recorded when the leg completed
+    /// with a receipt from an external system. `None` for an internal
+    /// effect and for every leg that is not `complete`.
+    pub external_receipt_hash: Option<String>,
     pub operation_state: String,
     pub credit_event_id: Option<Uuid>,
     pub settlement_batch_id: Option<Uuid>,
@@ -445,6 +537,7 @@ fn held_settlement_update() -> SettlementUpdate<'static> {
     SettlementUpdate {
         operation_state: "held",
         result_ref_hash: None,
+        external_receipt_hash: None,
         credit_event_id: None,
         settlement_batch_id: None,
         payout_state: None,
@@ -452,15 +545,43 @@ fn held_settlement_update() -> SettlementUpdate<'static> {
     }
 }
 
+/// The settlement-row update for a leg that fails closed with `label`.
+fn failed_settlement_update(label: &str) -> SettlementUpdate<'_> {
+    SettlementUpdate {
+        operation_state: "failed",
+        result_ref_hash: None,
+        external_receipt_hash: None,
+        credit_event_id: None,
+        settlement_batch_id: None,
+        payout_state: None,
+        error_label: Some(label),
+    }
+}
+
+/// The settlement-row update for a leg forfeited with `label`.
+fn forfeited_settlement_update(label: &str) -> SettlementUpdate<'_> {
+    SettlementUpdate {
+        operation_state: "forfeited",
+        result_ref_hash: None,
+        external_receipt_hash: None,
+        credit_event_id: None,
+        settlement_batch_id: None,
+        payout_state: None,
+        error_label: Some(label),
+    }
+}
+
 /// `PgPipelineStore::update_settlement`'s per-call update. `credit_event_id`
 /// and `settlement_batch_id` only ever move from `NULL` to `Some` (a `None`
 /// here leaves whatever is already stored); `payout_state` similarly leaves
-/// the column unchanged when `None`. `result_ref_hash` is the exception --
-/// see `update_settlement`'s doc comment for which states force it to
-/// `NULL` regardless of what this carries.
+/// the column unchanged when `None`. `result_ref_hash` and
+/// `external_receipt_hash` are the exception -- see `update_settlement`'s doc
+/// comment for which states force them to `NULL` regardless of what this
+/// carries.
 struct SettlementUpdate<'a> {
     operation_state: &'a str,
     result_ref_hash: Option<&'a str>,
+    external_receipt_hash: Option<&'a str>,
     credit_event_id: Option<Uuid>,
     settlement_batch_id: Option<Uuid>,
     payout_state: Option<&'a str>,
@@ -1787,7 +1908,11 @@ impl PgPipelineStore {
     /// `'retry'` write it as `NULL` outright rather than `COALESCE`ing
     /// through whatever `update.result_ref_hash` carries, so a caller can
     /// never accidentally persist a result alongside a non-`'complete'`
-    /// state. `credit_event_id`/`settlement_batch_id` only move from `NULL`
+    /// state. `external_receipt_hash` is written only on the transition to
+    /// `'complete'` and is `NULL` for every other state
+    /// (`pipeline_run_settlements_external_receipt_shape`); a hash another
+    /// leg of the tenant already recorded is refused by
+    /// `pipeline_run_settlements_external_receipt_unique`. `credit_event_id`/`settlement_batch_id` only move from `NULL`
     /// to a value (never overwritten or cleared); `payout_state` is written
     /// only when the caller supplies one. `attempt_count` increments on
     /// `'retry'`/`'failed'` (not `'forfeited'` -- forfeiture is not a
@@ -1816,14 +1941,15 @@ impl PgPipelineStore {
     /// Moves one leg to `leased` under the run's own lease token
     /// and expiry immediately before its adapter call, and records the first
     /// dispatch (`dispatched_at`, set once and never cleared). It accepts
-    /// exactly the legs Step 6 dispatches -- any leg not `complete` or
-    /// `forfeited` -- so a `leased` leg an earlier, crashed attempt left
-    /// behind is leased again under this attempt's lease and dispatched
-    /// again (the adapter is idempotent by `operation_ref_hash`).
+    /// exactly the legs Step 6 dispatches (`SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL`),
+    /// so a `leased` leg an earlier, crashed attempt left behind is leased
+    /// again under this attempt's lease and dispatched again (the adapter is
+    /// idempotent by `operation_ref_hash`), and a leg that is never
+    /// dispatched again is refused.
     ///
     /// Fenced by the run lease: `ensure_current_lease` locks the run row and
     /// returns the stale-lease error only for a lease that is really stale.
-    /// A `complete` or `forfeited` leg (or no leg) under a live lease is
+    /// A leg closed to dispatch (or no leg) under a live lease is
     /// `settlement_leg_not_open_error`, never the stale-lease error.
     async fn mark_settlement_leased(
         &self,
@@ -1836,18 +1962,20 @@ impl PgPipelineStore {
         ensure_current_lease(&tx, run, lease_token).await?;
         let updated = tx
             .execute(
-                "UPDATE pipeline_run_settlements s
-                    SET operation_state = 'leased',
-                        lease_token = p.lease_token,
-                        lease_expires_at = p.lease_expires_at,
-                        dispatched_at = COALESCE(s.dispatched_at, NOW()),
-                        last_error_label = NULL,
-                        updated_at = NOW()
-                   FROM pipeline_runs p
-                  WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
-                    AND p.tenant_id = s.tenant_id AND p.run_id = s.run_id
-                    AND p.lease_token = $4
-                    AND s.operation_state NOT IN ('complete', 'forfeited')",
+                &format!(
+                    "UPDATE pipeline_run_settlements s
+                        SET operation_state = 'leased',
+                            lease_token = p.lease_token,
+                            lease_expires_at = p.lease_expires_at,
+                            dispatched_at = COALESCE(s.dispatched_at, NOW()),
+                            last_error_label = NULL,
+                            updated_at = NOW()
+                       FROM pipeline_runs p
+                      WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
+                        AND p.tenant_id = s.tenant_id AND p.run_id = s.run_id
+                        AND p.lease_token = $4
+                        AND {SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL}"
+                ),
                 &[&run.tenant_id, &run.run_id, &instrument_id, &lease_token],
             )
             .await?;
@@ -1861,20 +1989,23 @@ impl PgPipelineStore {
     /// Records the reconciling adapter call a worker makes for
     /// an open, dispatched, external leg before it fails the run
     /// (`PipelineService::reconcile_dispatched_settlement_legs`).
-    /// `Some(result)` -- equal to the selection's result reference --
-    /// completes the leg with it; `None` records `failed` /
-    /// `settlement_unreconciled`. Fenced like `mark_settlement_leased`, with
-    /// the same distinct refusal for any other leg.
+    /// `Some(receipt)` -- a receipt that answers the leg's request --
+    /// completes the leg with its result reference and its external receipt
+    /// hash; `None` records `failed` / `settlement_unreconciled`. Fenced like
+    /// `mark_settlement_leased`, with the same distinct refusal for any other
+    /// leg, including a leg that is never dispatched again.
     async fn record_settlement_reconciliation(
         &self,
         run: &PipelineRunRecord,
         instrument_id: &str,
-        result_ref_hash: Option<&str>,
+        receipt: Option<&SettlementReceipt>,
     ) -> Result<(), DatabaseError> {
-        let (operation_state, error_label) = match result_ref_hash {
+        let (operation_state, error_label) = match receipt {
             Some(_) => ("complete", None),
             None => ("failed", Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)),
         };
+        let result_ref_hash = receipt.map(SettlementReceipt::result_ref_hash);
+        let external_receipt_hash = receipt.and_then(SettlementReceipt::external_receipt_hash);
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
@@ -1885,6 +2016,7 @@ impl PgPipelineStore {
                     "UPDATE pipeline_run_settlements s
                         SET operation_state = $4,
                             result_ref_hash = $5,
+                            external_receipt_hash = $8,
                             last_error_label = $6,
                             lease_token = NULL,
                             lease_expires_at = NULL,
@@ -1892,7 +2024,8 @@ impl PgPipelineStore {
                       WHERE s.tenant_id = $1 AND s.run_id = $2 AND s.instrument_id = $3
                         AND s.instrument_id <> $7
                         AND s.dispatched_at IS NOT NULL
-                        AND {UNRESOLVED_SETTLEMENT_LEG_SQL}"
+                        AND {UNRESOLVED_SETTLEMENT_LEG_SQL}
+                        AND {SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL}"
                 ),
                 &[
                     &run.tenant_id,
@@ -1902,6 +2035,7 @@ impl PgPipelineStore {
                     &result_ref_hash,
                     &error_label,
                     &InstrumentId::trace_credit().as_str(),
+                    &external_receipt_hash,
                 ],
             )
             .await?;
@@ -2176,16 +2310,18 @@ async fn receipt_is_tombstoned(
 /// failed Settle runs `run_ids`, inside the caller's transaction -- the one
 /// that fails them (`mark_failed`, a `mark_retry` that exhausts the
 /// attempts, or the claim sweep in `claim_next`). No adapter is called
-/// here. A dispatched external leg still open is `failed` /
-/// `settlement_unreconciled`: its effect may have happened, and only its
-/// adapter can say. Every other open leg is `forfeited` / `run_failed`: one
-/// never dispatched paid nothing, and a Trace Credit leg pays only through
-/// the ledger row that commits with its completion, so an
+/// here. A leg `failed` as `settlement_request_conflict` or
+/// `settlement_request_rejected` is `forfeited` under that same label: its
+/// adapter said no effect happened. A dispatched external leg still open is
+/// `failed` / `settlement_unreconciled`: its effect may have happened, and
+/// only its adapter can say. Every other open leg is `forfeited` /
+/// `run_failed`: one never dispatched paid nothing, and a Trace Credit leg
+/// pays only through the ledger row that commits with its completion, so an
 /// incomplete one paid nothing either. Every leg it touches loses its lease
-/// columns (`pipeline_run_settlements_lease_shape`); a resolved leg is never
-/// touched. With a worker present, `PipelineService::reconcile_dispatched_settlement_legs`
-/// has already resolved the dispatched external legs, so this only
-/// forfeits.
+/// columns (`pipeline_run_settlements_lease_shape`); a resolved leg (see
+/// `settlement_leg_is_unresolved`) is never touched. With a worker present,
+/// `PipelineService::reconcile_dispatched_settlement_legs` has already
+/// resolved the dispatched external legs it may call, so this only forfeits.
 async fn resolve_open_settlement_legs_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
@@ -2194,15 +2330,23 @@ async fn resolve_open_settlement_legs_on_tx(
     if run_ids.is_empty() {
         return Ok(());
     }
+    let no_effect_labels = [
+        SettlementError::Conflict.label(),
+        SettlementError::Rejected.label(),
+    ];
     tx.execute(
         &format!(
             "UPDATE pipeline_run_settlements s
                 SET operation_state = CASE
+                        WHEN s.operation_state = 'failed' AND s.last_error_label = ANY($6)
+                            THEN 'forfeited'
                         WHEN s.dispatched_at IS NOT NULL AND s.instrument_id <> $3
                             THEN 'failed'
                         ELSE 'forfeited'
                     END,
                     last_error_label = CASE
+                        WHEN s.operation_state = 'failed' AND s.last_error_label = ANY($6)
+                            THEN s.last_error_label
                         WHEN s.dispatched_at IS NOT NULL AND s.instrument_id <> $3
                             THEN $4
                         ELSE $5
@@ -2219,6 +2363,7 @@ async fn resolve_open_settlement_legs_on_tx(
             &InstrumentId::trace_credit().as_str(),
             &PIPELINE_SETTLEMENT_UNRECONCILED_LABEL,
             &PIPELINE_SETTLEMENT_RUN_FAILED_LABEL,
+            &no_effect_labels.as_slice(),
         ],
     )
     .await?;
@@ -2243,6 +2388,10 @@ async fn update_settlement_on_tx(
                         result_ref_hash = CASE
                             WHEN $4 IN ('forfeited', 'retry') THEN NULL
                             ELSE COALESCE(s.result_ref_hash, $5)
+                        END,
+                        external_receipt_hash = CASE
+                            WHEN $4 = 'complete' THEN COALESCE(s.external_receipt_hash, $11)
+                            ELSE NULL
                         END,
                         credit_event_id = COALESCE(s.credit_event_id, $6),
                         settlement_batch_id = COALESCE(s.settlement_batch_id, $7),
@@ -2273,6 +2422,7 @@ async fn update_settlement_on_tx(
                 &update.payout_state,
                 &update.error_label,
                 &lease_token,
+                &update.external_receipt_hash,
             ],
         )
         .await?
@@ -2725,6 +2875,7 @@ fn pipeline_settlement_from_row(row: &Row) -> Result<PipelineSettlementRecord, D
         atomic_units,
         operation_ref_hash: row.get("operation_ref_hash"),
         result_ref_hash: row.get("result_ref_hash"),
+        external_receipt_hash: row.get("external_receipt_hash"),
         operation_state: row.get("operation_state"),
         credit_event_id: row.get("credit_event_id"),
         settlement_batch_id: row.get("settlement_batch_id"),
@@ -4349,13 +4500,20 @@ impl PipelineService {
 
     /// Before a worker fails a
     /// Settle run, each open, dispatched, external leg gets one more call to
-    /// its idempotent adapter with the request Step 6 made. A result equal
-    /// to the persisted selection's result reference completes the leg with
-    /// it. Anything else records `failed` / `settlement_unreconciled`: a
-    /// different result, an adapter error, or no call at all -- for a
-    /// missing adapter, a missing cap or an amount over it (the reconciling
-    /// call never pays what Step 6 would refuse), a selection without the
-    /// leg's result, or a submission that is no longer operable.
+    /// its idempotent adapter with the request Step 6 made. A receipt that
+    /// answers the request completes the leg with its result reference and
+    /// external receipt hash. Anything else records `failed` /
+    /// `settlement_unreconciled`: a receipt that does not answer the request
+    /// or that another leg already recorded, an adapter error, or no call at
+    /// all -- for a missing adapter, a missing cap or an amount over it (the
+    /// reconciling call never pays what Step 6 would refuse), a selection
+    /// without the leg's result, a request that cannot be formed, or a
+    /// submission that is no longer operable.
+    ///
+    /// A leg that is never dispatched again (`settlement_leg_is_open_to_dispatch`)
+    /// gets no call: a `settlement_result_mismatch` leg is already resolved,
+    /// and a `settlement_request_conflict` or `settlement_request_rejected`
+    /// leg is forfeited by the transaction that fails the run.
     ///
     /// Each call is fenced by `ensure_live_lease` and each record by the run
     /// lease, so a stale lease here ends as `lease_expired`, never as a
@@ -4378,6 +4536,10 @@ impl PipelineService {
                 settlement.dispatched_at.is_some()
                     && settlement.instrument_id != InstrumentId::trace_credit().as_str()
                     && settlement_leg_is_unresolved(
+                        &settlement.operation_state,
+                        settlement.last_error_label.as_deref(),
+                    )
+                    && settlement_leg_is_open_to_dispatch(
                         &settlement.operation_state,
                         settlement.last_error_label.as_deref(),
                     )
@@ -4419,26 +4581,40 @@ impl PipelineService {
             } else {
                 None
             };
-            self.store
+            match self
+                .store
                 .record_settlement_reconciliation(
                     run,
                     &settlement.instrument_id,
-                    reconciled.as_deref(),
+                    reconciled.as_ref(),
                 )
-                .await?;
+                .await
+            {
+                Ok(()) => {}
+                // One external receipt answers one leg: a receipt another
+                // leg already recorded does not reconcile this one.
+                Err(DatabaseError::Postgres(error))
+                    if reconciled.is_some() && is_external_receipt_reuse(&error) =>
+                {
+                    self.store
+                        .record_settlement_reconciliation(run, &settlement.instrument_id, None)
+                        .await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(())
     }
 
     /// The one reconciling adapter call for `settlement`, or `None` when it
-    /// is not made or its result is not the expected one (see
+    /// is not made or its receipt does not answer the request (see
     /// `reconcile_dispatched_settlement_legs`).
     async fn reconciling_settle_call(
         &self,
         run: &PipelineRunRecord,
         settlement: &PipelineSettlementRecord,
         expected_results: &BTreeMap<String, String>,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<Option<SettlementReceipt>> {
         let Ok(instrument_id) = InstrumentId::new(settlement.instrument_id.clone()) else {
             return Ok(None);
         };
@@ -4456,17 +4632,19 @@ impl PipelineService {
         if !within_cap {
             return Ok(None);
         }
-        self.ensure_live_lease(run).await?;
-        let request = SettlementRequest {
-            tenant_id: run.tenant_id.clone(),
-            run_id: run.run_id,
+        let Ok(request) = SettlementRequest::new(
+            pipeline_tenant_storage_ref(&run.tenant_id),
+            run.run_id,
             instrument_id,
-            atomic_units: settlement.atomic_units,
-            operation_ref_hash: settlement.operation_ref_hash.clone(),
-            expected_result_ref_hash: expected_result_ref_hash.clone(),
+            settlement.atomic_units,
+            settlement.operation_ref_hash.clone(),
+            expected_result_ref_hash.clone(),
+        ) else {
+            return Ok(None);
         };
-        Ok(match adapter.settle(&request) {
-            Ok(result) if result == *expected_result_ref_hash => Some(result),
+        self.ensure_live_lease(run).await?;
+        Ok(match adapter.settle(&request).await {
+            Ok(receipt) if receipt.answers(&request) => Some(receipt),
             Ok(_) | Err(_) => None,
         })
     }
@@ -4910,40 +5088,38 @@ impl PipelineService {
             }
         }
 
-        // Step 6 (brief 3C, port 4724 to 4872 under the #971 settlement
-        // shape, amendments-971 A9): each settlement row Score seeded
-        // settles as an independent leg with no atomicity across
-        // instruments -- no leg waits for or reverses another leg, and a
-        // retry never repeats a leg that already reached `complete`. Guard
-        // is re-checked immediately before any instrument dispatch, the
-        // same reason Step 5 re-checks it before its own external effect:
-        // the withdrawal can land in the gap since Step 3's read (when this
-        // pass took it -- it does not run on the persisted-selection
-        // branch) or Step 5's, when that ran. The settlement rows
-        // themselves are not re-listed -- Step 2's list is still current,
-        // per the note there --
-        // so this reuses it rather than querying again.
+        // Step 6: each settlement row Score seeded settles as an independent
+        // leg, with no atomicity across instruments: no leg waits for or
+        // reverses another leg, and a retry never repeats a leg that already
+        // reached `complete`. The guard is read again immediately before any
+        // adapter call, for the same reason Step 5 reads it before its own
+        // external effect: a withdrawal can land after Step 3's read (when
+        // this pass took it -- it does not run on the persisted-selection
+        // branch) or Step 5's, when that ran. The settlement rows themselves
+        // are not listed again: Step 2's list is still current, per the note
+        // there.
         let mut guard = self.submission_guard(&run).await?;
         if !guard.operable {
             // The submission stopped being operable: every leg that has not
             // already completed is forfeited without calling its adapter.
             // Credit that already settled stays settled (skipped below);
-            // credit that did not is forfeited, same as every other
+            // credit that did not is forfeited, the same as every other
             // instrument -- there is no special case for Trace Credit here.
+            //
+            // A leg forfeited here may already have been dispatched: a leg
+            // left `retry` by an `Unavailable` answer, a `leased` leg of an
+            // interrupted attempt, or a `settlement_result_mismatch` leg. Its
+            // external effect may have happened. This forfeit does not
+            // reconcile it against its adapter; the leg keeps its
+            // `dispatched_at`, and the adapter's records for its
+            // `operation_ref_hash` are the only evidence of the effect.
             for settlement in &settlements {
                 if settlement.operation_state != "complete" {
                     self.store
                         .update_settlement(
                             &run,
                             &settlement.instrument_id,
-                            SettlementUpdate {
-                                operation_state: "forfeited",
-                                result_ref_hash: None,
-                                credit_event_id: None,
-                                settlement_batch_id: None,
-                                payout_state: None,
-                                error_label: Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
-                            },
+                            forfeited_settlement_update(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
                         )
                         .await?;
                 }
@@ -4955,10 +5131,13 @@ impl PipelineService {
             let selection_decision =
                 serde_json::from_value::<SettleDecision>(selection.decision.clone())
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
-            // Why legs this attempt leaves non-terminal are waiting: a hold,
-            // an adapter call error (both suspensions, FR3), or a charged
-            // blocker (a result that differs from the selection, or an
-            // amount over the cap -- both fail closed).
+            let tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id);
+            // Why legs this attempt leaves open are waiting: a hold or an
+            // `Unavailable` answer (both uncharged suspensions), or a charged
+            // blocker -- a leg that fails closed in this pass (a receipt that
+            // does not answer its request, a `Conflict` or `Rejected` answer,
+            // an amount over the cap, a request that cannot be formed) or a
+            // leg an earlier pass failed closed for good.
             let mut held = false;
             let mut adapter_unavailable = false;
             let mut settlement_blocked = false;
@@ -4978,24 +5157,29 @@ impl PipelineService {
                 // From that point on this pass treats every remaining
                 // non-terminal leg the way Step 6's top-level inoperable
                 // branch treats a submission already known inoperable:
-                // forfeited without calling its adapter. A leg that already
-                // completed earlier in this pass is untouched (A9: no leg
-                // reverses another).
+                // forfeited without calling its adapter, including a leg that
+                // was dispatched before and whose effect may have happened
+                // (see that branch). A leg that already completed earlier in
+                // this pass is untouched: no leg reverses another.
                 if !guard.operable {
                     self.store
                         .update_settlement(
                             &run,
                             instrument_id.as_str(),
-                            SettlementUpdate {
-                                operation_state: "forfeited",
-                                result_ref_hash: None,
-                                credit_event_id: None,
-                                settlement_batch_id: None,
-                                payout_state: None,
-                                error_label: Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
-                            },
+                            forfeited_settlement_update(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
                         )
                         .await?;
+                    continue;
+                }
+                // A leg an earlier pass failed closed for good is never
+                // dispatched again. While one exists, the run's retry stays
+                // charged, so the other legs still progress, the attempts run
+                // out, and the failure path resolves it.
+                if !settlement_leg_is_open_to_dispatch(
+                    &settlement.operation_state,
+                    settlement.last_error_label.as_deref(),
+                ) {
+                    settlement_blocked = true;
                     continue;
                 }
                 let adapter = self
@@ -5019,14 +5203,7 @@ impl PipelineService {
                         .update_settlement(
                             &run,
                             instrument_id.as_str(),
-                            SettlementUpdate {
-                                operation_state: "failed",
-                                result_ref_hash: None,
-                                credit_event_id: None,
-                                settlement_batch_id: None,
-                                payout_state: None,
-                                error_label: Some(PIPELINE_CREDIT_CAP_LABEL),
-                            },
+                            failed_settlement_update(PIPELINE_CREDIT_CAP_LABEL),
                         )
                         .await?;
                     settlement_blocked = true;
@@ -5039,9 +5216,32 @@ impl PipelineService {
                     .and_then(|operation| operation.result_ref_hash())
                     .map(str::to_string)
                     .ok_or_else(|| anyhow::anyhow!("settlement result reference is missing"))?;
-                // Ruling FR2, step 1: a held Trace Credit account is checked
-                // before any external effect, so a held account never
-                // reaches its adapter.
+                // A request that `SettlementRequest::new` refuses cannot be
+                // sent: the leg fails closed before any adapter call, and the
+                // retry is charged.
+                let request = match SettlementRequest::new(
+                    tenant_storage_ref.clone(),
+                    run.run_id,
+                    instrument_id.clone(),
+                    settlement.atomic_units,
+                    settlement.operation_ref_hash.clone(),
+                    expected_result_ref_hash,
+                ) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                failed_settlement_update(PIPELINE_SETTLEMENT_REQUEST_INVALID_LABEL),
+                            )
+                            .await?;
+                        settlement_blocked = true;
+                        continue;
+                    }
+                };
+                // A held Trace Credit account is checked before any external
+                // effect, so a held account never reaches its adapter.
                 let credit_account_ref = if instrument_id == InstrumentId::trace_credit() {
                     let account_ref = self.credit_account_ref(&run).await?;
                     if self
@@ -5062,9 +5262,9 @@ impl PipelineService {
                 } else {
                     None
                 };
-                // FR2, step 2: every adapter dispatch is fenced by the
-                // lease this attempt still holds, the same check Step 5 runs
-                // before the index write.
+                // Every adapter call is fenced by the lease this attempt
+                // still holds, the same check Step 5 runs before the index
+                // write.
                 self.ensure_live_lease(&run).await?;
                 // The leg is `leased` under this attempt's lease
                 // while its adapter call is in flight, and `dispatched_at`
@@ -5073,37 +5273,28 @@ impl PipelineService {
                 self.store
                     .mark_settlement_leased(&run, instrument_id.as_str())
                     .await?;
-                let request = SettlementRequest {
-                    tenant_id: run.tenant_id.clone(),
-                    run_id: run.run_id,
-                    instrument_id: instrument_id.clone(),
-                    atomic_units: settlement.atomic_units,
-                    operation_ref_hash: settlement.operation_ref_hash.clone(),
-                    expected_result_ref_hash: expected_result_ref_hash.clone(),
-                };
-                // FR2, step 3: the adapter's result must equal the result
-                // reference the persisted selection recorded.
-                let actual_result = match adapter.settle(&request) {
-                    Ok(result) if result == expected_result_ref_hash => result,
+                let receipt = match adapter.settle(&request).await {
+                    // The receipt must answer the request: its result
+                    // reference is the one the persisted selection recorded.
+                    Ok(receipt) if receipt.answers(&request) => receipt,
+                    // Any other receipt fails the leg closed, and the leg is
+                    // never dispatched again.
                     Ok(_) => {
                         self.store
                             .update_settlement(
                                 &run,
                                 instrument_id.as_str(),
-                                SettlementUpdate {
-                                    operation_state: "failed",
-                                    result_ref_hash: None,
-                                    credit_event_id: None,
-                                    settlement_batch_id: None,
-                                    payout_state: None,
-                                    error_label: Some("settlement_result_mismatch"),
-                                },
+                                failed_settlement_update(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL),
                             )
                             .await?;
                         settlement_blocked = true;
                         continue;
                     }
-                    Err(_) => {
+                    // The effect may or may not have happened. The leg waits
+                    // in `retry`, uncharged, and a later attempt sends the
+                    // same request; the adapter's idempotency contract makes
+                    // that safe.
+                    Err(SettlementError::Unavailable) => {
                         self.store
                             .update_settlement(
                                 &run,
@@ -5111,32 +5302,47 @@ impl PipelineService {
                                 SettlementUpdate {
                                     operation_state: "retry",
                                     result_ref_hash: None,
+                                    external_receipt_hash: None,
                                     credit_event_id: None,
                                     settlement_batch_id: None,
                                     payout_state: None,
-                                    error_label: Some("settlement_adapter_unavailable"),
+                                    error_label: Some(SettlementError::Unavailable.label()),
                                 },
                             )
                             .await?;
                         adapter_unavailable = true;
                         continue;
                     }
+                    // No effect happened, and the operation must not be sent
+                    // again: the leg fails under the adapter's own label and
+                    // is never dispatched again.
+                    Err(error @ (SettlementError::Conflict | SettlementError::Rejected)) => {
+                        self.store
+                            .update_settlement(
+                                &run,
+                                instrument_id.as_str(),
+                                failed_settlement_update(error.label()),
+                            )
+                            .await?;
+                        settlement_blocked = true;
+                        continue;
+                    }
                 };
                 match credit_account_ref {
-                    // FR2, step 4: the ledger row, the finalized batch, and
-                    // the completed settlement row commit in one transaction.
+                    // The ledger row, the finalized batch, and the completed
+                    // settlement row commit in one transaction.
                     Some(account_ref) => match self
                         .settle_internal_credit(
                             &run,
                             &settlement,
                             score_outcome.outcome_id,
                             &account_ref,
-                            &actual_result,
+                            &receipt,
                         )
-                        .await?
+                        .await
                     {
-                        InternalCreditResult::Complete => {}
-                        InternalCreditResult::Held => {
+                        Ok(InternalCreditResult::Complete) => {}
+                        Ok(InternalCreditResult::Held) => {
                             self.store
                                 .update_settlement(
                                     &run,
@@ -5161,52 +5367,89 @@ impl PipelineService {
                         // `submission_inoperable`; when one did, this
                         // attempt retries instead, and the next pass's guard
                         // read forfeits every leg before any adapter call.
-                        InternalCreditResult::Inoperable => {
+                        Ok(InternalCreditResult::Inoperable) => {
                             self.store
                                 .update_settlement(
                                     &run,
                                     instrument_id.as_str(),
-                                    SettlementUpdate {
-                                        operation_state: "forfeited",
-                                        result_ref_hash: None,
-                                        credit_event_id: None,
-                                        settlement_batch_id: None,
-                                        payout_state: None,
-                                        error_label: Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
-                                    },
+                                    forfeited_settlement_update(
+                                        PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+                                    ),
                                 )
                                 .await?;
                             guard.operable = false;
                             continue;
                         }
+                        // One external receipt answers one leg: a receipt
+                        // another leg already recorded does not answer this
+                        // one. The credit transaction rolled back, so no
+                        // ledger row was written.
+                        Err(error) if is_external_receipt_reuse_error(&error) => {
+                            self.store
+                                .update_settlement(
+                                    &run,
+                                    instrument_id.as_str(),
+                                    failed_settlement_update(
+                                        PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL,
+                                    ),
+                                )
+                                .await?;
+                            settlement_blocked = true;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
                     },
                     None => {
-                        self.store
+                        let completed = self
+                            .store
                             .update_settlement(
                                 &run,
                                 instrument_id.as_str(),
                                 SettlementUpdate {
                                     operation_state: "complete",
-                                    result_ref_hash: Some(&actual_result),
+                                    result_ref_hash: Some(receipt.result_ref_hash()),
+                                    external_receipt_hash: receipt.external_receipt_hash(),
                                     credit_event_id: None,
                                     settlement_batch_id: None,
                                     payout_state: None,
                                     error_label: None,
                                 },
                             )
-                            .await?;
+                            .await;
+                        match completed {
+                            Ok(_) => {}
+                            // One external receipt answers one leg: a receipt
+                            // another leg already recorded does not answer
+                            // this one.
+                            Err(DatabaseError::Postgres(error))
+                                if is_external_receipt_reuse(&error) =>
+                            {
+                                self.store
+                                    .update_settlement(
+                                        &run,
+                                        instrument_id.as_str(),
+                                        failed_settlement_update(
+                                            PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL,
+                                        ),
+                                    )
+                                    .await?;
+                                settlement_blocked = true;
+                                continue;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                 }
                 self.inject_crash(PipelineCrashPoint::AfterInstrumentOperation)?;
             }
             // Every non-terminal row this attempt leaves behind is retried
-            // together (decision P2's mechanics: the Settle code records the
-            // retry itself, never returning `Err` for this case). A charged
-            // blocker fails closed and is charged, whatever else happened;
-            // otherwise a hold or an adapter call error is an uncharged
-            // suspension (ruling FR3), labeled by the hold when there is one.
-            // The charged retry that exhausts the attempts
-            // resolves every open leg before the run fails (`charged_retry`).
+            // together; the Settle code records the retry itself and never
+            // returns `Err` for this case. A charged blocker fails closed and
+            // is charged, whatever else happened; otherwise a hold or an
+            // `Unavailable` answer is an uncharged suspension, labeled by the
+            // hold when there is one. The charged retry that exhausts the
+            // attempts resolves every open leg before the run fails
+            // (`charged_retry`).
             if settlement_blocked {
                 return self
                     .charged_retry(&run, PIPELINE_SETTLEMENT_RETRY_LABEL)
@@ -5298,11 +5541,20 @@ impl PipelineService {
                             .result_ref_hash
                             .clone()
                             .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?;
-                        InstrumentSettlement::new(
+                        // The committed operation carries the receipt the leg
+                        // recorded, its external receipt hash included.
+                        let receipt = match settlement.external_receipt_hash.clone() {
+                            Some(external_receipt_hash) => {
+                                SettlementReceipt::external(result_ref_hash, external_receipt_hash)
+                            }
+                            None => SettlementReceipt::internal(result_ref_hash),
+                        }
+                        .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                        InstrumentSettlement::completed(
                             instrument_id,
                             settlement.atomic_units,
                             settlement.operation_ref_hash.clone(),
-                            result_ref_hash,
+                            &receipt,
                         )
                         .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))
                     }
@@ -5334,6 +5586,7 @@ impl PipelineService {
                     instrument_id: InstrumentId::new(settlement.instrument_id.clone())?,
                     operation_ref_hash: settlement.operation_ref_hash.clone(),
                     result_ref_hash: settlement.result_ref_hash.clone(),
+                    external_receipt_hash: settlement.external_receipt_hash.clone(),
                 })
             })
             .collect::<Result<Vec<_>, trace_commons_gate_api::pipeline::ContractError>>()
@@ -5392,10 +5645,10 @@ impl PipelineService {
     }
 
     /// Settles the Trace Credit leg into the internal credit ledger (port
-    /// 4937 to 5112) in ONE tenant transaction (ruling FR2, step 4), after
-    /// the caller has checked the hold, fenced the lease, and received the
-    /// adapter's result (`result_ref_hash`, already equal to the selection's
-    /// result reference). The transaction:
+    /// 4937 to 5112) in ONE tenant transaction, after the caller has checked
+    /// the hold, fenced the lease, and received the adapter's receipt
+    /// (`receipt`, which already answers the leg's request). The
+    /// transaction:
     ///
     /// 1. locks the run row and confirms this attempt's lease is still the
     ///    current one (`ensure_current_lease`, as the commit transactions do);
@@ -5416,8 +5669,10 @@ impl PipelineService {
     ///    carries it; otherwise composes the batch from the account's pending
     ///    events, writes it finalized, sets its `instrument_id`, and marks
     ///    those events final;
-    /// 7. completes the settlement row with the result, the event, and the
-    ///    batch.
+    /// 7. completes the settlement row with the receipt's result reference
+    ///    and external receipt hash, the event, and the batch. A receipt hash
+    ///    another leg already recorded is refused here, and the whole
+    ///    transaction rolls back.
     ///
     /// Everything commits together or nothing does, so a crash or a stale
     /// lease anywhere in it leaves the leg exactly as it was before the
@@ -5440,7 +5695,7 @@ impl PipelineService {
         settlement: &PipelineSettlementRecord,
         score_outcome_id: Uuid,
         account_ref: &str,
-        result_ref_hash: &str,
+        receipt: &SettlementReceipt,
     ) -> anyhow::Result<InternalCreditResult> {
         let lease_token = required_lease_token(run)?;
         let account_hash = credit_account_hash(account_ref);
@@ -5582,7 +5837,8 @@ impl PipelineService {
             &settlement.instrument_id,
             SettlementUpdate {
                 operation_state: "complete",
-                result_ref_hash: Some(result_ref_hash),
+                result_ref_hash: Some(receipt.result_ref_hash()),
+                external_receipt_hash: receipt.external_receipt_hash(),
                 credit_event_id: Some(event_id),
                 settlement_batch_id: Some(batch_id),
                 payout_state: None,
@@ -5984,38 +6240,95 @@ mod tests {
         ));
     }
 
-    /// A failure path still resolves a leg unless it is
-    /// `complete`, `forfeited`, or already `failed` as
-    /// `settlement_unreconciled`. A leg `failed` for any other reason (a
-    /// result mismatch, an amount over the cap) is retried by Step 6 and so
-    /// is still unresolved.
+    /// A failure path still resolves a leg unless it is `complete`,
+    /// `forfeited`, or already `failed` as `settlement_unreconciled` or
+    /// `settlement_result_mismatch` (its effect is unknown). A leg `failed`
+    /// with a `Conflict` or `Rejected` label is still unresolved (the failure
+    /// path forfeits it), and so is one `failed` for a reason Step 6 retries
+    /// (an amount over the cap, a request that cannot be formed).
     #[test]
     fn a_leg_is_unresolved_until_it_is_resolved() {
         for state in ["pending", "leased", "retry", "held"] {
             assert!(settlement_leg_is_unresolved(state, None), "{state}");
         }
-        assert!(settlement_leg_is_unresolved(
-            "failed",
-            Some("settlement_result_mismatch")
-        ));
-        assert!(settlement_leg_is_unresolved(
-            "failed",
-            Some(PIPELINE_CREDIT_CAP_LABEL)
-        ));
-        assert!(!settlement_leg_is_unresolved(
-            "failed",
-            Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
-        ));
+        for label in [
+            SettlementError::Conflict.label(),
+            SettlementError::Rejected.label(),
+            PIPELINE_CREDIT_CAP_LABEL,
+            PIPELINE_SETTLEMENT_REQUEST_INVALID_LABEL,
+        ] {
+            assert!(
+                settlement_leg_is_unresolved("failed", Some(label)),
+                "{label}"
+            );
+        }
+        for label in [
+            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL,
+            PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL,
+        ] {
+            assert!(
+                !settlement_leg_is_unresolved("failed", Some(label)),
+                "{label}"
+            );
+            // The SQL form names the same resolved labels.
+            assert!(
+                UNRESOLVED_SETTLEMENT_LEG_SQL.contains(&format!("'{label}'")),
+                "{label}"
+            );
+        }
         assert!(!settlement_leg_is_unresolved("complete", None));
         assert!(!settlement_leg_is_unresolved(
             "forfeited",
             Some(PIPELINE_SETTLEMENT_RUN_FAILED_LABEL)
         ));
-        // The SQL form names the same resolved label.
-        assert!(
-            UNRESOLVED_SETTLEMENT_LEG_SQL
-                .contains(&format!("'{PIPELINE_SETTLEMENT_UNRECONCILED_LABEL}'"))
+        assert!(!settlement_leg_is_unresolved(
+            "forfeited",
+            Some(SettlementError::Conflict.label())
+        ));
+    }
+
+    /// A leg failed as `settlement_result_mismatch`,
+    /// `settlement_request_conflict`, or `settlement_request_rejected` is
+    /// never dispatched again, and neither is a `complete` or `forfeited`
+    /// leg. Every other leg -- a `settlement_unreconciled` leg of a live run
+    /// included -- is open to dispatch. The SQL form names the same labels.
+    #[test]
+    fn a_leg_failed_closed_is_never_dispatched_again() {
+        assert_eq!(
+            TERMINAL_SETTLEMENT_FAILURE_LABELS,
+            [
+                PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL,
+                SettlementError::Conflict.label(),
+                SettlementError::Rejected.label(),
+            ]
         );
+        for label in TERMINAL_SETTLEMENT_FAILURE_LABELS {
+            assert!(
+                !settlement_leg_is_open_to_dispatch("failed", Some(label)),
+                "{label}"
+            );
+            assert!(
+                SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL.contains(&format!("'{label}'")),
+                "{label}"
+            );
+        }
+        assert!(!settlement_leg_is_open_to_dispatch("complete", None));
+        assert!(!settlement_leg_is_open_to_dispatch("forfeited", None));
+        for state in ["pending", "leased", "retry", "held"] {
+            assert!(settlement_leg_is_open_to_dispatch(state, None), "{state}");
+        }
+        for label in [
+            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL,
+            PIPELINE_CREDIT_CAP_LABEL,
+            PIPELINE_SETTLEMENT_REQUEST_INVALID_LABEL,
+            SettlementError::Unavailable.label(),
+        ] {
+            assert!(
+                settlement_leg_is_open_to_dispatch("failed", Some(label)),
+                "{label}"
+            );
+        }
+        assert!(settlement_leg_is_open_to_dispatch("failed", None));
     }
 
     /// A transient database failure -- the pool

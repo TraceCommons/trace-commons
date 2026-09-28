@@ -30,8 +30,7 @@ use trace_commons_gate_api::pipeline::{
     SettleDecision, SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy,
 };
 use trace_commons_gate_api::{
-    Embedder, PerplexityScorer, ReferenceEmbedder, ReferencePerplexityScorer, VectorIndexReader,
-    VectorIndexWriter,
+    IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
 };
 
 use crate::versioned_pipeline_index::IsolatedPipelineIndex;
@@ -50,66 +49,6 @@ pub const PIPELINE_DEPENDENCY_MISSING_LABEL: &str = "bundle_dependency_missing";
 /// Review phase this label parks the run in
 /// `PipelineRunState::AwaitingReview` instead of retrying it hourly forever.
 pub const PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL: &str = "review_assessment_required";
-
-/// A perplexity scorer identified by a content-hashable descriptor, so a
-/// bundle package can name it and a runtime can prove it matched.
-pub trait IdentifiedPerplexityScorer: PerplexityScorer {
-    fn dependency_identity(&self) -> &str;
-    fn content_descriptor(&self) -> Vec<u8>;
-    fn production_qualified(&self) -> bool {
-        false
-    }
-}
-
-/// An embedder identified by a content-hashable descriptor and a model id.
-pub trait IdentifiedEmbedder: Embedder {
-    fn dependency_identity(&self) -> &str;
-    fn model_id(&self) -> &str;
-    fn content_descriptor(&self) -> Vec<u8>;
-    fn production_qualified(&self) -> bool {
-        false
-    }
-}
-
-/// A vector index reader identified for bundle-dependency reporting.
-pub trait IdentifiedIndexReader: VectorIndexReader {
-    fn dependency_identity(&self) -> &str;
-    fn production_qualified(&self) -> bool {
-        false
-    }
-}
-
-/// A vector index writer identified for bundle-dependency reporting.
-pub trait IdentifiedIndexWriter: VectorIndexWriter {
-    fn dependency_identity(&self) -> &str;
-    fn production_qualified(&self) -> bool {
-        false
-    }
-}
-
-impl IdentifiedPerplexityScorer for ReferencePerplexityScorer {
-    fn dependency_identity(&self) -> &str {
-        "reference_perplexity_test_only"
-    }
-
-    fn content_descriptor(&self) -> Vec<u8> {
-        b"trace-commons-reference-perplexity-scorer.v1".to_vec()
-    }
-}
-
-impl IdentifiedEmbedder for ReferenceEmbedder {
-    fn dependency_identity(&self) -> &str {
-        "reference_embedder_test_only"
-    }
-
-    fn model_id(&self) -> &str {
-        "reference-embedder-v1"
-    }
-
-    fn content_descriptor(&self) -> Vec<u8> {
-        b"trace-commons-reference-embedder.v1".to_vec()
-    }
-}
 
 impl IdentifiedIndexReader for IsolatedPipelineIndex {
     fn dependency_identity(&self) -> &str {
@@ -705,7 +644,7 @@ mod tests {
     use crate::versioned_pipeline_index::IsolatedPipelineIndex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use trace_commons_gate_api::pipeline::{InstrumentKind, TRACE_CREDIT_DECIMALS};
-    use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+    use trace_commons_gate_api::{Embedder, ReferenceEmbedder, ReferencePerplexityScorer};
 
     /// An embedder whose descriptor is chosen by the test, and which counts calls.
     struct CountingEmbedder {

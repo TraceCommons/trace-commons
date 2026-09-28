@@ -27,7 +27,7 @@ use axum::extract::State;
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind,
 };
-use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter};
 use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
 use trace_commons_protocol::trace_contribution::{
     RawTraceCaptureTurn, RawTraceContribution, TraceContributionEventType,
@@ -41,7 +41,7 @@ use trace_commons_server::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    RecordingSettlementAdapter, SettlementAdapter, SettlementAdapterRegistry,
+    RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::witness_service;
