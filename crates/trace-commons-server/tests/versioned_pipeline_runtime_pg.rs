@@ -1313,7 +1313,7 @@ async fn age_run(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid, by: c
     tx.commit().await.unwrap();
 }
 
-/// Ruling FR3: `mark_transient_retry` schedules the next attempt after the
+/// `mark_transient_retry` schedules the next attempt after the
 /// time the run has spent in its current phase, clamped to [1 s, 1 h]. With
 /// no counter, the delay doubles on each retry (the next retry happens that
 /// much later, so the phase is twice as old) and caps at one retry per hour.
@@ -4701,7 +4701,7 @@ async fn settle_retry_reuses_the_persisted_selection() {
     assert_eq!(committed_decision, persisted_decision);
 }
 
-/// Ruling FR3: a Settle index outage (`IndexWriteError::Failed`/`Uncertain`)
+/// A Settle index outage (`IndexWriteError::Failed`/`Uncertain`)
 /// is a dependency failure like Score's `index_unavailable`, not the
 /// trace's fault. An outage that lasts more retries than the run's whole
 /// attempt budget leaves the run waiting in retry, uncharged, and the run
@@ -5264,8 +5264,8 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
 /// runs. `put_serialized_json` is a synchronous call the Review arm makes
 /// mid-transaction-free (there is no open database transaction while it
 /// runs), so a wrapper that intercepts exactly that write and drives the
-/// real withdrawal to completion before returning reproduces the review
-/// comment's race deterministically: `commit_review` must always find the
+/// real withdrawal to completion before returning makes the race
+/// deterministic: `commit_review` must always find the
 /// submission already withdrawn by the time it takes the submission row's
 /// lock.
 ///
@@ -5486,11 +5486,10 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
 /// A submission withdrawn *before* the run is
 /// even claimed for Review must fail the run terminally on the very first
 /// pass -- `load_object_bytes`'s existing operability refusal is permanent
-/// in Review, not a charged retry to burn through `max_attempts` (P2's
-/// ordinary charged-retry allowlist, which this label was in before this
-/// task, would otherwise take five attempts to exhaust it). No approved
-/// object is ever written, because Review never reaches the point that
-/// writes one.
+/// in Review, not a charged retry to burn through `max_attempts` (the label
+/// otherwise falls into P2's ordinary charged-retry allowlist, which would
+/// take five attempts to exhaust it). No approved object is ever written,
+/// because Review never reaches the point that writes one.
 #[tokio::test]
 async fn withdrawal_before_review_claim_fails_closed_on_the_first_pass() {
     let Some(backend) = runtime_backend(4).await else {
@@ -5747,7 +5746,7 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
     let tenant = format!("settle-instruments-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
-    // Ruling FR3: an adapter call error is a dependency failure, not the
+    // An adapter call error is a dependency failure, not the
     // trace's fault -- an uncharged retry, however many times it repeats,
     // including more times than the run's whole attempt budget.
     let mut retried = None;
@@ -6080,7 +6079,7 @@ async fn settled_credit_stays_when_withdrawal_follows_settlement() {
 /// A hold on the Trace Credit account (the same `TraceCorpusStore` API the
 /// port's `place_credit_hold` uses) keeps that leg pending while every other
 /// instrument still completes: the run retries under `credit_held`, the
-/// held leg's adapter is never called (ruling FR2), and only once the hold is
+/// held leg's adapter is never called, and only once the hold is
 /// released does the leg settle and the Settle outcome commit.
 #[tokio::test]
 async fn a_held_account_keeps_trace_credit_pending_and_other_instruments_complete() {

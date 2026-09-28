@@ -861,8 +861,9 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 // `provision_second_device_on_the_same_account`) rather than a second copy.
 // ----------------------------------------------------------------------------
 
-/// The same `AdmissionLimits` value for every test in this file that
-/// reserves admission for real (all but the legacy-fallback test): the
+/// The same `AdmissionLimits` value for the two tests in this file that
+/// reserve admission for real, `real_http_pipeline_receipt_replays_on_retry`
+/// and `real_http_pipeline_receipt_refuses_a_different_devices_retry`: the
 /// global budget row (`trace_admission_global_budget`) is a `PostgreSQL`
 /// singleton, not tenant-scoped, so two tests reserving in the same
 /// database must agree on `global_cost_limit` or the second one's
@@ -1206,8 +1207,9 @@ async fn real_http_pipeline_receipt_replays_on_retry() {
 
     // Second POST: the exact same bytes, no evidence headers -- a terminal
     // retry. `admission::reserve` finds the ledger already `completed` for
-    // this exact body hash; before the fix, the completed-admission branch
-    // 500ed reading the legacy file record the pipeline never wrote.
+    // this exact body hash, so the completed-admission branch must replay
+    // the pipeline receipt rather than reading the legacy file record the
+    // pipeline never wrote.
     let second = client
         .post(format!("{base}/v1/traces"))
         .headers(reqwest_headers(auth_headers(token)))
@@ -1291,8 +1293,9 @@ fn first_receipt_submission_id(envelope_bytes: &[u8]) -> Uuid {
 /// `admission::reserve`'s completed-lookup -- keyed on `(tenant, anchor,
 /// submission, body_hash)`, not on principal -- answers a retry from either
 /// device's credential the same way. `admission::reserve`'s own comment says
-/// the handler still checks ownership before returning the existing receipt;
-/// before this fix the completed-admission branch's pipeline lookup did not.
+/// the handler still checks ownership before returning the existing receipt,
+/// and the completed-admission branch's pipeline lookup must enforce that
+/// same check before it returns either pipeline outcome.
 /// A second device retrying the first device's submission must get the
 /// legacy branch's own 409 `admission_identity_conflict`, not the pipeline
 /// receipt.

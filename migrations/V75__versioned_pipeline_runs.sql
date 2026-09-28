@@ -107,11 +107,10 @@ CREATE POLICY trace_corpus_tenant_isolation ON phase_outcomes
 -- key to `pipeline_runs` cascades, so a direct delete of a run also
 -- removes its outcomes. Outcomes are otherwise append-only: neither an
 -- UPDATE nor a direct DELETE is ever allowed. A DELETE reaching this
--- trigger from a cascade (the run it belongs to was deleted, taking the
--- whole submission or tenant with it) is not a direct delete and is let
--- through, so a tenant or a submission with pipeline rows can still be
--- removed; `pg_trigger_depth()` is 1 for a delete issued directly against
--- this table and at least 2 for one that arrived through a foreign key's
+-- trigger from a cascade is not a direct delete and is let through, so a
+-- tenant or a submission with pipeline rows can still be removed;
+-- `pg_trigger_depth()` is 1 for a delete issued directly against this
+-- table and at least 2 for one that arrived through a foreign key's
 -- `ON DELETE CASCADE`, because that cascade runs as a trigger of its own
 -- around this one.
 CREATE FUNCTION reject_phase_outcome_mutation()

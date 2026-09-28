@@ -166,7 +166,8 @@ or `index_key_conflict`), no leg stays open:
   with `settlement_unreconciled`. The worker does not make the call when
   the submission is no longer operable, the adapter or cap is missing, the
   amount is above the cap, or the persisted selection has no result for the
-  leg (it was never seeded with one).
+  leg -- because none was ever seeded, or because the persisted selection
+  does not decode.
 - When the next claim fails a crashed worker's run (`attempts_exhausted`
   after its lease expired), no worker can call the adapter. Every
   dispatched leg of another instrument is then `settlement_unreconciled`.
@@ -199,7 +200,9 @@ After a failed receipt attempt leaves a staged row, a later receipt with the
 same idempotency key and different content is refused with the
 content-conflict 409 until the sweeper removes that staged row -- up to
 about one hour after it was staged. A retry with the *same* content is
-unaffected: it replays once the run commits.
+unaffected: the failed attempt never created a run, so the retry is a new
+attempt that creates the run itself, and the caller gets the same 200 it
+would have gotten on a first success.
 
 ## Submission quota at switch-over
 

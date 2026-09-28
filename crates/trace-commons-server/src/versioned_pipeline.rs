@@ -1793,7 +1793,7 @@ impl PgPipelineStore {
     /// `'retry'`/`'failed'` (not `'forfeited'` -- forfeiture is not a
     /// dispatch failure) and saturates rather than overflow: it is a
     /// diagnostic count, and an adapter outage is an uncharged run retry
-    /// with no terminal bound (ruling FR3), so it must never refuse the
+    /// with no terminal bound, so it must never refuse the
     /// update. Every update here moves the leg out of `leased` (none sets
     /// it; `mark_settlement_leased` does), so it clears the lease columns
     /// (`pipeline_run_settlements_lease_shape`); `dispatched_at` is never
@@ -2180,7 +2180,7 @@ async fn receipt_is_tombstoned(
 /// `settlement_unreconciled`: its effect may have happened, and only its
 /// adapter can say. Every other open leg is `forfeited` / `run_failed`: one
 /// never dispatched paid nothing, and a Trace Credit leg pays only through
-/// the ledger row that commits with its completion (ruling FR2), so an
+/// the ledger row that commits with its completion, so an
 /// incomplete one paid nothing either. Every leg it touches loses its lease
 /// columns (`pipeline_run_settlements_lease_shape`); a resolved leg is never
 /// touched. With a worker present, `PipelineService::reconcile_dispatched_settlement_legs`
@@ -2626,12 +2626,13 @@ fn is_transient_sqlstate(code: &tokio_postgres::error::SqlState) -> bool {
         )
 }
 
-/// For one driver error: a SQLSTATE in `is_transient_sqlstate`,
-/// or no SQLSTATE because the server never answered -- the connection is
-/// closed, or the cause is an I/O error (sending, receiving, connecting).
-/// A driver error with no SQLSTATE and no I/O cause (a row-count mismatch,
-/// a type conversion, a parameter count) is a local error in this code,
-/// not the database being unavailable, and keeps P2.
+/// These are the transient cases for one driver error: a SQLSTATE in
+/// `is_transient_sqlstate`, or no SQLSTATE because the server never
+/// answered -- the connection is closed, or the cause is an I/O error
+/// (sending, receiving, connecting). A driver error with no SQLSTATE and
+/// no I/O cause (a row-count mismatch, a type conversion, a parameter
+/// count) is a local error in this code, not the database being
+/// unavailable, and keeps P2.
 fn is_transient_postgres_error(error: &tokio_postgres::Error) -> bool {
     match error.code() {
         Some(code) => is_transient_sqlstate(code),
@@ -3480,12 +3481,16 @@ impl PipelineService {
         }
     }
 
-    /// A read-only replay lookup for a caller that already knows a
-    /// submission was admitted and only needs to know what to hand back --
-    /// `trace-commons-ingest`'s `submit_trace_handler`, for a retried upload
-    /// whose legacy admission ledger already marked it `completed`. That
-    /// path never wrote a legacy file record for a pipeline-routed tenant, so
-    /// it cannot replay from there; this is the pipeline-side equivalent.
+    /// A read-only replay lookup for a caller that already knows a run may
+    /// exist for this key and only needs to know what to hand back. Two
+    /// callers use it: `trace-commons-ingest`'s `submit_trace_handler`, for
+    /// a retried upload whose legacy admission ledger already marked it
+    /// `completed` (that path never wrote a legacy file record for a
+    /// pipeline-routed tenant, so it cannot replay from there); and
+    /// `route_pipeline_receipt`, when the pipeline's own `submit` call
+    /// itself returned `Replayed` or `ContentConflict`. Neither caller may
+    /// hand back what this returns without checking ownership first -- see
+    /// below.
     ///
     /// One short tenant transaction, read-only (`existing_receipt_run`, the
     /// same lookup `receipt_key_refusal` uses): `Replayed` for a run whose
@@ -4206,11 +4211,12 @@ impl PipelineService {
                 }
                 // D9 / FR3: a typed `PolicyError` raised while a
                 // phase runs is budgeted by kind, ahead of the P2 string
-                // allowlist below -- a transient failure (an outage, a
-                // timeout, a quarantine awaiting human review) is the
-                // uncharged suspension with backoff, exactly like a missing
-                // bound dependency; a permanent policy failure is charged
-                // like any other labeled retry.
+                // allowlist below -- a transient failure (an outage or a
+                // timeout) is the uncharged suspension with backoff, exactly
+                // like a missing bound dependency; a Review quarantine
+                // awaiting human assessment instead parks the run rather
+                // than retrying it (below); a permanent policy failure is
+                // charged like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
                     return if policy.is_transient() {
                         // A Review quarantine
@@ -4313,8 +4319,8 @@ impl PipelineService {
         }
     }
 
-    /// P2's terminal failure with a worker present. A Settle
-    /// run first reconciles its dispatched external legs
+    /// The terminal `mark_failed` failure taken with a worker present. A
+    /// Settle run first reconciles its dispatched external legs
     /// (`reconcile_dispatched_settlement_legs`); `mark_failed` then forfeits
     /// every other open leg in the transaction that fails the run.
     async fn fail_run(&self, run: &PipelineRunRecord, error_label: &str) -> anyhow::Result<()> {
@@ -4883,7 +4889,7 @@ impl PipelineService {
                     {
                         Ok(_) => {}
                         Err(IndexWriteError::Uncertain) | Err(IndexWriteError::Failed) => {
-                            // Ruling FR3: an index outage is a
+                            // An index outage is a
                             // dependency failure, like Score's own
                             // `index_unavailable` -- an uncharged
                             // suspension, which the Settle code records
@@ -5803,7 +5809,7 @@ pub fn pipeline_attempt_object_id(artifact: &str, run_id: Uuid, lease_token: Uui
 }
 
 /// The object id one receipt attempt stores its source envelope under.
-/// As in `pipeline_attempt_object_id` (ruling FR1), the id
+/// Like `pipeline_attempt_object_id`, the id
 /// carries a per-attempt value -- a random attempt id, since a receipt holds
 /// no lease -- so two attempts for one key never write the same object, and
 /// a committed object ref's hash always matches its object. The attempt's

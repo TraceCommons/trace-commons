@@ -13653,9 +13653,13 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
 /// startup instead (`validate_pipeline_receipt_rollout`), so it can never
 /// reach this function.
 ///
-/// A `Replayed` or `ContentConflict` outcome means a run already exists for
-/// this key; before handing either back, this checks that the caller is the
-/// principal who created that run, the same way the completed-admission
+/// A `Replayed` outcome always means a run already exists for this key. A
+/// `ContentConflict` outcome usually does too, but not always: it can also
+/// come from an attempt staged with different content for which no run was
+/// ever created, in which case `replay_receipt` returns `None` below, no
+/// ownership check runs, and the generic content-conflict response is
+/// returned as-is. When a run does exist, this checks that the caller is
+/// the principal who created it, the same way the completed-admission
 /// branch of `submit_trace_handler` checks a replay it finds there. A
 /// pipeline-routed tenant never writes the legacy file record the ordinary
 /// `can_access_submission` check reads, so without this check here that
@@ -13691,14 +13695,20 @@ async fn route_pipeline_receipt(
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
         | PipelineReceiptResult::ContentConflict) => {
-            // A replay or a content conflict both mean a run already exists
-            // for this key, created by a submission from some principal --
-            // possibly not this one. `read_submission_record` finds no
-            // legacy file record for a pipeline-routed tenant (the pipeline
-            // never writes one), so the legacy `can_access_submission` check
-            // below never runs against this key; apply the same ownership
-            // predicate here, against the principal the pipeline recorded
-            // when it first created the run.
+            // A replay means a run already exists for this key, created by
+            // a submission from some principal -- possibly not this one. A
+            // content conflict usually means the same, but not always: it
+            // can also come from an attempt staged with different content
+            // for which no run was ever created, in which case
+            // `replay_receipt` below returns `None` and there is no owner
+            // to check. `read_submission_record` finds no legacy file
+            // record for a pipeline-routed tenant (the pipeline never
+            // writes one), so the legacy `can_access_submission` check --
+            // which already ran earlier, in `submit_trace_handler`, before
+            // this function was ever called -- never ran against this key;
+            // apply the same ownership predicate here, against the
+            // principal the pipeline recorded when it first created the
+            // run.
             if let Some(replay) = pipeline_service
                 .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
                 .await

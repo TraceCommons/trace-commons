@@ -93,7 +93,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.object_store_name() == object_store_name,
         "pipeline_runtime_object_store_mismatch"
     );
-    // The same shape as M11's store-name check -- an assembly that
+    // The same shape as the store-name check above -- an assembly that
     // ignores the configured lease lengths would silently run every phase
     // under whatever lease lengths its own construction happened to pick.
     anyhow::ensure!(
