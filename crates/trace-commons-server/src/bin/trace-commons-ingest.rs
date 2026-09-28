@@ -22852,7 +22852,9 @@ fn default_near_credit_outbox_submit_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceNearCreditOutboxSubmitWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     submitted: usize,
@@ -22877,7 +22879,9 @@ fn default_near_credit_outbox_confirm_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceNearCreditOutboxConfirmWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     confirmed: usize,
@@ -22902,7 +22906,9 @@ fn default_benchmark_registry_outbox_submit_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     submitted: usize,
@@ -22927,7 +22933,9 @@ fn default_benchmark_registry_outbox_confirm_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     confirmed: usize,
@@ -28264,7 +28272,7 @@ async fn run_benchmark_registry_outbox_submit_worker(
         .take(limit)
         .collect();
     let mut response = TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: candidates.len(),
         submitted: 0,
@@ -28396,7 +28404,7 @@ async fn run_benchmark_registry_outbox_confirm_worker(
         .take(limit)
         .collect();
     let mut response = TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: candidates.len(),
         confirmed: 0,
@@ -28642,7 +28650,7 @@ fn benchmark_registry_outbox_submit_worker_log_fields(
 ) -> TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
     TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         submitted: response.submitted,
@@ -28688,7 +28696,7 @@ fn benchmark_registry_outbox_confirm_worker_log_fields(
 ) -> TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
     TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         confirmed: response.confirmed,
@@ -28795,7 +28803,7 @@ async fn run_near_credit_outbox_submit_worker(
         .take(limit)
         .count();
     let mut response = TraceNearCreditOutboxSubmitWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: preview_candidate_count,
         submitted: 0,
@@ -28999,7 +29007,7 @@ async fn run_near_credit_outbox_confirm_worker(
         .take(limit)
         .collect();
     let mut response = TraceNearCreditOutboxConfirmWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: candidates.len(),
         confirmed: 0,
@@ -29223,7 +29231,7 @@ fn near_credit_outbox_submit_worker_log_fields(
 ) -> TraceNearCreditOutboxSubmitWorkerLogFields {
     TraceNearCreditOutboxSubmitWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         submitted: response.submitted,
@@ -29269,7 +29277,7 @@ fn near_credit_outbox_confirm_worker_log_fields(
 ) -> TraceNearCreditOutboxConfirmWorkerLogFields {
     TraceNearCreditOutboxConfirmWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         confirmed: response.confirmed,
@@ -29493,7 +29501,7 @@ async fn append_near_credit_outbox_submit_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -29554,7 +29562,7 @@ async fn append_near_credit_outbox_confirm_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -29615,7 +29623,7 @@ async fn append_benchmark_registry_outbox_submit_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -29676,7 +29684,7 @@ async fn append_benchmark_registry_outbox_confirm_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -44447,7 +44455,7 @@ async fn run_revocation_propagation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose_hash: sha256_prefixed(&worker.purpose),
+        purpose_hash: worker.purpose_hash.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         dry_run: worker.dry_run,
@@ -44791,7 +44799,7 @@ async fn run_retention_dry_run_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose_hash: sha256_prefixed(&maintenance.purpose),
+        purpose_hash: maintenance.purpose_hash.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         dry_run: maintenance.dry_run,
@@ -44889,7 +44897,7 @@ async fn run_vector_index_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose_hash: sha256_prefixed(&worker.purpose),
+        purpose_hash: worker.purpose_hash.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash: String::new(),
         dry_run: worker.dry_run,
@@ -51439,7 +51447,9 @@ fn default_revocation_propagation_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceRevocationPropagationWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     completed: usize,
@@ -51747,7 +51757,9 @@ struct TraceVectorIndexRequest {
 struct TraceVectorIndexResponse {
     tenant_id: String,
     tenant_storage_ref: String,
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     audit_event_id: Uuid,
     checked_count: usize,
@@ -60490,7 +60502,7 @@ async fn run_revocation_propagation_worker(
         .context("failed to list due trace revocation propagation items")?;
 
     let mut response = TraceRevocationPropagationWorkerResponse {
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: due_items.len(),
         completed: 0,
@@ -60658,7 +60670,7 @@ fn revocation_propagation_worker_log_fields(
 ) -> TraceRevocationPropagationWorkerLogFields {
     TraceRevocationPropagationWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         completed: response.completed,
@@ -61571,7 +61583,7 @@ async fn append_revocation_propagation_audit(
         "next_attempt_scheduled".to_string(),
         response.next_attempt_scheduled.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -67788,7 +67800,7 @@ async fn run_maintenance(
     Ok(TraceMaintenanceResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         audit_event_id,
         revoked_submission_count: revoked_submission_ids.len(),
@@ -69395,7 +69407,7 @@ async fn run_vector_index_worker(
     Ok(TraceVectorIndexResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         audit_event_id,
         checked_count: report.checked_count,
@@ -73533,7 +73545,9 @@ struct TraceExportCachePruneMarker {
 struct TraceMaintenanceResponse {
     tenant_id: String,
     tenant_storage_ref: String,
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     audit_event_id: Uuid,
     revoked_submission_count: usize,
