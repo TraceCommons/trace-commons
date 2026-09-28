@@ -147,7 +147,14 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
 ///
 /// `ui/style.rs` and `ui/css_contract.rs` are not here: they hold CSS, which
 /// is not wording, and the scanner does not count it.
-const RUST_OWNED_SURFACES: &[&str] = &[];
+///
+/// `disclosure.rs` is K11's: the raw send, both enclaves and where the
+/// witness came from, every row from `consent_copy::route_disclosure_for_wire`.
+///
+/// What the two K11 surfaces draw is tested in `disclosure.rs`, on
+/// `disclosure::drawn`: `ui::fill_disclosure_rows` makes one widget per item
+/// it returns and decides nothing else.
+const RUST_OWNED_SURFACES: &[&str] = &["disclosure.rs"];
 
 /// Words a sentence has and an identifier, a wire key, a CSS class or a
 /// format pattern does not.

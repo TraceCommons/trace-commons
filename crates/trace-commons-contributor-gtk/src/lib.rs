@@ -24,6 +24,7 @@ pub mod balance;
 pub mod certificate;
 pub mod copy;
 mod dbus;
+pub mod disclosure;
 pub mod eligibility;
 pub mod model;
 pub mod notify;
