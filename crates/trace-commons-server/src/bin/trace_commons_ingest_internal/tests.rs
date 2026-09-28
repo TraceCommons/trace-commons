@@ -10723,15 +10723,80 @@ impl trace_commons_gate_api::SettlementAdapter for QualifiedTestSettlementAdapte
     }
 }
 
+/// A `PipelineAuthorityProvider` whose `production_qualified` override
+/// reports `true`, permitting any tenant unconditionally. Real production
+/// authority sources are injected by a proprietary assembler and never live
+/// in this tree; this exists only so the fail-closed tests below can prove
+/// the check does not block a genuinely qualified runtime.
+struct QualifiedTestAuthority;
+
+impl trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider
+    for QualifiedTestAuthority
+{
+    fn authority_for_tenant(
+        &self,
+        _tenant_id: &str,
+    ) -> Option<trace_commons_server::trace_authority::SubmissionAuthority> {
+        Some(trace_commons_server::trace_authority::SubmissionAuthority {
+            tenant: trace_commons_server::trace_authority::SubmissionAllowlists::default(),
+            policy: None,
+            require_policy: false,
+        })
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_authority"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A `PipelinePrivacyBoundary` whose `production_qualified` override
+/// reports `true`. Transforms nothing and finds nothing -- this double is
+/// never exercised past assembly in the tests that use it.
+struct QualifiedTestPrivacy;
+
+#[async_trait::async_trait]
+impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
+    for QualifiedTestPrivacy
+{
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_privacy"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
 /// A pipeline service whose scorer, embedder, index, and settlement adapter
 /// are all the `Qualified*` test doubles above, so
 /// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
 /// shape as `minimal_pipeline_service`, which stays unqualified (its
-/// settlement adapter registry is empty).
+/// settlement adapter registry is empty). `include_authority`/
+/// `include_privacy` let a caller build an otherwise fully qualified
+/// service that is missing just one of those two controls, to isolate
+/// T2-2's own contribution to the overall qualification check from the
+/// pre-existing scorer/embedder/index/settlement checks.
 fn qualified_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    include_authority: bool,
+    include_privacy: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -10779,6 +10844,12 @@ fn qualified_pipeline_service(
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
+    if include_authority {
+        builder = builder.with_authority(Arc::new(QualifiedTestAuthority));
+    }
+    if include_privacy {
+        builder = builder.with_privacy(Arc::new(QualifiedTestPrivacy));
+    }
     Ok(Arc::new(builder.build()?))
 }
 
@@ -10814,6 +10885,50 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            true,
+            true,
+        )
+    }
+}
+
+/// Like `QualifiedAssembler`, but the service it builds holds no authority
+/// provider at all -- everything else (scorer, embedder, index, settlement,
+/// privacy) is the same fully qualified set. Isolates T2-2's own
+/// contribution to `pipeline_runtime_is_production_qualified` from the
+/// pre-existing scorer/embedder/index/settlement checks.
+struct QualifiedAssemblerWithoutAuthority;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            false,
+            true,
+        )
+    }
+}
+
+/// Like `QualifiedAssembler`, but the service it builds holds no privacy
+/// boundary at all -- the privacy counterpart of
+/// `QualifiedAssemblerWithoutAuthority`.
+struct QualifiedAssemblerWithoutPrivacy;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            false,
         )
     }
 }
@@ -10928,6 +11043,58 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
     assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// T2-2: an otherwise fully qualified service (scorer, embedder, index,
+/// settlement, and privacy all qualified) that holds no authority provider
+/// at all is refused exactly like an unqualified scorer or index would be,
+/// when tenants are routed and there is no opt-in. Isolates the authority
+/// half of Ruling T2-2's contribution to `pipeline_runtime_is_production_
+/// qualified` from the pre-existing dependency checks.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithoutAuthority),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .err()
+    .expect("a missing authority provider with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+}
+
+/// The privacy counterpart of
+/// `pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_authority`.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_privacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssemblerWithoutPrivacy),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .err()
+    .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
 }
 
 /// No routed tenants, no required flag, an unqualified
