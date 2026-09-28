@@ -216,6 +216,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_legacy_invite_link_challenges",
     "trace_legacy_invite_links",
     "trace_legacy_invite_link_conflicts",
+    "trace_legacy_invite_link_devices",
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
@@ -1435,6 +1436,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         81,
         "legacy_invite_link",
         include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+    ),
+    (
+        91,
+        "legacy_invite_link_devices",
+        include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
     ),
 ];
 
@@ -7344,6 +7350,7 @@ mod tests {
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7372,6 +7379,7 @@ mod tests {
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
