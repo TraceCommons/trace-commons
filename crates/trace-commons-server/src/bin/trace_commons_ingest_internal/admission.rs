@@ -755,6 +755,15 @@ async fn reserve_account(
             ));
         }
         AdmissionDecision::Exhausted => {
+            // Earned-trust shadow calibration only: counts a refusal the
+            // candidate growth policy would have admitted. It cannot change
+            // this refusal, and any failure in it is ignored.
+            if let Some(spend) = decision.period_spend {
+                super::account_trust_growth_routes::observe_shadow_would_admit(
+                    state, &account, spend,
+                )
+                .await;
+            }
             return Err(api_error_with_retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 AdmissionRefusal::AccountLimitReached.label(),

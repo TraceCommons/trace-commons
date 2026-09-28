@@ -449,6 +449,19 @@ async fn account_admission_atomicity_replay_and_revocation() {
     );
     assert_eq!(exhausted.authority, Some("bounded"));
     assert_eq!(exhausted.retry_after_seconds, None);
+    // The refusal reports the period's spend, which the earned-trust shadow
+    // counter compares against the candidate allowance. Label-free: a count.
+    let lifetime_spend: i64 = admin
+        .query_one(
+            "SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget
+              WHERE tenant_id=$1 AND account_id=$2 AND period_id LIKE '%:lifetime'",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(exhausted.period_spend, Some(lifetime_spend));
+    assert!(lifetime_spend + 5 > 30);
     assert!(
         !runtime
             .account_admission_status(&trust_account, &principal, &tuned.policy)

@@ -416,6 +416,58 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
         Err(DatabaseError::Pool("account_trust_fact_unavailable".into()))
     }
+    /// Earned-trust worker enumeration: open accounts in anchored tenants,
+    /// keyed and paged. See `db/postgres_account_trust_growth.rs`.
+    async fn list_account_trust_worker_accounts(
+        &self,
+        _after: Option<&crate::account_trust::TrustAccount>,
+        _limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustAccount>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Sources naming this account that have no trust fact yet.
+    async fn list_account_trust_fact_candidates(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Every fact of one account with the gate fields the rule reads.
+    async fn account_trust_evaluation_inputs(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::account_trust_rule::EvaluationFact>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Stores one evaluation (shadow only); returns whether the tier changed.
+    async fn record_account_trust_evaluation(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _mode: &str,
+        _evaluation: &crate::account_trust_rule::Evaluation,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// The newest stored evaluation under one policy version and mode.
+    async fn latest_account_trust_evaluation(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _policy_version: &str,
+        _mode: &str,
+    ) -> Result<Option<crate::account_trust_rule::Evaluation>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
     async fn account_admission_status(
         &self,
         _account: &crate::account_trust::TrustAccount,

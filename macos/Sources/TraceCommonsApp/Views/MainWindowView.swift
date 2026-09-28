@@ -98,6 +98,23 @@ struct MainWindowView: View {
                 onAcknowledge: { id in model.acknowledgeGrantVoid(id: id) },
                 onRearm: { id, projectID in model.rearmGrantVoid(id: id, projectID: projectID) }
             )
+            // The switch-on notices, above the shell for the same reason: a
+            // folder's arming was reworded, or armed folders are on hold.
+            ArmingRewordingNotices(
+                rewordings: model.status.armingRewordings,
+                refused: model.askFirstRefused,
+                onAcknowledge: { id in model.acknowledgeArmingRewording(id: id) },
+                onAskFirst: { projectID in model.askFirst(projectID: projectID) }
+            )
+            if let held = model.gateHeldNotice {
+                GateHeldNoticeCard(
+                    notice: held,
+                    refused: model.askFirstRefused,
+                    onAskFirst: { projectID in model.askFirst(projectID: projectID) }
+                )
+                .padding(.horizontal, TC.Space.md)
+                .padding(.top, TC.Space.s)
+            }
             shell
         }
     }
@@ -849,6 +866,170 @@ struct GrantVoidNoticeCard: View {
                     .lineLimit(1)
                     .fixedSize()
             }
+        }
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(notice.title))
+    }
+}
+
+/// Every armed folder whose arming wording no longer claims a model scrubs
+/// its sessions, not yet shown by any shell (K5). The words come from
+/// `consent_copy` across the ABI; this view only lays them out. As with
+/// `GrantVoidNotices`, nothing is drawn for an element the ABI cannot word.
+struct ArmingRewordingNotices: View {
+    let rewordings: [ArmingRewordingWire]
+    let refused: Set<String>
+    let onAcknowledge: (UInt64) -> Void
+    let onAskFirst: (String) -> Void
+
+    var body: some View {
+        if !rewordings.isEmpty {
+            VStack(spacing: TC.Space.s) {
+                ForEach(rewordings, id: \.id) { rewording in
+                    if let notice = TCConsentCopy.armingRewordedNoticeJSON(forRewording: rewording.json)
+                        .flatMap(ArmingRewordedNotice.decode(fromJSON:))
+                    {
+                        let target = notice.askFirstTarget(for: rewording)
+                        ArmingRewordedNoticeCard(
+                            notice: notice,
+                            refused: target.map(refused.contains) ?? false,
+                            onAcknowledge: { onAcknowledge(rewording.id) },
+                            onAskFirst: target.map { projectID in { onAskFirst(projectID) } }
+                        )
+                    }
+                }
+            }
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+struct ArmingRewordedNoticeCard: View {
+    let notice: ArmingRewordedNotice
+    let refused: Bool
+    let onAcknowledge: () -> Void
+    /// Present only when the Rust offered "Ask me first" and the element
+    /// names a project.
+    let onAskFirst: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(notice.title)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                Text(notice.body)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(notice.nowHeading)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                    .padding(.top, TC.Space.xxs)
+                ForEach([notice.scope, notice.limit, notice.noReview], id: \.self) { line in
+                    Text(line)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if refused, let failed = notice.askFirstFailed {
+                    Text(failed)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.Tone.attention.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: TC.Space.m)
+            VStack(alignment: .trailing, spacing: TC.Space.xs) {
+                if let onAskFirst, let action = notice.askFirstAction {
+                    Button(action, action: onAskFirst)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                // Acknowledging records that the notice was shown, and
+                // changes nothing about the folder.
+                Button(notice.acknowledge, action: onAcknowledge)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .padding(.vertical, TC.Space.m)
+        .padding(.horizontal, TC.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tcCard(emphasised: true)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(notice.title))
+    }
+}
+
+/// Armed folders the automatic-contribution gate is holding, in the Rust's
+/// words. No dismiss button: it goes when the hold does.
+struct GateHeldNoticeCard: View {
+    let notice: GateHeldNotice
+    let refused: Set<String>
+    let onAskFirst: (String) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: TC.Space.m) {
+            MacGlyph(glyph: .warningTriangle, size: 14, color: TC.Tone.attention.color)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                Text(notice.title)
+                    .font(TC.Font_.cardTitle)
+                    .foregroundStyle(TC.inkPrimary)
+                Text(notice.body)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(notice.reasons, id: \.self) { reason in
+                    HStack(alignment: .firstTextBaseline, spacing: TC.Space.xxs) {
+                        Text(verbatim: "\u{2022}")
+                        Text(reason)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                }
+                Text(notice.release)
+                    .tcType(TC.Font_.captionText)
+                    .foregroundStyle(TC.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !notice.projects.isEmpty {
+                    Text(notice.askFirst)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, TC.Space.xxs)
+                    ForEach(notice.projects, id: \.line) { project in
+                        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+                            Text(project.line)
+                                .tcType(TC.Font_.captionText)
+                                .foregroundStyle(TC.inkPrimary)
+                            if let projectID = project.projectId, let action = project.askFirstAction {
+                                Button(action) { onAskFirst(projectID) }
+                                    .lineLimit(1)
+                                    .fixedSize()
+                            }
+                            if let projectID = project.projectId, refused.contains(projectID),
+                                let failed = project.askFirstFailed
+                            {
+                                Text(failed)
+                                    .tcType(TC.Font_.captionText)
+                                    .foregroundStyle(TC.Tone.attention.color)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: TC.Space.m)
         }
         .padding(.vertical, TC.Space.m)
         .padding(.horizontal, TC.Space.md)
