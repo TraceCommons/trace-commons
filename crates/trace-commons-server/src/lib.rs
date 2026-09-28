@@ -28,6 +28,7 @@ pub mod error;
 pub mod inference_connection;
 pub mod inference_funding;
 pub mod instance_enroll_guard;
+pub mod legacy_invite_link;
 pub mod mission_rewards;
 pub mod near_account_identity;
 pub mod near_ai_login;

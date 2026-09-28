@@ -304,7 +304,17 @@ pub(super) async fn reserve(
     envelope: &TraceContributionEnvelope,
 ) -> ApiResult<Option<Attempt>> {
     let submission = envelope.submission_id;
-    if let Some(config) = state.account_admission.as_ref() {
+    // Coexistence (V81): account admission governs only the `near-`/`nearai-`
+    // namespaces. A legacy `tenant-…` invite identity keeps the path it had
+    // before the switch -- `anchor` below returns `None` for it -- whether or
+    // not it has been linked to a NEAR account. Startup readiness
+    // (`trace_account_admission_linkage_ready`) is what refuses an ambiguous
+    // legacy identity; per request there is nothing further to decide.
+    if let Some(config) = state
+        .account_admission
+        .as_ref()
+        .filter(|_| is_anchored_tenant(tenant.tenant_id()))
+    {
         return reserve_account(state, tenant, headers, body, envelope, config)
             .await
             .map(Some);

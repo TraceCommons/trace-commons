@@ -65,6 +65,8 @@ the link.
 | Taking attested inference from dormant to enforced | [`./attested-inference.md`](./attested-inference.md) |
 | Switching on invite-free (uninvited, receipt-backed) contribution | [`./invite-free-admission.md`](./invite-free-admission.md) |
 | Preparing authenticated account contribution admission | [`./account-trust.md`](./account-trust.md) |
+| Linking legacy invite tenants to NEAR accounts, marking pooled tenants, or retiring a shared event invite | [`./legacy-invite-migration.md`](./legacy-invite-migration.md) |
+| Counting legacy invite tenants, accounts, links and readiness blockers before account admission | [`./legacy-invite-counts.md`](./legacy-invite-counts.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
@@ -170,6 +172,15 @@ Every runbook in this directory, with a one-line description.
   procedure, including drill validation and rollback.
 - [Large-trace chunked scoring](large-trace-chunked-scoring.md) — chunking
   knobs, peak/representative columns, per-chunk revocation.
+- [`./legacy-invite-counts.md`](./legacy-invite-counts.md) — the read-only,
+  counts-only inventory of legacy invite identities (pooled and individual),
+  devices per tenant, wallet and NEAR AI accounts, links, ambiguous claims and
+  readiness blockers; runs before and after V81.
+- [`./legacy-invite-migration.md`](./legacy-invite-migration.md) — legacy
+  `tenant-…` invite identities under account admission: coexistence, the
+  tenant-level link to a NEAR account (V81), the operator-set pooled-tenant
+  marker, conflict resolution, readiness rules, and the cutover for shared
+  event invites.
 - [`./mission-insight-rewards.md`](./mission-insight-rewards.md): provision reward roles, pin program terms, reserve capacity, review claims, and inspect award history.
 - [`./mission-packages.md`](./mission-packages.md) — publish immutable
   executable mission packages, operate anonymous discovery, and interpret
