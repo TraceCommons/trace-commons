@@ -562,7 +562,28 @@ keyring-core = "=1.0.0"
 # Token capture integration: nearai/ironwire#57 (draft), exact reviewed candidate.
 # Adds bounded private capture leases and opt-in Chat probability fields.
 # No new packages; re-run downstream platform and license gates before landing.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
+#
+# Z4b (#1118): advanced to 1d05001a, branch `z4a-on-token-capture` on
+# nearai/ironwire -- nearai/ironwire#58 (receipt proof status, the `/summary`
+# rollup, `EmbedOptions::with_signer_attestor`) cherry-picked onto #57's
+# d622d11, because this crate needs both and neither has merged. MUST be
+# re-pinned to IronWire `main` once #57 and #58 land; this rev is an
+# integration commit, not a release.
+#
+# COST. No package enters any graph. The three lockfiles (root, GTK, Tauri)
+# each move only the ironwire source strings plus three new edges from
+# `ironwire_proxy` -- `async-trait`, `ed25519-dalek`, `hex` -- to packages
+# already in each lock. `cargo-sources.json` moves the same 14 lines as prior
+# advances (2 full revs, 12 short-hash vendor lines), edited rather than
+# regenerated because flatpak-cargo-generator was not available; the lock's
+# package set is unchanged, which is what makes that equivalent.
+#
+# SURFACE. `EmbedOptions` gains `signer_attestor` and `proof_settings`
+# (additive; this crate writes no `EmbedOptions` literal). Other breaking
+# IronWire changes (`Exchange.proof`, `Capture::request` becoming a method,
+# `CaptureConfig.receipts`, `LedgerContext` non-exhaustive) touch nothing this
+# crate names.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "1d05001a774036d135204fbdffae9ce92a154634" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -576,8 +597,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "d622d11417
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "d622d11417f1e70f3eada0877673e3866ba5f31f" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "1d05001a774036d135204fbdffae9ce92a154634" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "1d05001a774036d135204fbdffae9ce92a154634" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
