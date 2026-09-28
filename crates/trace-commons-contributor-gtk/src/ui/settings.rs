@@ -179,6 +179,11 @@ pub struct SettingsView {
     /// to a session, and what the last submission this process made
     /// actually did. Rebuilt on each render, because both are labels.
     witness_status: gtk::Box,
+    /// K11's disclosure: what leaves this machine, to whom, and where the
+    /// witness came from. Its title and card are rebuilt from the daemon's
+    /// `route_disclosure` on each witness render; every row is
+    /// `crate::disclosure`'s.
+    disclosure: gtk::Box,
     /// The address, the signing key and the pins. Built once and only ever
     /// refilled, for the same reason the routing fields are: a refresh runs
     /// on every daemon event and would otherwise replace a half-typed
@@ -376,6 +381,14 @@ impl SettingsView {
             .build();
         private_inference_card.append(&private_inference_link);
         content.append(&private_inference_card);
+
+        // K11: where sessions go, above the witness it names. Its title and
+        // card are both drawn by `render_disclosure` -- the title only when
+        // the disclosure could be read -- so it stays hidden until the
+        // daemon answers.
+        let disclosure = gtk::Box::new(gtk::Orientation::Vertical, space::XL);
+        disclosure.set_visible(false);
+        content.append(&disclosure);
 
         // The witness card. Its own section rather than a row on the card
         // above: routing is about what a tool sends, this is about who does
@@ -682,6 +695,7 @@ impl SettingsView {
             private_inference_link,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
+            disclosure,
             witness_form,
             witness_url,
             witness_signing_address,
@@ -3112,6 +3126,27 @@ fn text_of(view: &gtk::TextView) -> String {
         .to_string()
 }
 
+/// K11: ask the daemon what leaves this machine and draw the core's words
+/// for it. A failed call is drawn as unreadable, never as a route, and
+/// without the section title, which would head a disclosure that is not
+/// there.
+fn render_disclosure(app: &Rc<App>) {
+    app.call("route_disclosure", serde_json::json!({}), |app, result| {
+        let panel = crate::disclosure::panel(result.as_ref().ok());
+        let section = &app.settings.disclosure;
+        while let Some(child) = section.first_child() {
+            section.remove(&child);
+        }
+        if let Some(title) = &panel.title {
+            section.append(&style::section(title));
+        }
+        let card = style::card(gtk::Orientation::Vertical, space::S);
+        super::fill_disclosure_rows(&card, &panel.rows);
+        section.append(&card);
+        section.set_visible(true);
+    });
+}
+
 /// Paint the card from the configuration on disk, and from what the last
 /// submission this process made actually did.
 ///
@@ -3121,6 +3156,8 @@ fn text_of(view: &gtk::TextView) -> String {
 /// here" and "nothing left this machine" must survive a greyscale
 /// screenshot.
 pub fn render_witness(app: &Rc<App>) {
+    // The disclosure names the witness, so it is repainted with it.
+    render_disclosure(app);
     let status = witness_read(&app.worker.dir);
     let state = status.state;
     let actions = witness_actions(state);

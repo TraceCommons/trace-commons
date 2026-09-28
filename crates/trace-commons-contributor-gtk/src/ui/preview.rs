@@ -1224,6 +1224,48 @@ impl Sheet {
         }
         self.whats_in_it.append(&detail);
 
+        // K11: what leaves this computer for this session, before and
+        // after redaction, and what its witness was checked against. Filled
+        // when the daemon answers; dropped if the sheet has moved on.
+        let disclosure = style::card(gtk::Orientation::Vertical, space::S);
+        self.whats_in_it.append(&disclosure);
+        if let Some(entry) = self.current() {
+            let entry_id = entry.entry_id.clone();
+            let held = entry.holds_certificate;
+            let raw = human_bytes(summary.raw_session_bytes);
+            let would_send = human_bytes(summary.would_send_bytes);
+            let sheet = Rc::clone(self);
+            let asked = entry_id.clone();
+            self.app.call(
+                "route_disclosure",
+                serde_json::json!({}),
+                move |app, facts| {
+                    let facts = facts.ok();
+                    let draw = move |certificate: Option<serde_json::Value>| {
+                        if sheet.current().is_none_or(|e| e.entry_id != entry_id) {
+                            return;
+                        }
+                        let rows = crate::disclosure::session(
+                            facts.as_ref(),
+                            &raw,
+                            &would_send,
+                            certificate.as_ref(),
+                        );
+                        super::fill_disclosure_rows(&disclosure, &rows);
+                    };
+                    if held {
+                        app.call(
+                            "certificate_detail",
+                            serde_json::json!({ "entry_id": asked }),
+                            move |_, detail| draw(detail.ok()),
+                        );
+                    } else {
+                        draw(None);
+                    }
+                },
+            );
+        }
+
         if !summary.enrolled {
             let unenrolled = style::card(gtk::Orientation::Vertical, space::S);
             let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
