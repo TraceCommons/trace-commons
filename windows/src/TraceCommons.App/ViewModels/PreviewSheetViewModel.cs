@@ -171,6 +171,9 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             if (!NativeWitnessReview.IsReady(response))
             {
                 _witnessRefusal = NativeWitnessReview.Refusal(response);
+                // A busy witness judged nothing: say when to try again.
+                if (_witnessRefusal is { } busy && NativeWitnessReview.RetryLine(response) is { } retry)
+                    _witnessRefusal = busy + Environment.NewLine + retry;
                 Fail();
                 return;
             }

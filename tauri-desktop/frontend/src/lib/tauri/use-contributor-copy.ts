@@ -1,21 +1,35 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   getArmingOfferCopy,
+  getArmingRewordedNotice,
   getAutomaticGrantCopy,
+  getCertificateDetail,
   getContributorDisclosureCopy,
   getEligibilityCopy,
   getEligibilityGroupCopy,
+  getGateHeldNotice,
   getGrantVoidNotice,
+  getInferenceConnectionCopy,
   getProjectIgnoreCopy,
   getQuitConfirmationCopy,
   getRedactionSummary,
   getResidualSecretLine,
+  getRouteDisclosure,
   getWithdrawalConfirmationPrompt,
   getWitnessCapacityNotice,
   getWitnessReviewCopy,
 } from "./contributor-copy-api";
 
+/**
+ * K11's disclosure facts change whenever the witness does, so they live
+ * under the account and are invalidated by every witness change.
+ */
+export const routeDisclosureKey = (account: string) =>
+  ["account", account, "route-disclosure"] as const;
+
 const copyKeys = {
+  certificateDetail: (entryId: string) =>
+    ["contributor-copy", "certificate-detail", entryId] as const,
   armingOffer: (projectLabel: string, count: number) =>
     ["contributor-copy", "arming-offer", projectLabel, count] as const,
   disclosure: ["contributor-copy", "disclosure"] as const,
@@ -25,6 +39,10 @@ const copyKeys = {
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
   grantVoid: (id: number) => ["contributor-copy", "grant-void", id] as const,
+  armingRewording: (id: number) =>
+    ["contributor-copy", "arming-rewording", id] as const,
+  gateHeld: (wire: string) => ["contributor-copy", "gate-held", wire] as const,
+  inferenceConnection: ["contributor-copy", "inference-connection"] as const,
   witnessCapacity: (waiting: number) =>
     ["contributor-copy", "witness-capacity", waiting] as const,
   eligibility: (label: string, reason: string | null) =>
@@ -76,10 +94,43 @@ export function useArmingOfferCopy(projectLabel: string, count: number) {
 }
 
 /** The notice for one void. Keyed by its id, which is never reused. */
+/** The connect-inference step's sentences (K12). */
+export function useInferenceConnectionCopy() {
+  return useQuery({
+    queryKey: copyKeys.inferenceConnection,
+    queryFn: getInferenceConnectionCopy,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useGrantVoidNotice(id: number, wire: Record<string, unknown>) {
   return useQuery({
     queryKey: copyKeys.grantVoid(id),
     queryFn: () => getGrantVoidNotice(wire),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/** The notice for one rewording. Keyed by its id, which is never reused. */
+export function useArmingRewordedNotice(
+  id: number,
+  wire: Record<string, unknown>,
+) {
+  return useQuery({
+    queryKey: copyKeys.armingRewording(id),
+    queryFn: () => getArmingRewordedNotice(wire),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The notice for armed folders the gate holds. Keyed by the whole object:
+ * the count, the reasons and the folders all change its words.
+ */
+export function useGateHeldNotice(wire: Record<string, unknown>) {
+  return useQuery({
+    queryKey: copyKeys.gateHeld(JSON.stringify(wire)),
+    queryFn: () => getGateHeldNotice(wire),
     staleTime: Number.POSITIVE_INFINITY,
   });
 }
@@ -96,6 +147,34 @@ export function useWitnessCapacityNotice(
     queryKey: copyKeys.witnessCapacity(waiting),
     queryFn: () => getWitnessCapacityNotice(wire),
     staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * K11: what leaves this machine, to whom, and what this client checked --
+ * the daemon's facts with the core's words. Re-read each time a disclosure
+ * surface opens: the witness, its origin and the filter can all change.
+ */
+export function useRouteDisclosure(account: string, enabled: boolean) {
+  return useQuery({
+    queryKey: routeDisclosureKey(account),
+    queryFn: getRouteDisclosure,
+    enabled,
+    staleTime: 0,
+  });
+}
+
+/**
+ * The certificate a pending entry holds, as checked at review. Only asked
+ * for an entry whose `holds_certificate` is true; the daemon refuses others.
+ */
+export function useCertificateDetail(entryId: string | null) {
+  return useQuery({
+    queryKey: copyKeys.certificateDetail(entryId ?? ""),
+    queryFn: () => getCertificateDetail(entryId ?? ""),
+    enabled: entryId !== null && entryId.length > 0,
+    staleTime: 0,
+    gcTime: 0,
   });
 }
 
