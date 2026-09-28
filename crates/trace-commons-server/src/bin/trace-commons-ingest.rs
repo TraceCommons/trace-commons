@@ -58558,9 +58558,18 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         previous_event_hash: &str,
         event_hash: &str,
     ) -> bool {
-        if previous_event_hash == TRACE_AUDIT_EVENT_GENESIS_HASH {
-            return true;
-        }
+        previous_event_hash == TRACE_AUDIT_EVENT_GENESIS_HASH
+            || self.anchored_in_file(row, previous_event_hash, event_hash)
+    }
+
+    /// The row carries exactly the chain fields of the file event with its
+    /// id, and that event chains from a file event.
+    fn anchored_in_file(
+        &self,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
         let Some(file_event) = self.by_id.get(&row.audit_event_id) else {
             return false;
         };
@@ -58569,7 +58578,37 @@ impl<'a> DbAuditChainFileAnchors<'a> {
             && self.event_hashes.contains(previous_event_hash)
     }
 
-    /// Whether a hashed row chains: from the hashed row before it, or, for
+    /// The row an operator audit-chain repair writes to resume the chain
+    /// across a legacy segment -- file events a rolled-back build chained
+    /// into the file but mirrored without chain fields. It chains from the
+    /// file head, not from `expected_previous_hash`, and names
+    /// `expected_previous_hash` as its `decision_inputs_hash`; its canonical
+    /// payload, whose hash the chain check recomputes, carries that
+    /// declaration. So the DB chain continues through it only from the exact
+    /// hashed row it was written against: a hashed row lost before it still
+    /// breaks the chain.
+    fn accepts_legacy_segment_resume(
+        &self,
+        expected_previous_hash: &str,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
+        row.decision_inputs_hash.as_deref() == Some(expected_previous_hash)
+            && row.canonical_event_json.is_some()
+            && row.action == StorageTraceAuditAction::Retain
+            && matches!(
+                &row.metadata,
+                StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(surface),
+                    ..
+                } if surface == AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            )
+            && self.anchored_in_file(row, previous_event_hash, event_hash)
+    }
+
+    /// Whether a hashed row chains: from the hashed row before it, or across
+    /// a legacy segment by [`Self::accepts_legacy_segment_resume`], or, for
     /// the first hashed row (`expected_previous_hash` is `None`), from a
     /// start [`Self::accepts_chain_start`] allows.
     fn chains(
@@ -58580,7 +58619,15 @@ impl<'a> DbAuditChainFileAnchors<'a> {
         event_hash: &str,
     ) -> bool {
         match expected_previous_hash {
-            Some(expected) => previous_event_hash == expected,
+            Some(expected) => {
+                previous_event_hash == expected
+                    || self.accepts_legacy_segment_resume(
+                        expected,
+                        row,
+                        previous_event_hash,
+                        event_hash,
+                    )
+            }
             None => self.accepts_chain_start(row, previous_event_hash, event_hash),
         }
     }
@@ -66046,6 +66093,202 @@ fn plan_audit_chain_repair(
     Ok(plan)
 }
 
+/// A legacy segment the DB audit chain can resume across. Hash and counts
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacySegmentResume {
+    /// The DB's latest hashed row's `event_hash`: where the DB chain stopped.
+    db_head_event_hash: String,
+    /// File events after the DB head.
+    file_events: usize,
+    /// DB rows after the DB head, all without chain fields.
+    unhashed_db_rows: usize,
+    /// File events after the DB head that have no DB row of their id.
+    file_only_events: usize,
+}
+
+/// Plans the repair for a file log that ran ahead of the DB through legacy
+/// rows: the state a binary rollback to a build from before #1043 leaves.
+///
+/// That build chained every event into the file, but under required mirror
+/// writes it wrote the DB row before the event was chained, so the row has
+/// no chain fields; and some of its events (a submission's `submitted`, an
+/// idempotent re-POST) were written to the file only. After the roll-forward
+/// the new build chains from the file head, which is no hashed DB row, and
+/// every append is refused as stale.
+///
+/// `file_events` must be in file-line order. `Ok(None)` means nothing is
+/// locked: there is no hashed DB row (the DB accepts any first one), or the
+/// file ends at the DB's latest hashed row. The plan is only ever this shape:
+/// - the DB's latest hashed row is a file event, with the same chain fields
+///   (else `db_head_not_in_file`: a fork or a tampered row);
+/// - the file events after it chain from it, each reproducing its own hash
+///   (else `file_chain_break_after_db_head`);
+/// - none of them has a hashed DB row, and every DB row of one's id is an
+///   unhashed row agreeing with it (else `legacy_row_mismatch`);
+/// - at least one DB row after the latest hashed row is unhashed -- the mark
+///   of the old build. Without it, a file ahead of the DB is unexplained and
+///   is refused as before (`file_head_not_in_db`).
+fn plan_legacy_segment_resume(
+    file_events: &[TraceCommonsAuditEvent],
+    db_rows: &[StorageTraceAuditEventRecord],
+) -> Result<Option<LegacySegmentResume>, &'static str> {
+    let Some(db_head) = db_rows
+        .iter()
+        .filter(|row| row.event_hash.is_some())
+        .max_by_key(|row| row.audit_sequence)
+    else {
+        return Ok(None);
+    };
+    let db_head_hash = db_head.event_hash.clone().ok_or("db_head_not_in_file")?;
+    let head_index = file_events
+        .iter()
+        .position(|event| event.event_id == db_head.audit_event_id)
+        .ok_or("db_head_not_in_file")?;
+    let head_event = &file_events[head_index];
+    if head_event.event_hash.as_deref() != Some(db_head_hash.as_str())
+        || head_event.previous_event_hash != db_head.previous_event_hash
+    {
+        return Err("db_head_not_in_file");
+    }
+    let segment = &file_events[head_index + 1..];
+    if segment.is_empty() {
+        return Ok(None);
+    }
+    let mut expected_previous = db_head_hash.clone();
+    for event in segment {
+        let Some(event_hash) = event.event_hash.as_deref() else {
+            return Err("file_chain_break_after_db_head");
+        };
+        if event.previous_event_hash.as_deref() != Some(expected_previous.as_str())
+            || compute_audit_event_hash(&expected_previous, event)
+                .map_err(|_| "file_chain_break_after_db_head")?
+                != event_hash
+        {
+            return Err("file_chain_break_after_db_head");
+        }
+        expected_previous = event_hash.to_string();
+    }
+    let rows_by_id = db_rows
+        .iter()
+        .map(|row| (row.audit_event_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut file_only_events = 0usize;
+    for event in segment {
+        let Some(row) = rows_by_id.get(&event.event_id) else {
+            file_only_events += 1;
+            continue;
+        };
+        if !legacy_audit_row_matches_file_event(row, event) {
+            return Err("legacy_row_mismatch");
+        }
+    }
+    let unhashed_db_rows = db_rows
+        .iter()
+        .filter(|row| row.audit_sequence > db_head.audit_sequence)
+        .count();
+    if unhashed_db_rows == 0 {
+        return Err("file_head_not_in_db");
+    }
+    Ok(Some(LegacySegmentResume {
+        db_head_event_hash: db_head_hash,
+        file_events: segment.len(),
+        unhashed_db_rows,
+        file_only_events,
+    }))
+}
+
+/// Whether an unhashed DB row is the mirror a build from before #1043 wrote
+/// for this file event: that build copied these fields from the unchained
+/// event, so any difference is not its doing.
+fn legacy_audit_row_matches_file_event(
+    row: &StorageTraceAuditEventRecord,
+    event: &TraceCommonsAuditEvent,
+) -> bool {
+    row.event_hash.is_none()
+        && row.previous_event_hash.is_none()
+        && row.canonical_event_json.is_none()
+        && row.tenant_id == event.tenant_id
+        && row.submission_id == (event.submission_id != Uuid::nil()).then_some(event.submission_id)
+        && row.reason == event.reason
+        && row.export_manifest_id == event.export_id
+        && row.decision_inputs_hash == event.decision_inputs_hash
+        && event
+            .actor_principal_ref
+            .as_deref()
+            .is_none_or(|principal| principal == row.actor_principal_ref)
+}
+
+enum AuditChainRepairOutcome {
+    Restore {
+        restorable: usize,
+        restored_event_ids: Vec<Uuid>,
+    },
+    ResumeLegacySegment {
+        resume: LegacySegmentResume,
+        /// Absent for a dry run.
+        resume_event_id: Option<Uuid>,
+    },
+}
+
+/// Writes the event that resumes the DB audit chain across a legacy segment:
+/// a hash-only `audit_chain_repair` event, chained from the file head like
+/// any other, whose `decision_inputs_hash` names the DB's latest hashed row.
+/// The caller holds the tenant's audit append lock.
+///
+/// The file line goes first. If the DB insert then fails, the event is one
+/// more file-only event past the DB head and a rerun resumes across it; the
+/// DB insert refuses a DB head that has moved since the plan.
+async fn write_legacy_segment_resume_event(
+    state: &AppState,
+    tenant: &TenantAuth,
+    db: &dyn Database,
+    resume: &LegacySegmentResume,
+    purpose_hash: &str,
+) -> anyhow::Result<Uuid> {
+    let mut action_counts = BTreeMap::new();
+    for (key, value) in [
+        ("legacy_segment_file_events", resume.file_events),
+        ("legacy_segment_unhashed_db_rows", resume.unhashed_db_rows),
+        ("legacy_segment_file_only_events", resume.file_only_events),
+    ] {
+        action_counts.insert(key.to_string(), value.min(u32::MAX as usize) as u32);
+    }
+    let mut event = TraceCommonsAuditEvent::lifecycle_counts(
+        tenant,
+        Uuid::nil(),
+        AUDIT_CHAIN_REPAIR_AUDIT_KIND,
+        Some(purpose_hash),
+        &action_counts,
+    );
+    event.decision_inputs_hash = Some(resume.db_head_event_hash.clone());
+    event.created_at = Utc::now().max(latest_audit_event_created_at(
+        &audit_events_path(&state.root, &tenant.tenant_id),
+        &tenant.tenant_id,
+    )?);
+    let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
+    let write = audit_event_storage_write(
+        tenant,
+        &event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Retain,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+                purpose_hash: Some(purpose_hash.to_string()),
+                dry_run: false,
+                action_counts,
+            },
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+    )?;
+    write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
+    db.append_trace_audit_chain_resume_event(write, &resume.db_head_event_hash)
+        .await
+        .context("failed to write the audit chain resume row")?;
+    Ok(event.event_id)
+}
+
 fn default_audit_chain_repair_dry_run() -> bool {
     true
 }
@@ -66068,11 +66311,21 @@ struct TraceAuditChainRepairResponse {
     purpose_hash: String,
     dry_run: bool,
     /// `clean` when the file log already holds every hashed DB row;
-    /// `db_ahead_of_file` when it lacks a verifiable tail of them.
+    /// `db_ahead_of_file` when it lacks a verifiable tail of them;
+    /// `file_ahead_through_legacy_rows` when the file ran ahead of the DB's
+    /// latest hashed row through rows a rolled-back build wrote unhashed.
     divergence: &'static str,
     file_events_restorable: usize,
     file_events_restored: usize,
     restored_event_ids: Vec<Uuid>,
+    /// For `file_ahead_through_legacy_rows`: the file events past the DB's
+    /// latest hashed row, how many DB rows (all unhashed) the rolled-back
+    /// build wrote there, and how many of those file events have no DB row.
+    legacy_segment_file_events: usize,
+    legacy_segment_unhashed_db_rows: usize,
+    legacy_segment_file_only_events: usize,
+    /// Whether this run wrote the row that resumes the DB chain.
+    chain_resumed: bool,
     /// The repair's own audit event; absent for a dry run.
     repair_audit_event_id: Option<Uuid>,
 }
@@ -66142,7 +66395,7 @@ async fn run_audit_chain_repair(
         .unwrap_or("trace_commons_audit_chain_repair");
     let purpose_hash = sha256_prefixed(purpose);
 
-    let (restorable, restored_event_ids) = {
+    let outcome = {
         let lock = audit_append_lock(&state.root, &tenant.tenant_id);
         let _guard = lock.lock().await;
         let file_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
@@ -66150,25 +66403,78 @@ async fn run_audit_chain_repair(
             .list_trace_audit_events(&tenant.tenant_id)
             .await
             .context("failed to list DB audit rows for audit chain repair")?;
-        let plan = plan_audit_chain_repair(&file_events, &db_rows).map_err(|label| {
+        let refuse = |label: &'static str| {
             tracing::warn!(
                 refusal = label,
                 "Trace Commons audit chain repair refused a divergence it cannot restore"
             );
             anyhow::Error::new(TraceAuditChainRepairRefused(label))
-        })?;
-        let mut restored = Vec::new();
-        if !request.dry_run {
-            for event in &plan {
-                write_chained_audit_event(&state.root, &tenant.tenant_id, event)?;
-                restored.push(event.event_id);
+        };
+        match plan_audit_chain_repair(&file_events, &db_rows) {
+            Ok(plan) => {
+                let mut restored = Vec::new();
+                if !request.dry_run {
+                    for event in &plan {
+                        write_chained_audit_event(&state.root, &tenant.tenant_id, event)?;
+                        restored.push(event.event_id);
+                    }
+                }
+                AuditChainRepairOutcome::Restore {
+                    restorable: plan.len(),
+                    restored_event_ids: restored,
+                }
             }
+            // The file is ahead of the DB. That is a fork -- unless a
+            // rolled-back build wrote it, with unhashed DB rows.
+            Err("file_head_not_in_db") => {
+                let file_events_in_order =
+                    read_audit_events_in_file_order(&state.root, &tenant.tenant_id)?;
+                match plan_legacy_segment_resume(&file_events_in_order, &db_rows).map_err(refuse)? {
+                    None => AuditChainRepairOutcome::Restore {
+                        restorable: 0,
+                        restored_event_ids: Vec::new(),
+                    },
+                    Some(resume) => {
+                        let resume_event_id = if request.dry_run {
+                            None
+                        } else {
+                            Some(
+                                write_legacy_segment_resume_event(
+                                    state,
+                                    tenant,
+                                    db.as_ref(),
+                                    &resume,
+                                    &purpose_hash,
+                                )
+                                .await?,
+                            )
+                        };
+                        AuditChainRepairOutcome::ResumeLegacySegment {
+                            resume,
+                            resume_event_id,
+                        }
+                    }
+                }
+            }
+            Err(label) => return Err(refuse(label)),
         }
-        (plan.len(), restored)
     };
 
+    let (restorable, restored_event_ids, resume, resume_event_id) = match outcome {
+        AuditChainRepairOutcome::Restore {
+            restorable,
+            restored_event_ids,
+        } => (restorable, restored_event_ids, None, None),
+        AuditChainRepairOutcome::ResumeLegacySegment {
+            resume,
+            resume_event_id,
+        } => (0, Vec::new(), Some(resume), resume_event_id),
+    };
     let repair_audit_event_id = if request.dry_run {
         None
+    } else if resume.is_some() {
+        // The row that resumed the chain is this repair's audit event.
+        resume_event_id
     } else {
         let mut action_counts = BTreeMap::new();
         action_counts.insert(
@@ -66211,7 +66517,9 @@ async fn run_audit_chain_repair(
         generated_at: Utc::now(),
         purpose_hash,
         dry_run: request.dry_run,
-        divergence: if restorable == 0 {
+        divergence: if resume.is_some() {
+            "file_ahead_through_legacy_rows"
+        } else if restorable == 0 {
             "clean"
         } else {
             "db_ahead_of_file"
@@ -66219,6 +66527,14 @@ async fn run_audit_chain_repair(
         file_events_restorable: restorable,
         file_events_restored: restored_event_ids.len(),
         restored_event_ids,
+        legacy_segment_file_events: resume.as_ref().map_or(0, |resume| resume.file_events),
+        legacy_segment_unhashed_db_rows: resume
+            .as_ref()
+            .map_or(0, |resume| resume.unhashed_db_rows),
+        legacy_segment_file_only_events: resume
+            .as_ref()
+            .map_or(0, |resume| resume.file_only_events),
+        chain_resumed: resume_event_id.is_some(),
         repair_audit_event_id,
     })
 }
@@ -66650,6 +66966,17 @@ async fn mirror_audit_event_row_to_db(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
+    db.append_trace_audit_event(audit_event_storage_write(tenant, event, row)?)
+        .await
+        .context("failed to mirror trace audit event")
+}
+
+/// The DB row `event` is mirrored as.
+fn audit_event_storage_write(
+    tenant: &TenantAuth,
+    event: &TraceCommonsAuditEvent,
+    row: AuditRowMirror,
+) -> anyhow::Result<StorageTraceAuditEventWrite> {
     let AuditRowMirror {
         action,
         metadata,
@@ -66662,7 +66989,7 @@ async fn mirror_audit_event_row_to_db(
         .as_deref()
         .map(|previous_event_hash| canonical_audit_event_json(previous_event_hash, event))
         .transpose()?;
-    db.append_trace_audit_event(StorageTraceAuditEventWrite {
+    Ok(StorageTraceAuditEventWrite {
         audit_event_id: event.event_id,
         tenant_id: tenant.tenant_id.clone(),
         actor_principal_ref: event
@@ -66686,8 +67013,6 @@ async fn mirror_audit_event_row_to_db(
         canonical_event_json,
         metadata,
     })
-    .await
-    .context("failed to mirror trace audit event")
 }
 
 fn normalize_audit_event_metadata(
@@ -66941,6 +67266,18 @@ fn read_all_audit_events(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
+    let mut events = read_audit_events_in_file_order(root, tenant_id)?;
+    events.sort_by_key(|event| event.created_at);
+    Ok(events)
+}
+
+/// The tenant's file audit events in line order: the file chain's order.
+/// Events a build from before #1043 wrote were stamped before the append
+/// lock, so their `created_at` order need not be the chain's.
+fn read_audit_events_in_file_order(
+    root: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
     let path = audit_events_path(root, tenant_id);
     if !path.exists() {
         return Ok(Vec::new());
@@ -66964,7 +67301,6 @@ fn read_all_audit_events(
         ensure_audit_event_tenant(&event, tenant_id)?;
         events.push(event);
     }
-    events.sort_by_key(|event| event.created_at);
     Ok(events)
 }
 

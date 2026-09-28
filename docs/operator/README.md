@@ -116,7 +116,8 @@ Every runbook in this directory, with a one-line description.
   stale-container trap, what a contributor needs, and rollback to dormant.
 - [`./audit-trail-forensics.md`](./audit-trail-forensics.md) — how to query
   and verify the audit chain when investigating a dispute or anomaly, and
-  how to repair a required-mirror lockout (`/v1/admin/audit-chain-repair`).
+  how to repair a required-mirror lockout or roll forward after a binary
+  rollback (`/v1/admin/audit-chain-repair`).
 - [`./backup-restore.md`](./backup-restore.md) — what is backed up where,
   restore procedures, and honest RPO/RTO targets.
 - [`./corpus-validity-battery.md`](./corpus-validity-battery.md) — the
