@@ -42,9 +42,15 @@ CREATE TABLE pipeline_review_assessments (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, assessment_id),
     UNIQUE (tenant_id, run_id),
+    -- Cascade, not restrict: like `pipeline_bundle_policy_status` (V93) and
+    -- `pipeline_review_claims` above, this table has no foreign key of its
+    -- own straight to `trace_tenants` or `trace_submissions`, so an
+    -- assessment has no other path out when its run goes away. The `UNIQUE
+    -- (tenant_id, run_id)` above means this table only ever holds one row
+    -- per live run.
     FOREIGN KEY (tenant_id, run_id)
         REFERENCES pipeline_runs (tenant_id, run_id)
-        ON DELETE RESTRICT
+        ON DELETE CASCADE
 );
 
 CREATE TABLE pipeline_index_invalidations (
@@ -82,11 +88,22 @@ CREATE INDEX idx_pipeline_index_invalidations_work
         state, next_attempt_at, requested_at, run_id
     );
 
+-- Assessments are append-only, the same shape as `phase_outcomes` (V92) and
+-- `pipeline_bundle_packages` (V93): neither an UPDATE nor a direct DELETE is
+-- ever allowed, but a DELETE arriving through a cascade (the run this
+-- assessment belongs to was deleted, taking the whole submission or tenant
+-- with it) is let through, so a tenant or a submission with a recorded
+-- assessment can still be removed. See `reject_phase_outcome_mutation`'s
+-- comment (V92) for why `pg_trigger_depth() > 1` is the direct/cascade
+-- boundary.
 CREATE FUNCTION reject_pipeline_review_assessment_mutation()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'pipeline review assessments are immutable';
 END;
 $$;

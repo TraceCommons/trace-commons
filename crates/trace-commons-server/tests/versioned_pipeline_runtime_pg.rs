@@ -2270,6 +2270,27 @@ async fn submit_registered(
     service.submit(request).await
 }
 
+/// `SELECT COUNT(*) FROM {table} WHERE tenant_id = $1`, in its own
+/// tenant-scoped transaction on an owner connection: this is an observer,
+/// not the runtime under test, and it counts tables the runtime login holds
+/// no SELECT on. `table` must be a literal table name, never external input
+/// -- it is interpolated into the query text because PostgreSQL does not
+/// allow a table name as a bind parameter.
+async fn count_tenant_rows(tenant_id: &str, table: &str) -> i64 {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            &format!("SELECT COUNT(*) FROM {table} WHERE tenant_id = $1"),
+            &[&tenant_id],
+        )
+        .await
+        .expect("count tenant rows")
+        .get(0);
+    tx.commit().await.expect("commit count_tenant_rows");
+    count
+}
+
 /// `SELECT COUNT(*)` over `pipeline_runs` for `tenant_id`, in its own
 /// tenant-scoped transaction.
 async fn count_runs(backend: &Arc<PgBackend>, tenant_id: &str) -> i64 {
@@ -4226,6 +4247,22 @@ async fn tenant_tx<'a>(
     )
     .await
     .expect("set tenant for tx");
+    tx
+}
+
+/// `tenant_tx` on an owner connection (`owner_client`), for test setup and
+/// observation outside the runtime login's grants.
+async fn owner_tenant_tx<'a>(
+    owner: &'a mut tokio_postgres::Client,
+    tenant_id: &str,
+) -> tokio_postgres::Transaction<'a> {
+    let tx = owner.transaction().await.expect("open owner tenant tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant for owner tx");
     tx
 }
 
@@ -10570,8 +10607,13 @@ async fn an_unreconciled_leg_on_a_live_run_is_dispatched_again() {
 /// `trace_credit_settlement_batches` rows the Trace Credit leg creates),
 /// the tenant's `pipeline_bundle_packages` / `pipeline_active_bundles` /
 /// `pipeline_bundle_policy_status` rows (`register_default_bundle`, inside
-/// `submit_registered`), its committed `pipeline_receipt_artifacts` row,
-/// and its `pipeline_admission_usage` row.
+/// `submit_registered`), its committed `pipeline_receipt_artifacts` row, its
+/// `pipeline_admission_usage` row, and -- inserted directly by SQL through
+/// an owner connection, since the product write paths for them (Tasks 3 and
+/// 12) do not exist yet -- one `pipeline_review_claims`,
+/// `pipeline_review_assessments`, and `pipeline_index_invalidations` row, and
+/// one `pipeline_export_snapshots` row with one
+/// `pipeline_export_snapshot_items` row.
 async fn run_with_every_pipeline_row_kind(
     service: &PipelineService,
     tenant: &str,
@@ -10583,13 +10625,146 @@ async fn run_with_every_pipeline_row_kind(
         .unwrap()
         .expect("Settle runs to completion");
     assert_eq!(settled.state, PipelineRunState::Complete);
+    insert_review_claim_and_assessment(tenant, settled.run_id).await;
+    insert_index_invalidation(tenant, &settled).await;
+    insert_export_snapshot_and_item(tenant, &settled).await;
     settled
 }
 
+/// Inserts one `pipeline_review_claims` row and one
+/// `pipeline_review_assessments` row for `run_id`, directly by SQL in the
+/// run's own tenant-scoped transaction -- Tasks 3 and 12 have not yet added
+/// the product write paths for these tables. Test setup, not the runtime
+/// under test, so it writes through an owner connection. Returns the
+/// assessment's id.
+async fn insert_review_claim_and_assessment(tenant: &str, run_id: uuid::Uuid) -> uuid::Uuid {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant).await;
+    let reviewer = format!("reviewer_sha256:{}", "b".repeat(64));
+    tx.execute(
+        "INSERT INTO pipeline_review_claims (
+            tenant_id, run_id, reviewer_principal_ref, lease_token, lease_expires_at
+         ) VALUES ($1, $2, $3, $4, NOW() + INTERVAL '1 hour')",
+        &[&tenant, &run_id, &reviewer, &uuid::Uuid::new_v4()],
+    )
+    .await
+    .expect("insert a review claim");
+    let assessment_id = uuid::Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO pipeline_review_assessments (
+            tenant_id, assessment_id, run_id, reviewer_principal_ref, recommendation,
+            reason_code, evidence_hash
+         ) VALUES ($1, $2, $3, $4, 'approve', $5, $6)",
+        &[
+            &tenant,
+            &assessment_id,
+            &run_id,
+            &reviewer,
+            &"review_test_assessment",
+            &format!("sha256:{}", "c".repeat(64)),
+        ],
+    )
+    .await
+    .expect("insert a review assessment");
+    tx.commit().await.unwrap();
+    assessment_id
+}
+
+/// Inserts one `pipeline_index_invalidations` row for `run`, directly by
+/// SQL through an owner connection, for the same reason as
+/// `insert_review_claim_and_assessment`.
+async fn insert_index_invalidation(tenant: &str, run: &PipelineRunRecord) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "INSERT INTO pipeline_index_invalidations (
+            tenant_id, run_id, submission_id, registry_revision_id, reason_code
+         ) VALUES ($1, $2, $3, $4, $5)",
+        &[
+            &tenant,
+            &run.run_id,
+            &run.submission_id,
+            &uuid::Uuid::new_v4(),
+            &"review_test_invalidation",
+        ],
+    )
+    .await
+    .expect("insert an index invalidation");
+    tx.commit().await.unwrap();
+}
+
+/// Inserts one `pipeline_export_snapshots` row and one
+/// `pipeline_export_snapshot_items` row for `run`, directly by SQL through
+/// an owner connection, for the same reason as
+/// `insert_review_claim_and_assessment`. Returns
+/// `(snapshot_id, registry_revision_id)` so a caller that needs to name the
+/// item directly (a delete test) does not have to read them back.
+async fn insert_export_snapshot_and_item(
+    tenant: &str,
+    run: &PipelineRunRecord,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant).await;
+    let snapshot_id = uuid::Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshots (
+            tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash, item_count
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        &[
+            &tenant,
+            &snapshot_id,
+            &format!("sha256:{}", "d".repeat(64)),
+            &"exporter_sha256:testexporter",
+            &"research",
+            &format!("sha256:{}", "e".repeat(64)),
+            &"policy-test-v1",
+            &format!("sha256:{}", "f".repeat(64)),
+            &1_i32,
+        ],
+    )
+    .await
+    .expect("insert an export snapshot");
+    let registry_revision_id = uuid::Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshot_items (
+            tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+            registry_revision_id, source_object_ref_id, source_content_hash, bundle_id,
+            outcome_schema_id, outcome_schema_version, authorized_view_schema_id,
+            consent_scopes, allowed_uses
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+        &[
+            &tenant,
+            &snapshot_id,
+            &0_i32,
+            &run.run_id,
+            &run.submission_id,
+            &run.trace_id,
+            &registry_revision_id,
+            &run.source_object_ref_id,
+            &format!("sha256:{}", "1".repeat(64)),
+            &run.bundle_id,
+            &"pipeline.outcome.test.v1",
+            &1_i32,
+            &"pipeline.view.test.v1",
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+        ],
+    )
+    .await
+    .expect("insert an export snapshot item");
+    tx.commit().await.unwrap();
+    (snapshot_id, registry_revision_id)
+}
+
 /// Deleting the submission that a fully-settled run belongs to must succeed
-/// and take every pipeline row for it along, not stop partway at an
-/// immutability trigger or a foreign key that has not yet seen its sibling
-/// cascade finish.
+/// and take every pipeline row for it along -- including a review claim, a
+/// review assessment, an index invalidation, and an export snapshot item
+/// (Ruling RB-5) -- not stop partway at an immutability trigger or a foreign
+/// key that has not yet seen its sibling cascade finish. The export
+/// snapshot itself is tenant-scoped, not submission-scoped, so it is not
+/// expected to disappear here; `deleting_a_tenant_with_pipeline_rows_succeeds`
+/// below covers it.
 #[tokio::test]
 async fn deleting_a_submission_with_pipeline_rows_succeeds() {
     let Some(backend) = runtime_backend(4).await else {
@@ -10621,13 +10796,35 @@ async fn deleting_a_submission_with_pipeline_rows_succeeds() {
         0,
         "the run cascaded away with its submission"
     );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_claims").await,
+        0,
+        "the review claim cascaded away with its run"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "the review assessment cascaded away with its run"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_index_invalidations").await,
+        0,
+        "the index invalidation cascaded away with its run"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        0,
+        "the export snapshot item cascaded away with its run"
+    );
 }
 
 /// The tenant-delete half of the same requirement: the cascade chain runs
 /// from `trace_tenants` instead of `trace_submissions`, and the tenant also
 /// owns `pipeline_bundle_packages` / `pipeline_active_bundles` /
 /// `pipeline_bundle_policy_status` / `pipeline_admission_usage` rows
-/// directly (not through a submission).
+/// directly (not through a submission). Here the export snapshot is also
+/// tenant-scoped, so (unlike the submission-delete half above) it is
+/// expected to disappear along with its item (Ruling RB-5).
 #[tokio::test]
 async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
     let Some(backend) = runtime_backend(4).await else {
@@ -10663,6 +10860,21 @@ async fn deleting_a_tenant_with_pipeline_rows_succeeds() {
         .get(0);
     check_tx.commit().await.unwrap();
     assert_eq!(remaining, 0, "the tenant row itself is gone");
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "the review assessment cascaded away with its tenant"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        0,
+        "the export snapshot cascaded away with its tenant"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        0,
+        "the export snapshot item cascaded away with its tenant"
+    );
 }
 
 /// The append-only property the trigger exists for stays exactly as strict
@@ -10720,6 +10932,119 @@ async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
     assert!(
         db_error_message(&error).contains("phase outcomes are immutable"),
         "unexpected owner error: {error:?}"
+    );
+}
+
+/// Ruling RB-5, the review-assessment half: `pipeline_review_assessments` is
+/// append-only like `phase_outcomes`, but its own direct delete must still
+/// be refused while its run exists -- only a cascade (the run going away
+/// with it) is let through.
+#[tokio::test]
+async fn a_direct_review_assessment_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("assessment-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let assessment_id = insert_review_claim_and_assessment(&tenant, run.run_id).await;
+
+    // The runtime login holds no DELETE on pipeline_review_assessments; the
+    // owner does, and the trigger refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM pipeline_review_assessments WHERE tenant_id = $1 AND assessment_id = $2",
+            &[&tenant, &assessment_id],
+        )
+        .await
+        .expect_err("a review assessment delete is refused while its run still exists");
+    assert!(
+        db_error_message(&error).contains("pipeline review assessments are immutable"),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// Ruling RB-5, the export-snapshot half: a direct delete of the snapshot
+/// itself is still refused while its run (and item) exist -- only a cascade
+/// (the tenant going away with it) is let through.
+#[tokio::test]
+async fn a_direct_export_snapshot_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("snapshot-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let (snapshot_id, _registry_revision_id) = insert_export_snapshot_and_item(&tenant, &run).await;
+
+    // The runtime login holds no DELETE on pipeline_export_snapshots; the
+    // owner does, and the trigger refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM pipeline_export_snapshots WHERE tenant_id = $1 AND snapshot_id = $2",
+            &[&tenant, &snapshot_id],
+        )
+        .await
+        .expect_err("an export snapshot delete is refused while its tenant still exists");
+    assert!(
+        db_error_message(&error).contains("pipeline export snapshots are retained"),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// Ruling RB-5, the export-snapshot-item half: a direct delete of the item
+/// itself is still refused while its run exists -- only a cascade (the run,
+/// submission, or tenant going away with it) is let through.
+#[tokio::test]
+async fn a_direct_export_snapshot_item_delete_is_still_refused_while_its_run_exists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("snapshot-item-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let (snapshot_id, registry_revision_id) = insert_export_snapshot_and_item(&tenant, &run).await;
+
+    // The runtime login holds no DELETE on pipeline_export_snapshot_items;
+    // the owner does, and the trigger refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM pipeline_export_snapshot_items
+             WHERE tenant_id = $1 AND snapshot_id = $2 AND registry_revision_id = $3",
+            &[&tenant, &snapshot_id, &registry_revision_id],
+        )
+        .await
+        .expect_err("an export snapshot item delete is refused while its run still exists");
+    assert!(
+        db_error_message(&error).contains("pipeline export snapshots are retained"),
+        "unexpected error: {error:?}"
     );
 }
 

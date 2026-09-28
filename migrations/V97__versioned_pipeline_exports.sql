@@ -65,18 +65,50 @@ CREATE TABLE pipeline_export_snapshot_items (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, snapshot_id, registry_revision_id),
     UNIQUE (tenant_id, snapshot_id, ordinal),
-    FOREIGN KEY (tenant_id, snapshot_id)
-        REFERENCES pipeline_export_snapshots (tenant_id, snapshot_id)
-        ON DELETE RESTRICT,
+    -- Cascade, not restrict: an item is derived from exactly the run that
+    -- produced it (the same one-hop shape as `pipeline_run_settlements` ->
+    -- `pipeline_runs`, V77), and nothing ever deletes a `pipeline_runs` row
+    -- on its own -- only a submission or tenant delete removes it, cascading
+    -- from `trace_submissions`. The three reference foreign keys below defer
+    -- their checks instead, because each of their targets is also removed
+    -- by a separate path from that same submission or tenant, racing this
+    -- one.
     FOREIGN KEY (tenant_id, run_id)
         REFERENCES pipeline_runs (tenant_id, run_id)
-        ON DELETE RESTRICT,
+        ON DELETE CASCADE,
+    -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
+    -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
+    -- same check, deferrable. Deferred because the item is already removed
+    -- by its run's own cascade above, and a tenant delete also cascades
+    -- `pipeline_export_snapshots` straight from `trace_tenants`, a sibling
+    -- of the run's own cascade chain up to the same tenant, so a tenant
+    -- delete can reach either branch first. By commit time the item is
+    -- already gone whenever the whole tenant is going away together; a
+    -- snapshot deleted on its own is still refused regardless of this key,
+    -- by the trigger on `pipeline_export_snapshots` itself below.
+    FOREIGN KEY (tenant_id, snapshot_id)
+        REFERENCES pipeline_export_snapshots (tenant_id, snapshot_id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
+    -- `NO ACTION`, not `RESTRICT`, for the same reason: the item is already
+    -- removed by its run's own cascade above, and `trace_submissions` is
+    -- either the row being deleted directly or cascades straight from
+    -- `trace_tenants`, a sibling of the run's own cascade through the same
+    -- parent, so a submission or tenant delete can reach either branch
+    -- first.
     FOREIGN KEY (tenant_id, submission_id)
         REFERENCES trace_submissions (tenant_id, submission_id)
-        ON DELETE RESTRICT,
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
+    -- `NO ACTION`, not `RESTRICT`, for the same reason again: the item is
+    -- already removed by its run's own cascade above, and
+    -- `trace_object_refs` cascades straight from `trace_submissions`, a
+    -- sibling of the run's own cascade up the same submission/tenant chain,
+    -- so a submission or tenant delete can reach either branch first.
     FOREIGN KEY (tenant_id, submission_id, source_object_ref_id)
         REFERENCES trace_object_refs (tenant_id, submission_id, object_ref_id)
-        ON DELETE RESTRICT,
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
     CHECK (
         (invalidated_at IS NULL AND invalidation_reason IS NULL)
         OR (invalidated_at IS NOT NULL AND invalidation_reason IS NOT NULL)
@@ -146,11 +178,23 @@ CREATE TRIGGER pipeline_export_snapshot_items_reject_identity_update
     BEFORE UPDATE ON pipeline_export_snapshot_items
     FOR EACH ROW EXECUTE FUNCTION reject_pipeline_export_snapshot_item_identity_mutation();
 
+-- Snapshots and their items are retained, the same append-only intent as
+-- `phase_outcomes` (V92): a direct DELETE is refused, but one arriving
+-- through a cascade (the tenant a snapshot belongs to was deleted, or -- for
+-- an item -- the run it was derived from was deleted, taking the whole
+-- submission or tenant with it) is let through, so a tenant or a submission
+-- with export history can still be removed. See
+-- `reject_phase_outcome_mutation`'s comment (V92) for why
+-- `pg_trigger_depth() > 1` is the direct/cascade boundary. This function is
+-- shared by both tables' delete triggers below.
 CREATE FUNCTION reject_pipeline_export_snapshot_delete()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'pipeline export snapshots are retained';
 END;
 $$;
