@@ -23,7 +23,9 @@
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{
-    Database, postgres::PgBackend, postgres::apply_and_record_migration,
+    Database,
+    postgres::PgBackend,
+    postgres::{apply_and_record_migration, registered_migrations},
 };
 
 /// Connects and puts the session in a private scratch schema holding its own
@@ -297,6 +299,90 @@ async fn concurrent_migration_runs_do_not_race_on_a_virgin_database() {
     dropped.expect("drop the probe database");
 }
 
+/// A database owned by `owner`, a login with CREATEROLE and nothing more, in
+/// the PostgreSQL 15 shape, the way an operator's migrator holds one. Drops any
+/// copy an earlier run left behind. Returns a superuser connection to the
+/// `postgres` database, for dropping it again afterwards.
+async fn owned_database(url: &str, owner: &str, database: &str) -> tokio_postgres::Client {
+    let admin = connect(&with_database(url, "postgres")).await;
+    admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"),
+            &[],
+        )
+        .await
+        .expect("drop any owner-probe database left by an earlier run");
+    admin
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{owner}') THEN
+                     CREATE ROLE {owner};
+                 END IF;
+             END $$;
+             ALTER ROLE {owner} LOGIN CREATEROLE NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';"
+        ))
+        .await
+        .expect("create the non-superuser owner");
+    // Roles are per server, so on a shared one the roles the migrations create
+    // already exist, made by whoever migrated first. Since PostgreSQL 16
+    // CREATEROLE may only administer roles it holds ADMIN on, which a real
+    // operator's migrator has by having created them. Give the probe the same
+    // standing; on 15 and earlier CREATEROLE already covers it. Login roles
+    // too: V30 runs `ALTER ROLE trace_login_resolver SET statement_timeout`,
+    // and 16 asks for ADMIN there as well -- leaving them out is how this
+    // test's first CI run failed.
+    let sixteen_or_later: bool = admin
+        .query_one(
+            "SELECT current_setting('server_version_num')::int >= 160000",
+            &[],
+        )
+        .await
+        .expect("server version")
+        .get(0);
+    // Listed on every version so the statement is exercised wherever this runs;
+    // only the grants are version-specific.
+    let existing = admin
+        .query(
+            "SELECT rolname FROM pg_roles
+              WHERE rolname LIKE 'trace\\_%' AND NOT rolsuper AND rolname <> $1",
+            &[&owner],
+        )
+        .await
+        .expect("list the roles already on this server");
+    if sixteen_or_later {
+        for row in existing {
+            let role: String = row.get(0);
+            admin
+                .execute(
+                    &format!("GRANT \"{role}\" TO {owner} WITH ADMIN OPTION"),
+                    &[],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("grant admin on {role}: {error}"));
+        }
+    }
+    admin
+        .execute(&format!("CREATE DATABASE {database} OWNER {owner}"), &[])
+        .await
+        .expect("create the owner-probe database");
+
+    // PostgreSQL 15 stopped giving PUBLIC the CREATE privilege on `public` and
+    // handed the schema to the database owner. Put every version in that
+    // shape: on 14 an `ALTER FUNCTION ... OWNER TO` a role that was never
+    // granted CREATE passes by way of PUBLIC, and the migration that forgot the
+    // grant fails only on the servers people actually deploy.
+    connect(&with_database(url, database))
+        .await
+        .batch_execute(&format!(
+            "REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+             ALTER SCHEMA public OWNER TO {owner};"
+        ))
+        .await
+        .expect("put the public schema in its PostgreSQL 15 shape");
+
+    admin
+}
+
 /// Every suite migrates as a superuser, and a superuser may do things the role
 /// an operator is told to migrate with may not. The pilot found one the hard
 /// way: V64, V71 and V72 attached `SET trace_commons.trace_tenant_id = ''` to
@@ -327,81 +413,7 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
 
     const OWNER: &str = "trace_migration_owner_probe";
     const OWNER_DB: &str = "trace_migration_owner_probe_db";
-    let admin = connect(&with_database(&url, "postgres")).await;
-    admin
-        .execute(
-            &format!("DROP DATABASE IF EXISTS {OWNER_DB} WITH (FORCE)"),
-            &[],
-        )
-        .await
-        .expect("drop any owner-probe database left by an earlier run");
-    admin
-        .batch_execute(&format!(
-            "DO $$ BEGIN
-                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{OWNER}') THEN
-                     CREATE ROLE {OWNER};
-                 END IF;
-             END $$;
-             ALTER ROLE {OWNER} LOGIN CREATEROLE NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';"
-        ))
-        .await
-        .expect("create the non-superuser owner");
-    // Roles are per server, so on a shared one the roles the migrations create
-    // already exist, made by whoever migrated first. Since PostgreSQL 16
-    // CREATEROLE may only administer roles it holds ADMIN on, which a real
-    // operator's migrator has by having created them. Give the probe the same
-    // standing; on 15 and earlier CREATEROLE already covers it. Login roles
-    // too: V30 runs `ALTER ROLE trace_login_resolver SET statement_timeout`,
-    // and 16 asks for ADMIN there as well -- leaving them out is how this
-    // test's first CI run failed.
-    let sixteen_or_later: bool = admin
-        .query_one(
-            "SELECT current_setting('server_version_num')::int >= 160000",
-            &[],
-        )
-        .await
-        .expect("server version")
-        .get(0);
-    // Listed on every version so the statement is exercised wherever this runs;
-    // only the grants are version-specific.
-    let existing = admin
-        .query(
-            "SELECT rolname FROM pg_roles
-              WHERE rolname LIKE 'trace\\_%' AND NOT rolsuper AND rolname <> $1",
-            &[&OWNER],
-        )
-        .await
-        .expect("list the roles already on this server");
-    if sixteen_or_later {
-        for row in existing {
-            let role: String = row.get(0);
-            admin
-                .execute(
-                    &format!("GRANT \"{role}\" TO {OWNER} WITH ADMIN OPTION"),
-                    &[],
-                )
-                .await
-                .unwrap_or_else(|error| panic!("grant admin on {role}: {error}"));
-        }
-    }
-    admin
-        .execute(&format!("CREATE DATABASE {OWNER_DB} OWNER {OWNER}"), &[])
-        .await
-        .expect("create the owner-probe database");
-
-    // PostgreSQL 15 stopped giving PUBLIC the CREATE privilege on `public` and
-    // handed the schema to the database owner. Put every version in that
-    // shape: on 14 an `ALTER FUNCTION ... OWNER TO` a role that was never
-    // granted CREATE passes by way of PUBLIC, and the migration that forgot the
-    // grant fails only on the servers people actually deploy.
-    connect(&with_database(&url, OWNER_DB))
-        .await
-        .batch_execute(&format!(
-            "REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-             ALTER SCHEMA public OWNER TO {OWNER};"
-        ))
-        .await
-        .expect("put the public schema in its PostgreSQL 15 shape");
+    let admin = owned_database(&url, OWNER, OWNER_DB).await;
 
     let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
     let config = DatabaseConfig {
@@ -756,4 +768,698 @@ async fn tenant_is_cleared_inside_and_restored_after(url: &str, database: &str) 
         let _ = client.batch_execute("ROLLBACK").await;
     }
     problems
+}
+
+/// The pilot's hand-made runtime grants, taken once when the schema was at V62
+/// (from the cutover rehearsal harness). `pg_default_acl` is empty there, so
+/// every table a later migration creates is invisible to the group until
+/// something grants on it.
+const PILOT_V62_RUNTIME_GRANTS: &str = "
+    GRANT USAGE ON SCHEMA public TO trace_ingest_runtime;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trace_ingest_runtime;
+    REVOKE ALL ON trace_admission_receipts, trace_admission_global_budget FROM trace_ingest_runtime;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trace_ingest_runtime;
+    GRANT EXECUTE ON FUNCTION
+        trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),
+        trace_transition_admission(TEXT,UUID,UUID,TEXT)
+        TO trace_ingest_runtime;
+    GRANT EXECUTE ON FUNCTION trace_prune_onboarding_expiry(TEXT,INTEGER,BOOLEAN)
+        TO trace_ingest_runtime;
+    GRANT CREATE ON SCHEMA public TO trace_ingest_runtime;";
+
+/// The migration under test: the first one that grants to `trace_ingest_runtime`.
+const RUNTIME_GRANTS_VERSION: i32 = 90;
+
+fn v90_submission(
+    tenant: &str,
+    submission_id: uuid::Uuid,
+    principal: &str,
+) -> trace_commons_server::trace_corpus_storage::TraceSubmissionWrite {
+    use trace_commons_server::trace_corpus_storage::{TraceCorpusStatus, TraceSubmissionWrite};
+    TraceSubmissionWrite {
+        tenant_id: tenant.into(),
+        submission_id,
+        trace_id: uuid::Uuid::new_v4(),
+        auth_principal_ref: principal.into(),
+        contributor_pseudonym: None,
+        submitted_tenant_scope_ref: None,
+        schema_version: "ironclaw.trace_contribution.v1".into(),
+        consent_policy_version: "2026-04-24".into(),
+        consent_scopes: vec!["debugging".into()],
+        allowed_uses: vec!["debugging".into()],
+        retention_policy_id: "standard".into(),
+        status: TraceCorpusStatus::Accepted,
+        privacy_risk: "low".into(),
+        redaction_pipeline_version: "deterministic-v1".into(),
+        redaction_counts: std::collections::BTreeMap::new(),
+        redaction_hash: "sha256:v90-probe".into(),
+        canonical_summary_hash: None,
+        submission_score: None,
+        credit_points_pending: None,
+        credit_points_final: None,
+        expires_at: None,
+        residual_risk_basis: None,
+    }
+}
+
+fn pg_backend(url: String) -> DatabaseConfig {
+    DatabaseConfig {
+        url: SecretString::from(url),
+        pool_size: 2,
+        ssl_mode: SslMode::Prefer,
+        login_resolver_url: None,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    }
+}
+
+/// `Err` rendered with the server's message, which is what names the table.
+fn denial<T: std::fmt::Debug>(
+    result: Result<T, trace_commons_server::error::DatabaseError>,
+) -> String {
+    match result {
+        Ok(value) => format!("succeeded: {value:?}"),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+/// V90 against the database the pilot actually has, not the one CI has.
+///
+/// The pilot's ingest login holds its privileges through a hand-made group,
+/// `trace_ingest_runtime`, granted table-wide once at V62. Nothing migrated
+/// since then granted it anything, so on the cutover build every submission
+/// (`FOR UPDATE` on the V78 source-session row), every idempotent re-POST (the
+/// V76 witness-evidence read) and every withdrawal (V78, plus the V65-V68
+/// token-bundle trigger) failed with `permission denied`, and the table-wide
+/// `UPDATE ON trace_accounts` it was given failed account admission's readiness
+/// check. CI never sees any of it, because CI migrates and serves as one
+/// superuser.
+///
+/// So: a non-superuser CREATEROLE owner migrates to V62, the pilot's grants are
+/// applied, the owner migrates to just below V90, and the store methods those
+/// routes call run as a login in that group -- first to show each one refused,
+/// then, once the real runner has applied V90, to show each one working.
+#[tokio::test]
+async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_need() {
+    use trace_commons_protocol::token_distribution::{
+        ContentDigest, ContributionBundleManifest, TokenUsageProfile,
+    };
+    use trace_commons_server::token_bundle_store::{StoredTokenBundle, StoredTokenObject};
+    use trace_commons_server::trace_artifact_store::{
+        TraceArtifactKind, TraceArtifactObjectRef, TraceArtifactProviderKind,
+    };
+    use trace_commons_server::trace_corpus_storage::{
+        TraceCorpusStatus, TraceCorpusStore, TraceSourceSessionStatus,
+    };
+
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "trace_v90_owner_probe";
+    const DB: &str = "trace_v90_runtime_probe_db";
+    // Released clients: ingest with account admission off.
+    const INGEST: &str = "trace_v90_probe_ingest";
+    // The same login once account admission is switched on.
+    const ADMISSION: &str = "trace_v90_probe_admission";
+
+    // The group exists before any of this, made by hand, as on the pilot.
+    // Roles are per server: strip whatever another database's V90 (or an
+    // interrupted run) already gave these roles, so the "before" half sees
+    // only what the pilot has.
+    let server = connect(&with_database(&url, "postgres")).await;
+    server
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
+                     CREATE ROLE trace_ingest_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+                 END IF;
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{INGEST}') THEN
+                     CREATE ROLE {INGEST} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';
+                 END IF;
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ADMISSION}') THEN
+                     CREATE ROLE {ADMISSION} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'probe';
+                 END IF;
+             END $$;"
+        ))
+        .await
+        .expect("create the runtime group and its logins");
+    let sixteen_or_later: bool = server
+        .query_one(
+            "SELECT current_setting('server_version_num')::int >= 160000",
+            &[],
+        )
+        .await
+        .expect("server version")
+        .get(0);
+    let memberships = server
+        .query(
+            "SELECT g.rolname, m.rolname, gr.rolname
+               FROM pg_auth_members a
+               JOIN pg_roles g ON g.oid = a.roleid
+               JOIN pg_roles m ON m.oid = a.member
+               JOIN pg_roles gr ON gr.oid = a.grantor
+              WHERE m.rolname IN ('trace_ingest_runtime', $1, $2)",
+            &[&INGEST, &ADMISSION],
+        )
+        .await
+        .expect("list the memberships left on this server");
+    for row in memberships {
+        let (granted, member, grantor): (String, String, String) =
+            (row.get(0), row.get(1), row.get(2));
+        // Before 16 a membership is one row whoever granted it; since 16 each
+        // grantor's grant is its own row, and a superuser's REVOKE removes only
+        // its own unless told whose.
+        let revoke = if sixteen_or_later {
+            format!("REVOKE \"{granted}\" FROM \"{member}\" GRANTED BY \"{grantor}\"")
+        } else {
+            format!("REVOKE \"{granted}\" FROM \"{member}\"")
+        };
+        server
+            .batch_execute(&revoke)
+            .await
+            .unwrap_or_else(|error| panic!("{revoke}: {error}"));
+    }
+    server
+        .batch_execute(&format!(
+            "GRANT trace_ingest_runtime TO {INGEST}, {ADMISSION};"
+        ))
+        .await
+        .expect("put both logins in the group");
+    drop(server);
+
+    let admin = owned_database(&url, OWNER, DB).await;
+    let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
+    let mut owner = connect(&owner_url).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    let migrations = registered_migrations();
+    for (version, name, sql) in migrations.iter().filter(|(version, ..)| *version <= 62) {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply V{version}: {error:?}"));
+    }
+    owner
+        .batch_execute(PILOT_V62_RUNTIME_GRANTS)
+        .await
+        .expect("the pilot's V62-era runtime grants");
+    for (version, name, sql) in migrations
+        .iter()
+        .filter(|(version, ..)| *version > 62 && *version < RUNTIME_GRANTS_VERSION)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply V{version}: {error:?}"));
+    }
+    // The one runtime grant the pilot took at V74, per deployment.md.
+    owner
+        .batch_execute("GRANT trace_public_run_runtime TO trace_ingest_runtime;")
+        .await
+        .expect("the pilot's V74 runtime grant");
+
+    let superuser = PgBackend::new(&pg_backend(with_database(&url, DB)))
+        .await
+        .expect("superuser backend");
+    let ingest = PgBackend::new(&pg_backend(with_user(
+        &with_database(&url, DB),
+        INGEST,
+        "probe",
+    )))
+    .await
+    .expect("ingest backend");
+    let admission = PgBackend::new(&pg_backend(with_user(
+        &with_database(&url, DB),
+        ADMISSION,
+        "probe",
+    )))
+    .await
+    .expect("admission backend");
+    let ingest_raw = connect(&with_user(&with_database(&url, DB), INGEST, "probe")).await;
+
+    // Switching account admission on grants its role to the ingest login. The
+    // readiness check is asked before any account exists, so linkage cannot
+    // be what refuses it.
+    owner
+        .batch_execute(&format!(
+            "GRANT trace_account_admission_runtime TO {ADMISSION};"
+        ))
+        .await
+        .expect("grant the admission role");
+    let readiness_before = admission.account_admission_runtime_ready().await;
+
+    // Fixtures, as the superuser: one account with one device principal, an
+    // accepted submission with a staged token bundle, and nothing else.
+    let tenant = format!("tenant-v90-{}", uuid::Uuid::new_v4().simple());
+    let account = uuid::Uuid::new_v4();
+    let principal = format!("principal:v90:{}", uuid::Uuid::new_v4().simple());
+    let existing = uuid::Uuid::new_v4();
+    let fresh = uuid::Uuid::new_v4();
+    let claimed = uuid::Uuid::new_v4();
+    let digest = [0x90u8; 32];
+    let db_client = connect(&with_database(&url, DB)).await;
+    db_client
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .expect("tenant");
+    db_client
+        .execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&tenant, &account],
+        )
+        .await
+        .expect("account");
+    db_client
+        .execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES ($1, $2, $3)",
+            &[&tenant, &account, &principal],
+        )
+        .await
+        .expect("principal");
+    superuser
+        .upsert_trace_submission(v90_submission(&tenant, existing, &principal))
+        .await
+        .expect("an accepted submission");
+    let revision = "v90-revision".to_string();
+    superuser
+        .begin_token_bundle(StoredTokenBundle {
+            tenant_id: tenant.clone(),
+            submission_id: existing,
+            revision: revision.clone(),
+            owner_ref: principal.clone(),
+            manifest: ContributionBundleManifest {
+                version: 1,
+                usage_profile: TokenUsageProfile::RestrictedResearch,
+                submission_id: existing.to_string(),
+                bundle_revision: revision.clone(),
+                envelope_digest: ContentDigest::of(b"envelope"),
+                consent_digest: ContentDigest::of(b"consent"),
+                policy_version: "policy".into(),
+                attachments: Vec::new(),
+            },
+            witness_headers: std::collections::BTreeMap::new(),
+            state: "staging".into(),
+            processing_state: "pending".into(),
+            processing_summary: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            receipt: None,
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("a token bundle");
+    superuser
+        .stage_token_object(
+            &tenant,
+            existing,
+            &revision,
+            &principal,
+            StoredTokenObject {
+                artifact_id: "envelope".into(),
+                object_ref: TraceArtifactObjectRef {
+                    provider_kind: TraceArtifactProviderKind::LocalEncrypted,
+                    object_store: "v90-probe".into(),
+                    tenant_storage_ref: "tenant-ref".into(),
+                    submission_storage_ref: "submission-ref".into(),
+                    artifact_kind: TraceArtifactKind::TokenDistribution,
+                    object_key: "v90/probe".into(),
+                    ciphertext_sha256: "0".repeat(64),
+                },
+                deleted: false,
+                ready: false,
+                prepared: Some(vec![1]),
+            },
+        )
+        .await
+        .expect("a staged token object");
+
+    // What the pilot's runtime is refused, one route at a time.
+    let mut before = Vec::new();
+    before.push((
+        "submit: a new submission",
+        "permission denied for table trace_submission_sessions",
+        denial(
+            ingest
+                .upsert_trace_submission(v90_submission(&tenant, fresh, &principal))
+                .await,
+        ),
+    ));
+    before.push((
+        "re-POST: the witness-evidence retry read",
+        "permission denied for table trace_witness_certificate_evidence",
+        denial(
+            ingest
+                .witness_retry_identity_matches(&tenant, existing, None, None, b"body")
+                .await,
+        ),
+    ));
+    before.push((
+        "withdraw: the source-session mapping",
+        "permission denied for table trace_submission_sessions",
+        denial(
+            ingest
+                .withdraw_trace_source_session(&tenant, account, existing, chrono::Utc::now())
+                .await,
+        ),
+    ));
+    // The raw statement, so the token trigger is what refuses it rather than
+    // the source-session lock the store method takes first.
+    before.push((
+        "withdraw: revoking fires the token-bundle trigger",
+        "permission denied for table trace_token_bundles",
+        denial(
+            ingest_raw
+                .batch_execute(&format!(
+                    "BEGIN;
+                     SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+                     UPDATE trace_submissions SET status = 'revoked'
+                      WHERE tenant_id = '{tenant}' AND submission_id = '{existing}';
+                     COMMIT;"
+                ))
+                .await
+                .map_err(trace_commons_server::error::DatabaseError::Postgres),
+        ),
+    ));
+    let _ = ingest_raw.batch_execute("ROLLBACK").await;
+    before.push((
+        "withdraw: the pending token-bundle deletions",
+        "permission denied for table trace_token_bundles",
+        denial(
+            ingest
+                .pending_token_bundle_deletions(&tenant, Some(existing))
+                .await
+                .map(|pending| pending.len()),
+        ),
+    ));
+    before.push((
+        "account admission: claiming a source session",
+        "permission denied for table trace_source_sessions",
+        denial(
+            admission
+                .claim_trace_source_session(&tenant, account, &digest, claimed)
+                .await,
+        ),
+    ));
+    let account_id_writable_before: bool = db_client
+        .query_one(
+            "SELECT has_column_privilege($1, 'trace_accounts', 'account_id', 'UPDATE')",
+            &[&ADMISSION],
+        )
+        .await
+        .expect("account_id privilege")
+        .get(0);
+
+    // The real runner applies V90, as the owner.
+    let owner_backend = PgBackend::new(&pg_backend(owner_url.clone()))
+        .await
+        .expect("owner backend");
+    let migrated = owner_backend
+        .run_migrations()
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    let mut after = Vec::new();
+    after.push((
+        "submit: a new submission",
+        denial(
+            ingest
+                .upsert_trace_submission(v90_submission(&tenant, fresh, &principal))
+                .await
+                .map(|record| record.status),
+        ),
+    ));
+    after.push((
+        "re-POST: the witness-evidence retry read",
+        denial(
+            ingest
+                .witness_retry_identity_matches(&tenant, existing, None, None, b"body")
+                .await,
+        ),
+    ));
+    after.push((
+        "withdraw: the source-session mapping",
+        denial(
+            ingest
+                .withdraw_trace_source_session(&tenant, account, existing, chrono::Utc::now())
+                .await
+                .map(|mapped| mapped.is_some()),
+        ),
+    ));
+    after.push((
+        "withdraw: revoking through the store, which fires the trigger",
+        denial(
+            ingest
+                .update_trace_submission_status(
+                    &tenant,
+                    existing,
+                    TraceCorpusStatus::Revoked,
+                    &principal,
+                    Some("withdrawn"),
+                )
+                .await,
+        ),
+    ));
+    after.push((
+        "withdraw: the pending token-bundle deletions",
+        denial(
+            ingest
+                .pending_token_bundle_deletions(&tenant, Some(existing))
+                .await
+                .map(|pending| {
+                    pending
+                        .iter()
+                        .map(|bundle| (bundle.state.clone(), bundle.attachments.len()))
+                        .collect::<Vec<_>>()
+                }),
+        ),
+    ));
+    after.push((
+        "withdraw: marking the token object deleted",
+        denial(
+            ingest
+                .mark_token_object_deleted(&tenant, existing, &revision, "envelope")
+                .await,
+        ),
+    ));
+    after.push((
+        "withdraw: nothing left pending once the object is deleted",
+        denial(
+            ingest
+                .pending_token_bundle_deletions(&tenant, Some(existing))
+                .await
+                .map(|pending| pending.len()),
+        ),
+    ));
+    after.push((
+        "account admission: claiming a source session",
+        denial(
+            admission
+                .claim_trace_source_session(&tenant, account, &digest, claimed)
+                .await,
+        ),
+    ));
+    after.push((
+        "account admission: submitting into the claimed session",
+        denial(
+            ingest
+                .upsert_trace_submission(v90_submission(&tenant, claimed, &principal))
+                .await
+                .map(|record| record.status),
+        ),
+    ));
+    after.push((
+        "account admission: withdrawing the claimed session",
+        denial(
+            admission
+                .withdraw_trace_source_session(&tenant, account, claimed, chrono::Utc::now())
+                .await
+                .map(|mapped| mapped.map(|mapped| mapped.affected_submission_ids)),
+        ),
+    ));
+    after.push((
+        "account admission: the session reads back withdrawn",
+        denial(
+            ingest
+                .get_trace_source_session_status(&tenant, account, &digest)
+                .await
+                .map(|status| status == TraceSourceSessionStatus::Withdrawn),
+        ),
+    ));
+    // An account merge closes the absorbed account as the runtime; that is the
+    // one trace_accounts column ingest writes. Closing it also clears the
+    // linkage condition for the readiness check below.
+    after.push((
+        "account merge: closing an account",
+        denial(
+            ingest_raw
+                .batch_execute(&format!(
+                    "BEGIN;
+                     SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+                     UPDATE trace_accounts SET closed_at = now()
+                      WHERE tenant_id = trace_current_tenant_id() AND account_id = '{account}'
+                        AND closed_at IS NULL;
+                     COMMIT;"
+                ))
+                .await
+                .map_err(trace_commons_server::error::DatabaseError::Postgres),
+        ),
+    ));
+    let _ = ingest_raw.batch_execute("ROLLBACK").await;
+    let identity_rewrite = denial(
+        ingest_raw
+            .batch_execute(&format!(
+                "BEGIN;
+                 SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+                 UPDATE trace_accounts SET account_id = account_id
+                  WHERE tenant_id = trace_current_tenant_id();
+                 COMMIT;"
+            ))
+            .await
+            .map_err(trace_commons_server::error::DatabaseError::Postgres),
+    );
+    let _ = ingest_raw.batch_execute("ROLLBACK").await;
+    let readiness_after = admission.account_admission_runtime_ready().await;
+
+    // Applying V90's SQL a second time changes nothing and fails nothing.
+    let reapplied = match migrations
+        .iter()
+        .find(|(version, ..)| *version == RUNTIME_GRANTS_VERSION)
+    {
+        Some((_, _, sql)) => owner
+            .batch_execute(sql)
+            .await
+            .map_err(|error| format!("{error:?}")),
+        None => Err(format!(
+            "V{RUNTIME_GRANTS_VERSION} is not wired into the runner"
+        )),
+    };
+    let readiness_after_reapply = admission.account_admission_runtime_ready().await;
+
+    drop((
+        superuser,
+        ingest,
+        admission,
+        owner_backend,
+        ingest_raw,
+        db_client,
+        owner,
+    ));
+    let dropped = admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await;
+    // The probe logins held privileges only in the database just dropped. The
+    // group stays: another database on this server may have migrated to V90.
+    if dropped.is_ok() {
+        admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS {INGEST}, {ADMISSION};"))
+            .await
+            .expect("drop the probe logins");
+    }
+
+    // Before V90: every route refused, and refused on the table it names.
+    let wrong_before: Vec<String> = before
+        .iter()
+        .filter(|(_, expected, got)| !got.contains(expected))
+        .map(|(route, expected, got)| format!("{route}: expected `{expected}`, got {got}"))
+        .collect();
+    assert!(
+        wrong_before.is_empty(),
+        "before V90 each route must be refused the way the pilot refuses it:\n  {}",
+        wrong_before.join("\n  ")
+    );
+    assert!(
+        account_id_writable_before,
+        "before V90 the pilot's table-wide grant lets the runtime rewrite trace_accounts.account_id"
+    );
+    assert!(
+        matches!(readiness_before, Ok(false)),
+        "before V90 account admission's readiness refuses the pilot's runtime: {readiness_before:?}"
+    );
+
+    assert_eq!(migrated, Ok(()), "the owner applies V90 through the runner");
+    let expected_after: Vec<(&str, String)> = vec![
+        ("submit: a new submission", "Ok(Accepted)".into()),
+        (
+            "re-POST: the witness-evidence retry read",
+            "Ok(None)".into(),
+        ),
+        ("withdraw: the source-session mapping", "Ok(false)".into()),
+        (
+            "withdraw: revoking through the store, which fires the trigger",
+            "Ok(())".into(),
+        ),
+        (
+            "withdraw: the pending token-bundle deletions",
+            "Ok([(\"revoked\", 1)])".into(),
+        ),
+        (
+            "withdraw: marking the token object deleted",
+            "Ok(())".into(),
+        ),
+        (
+            "withdraw: nothing left pending once the object is deleted",
+            "Ok(0)".into(),
+        ),
+        (
+            "account admission: claiming a source session",
+            "Ok(Active)".into(),
+        ),
+        (
+            "account admission: submitting into the claimed session",
+            "Ok(Accepted)".into(),
+        ),
+        (
+            "account admission: withdrawing the claimed session",
+            format!("Ok(Some([{claimed}]))"),
+        ),
+        (
+            "account admission: the session reads back withdrawn",
+            "Ok(true)".into(),
+        ),
+        ("account merge: closing an account", "Ok(())".into()),
+    ];
+    let got_after: Vec<(&str, String)> = after
+        .iter()
+        .map(|(route, got)| {
+            let got = got
+                .strip_prefix("succeeded: ")
+                .map(|value| format!("Ok({value})"))
+                .unwrap_or_else(|| got.clone());
+            (*route, got)
+        })
+        .collect();
+    assert_eq!(
+        got_after, expected_after,
+        "after V90 the same runtime must complete every route"
+    );
+    assert!(
+        identity_rewrite.contains("permission denied for table trace_accounts"),
+        "after V90 the runtime may not rewrite account identity: {identity_rewrite}"
+    );
+    assert!(
+        matches!(readiness_after, Ok(true)),
+        "after V90 account admission's readiness accepts the runtime: {readiness_after:?}"
+    );
+    assert_eq!(reapplied, Ok(()), "V90 is idempotent");
+    assert!(
+        matches!(readiness_after_reapply, Ok(true)),
+        "re-applying V90 keeps the runtime ready: {readiness_after_reapply:?}"
+    );
+    dropped.expect("drop the V90 probe database");
 }

@@ -6,6 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# TEST-ONLY. Routes both OS credential stores (device key, account session,
+# Cloud credentials) to a plaintext file store inside the config directory,
+# and makes `OsSecretBackend::new` refuse. Integration tests link this crate
+# without `cfg(test)`, so without it every test that generated a device
+# identity wrote a real login-keychain item and left it there.
+#
+# Enabled ONLY by the self dev-dependency below, which cargo activates for
+# `cargo test` and never for `cargo build`/`--release` of a shipped binary.
+# Never enable it anywhere else. `tests/credential_store_isolation.rs` fails
+# if the wiring is lost.
+test-credential-store = []
+
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
@@ -614,6 +627,8 @@ apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
 
 [dev-dependencies]
+# Itself, for the test-only feature: see `test-credential-store` above.
+trace-commons-contributor = { path = ".", features = ["test-credential-store"] }
 axum = "0.8"
 # Signing test certificates, so the certificate-verification tests exercise
 # real secp256k1/EIP-191 rather than a fixture nobody can regenerate. Both are
