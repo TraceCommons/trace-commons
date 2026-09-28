@@ -80,7 +80,24 @@ final class AppModel: ObservableObject {
     init(daemonStartup: DaemonStartup? = nil) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
     }
-    @Published private(set) var status: DaemonStatus = .unknown
+    @Published private(set) var status: DaemonStatus = .unknown {
+        didSet {
+            // Worded across the ABI once per notice the daemon sends, not on
+            // every re-render of the card.
+            if status.legacyInviteMigration != oldValue.legacyInviteMigration {
+                legacyMigrationNotice = status.legacyInviteMigration.noticeJSON
+                    .flatMap(legacyMigrationWording)
+                    .flatMap(LegacyMigrationNotice.decode(fromJSON:))
+            }
+        }
+    }
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the Rust's words, or nil when there is none or it cannot be read.
+    @Published private(set) var legacyMigrationNotice: LegacyMigrationNotice?
+    /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
+    /// replaced only by tests.
+    var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
+        forNotice:)
     @Published private(set) var pending: [QueueEntry] = [] {
         didSet { recomputeWaiting() }
     }
@@ -98,7 +115,12 @@ final class AppModel: ObservableObject {
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
-    @Published private(set) var daemonSettings: DaemonSettingsView?
+    @Published private(set) var daemonSettings: DaemonSettingsView? {
+        // A settings write can change what leaves this machine -- inference
+        // evidence adds or removes the prompt-and-reply line, a filter change
+        // moves the local route's -- so the disclosure moves with it.
+        didSet { if daemonSettings != oldValue { refreshRouteDisclosure() } }
+    }
 
     // MARK: - The local proxy
 
@@ -723,11 +745,19 @@ final class AppModel: ObservableObject {
 
     // MARK: - What leaves this machine (K11)
 
-    /// The daemon's facts in the shared crate's words, or nil when they
-    /// could not be read -- `routeDisclosureUnreadable` then says so, and
-    /// nothing is drawn in its place.
-    @Published private(set) var routeDisclosure: RouteDisclosure?
-    @Published private(set) var routeDisclosureUnreadable = false
+    /// The daemon's facts in the shared crate's words, or where the panel
+    /// stands without them: loading before the first answer, unreadable when
+    /// there is no daemon to ask or its answer did not decode. Never a blank
+    /// panel, which would read as nothing to disclose.
+    @Published private(set) var routeDisclosureState: RouteDisclosureState = .loading
+    var routeDisclosure: RouteDisclosure? {
+        if case .shown(let disclosure) = routeDisclosureState { return disclosure }
+        return nil
+    }
+    /// Which read is the latest asked for. Each read is its own detached
+    /// task, so answers can land out of order; only the latest one's is
+    /// published, and an older answer arriving after it is dropped.
+    private var routeDisclosureGeneration: UInt64 = 0
     /// The Rust's words for that case, read once: they do not change.
     let routeDisclosureUnreadableCopy: RouteDisclosureUnreadable? =
         TCConsentCopy.routeDisclosureUnreadableJSON().flatMap {
@@ -736,16 +766,25 @@ final class AppModel: ObservableObject {
     /// Held certificates' claims, by entry id, for the review sheet.
     @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
 
+    /// Re-read what leaves this machine. Called wherever a fact it states
+    /// can change: the witness, enrolment, and any settings write (through
+    /// `daemonSettings`), as well as when a disclosure surface appears.
     func refreshRouteDisclosure() {
-        guard let client else { return }
+        routeDisclosureGeneration &+= 1
+        let generation = routeDisclosureGeneration
+        guard let client else {
+            publishIfChanged(\.routeDisclosureState, .unreadable)
+            return
+        }
         Task.detached(priority: .userInitiated) {
             let facts = try? client.routeDisclosureFactsJSON()
             let disclosure = facts
                 .flatMap { TCConsentCopy.routeDisclosureJSON(forFacts: $0) }
                 .flatMap { RouteDisclosure.decode(fromJSON: $0) }
             await MainActor.run {
-                self.publishIfChanged(\.routeDisclosure, disclosure)
-                self.publishIfChanged(\.routeDisclosureUnreadable, disclosure == nil)
+                guard generation == self.routeDisclosureGeneration else { return }
+                self.publishIfChanged(
+                    \.routeDisclosureState, disclosure.map { .shown($0) } ?? .unreadable)
             }
         }
     }
@@ -1522,13 +1561,17 @@ final class AppModel: ObservableObject {
 
     func enroll(invite: String, scopes: [String] = []) async -> EnrollOutcome {
         guard let client else { return .failed }
-        return await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
+        let outcome = await Task.detached(priority: .userInitiated) { () -> EnrollOutcome in
             do {
                 return .succeeded(try client.enroll(invite: invite, scopes: scopes))
             } catch {
                 return .failed
             }
         }.value
+        // Enrolling moves the route off `not_enrolled`; a failure may still
+        // have landed, so re-read either way.
+        refreshRouteDisclosure()
+        return outcome
     }
 
     /// Records that the NEAR AI first-use notice was shown, and clears the
@@ -1581,6 +1624,17 @@ final class AppModel: ObservableObject {
                 self.refreshProjects()
                 self.refreshAudit()
             }
+        }
+    }
+
+    /// Records that the legacy invite migration notice was shown, then
+    /// re-reads status so the daemon, not this shell, decides it is gone.
+    func acknowledgeLegacyInviteMigration() {
+        perform(
+            "acknowledge_legacy_invite_migration",
+            work: { try $0.acknowledgeLegacyInviteMigration() }
+        ) { _ in
+            self.refreshStatus()
         }
     }
 
@@ -1687,6 +1741,9 @@ final class AppModel: ObservableObject {
             }
             inferenceEvidenceSaveFailed = true
         }
+        // A lost answer does not prove the write failed, and an unchanged
+        // settings view triggers no re-read of its own: ask the daemon.
+        refreshRouteDisclosure()
     }
 
     @Published private(set) var tokenStorageNotice = ""

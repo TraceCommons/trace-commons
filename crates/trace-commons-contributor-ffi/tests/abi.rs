@@ -29,7 +29,7 @@ use trace_commons_contributor_ffi::{
     tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
     tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
     tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
-    tc_near_ai_credential_action, tc_near_ai_credential_state_line,
+    tc_legacy_migration_notice, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
     tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
     tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
     tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
@@ -5077,6 +5077,37 @@ fn nothing_waiting_on_the_witness_gets_null() {
         let arg = CString::new(text).unwrap();
         assert!(
             unsafe { tc_witness_capacity_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_legacy_migration_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    for wire in [
+        serde_json::json!({"folders_kept": 2, "automatic_grant_kept": false}),
+        serde_json::json!({"folders_kept": 0, "automatic_grant_kept": false}),
+    ] {
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe { tc_legacy_migration_notice(arg.as_ptr()) });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::legacy_migration_notice_for_wire(&wire).expect("readable"))
+                .unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    }
+}
+
+#[test]
+fn no_legacy_migration_notice_is_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_legacy_migration_notice(std::ptr::null()) }.is_null());
+    for text in ["not json", "null", "\"notice\"", "[]"] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_legacy_migration_notice(arg.as_ptr()) }.is_null(),
             "{text}"
         );
     }
