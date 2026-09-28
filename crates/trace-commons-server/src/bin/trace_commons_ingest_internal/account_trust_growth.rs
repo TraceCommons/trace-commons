@@ -46,6 +46,67 @@ pub(super) fn shadow_policy_from_values(
     }
 }
 
+/// Refusals since process start that the candidate policy would have
+/// admitted. Process-local and label-only; it resets on restart.
+static SHADOW_WOULD_ADMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called on an `account_limit_reached` refusal. Reads the account's latest
+/// shadow evaluation under the candidate policy and, when that tier's
+/// allowance would have fitted the refused reservation, counts it and logs a
+/// label-only line: the number the switch-on decision turns on. Never
+/// changes the refusal, and swallows every error.
+pub(super) async fn observe_shadow_would_admit(
+    state: &AppState,
+    account: &trace_commons_server::account_trust::TrustAccount,
+    period_spend: i64,
+) {
+    let (Some(policy), Some(db)) = (
+        state.account_trust_shadow_policy.as_deref(),
+        state.db_mirror.as_ref(),
+    ) else {
+        return;
+    };
+    let stored = match db
+        .latest_account_trust_evaluation(
+            account,
+            policy.version(),
+            trace_commons_server::account_trust_growth::SHADOW_MODE,
+        )
+        .await
+    {
+        Ok(stored) => stored,
+        Err(error) => {
+            tracing::debug!(
+                error_label = database_error_label(&error),
+                "earned-trust shadow read skipped"
+            );
+            return;
+        }
+    };
+    let head = stored.as_ref().map(|evaluation| {
+        trace_commons_server::account_trust_rule::StoredEvaluationHead {
+            growth_policy_version: &evaluation.growth_policy_version,
+            mode: trace_commons_server::account_trust_growth::SHADOW_MODE,
+            as_of: evaluation.as_of,
+            tier: evaluation.tier,
+        }
+    });
+    if trace_commons_server::account_trust_rule::shadow_would_admit(
+        policy,
+        head,
+        period_spend,
+        Utc::now(),
+    ) {
+        let total = SHADOW_WOULD_ADMIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::info!(
+            shadow_tier = head.map_or(0, |h| h.tier),
+            growth_policy_version = policy.version(),
+            shadow_would_admit_since_start = total,
+            "account_trust_shadow_would_admit"
+        );
+    }
+}
+
 fn worker_unavailable(
     error: &DatabaseError,
     context: &'static str,

@@ -1454,6 +1454,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_evaluations",
         include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
     ),
+    (
+        87,
+        "account_trust_facts_merge",
+        include_str!("../../../../migrations/V87__account_trust_facts_merge.sql"),
+    ),
+    (
+        88,
+        "account_admission_earned_tier",
+        include_str!("../../../../migrations/V88__account_admission_earned_tier.sql"),
+    ),
 ];
 
 #[async_trait]
