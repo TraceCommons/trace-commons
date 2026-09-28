@@ -1868,6 +1868,9 @@ async fn merge_carries_trust_facts_once_and_does_not_double_count_a_week() {
     let before_a = fact_keys(&backend, &tenant, account_a).await;
     let before_b = fact_keys(&backend, &tenant, account_b).await;
     assert_eq!((before_a.len(), before_b.len()), (3, 3));
+    // B also holds a NEAR anchor, so one merge must run both V82's NEAR carry
+    // and V87's fact carry.
+    seed_near_anchor(&backend, &tenant, account_b).await;
 
     let code_hash = unique_code_hash();
     seed_login_link(&backend, &tenant, account_b, &code_hash, false, false).await;
@@ -1909,6 +1912,11 @@ async fn merge_carries_trust_facts_once_and_does_not_double_count_a_week() {
         fact_keys(&backend, &tenant, account_b).await,
         before_b,
         "the absorbed account's rows stay, unreferenced, on the closed account"
+    );
+    assert_eq!(
+        near_rows_by_account(&backend, &tenant, "trace_near_account_anchors").await,
+        vec![(account_a, 1)],
+        "V82's NEAR carry ran in the same merge"
     );
 
     // Two contributions in one week, weekly cap 1: the union counts the week
