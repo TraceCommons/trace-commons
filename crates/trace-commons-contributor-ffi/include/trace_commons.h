@@ -1541,6 +1541,32 @@ char*       tc_grant_void_notice(const char* void_json);
  */
 char*       tc_witness_capacity_notice(const char* capacity_json);
 
+/* The notice for one armed folder whose arming wording no longer claims a
+ * model scrubs its sessions (K5), from one element of status's
+ * arming_rewordings list, passed through as the daemon sent it. Returns an
+ * owned JSON object with title, body, now_heading, scope, limit, no_review,
+ * acknowledge, and ask_first_action / ask_first_failed (null unless the
+ * element carries a project_id); free it with tc_string_free. Acknowledge it
+ * with acknowledge_arming_rewordings and the element's id.
+ *
+ * NULL only for a NULL, non-UTF-8 or unparseable argument, one that is not a
+ * JSON object, and on a caught panic.
+ */
+char*       tc_arming_reworded_notice(const char* rewording_json);
+
+/* The notice for armed folders the automatic-contribution gate is holding,
+ * from status's automatic_contribution_held object, passed through as the
+ * daemon sent it. Returns an owned JSON object with title, body (counted),
+ * reasons (a list of sentences), release, ask_first, and projects (each with
+ * project_id, line, ask_first_action, ask_first_failed); free it with
+ * tc_string_free. It is never acknowledged: it goes when the hold does.
+ *
+ * NULL when nothing is held (held_sessions absent, not a non-negative
+ * integer, or zero), for a NULL, non-UTF-8 or unparseable argument, and on a
+ * caught panic. Show nothing then; do not write a sentence natively.
+ */
+char*       tc_gate_held_notice(const char* held_json);
+
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
  * the opencode-export-version-unsupported health label. No daemon handle needed. */

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   acknowledgeWitnessDisclosure,
+  afterInference,
+  afterPrivacy,
   decideLater,
   goBack,
   grantBlockers,
@@ -125,7 +127,7 @@ test("Decide later saves no scope, gives no grant and lands on Flow 2", async ()
     assert.equal(next.progress.scopesSaved, null);
     assert.equal(next.progress.path, "ask_first");
     assert.equal(next.privacyIncluded, showPrivacy);
-    assert.equal(next.step, showPrivacy ? "privacy" : "projects");
+    assert.equal(next.step, showPrivacy ? "privacy" : "inference");
     // Even a connected contributor who read everything gets no grant.
     const progress = {
       ...next.progress,
@@ -167,8 +169,8 @@ test("Back resets the disclosures read, so the grant needs them again", async ()
     goBack(complete, "disclosure_witness", false).step,
     "disclosure_scrub",
   );
-  assert.equal(goBack(complete, "disclosure_scrub", false).step, "path");
-  assert.equal(goBack(complete, "disclosure_scrub", true).step, "privacy");
+  assert.equal(goBack(complete, "disclosure_scrub", false).step, "inference");
+  assert.equal(goBack(complete, "disclosure_scrub", true).step, "inference");
   assert.equal(goBack(complete, "path", false).step, "consent");
 });
 
@@ -218,4 +220,28 @@ test("a withdraw is confirmed only by re-reading the grant status", async () => 
     /daemon-unavailable/,
   );
   assert.equal(reads, 0);
+});
+
+test("connecting inference is an optional step before the disclosures and projects", () => {
+  // Every path reaches it, after the NEAR AI notice when there is one.
+  for (const path of ["automatic", "ask_first", null]) {
+    assert.equal(afterPrivacy(path), "inference");
+  }
+  // It leads on to the scrub disclosure on the automatic path, and to the
+  // projects step otherwise.
+  assert.equal(afterInference("automatic"), "disclosure_scrub");
+  assert.equal(afterInference("ask_first"), "projects");
+  assert.equal(afterInference(null), "projects");
+  // It is never a grant blocker: skipping it leaves the grant as reachable
+  // as before.
+  assert.deepEqual(grantBlockers(complete), []);
+});
+
+test("Back from connecting inference returns to the step before it", () => {
+  assert.equal(goBack(complete, "inference", true).step, "privacy");
+  assert.equal(goBack(complete, "inference", false).step, "path");
+  const undecided = { ...complete, scopesSaved: null, path: "ask_first" };
+  assert.equal(goBack(undecided, "inference", false).step, "consent");
+  assert.equal(goBack(complete, "projects", false).step, "inference");
+  assert.equal(goBack(complete, "projects", true).step, "inference");
 });

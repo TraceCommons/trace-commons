@@ -63,9 +63,12 @@ use crate::witness::transport::{WitnessedEnvelope, certified_redaction_pipeline_
 /// condition, set and cleared only from full passes (where
 /// `TickReport::gate_blocked` is `Some`), with copy in every shell. An
 /// event-driven pass sees only changed paths, so it can neither raise nor
-/// clear it. The count and the log line exist today; without the health
-/// label, an enforced gate would hold armed work with nothing in the app to
-/// say so.
+/// clear it. The count, the log line, the health label
+/// (`health::LABEL_AUTOMATIC_CONTRIBUTION_HELD`) and
+/// `status.automatic_contribution_held` exist in the daemon, as do the K5
+/// rewording notices (`arming_wording`); switching this on still needs every
+/// shell to show them, or an enforced gate would hold armed work with
+/// nothing in the app to say so.
 pub const ENFORCED: bool = false;
 
 /// A requirement the spec names, by its number there.
@@ -328,6 +331,7 @@ mod tests {
         ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.invalid".to_string(),
