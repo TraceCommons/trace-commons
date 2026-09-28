@@ -412,6 +412,20 @@ final class DaemonClient {
         case unconfirmedWrite
     }
 
+    // MARK: - What leaves this machine (K11)
+
+    /// The daemon's `route_disclosure` facts, as raw JSON for
+    /// `TCConsentCopy.routeDisclosureJSON`, which words them.
+    func routeDisclosureFactsJSON() throws -> String {
+        try rawResultJSON("route_disclosure")
+    }
+
+    /// The held certificate's claims for one pending entry. The daemon
+    /// refuses an entry without one; that refusal is thrown.
+    func certificateDetailJSON(entryID: String) throws -> String {
+        try rawResultJSON("certificate_detail", params: ["entry_id": entryID])
+    }
+
     // MARK: - The tools on this computer
 
     /// Every tool this machine knows about, and its state.

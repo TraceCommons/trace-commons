@@ -1414,6 +1414,49 @@ pub fn route_disclosure_copy(facts: &crate::disclosure::RouteDisclosure) -> Rout
     }
 }
 
+/// The daemon's `route_disclosure` answer, as sent, paired with the words for
+/// it: `{"facts": .., "copy": ..}`. The native shells' entry point (the C ABI's
+/// `tc_route_disclosure_copy`, and GTK directly).
+///
+/// `None` for anything this build cannot read -- an unknown `route` or
+/// `origin` is a newer daemon's answer, and the nearest known value would
+/// claim something the daemon did not say. A shell shows nothing then.
+#[must_use]
+pub fn route_disclosure_for_wire(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let facts: crate::disclosure::RouteDisclosure = serde_json::from_value(value.clone()).ok()?;
+    let copy = route_disclosure_copy(&facts);
+    Some(serde_json::json!({ "facts": facts, "copy": copy }))
+}
+
+/// What a disclosure surface says when the daemon's answer could not be read
+/// -- an older daemon without `route_disclosure`, or a newer route or origin
+/// this build cannot word. Said rather than left blank, so a missing panel is
+/// never mistaken for nothing to disclose.
+///
+/// Approved by Zaki with #1102.
+pub const DISCLOSURE_UNREADABLE: &str = "Where sessions go could not be read.";
+/// The same, on a single session's review.
+///
+/// Approved by Zaki with #1102.
+pub const DISCLOSURE_SESSION_UNREADABLE: &str = "Where this session goes could not be read.";
+
+/// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], for a
+/// shell that cannot hold them as constants (the C ABI's
+/// `tc_route_disclosure_unreadable_copy`).
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct DisclosureUnreadableCopy {
+    pub panel: &'static str,
+    pub session: &'static str,
+}
+
+#[must_use]
+pub fn disclosure_unreadable_copy() -> DisclosureUnreadableCopy {
+    DisclosureUnreadableCopy {
+        panel: DISCLOSURE_UNREADABLE,
+        session: DISCLOSURE_SESSION_UNREADABLE,
+    }
+}
+
 /// The labels for `certificate_detail`, the per-session record of what the
 /// witness was checked against when it reviewed this session.
 ///
@@ -1902,6 +1945,30 @@ mod tests {
             assert!(!wire.to_lowercase().contains("private inference"), "{wire}");
             assert!(!wire.contains("\"\""), "{wire}");
         }
+    }
+
+    /// The native shells hand the daemon's answer through unchanged and get
+    /// back the facts, canonicalised, beside the words for them.
+    #[test]
+    fn route_disclosure_for_wire_pairs_the_facts_with_their_words() {
+        use crate::disclosure::Route;
+        let f = facts(Route::Witness);
+        let wire = serde_json::to_value(&f).unwrap();
+        let out = route_disclosure_for_wire(&wire).expect("readable");
+        assert_eq!(out["facts"], wire);
+        assert_eq!(
+            out["copy"],
+            serde_json::to_value(route_disclosure_copy(&f)).unwrap()
+        );
+        // An unknown route or origin is a newer daemon's answer: refused,
+        // never rendered as the nearest one this build knows.
+        let mut unknown = wire.clone();
+        unknown["route"] = serde_json::json!("somewhere_new");
+        assert!(route_disclosure_for_wire(&unknown).is_none());
+        let mut origin = wire;
+        origin["witness"]["origin"] = serde_json::json!("an_operator");
+        assert!(route_disclosure_for_wire(&origin).is_none());
+        assert!(route_disclosure_for_wire(&serde_json::json!("witness")).is_none());
     }
 
     #[test]
