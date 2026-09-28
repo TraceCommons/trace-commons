@@ -1528,6 +1528,22 @@ char*       tc_consent_gate_help(int32_t pinned);
  */
 char*       tc_grant_void_notice(const char* void_json);
 
+/* The notice after a legacy invite identity moved to the contributor's NEAR
+ * AI account: that their contributions now go under that account, and
+ * whether their automatic folders were kept.
+ *
+ * notice_json is status's legacy_invite_migration.notice object, passed
+ * through as the daemon sent it. Returns an owned JSON object with title,
+ * body, folders and acknowledge; free it with tc_string_free. The folders
+ * sentence is already chosen: do not read folders_kept to choose words
+ * natively. Once shown, call acknowledge_legacy_invite_migration; that is all
+ * the button does.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, JSON null (nothing to
+ * show), anything that is not an object, and on a caught panic.
+ */
+char*       tc_legacy_migration_notice(const char* notice_json);
+
 /* The notice for approved sessions held because the privacy witness is busy.
  *
  * capacity_json is status's witness_capacity object, passed through as the

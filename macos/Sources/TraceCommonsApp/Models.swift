@@ -275,6 +275,9 @@ struct DaemonStatus: Decodable, Equatable {
     /// What the automatic-contribution gate held at the last full pass. A
     /// daemon that predates the field holds nothing.
     let gateHeld: GateHeld
+    /// The notice after a legacy invite identity moved to a NEAR AI account.
+    /// A daemon that predates the field has nothing to show.
+    let legacyInviteMigration: LegacyMigrationWire
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -291,6 +294,7 @@ struct DaemonStatus: Decodable, Equatable {
         case witnessCapacity = "witness_capacity"
         case armingRewordings = "arming_rewordings"
         case gateHeld = "automatic_contribution_held"
+        case legacyInviteMigration = "legacy_invite_migration"
     }
 
     init(
@@ -307,7 +311,8 @@ struct DaemonStatus: Decodable, Equatable {
         grantVoids: [GrantVoidWire] = [],
         witnessCapacity: WitnessCapacity = .none,
         armingRewordings: [ArmingRewordingWire] = [],
-        gateHeld: GateHeld = .none
+        gateHeld: GateHeld = .none,
+        legacyInviteMigration: LegacyMigrationWire = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -323,6 +328,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.witnessCapacity = witnessCapacity
         self.armingRewordings = armingRewordings
         self.gateHeld = gateHeld
+        self.legacyInviteMigration = legacyInviteMigration
     }
 
     init(from decoder: Decoder) throws {
@@ -346,6 +352,9 @@ struct DaemonStatus: Decodable, Equatable {
         armingRewordings =
             try c.decodeIfPresent([ArmingRewordingWire].self, forKey: .armingRewordings) ?? []
         gateHeld = try c.decodeIfPresent(GateHeld.self, forKey: .gateHeld) ?? .none
+        legacyInviteMigration =
+            (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
+            .flatMap { $0 } ?? .none
     }
 
     static let unknown = DaemonStatus(

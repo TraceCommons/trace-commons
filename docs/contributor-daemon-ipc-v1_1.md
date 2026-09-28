@@ -4046,4 +4046,7 @@ on the next pass. The move is audited label-only (`auto-upload-rebaselined`
 per folder, `legacy-invite-migrated`), and
 `status.legacy_invite_migration.notice` stays until
 `acknowledge_legacy_invite_migration`. The words are
-`consent_copy::legacy_migration_*`.
+`consent_copy::legacy_migration_*`. Every shell shows the notice: Tauri
+through its copy commands, macOS and Windows through
+`tc_legacy_migration_notice`, GTK directly; each passes the `notice` object
+through unread and acknowledges with `acknowledge_legacy_invite_migration`.

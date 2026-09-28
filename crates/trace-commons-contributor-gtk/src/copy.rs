@@ -509,8 +509,9 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // two render the shared one.
 pub use trace_commons_contributor::consent_copy::{
     AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, ArmingRewordedNoticeCopy,
-    GATE_NOT_PINNED_HELP, GATE_READY_HELP, GATE_STATEMENT, GateHeldNoticeCopy, VoidNoticeCopy,
-    arming_reworded_notice_for_wire, gate_held_notice_for_wire, gate_help, void_notice_for_wire,
+    GATE_NOT_PINNED_HELP, GATE_READY_HELP, GATE_STATEMENT, GateHeldNoticeCopy,
+    LegacyMigrationNoticeCopy, VoidNoticeCopy, arming_reworded_notice_for_wire,
+    gate_held_notice_for_wire, gate_help, legacy_migration_notice_for_wire, void_notice_for_wire,
     witness_capacity_notice,
 };
 pub use trace_commons_contributor::daemon::health::LABEL_AUTOMATIC_CONTRIBUTION_HELD as GATE_HELD_LABEL;
