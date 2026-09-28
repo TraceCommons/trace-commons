@@ -520,3 +520,101 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
         .get(0);
     assert_eq!(visible, 0, "another tenant's trust stays hidden under RLS");
 }
+
+/// The cutover path for a shared event invite (docs/operator/
+/// legacy-invite-migration.md): one registry code, `derived`, redeemed by
+/// many NEAR accounts, with `max_uses` counting accounts. A repeat by an
+/// account that already redeemed it spends nothing, and a `fixed`-tenant
+/// code -- the shape an imported file invite takes -- is refused to every
+/// NEAR account, so the old pooled codes cannot be carried onto accounts.
+#[tokio::test]
+async fn one_shared_code_admits_many_accounts_up_to_max_uses() {
+    let Ok(url) = std::env::var("TRACE_COMMONS_ACCOUNT_TRUST_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated account trust PostgreSQL fixture required");
+        return;
+    };
+    let parsed = reqwest::Url::parse(&url).expect("test database URL");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(parsed.path().starts_with("/admission_test_account_trust"));
+    let admin_db = PgBackend::new(&config(url.clone())).await.unwrap();
+    admin_db.run_migrations().await.unwrap();
+    let admin = admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    admin.batch_execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_account_invite_runtime') THEN CREATE ROLE tc_account_invite_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT trace_account_invite_runtime TO tc_account_invite_runtime;").await.unwrap();
+    let mut runtime_url = reqwest::Url::parse(&url).unwrap();
+    runtime_url
+        .set_username("tc_account_invite_runtime")
+        .unwrap();
+    let runtime = PgBackend::new(&config(runtime_url.into())).await.unwrap();
+
+    let shared = seed_invite(&admin, &format!("SHARED-{}", Uuid::new_v4()), 3).await;
+    let mut accounts = Vec::new();
+    for prefix in ["near", "nearai", "near", "nearai"] {
+        let tenant = format!("{prefix}-{}", Uuid::new_v4().simple().to_string().repeat(2));
+        let account = Uuid::new_v4();
+        seed_account(&admin, &tenant, account, true).await;
+        accounts.push((tenant, account));
+    }
+    for (tenant, account) in &accounts[..3] {
+        assert_eq!(
+            runtime
+                .redeem_account_invite(tenant, *account, &shared, Uuid::new_v4())
+                .await
+                .unwrap(),
+            Outcome::Invited { trust_version: 1 },
+            "each distinct account spends one use"
+        );
+    }
+    let (tenant, account) = &accounts[0];
+    assert_eq!(
+        runtime
+            .redeem_account_invite(tenant, *account, &shared, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::Invited { trust_version: 1 },
+        "a repeat by a redeemed account is not a new use"
+    );
+    let (tenant, account) = &accounts[3];
+    assert_eq!(
+        runtime
+            .redeem_account_invite(tenant, *account, &shared, Uuid::new_v4())
+            .await
+            .unwrap(),
+        Outcome::InvalidInvite,
+        "max_uses counts accounts"
+    );
+    let uses: i32 = admin
+        .query_one(
+            "SELECT consumed_uses FROM onboarding_invite_grants WHERE invite_subject_hash = $1",
+            &[&shared],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(uses, 3);
+
+    let imported = hash_invite_code(&format!("IMPORTED-{}", Uuid::new_v4()));
+    admin
+        .execute(
+            "INSERT INTO onboarding_invite_grants
+                (invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
+                 policy_version, max_uses, issuance_source)
+             VALUES ($1, 'pilot', 'fixed', 'tenant-event', 'v1', 2000, 'file_import')",
+            &[&imported],
+        )
+        .await
+        .unwrap();
+    for (tenant, account) in &accounts {
+        assert_eq!(
+            runtime
+                .redeem_account_invite(tenant, *account, &imported, Uuid::new_v4())
+                .await
+                .unwrap(),
+            Outcome::InvalidInvite,
+            "a fixed legacy tenant's code never elevates a NEAR account"
+        );
+    }
+}

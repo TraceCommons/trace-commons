@@ -580,6 +580,31 @@ poldsam and not yet opened. It must meet all of the following:
   is no migration: the logout rule applies, and a re-grant arms nothing
   already on disk.
 
+**The server side of the migration (decided 2026-09-27, V81).** Runbook:
+`docs/operator/legacy-invite-migration.md`.
+
+- **Coexistence, opt-in.** Legacy invite devices and tenants keep working
+  unchanged; account admission governs `near-`/`nearai-` only. Readiness no
+  longer requires every legacy identity to be linked before account admission
+  is enabled: invite-onboarded legacy identities, linked or not, and pooled
+  tenants coexist. Only an ambiguous identity blocks -- chiefly a non-pooled
+  tenant claimed by two accounts. This relaxes the ordering above: the server
+  may enable account admission before any invitee has linked, and each
+  invitee's client migrates when its contributor chooses.
+- **The redemption record above is the link record.** The daemon holds a
+  statement signed by the legacy device key, naming the legacy tenant, device,
+  invite, NEAR account and a server nonce, and ingest's countersignature over
+  the stored record (`POST /v1/account/invites/legacy-link`). The link is per
+  tenant, one tenant to one account, and carries the tenant's invite onto the
+  account without spending a use. A revoked invite does not carry over; an
+  expired, already-redeemed one does.
+- **Pooled tenants never link.** An operator marks a tenant shared by many
+  people (the Devfolio event invites); such a tenant stays in coexistence.
+  When an event moves off its bulk invite, new participants redeem a shared
+  registry code on their NEAR accounts, the old code stops onboarding at a
+  time the operator chooses, existing pooled devices keep contributing until
+  the tenant is retired, and history stays attributed to the pooled tenant.
+
 ### R7. The data-use scope is chosen
 
 Flow 1 replaces today's consent screen, and that screen **is** the "How may
