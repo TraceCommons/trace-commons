@@ -1765,8 +1765,9 @@ struct MintLoginLinkResponse {
 /// `status`: minting a login link is an authority the device key already has,
 /// and the loopback flow adds none.
 ///
-/// Returns the root-relative path only. The caller joins it onto the
-/// configured ingest base URL; it is never logged.
+/// Returns the root-relative path only. The caller joins it onto the ingest
+/// ORIGIN (`config::ingest_origin_url`), never onto `ingest_url` itself, which
+/// carries the upload path; it is never logged.
 pub async fn mint_account_login_link(
     store: &ConfigStore,
     cfg: &ContributorConfig,
