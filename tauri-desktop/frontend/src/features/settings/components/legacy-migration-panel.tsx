@@ -87,7 +87,7 @@ export function LegacyMigrationPanel({ status }: { status: unknown }) {
       )}
       {migrate.isError && (
         <p className="mt-3 text-[13px] text-destructive" role="alert">
-          The move could not be started. Nothing was changed.
+          {copy.data.start_failed}
         </p>
       )}
     </section>

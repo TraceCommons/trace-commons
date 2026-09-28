@@ -41,6 +41,7 @@ test("the core's words are required in full", () => {
     action: "a",
     working: "w",
     invite_prompt: "p",
+    start_failed: "f",
   };
   assert.deepEqual(parseLegacyMigrationOffer(offer), offer);
   assert.throws(() => parseLegacyMigrationOffer({ ...offer, action: "" }));

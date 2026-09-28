@@ -18,6 +18,7 @@ export type LegacyMigrationOffer = {
   action: string;
   working: string;
   invite_prompt: string;
+  start_failed: string;
 };
 
 /** The notice after the move, from the contributor core. */
@@ -75,6 +76,7 @@ export function parseLegacyMigrationOffer(
     action: text(value, "action"),
     working: text(value, "working"),
     invite_prompt: text(value, "invite_prompt"),
+    start_failed: text(value, "start_failed"),
   };
 }
 

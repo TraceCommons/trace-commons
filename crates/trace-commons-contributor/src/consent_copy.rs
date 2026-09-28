@@ -682,6 +682,11 @@ pub const LEGACY_MIGRATION_NOTICE_NOTHING_ARMED: &str =
 /// **DRAFT, NEEDS APPROVAL.**
 pub const LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE: &str = "Got it";
 
+/// Shown when the shell could not reach the core to start the move at all
+/// (a transport failure, not a refusal): nothing ran, so nothing changed.
+pub const LEGACY_MIGRATION_START_FAILED: &str =
+    "The move could not be started. Nothing was changed.";
+
 /// The notice after a move, as a shell renders it.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct LegacyMigrationNoticeCopy {
@@ -773,6 +778,7 @@ pub struct LegacyMigrationOfferCopy {
     pub action: &'static str,
     pub working: &'static str,
     pub invite_prompt: &'static str,
+    pub start_failed: &'static str,
 }
 
 #[must_use]
@@ -783,6 +789,7 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         action: LEGACY_MIGRATION_OFFER_ACTION,
         working: LEGACY_MIGRATION_WORKING,
         invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
+        start_failed: LEGACY_MIGRATION_START_FAILED,
     }
 }
 
