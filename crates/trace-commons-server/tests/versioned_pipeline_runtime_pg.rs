@@ -21,12 +21,12 @@ use trace_commons_gate_api::pipeline::{
     InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult,
     ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
     ReviewRecommendation, ScoreEvidence, SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
-    UnverifiedScoreDecision,
+    TenantStorageRef, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
-    Embedder, IdentifiedEmbedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder,
-    ReferencePerplexityScorer, SettlementAdapter, SettlementError, SettlementReceipt,
-    SettlementRequest, VectorIndexWriter,
+    Embedder, IdentifiedEmbedder, IdentifiedIndexWriter, IndexEntryKey, IndexUpsertResult,
+    IndexWriteError, ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter,
+    SettlementError, SettlementReceipt, SettlementRequest, VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
@@ -3545,25 +3545,14 @@ async fn assessment_after_withdrawal_is_refused() {
 /// to `pending` -- the three behaviours `list_review_queue`, `claim_review`,
 /// and `record_review_assessment` themselves own.
 ///
-/// KNOWN GAP (reported, not fixed here): the ruling also says the runner
-/// then ends the released run under PR2's `submission_inoperable` routing.
-/// That routing only fires when the phase's own read raises
-/// `submission_inoperable`, and Review's `load_source_bytes` (PR2 code,
-/// `load_object_bytes`'s query) checks only `trace_submissions.status`/
-/// `revoked_at`/`purged_at`/`expires_at` -- never `trace_withdrawals` --
-/// unlike `commit_review`'s own re-check just below it in this file, which
-/// does check `trace_withdrawals` separately. A tombstone-only withdrawal
-/// (this test's setup, and the shape the brief specifies) leaves
-/// `trace_submissions.status` at `quarantined`, so `load_object_bytes` still
-/// finds the row and Review reruns `MinimalReviewPolicy` with
-/// `human_assessment: None` exactly as before: `review_assessment_required`
-/// again, parking the run right back into `awaiting_review` instead of
-/// failing it. Verified directly: running `process_run` here after the
-/// release below lands the run back in `AwaitingReview`, not `Failed`. Since
-/// `load_object_bytes` is shared with Score's `load_approved_bytes` and
-/// predates this task, widening it is a PR2-code change this task must not
-/// make (worktree rule); the task report flags it for the controller
-/// instead.
+/// Ruling T3-7: the runner then ends the released run under the Review
+/// routing of `submission_inoperable` (failed on that pass) and does not
+/// park it again. The withdrawal here is a `trace_withdrawals` row only, so
+/// `trace_submissions.status` stays `quarantined`: Review's source read
+/// (`load_source_bytes`) refuses it because the content-read predicate
+/// (`load_object_bytes`) also excludes a submission with a
+/// `trace_withdrawals` row. Without that, Review would run again with no
+/// assessment and park the run in `awaiting_review` once more.
 #[tokio::test]
 async fn parked_run_with_an_inoperable_submission_is_released() {
     let Some(backend) = runtime_backend(4).await else {
@@ -3614,7 +3603,22 @@ async fn parked_run_with_an_inoperable_submission_is_released() {
     assert_eq!(
         released.state,
         PipelineRunState::Pending,
-        "released so the runner can reach it, whatever it then does with it"
+        "released so the runner can reach it"
+    );
+
+    let processed = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("the runner claims the released run");
+    assert_eq!(
+        processed.state,
+        PipelineRunState::Failed,
+        "Review ends the run on this pass and does not park it again"
+    );
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
     );
 }
 
@@ -7289,6 +7293,705 @@ async fn withdrawal_during_dispatch_cancels_the_index_write() {
         0,
         "dispatch was cancelled before any upsert call"
     );
+}
+
+/// The longest a held call waits for the test to release it, and the
+/// longest a test waits for a held call to be entered or for a task to
+/// finish. It is a bound, not a synchronization: the order of events in the
+/// tests that use it is set by channels, and the bound only turns a
+/// regression into a failure instead of a hang.
+const HELD_CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A test double's side of one held call. The first call that reaches
+/// `hold_first_call` tells the test it has started and then blocks its
+/// thread until the test releases it; every later call passes through at
+/// once. The dependency calls it holds (`VectorIndexWriter::upsert`,
+/// `Embedder::embed`) are synchronous, so a test that holds one needs a
+/// multi-thread runtime: the held call blocks one worker thread.
+struct CallHold {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+/// The test's side of a `CallHold`.
+struct HeldCall {
+    entered: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+impl CallHold {
+    fn new() -> (Self, HeldCall) {
+        let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        (
+            Self {
+                entered: std::sync::Mutex::new(Some(entered_sender)),
+                release: std::sync::Mutex::new(Some(release_receiver)),
+            },
+            HeldCall {
+                entered: Some(entered_receiver),
+                release: release_sender,
+            },
+        )
+    }
+
+    fn hold_first_call(&self) {
+        let Some(entered) = self.entered.lock().unwrap().take() else {
+            return;
+        };
+        let release = self
+            .release
+            .lock()
+            .unwrap()
+            .take()
+            .expect("only the first call is held");
+        let _ = entered.send(());
+        release
+            .recv_timeout(HELD_CALL_BOUND)
+            .expect("the test releases the held call within the bound");
+    }
+}
+
+impl HeldCall {
+    /// Returns once the held call has started. It does not continue (and
+    /// has not yet called through) until `release`.
+    async fn wait_until_entered(&mut self) {
+        let entered = self
+            .entered
+            .take()
+            .expect("wait for the held call only once");
+        tokio::time::timeout(HELD_CALL_BOUND, entered)
+            .await
+            .expect("the held call starts within the bound")
+            .expect("the double signals before it blocks");
+    }
+
+    /// Lets the held call continue.
+    fn release(&self) {
+        self.release
+            .send(())
+            .expect("the held call is still waiting for its release");
+    }
+}
+
+/// An index writer over a real `IsolatedPipelineIndex` whose first `upsert`
+/// is held (`CallHold`) until the test releases it, so a test can act while
+/// Settle's index dispatch is in the middle of its write. Every later call
+/// goes straight to the index underneath. `held_index_test_service` builds
+/// a service over it.
+struct BlockingIndexWriter {
+    inner: Arc<IsolatedPipelineIndex>,
+    hold: CallHold,
+}
+
+impl VectorIndexWriter for BlockingIndexWriter {
+    fn upsert(
+        &self,
+        key: &IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<IndexUpsertResult, IndexWriteError> {
+        self.hold.hold_first_call();
+        self.inner.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: uuid::Uuid,
+    ) -> Result<bool, IndexWriteError> {
+        self.inner
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl IdentifiedIndexWriter for BlockingIndexWriter {
+    fn dependency_identity(&self) -> &str {
+        "blocking_index_writer_test_only"
+    }
+}
+
+/// Like `test_service`, but Settle writes to the index through a
+/// `BlockingIndexWriter`. The returned index is the one underneath it (and
+/// the service's index reader); the returned `HeldCall` controls the first
+/// `upsert`.
+async fn held_index_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let (hold, held) = CallHold::new();
+    let writer = Arc::new(BlockingIndexWriter {
+        inner: index.clone(),
+        hold,
+    });
+    let registry = SettlementAdapterRegistry::new(vec![
+        RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+        RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+    ])
+    .expect("build settlement adapter registry");
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        writer,
+        registry,
+        uncapped_caps(&["storage_rebate", InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .build()
+    .expect("build pipeline service");
+    (Arc::new(service), index, held)
+}
+
+/// An embedder whose first `embed` call is held (`CallHold`) until the test
+/// releases it; otherwise it embeds as the reference embedder does. Score
+/// embeds after it has read the approved content and before it commits, so
+/// a test can act between Score's read and its commit.
+struct HoldingEmbedder {
+    hold: CallHold,
+}
+
+impl Embedder for HoldingEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.hold.hold_first_call();
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for HoldingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "holding_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "holding-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"holding-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
+/// Submits a Low-risk envelope and runs Review, so the run waits for Score
+/// with approved content.
+async fn run_past_review(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    reviewed
+}
+
+/// Expires a run's lease directly: a time shortcut for a test whose attempt
+/// crashed and left the run `leased`, not a processor call.
+async fn expire_lease(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id],
+    )
+    .await
+    .expect("expire the lease");
+    tx.commit().await.expect("commit the lease expiry");
+}
+
+/// The content read (`load_object_bytes`, behind `load_approved_bytes` and
+/// `load_source_bytes`) refuses a submission with a `trace_withdrawals`
+/// row, even while `trace_submissions.status` is unchanged.
+#[tokio::test]
+async fn content_reads_refuse_withdrawn_submissions() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("content-read-withdrawn-{}", uuid::Uuid::new_v4());
+    let reviewed = run_past_review(&service, &tenant).await;
+    service
+        .load_approved_bytes(&reviewed)
+        .await
+        .expect("the approved content reads before the withdrawal");
+    service
+        .load_source_bytes(&reviewed)
+        .await
+        .expect("the source content reads before the withdrawal");
+
+    withdraw_submission(&backend, &tenant, reviewed.submission_id).await;
+
+    // `let ... else` rather than `expect_err`, which would print the
+    // decoded trace bytes on a failure.
+    let Err(error) = service.load_approved_bytes(&reviewed).await else {
+        panic!("a withdrawn submission's approved content is not read");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+    let Err(error) = service.load_source_bytes(&reviewed).await else {
+        panic!("a withdrawn submission's source content is not read");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+}
+
+/// Asserts that Score committed nothing for `run`: no Score outcome and
+/// no settlement rows, and the run still waits for Score, in a charged
+/// retry under `submission_inoperable` (the P2 allowlist routes that label
+/// to a charged retry outside Review).
+async fn assert_score_refused_as_inoperable(
+    service: &PipelineService,
+    tenant: &str,
+    run: &PipelineRunRecord,
+) {
+    assert_eq!(run.state, PipelineRunState::Retry);
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(run.next_phase, Some(Phase::Score));
+    assert!(run.index_command_ref.is_none(), "no index command recorded");
+    let outcomes = service
+        .store()
+        .list_outcomes(tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !outcomes.iter().any(|outcome| outcome.phase == Phase::Score),
+        "no Score outcome is committed"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(tenant, run.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no settlement rows are seeded"
+    );
+}
+
+/// `commit_score` re-checks the submission under its own transaction: a
+/// withdrawal after Score read its input gets no Score outcome and no
+/// settlement rows, and the run ends under the routing of
+/// `submission_inoperable` for Score.
+///
+/// First case: Score crashes after it read the approved content and stored
+/// its artifacts (`AfterScoreArtifactStorage`); the submission is
+/// withdrawn; the run resumes. The resumed attempt reads the content again
+/// and is refused there, so this case does not reach the commit. Second
+/// case: the withdrawal lands inside one Score attempt, after its read
+/// (Score's first `embed` call is held until the withdrawal has committed),
+/// so the commit itself must refuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn score_commit_refuses_a_submission_withdrawn_after_the_read() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+
+    // First case: crash after the read, withdraw, resume.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        Some(PipelineCrashPoint::AfterScoreArtifactStorage),
+    )
+    .await;
+    let tenant = format!("score-withdrawn-resume-{}", uuid::Uuid::new_v4());
+    let reviewed = run_past_review(&service, &tenant).await;
+    let crashed = service.process_run(&tenant, reviewed.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    withdraw_submission(&backend, &tenant, reviewed.submission_id).await;
+    expire_lease(&backend, &tenant, reviewed.run_id).await;
+    let resumed = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the resumed Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &resumed).await;
+
+    // Second case: the withdrawal commits between Score's read and its
+    // commit, inside one attempt.
+    let dir = tempfile::tempdir().unwrap();
+    let (hold, mut held) = CallHold::new();
+    let service = test_service_with_embedder(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        Arc::new(HoldingEmbedder { hold }),
+    )
+    .await;
+    let tenant = format!("score-withdrawn-mid-attempt-{}", uuid::Uuid::new_v4());
+    let reviewed = run_past_review(&service, &tenant).await;
+    let score = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = reviewed.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    withdraw_submission(&backend, &tenant, reviewed.submission_id).await;
+    held.release();
+    let refused = tokio::time::timeout(HELD_CALL_BOUND, score)
+        .await
+        .expect("Score finishes once released")
+        .expect("the Score task did not panic")
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+}
+
+/// Brief section 2 (M9): Settle's index dispatch holds the submission lock
+/// from its guard read until the transaction that records the write
+/// commits.
+///
+/// First case: while an `upsert` is held, a withdrawal's first statement
+/// (`SELECT ... FOR UPDATE` on the submission) must wait; once the write
+/// is released it gets the lock, and by then the dispatch has committed
+/// `index_write_state = 'complete'`. The upsert is held by a channel, not a
+/// timer, so the dispatch is inside its write for the whole 300 ms window;
+/// the withdrawal's connection and transaction are opened before the
+/// window, so only the lock is timed. A dispatch that did not hold the lock
+/// fails both the 300 ms check and the `complete` check, whatever the
+/// timing.
+///
+/// Second case: a withdrawal that already holds the lock (`FOR UPDATE`
+/// and its `trace_withdrawals` row, not yet committed) makes the dispatch
+/// wait; once it commits, the dispatch sees the submission inoperable,
+/// writes nothing, and records `cancelled`. The withdrawal commits only
+/// once PostgreSQL reports the guard read blocked behind it
+/// (`pg_blocking_pids`), so that read always starts before the commit: a
+/// guard that reads the `trace_withdrawals` row with the snapshot it took
+/// before the wait misses it and fails the `cancelled` check every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn index_dispatch_holds_the_guard_until_the_write_commits() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+
+    // First case: the withdrawal waits for the write in progress.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("dispatch-guard-held-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, evidence) = run_to_settle_ready(&service, &tenant).await;
+    let entry_count = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command")
+        .keyed_entries(&tenant_ref)
+        .count();
+    assert!(entry_count > 0);
+
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+
+    let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
+    let (locked_sender, mut locked_receiver) = tokio::sync::oneshot::channel::<String>();
+    let withdrawal = tokio::spawn({
+        let backend = backend.clone();
+        let tenant = tenant.clone();
+        let submission_id = run.submission_id;
+        let run_id = run.run_id;
+        async move {
+            let mut client = backend.trace_pool_for_test().get().await.unwrap();
+            let tx = tenant_tx(&mut client, &tenant).await;
+            ready_sender.send(()).unwrap();
+            tx.query_one(
+                "SELECT 1 FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  FOR UPDATE",
+                &[&tenant, &submission_id],
+            )
+            .await
+            .unwrap();
+            let index_write_state: String = tx
+                .query_one(
+                    "SELECT index_write_state FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2",
+                    &[&tenant, &run_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            locked_sender.send(index_write_state).unwrap();
+            tx.commit().await.unwrap();
+        }
+    });
+    tokio::time::timeout(HELD_CALL_BOUND, ready_receiver)
+        .await
+        .expect("the withdrawal's transaction opens within the bound")
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut locked_receiver)
+            .await
+            .is_err(),
+        "the withdrawal's FOR UPDATE must wait while the index write is in progress"
+    );
+
+    held.release();
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle finishes once released")
+        .expect("the Settle task did not panic")
+        .unwrap()
+        .expect("Settle runs");
+    let seen_by_withdrawal = tokio::time::timeout(HELD_CALL_BOUND, locked_receiver)
+        .await
+        .expect("the withdrawal gets the lock once the write commits")
+        .unwrap();
+    tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal finishes")
+        .expect("the withdrawal task did not panic");
+    assert_eq!(
+        seen_by_withdrawal, "complete",
+        "the lock is granted only after the index write committed"
+    );
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_membership, "included");
+    assert_eq!(settled.index_write_state, "complete");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        entry_count
+    );
+
+    // Second case: the dispatch waits for a withdrawal that holds the lock,
+    // then cancels. A crash right after the selection persists leaves the
+    // index write `pending`, so the retry goes straight to the dispatch.
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterSettleSelection),
+    )
+    .await;
+    let tenant = format!("dispatch-guard-waits-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let crashed = service.process_run(&tenant, run.run_id).await;
+    let error = crashed.expect_err("the injected crash must propagate as an error");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    let pending = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("run exists");
+    assert_eq!(pending.index_write_state, "pending");
+    expire_lease(&backend, &tenant, run.run_id).await;
+
+    let mut withdrawal_client = backend.trace_pool_for_test().get().await.unwrap();
+    let withdrawal = tenant_tx(&mut withdrawal_client, &tenant).await;
+    let withdrawal_pid: i32 = withdrawal
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    withdrawal
+        .query_one(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR UPDATE",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    withdrawal
+        .execute(
+            "INSERT INTO trace_withdrawals (
+                tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             ) VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    // Commit only once PostgreSQL reports a session blocked by the
+    // withdrawal's: the dispatch's guard read, the only statement on this
+    // path that waits for the submission lock. So the guard read has
+    // started before the withdrawal commits, whatever the timing.
+    let observer = backend.trace_pool_for_test().get().await.unwrap();
+    let deadline = std::time::Instant::now() + HELD_CALL_BOUND;
+    loop {
+        let blocked: i64 = observer
+            .query_one(
+                "SELECT COUNT(*) FROM pg_locks
+                  WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid))",
+                &[&withdrawal_pid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if blocked > 0 {
+            break;
+        }
+        assert!(
+            !settle.is_finished(),
+            "the dispatch must wait for the withdrawal that holds the submission lock"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dispatch's guard read never waited for the withdrawal's lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(observer);
+    withdrawal.commit().await.unwrap();
+
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle finishes once the withdrawal commits")
+        .expect("the Settle task did not panic")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(index.writer_calls(), 0, "no index entry is written");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Ruling S5 and the pool-size-one rule, for Settle's index dispatch: its
+/// transaction holds the one pooled connection, and nothing checks out a
+/// second one while it is open -- on the write path, in the index-outage
+/// branch, and in the content-conflict branch (each error branch drops the
+/// transaction and its client before it records the result). With a pool
+/// of one, a second checkout would wait for the first forever; each pass is
+/// bounded, so that shows as a failure.
+#[tokio::test]
+async fn index_dispatch_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+
+    // The index-outage branch, then the write path.
+    let tenant = format!("dispatch-pool-one-{}", uuid::Uuid::new_v4());
+    let (run, _) = tokio::time::timeout(HELD_CALL_BOUND, run_to_settle_ready(&service, &tenant))
+        .await
+        .expect("Review and Score finish on a pool of one");
+    index.set_fault(IndexFault::FailBeforeApply);
+    let retried = tokio::time::timeout(HELD_CALL_BOUND, service.process_run(&tenant, run.run_id))
+        .await
+        .expect("the index-outage branch never waits for a second connection")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+    assert_eq!(
+        retried.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    );
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, service.process_run(&tenant, run.run_id))
+        .await
+        .expect("the write path never waits for a second connection")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
+
+    // The content-conflict branch.
+    let tenant = format!("dispatch-pool-one-conflict-{}", uuid::Uuid::new_v4());
+    let (run, evidence) =
+        tokio::time::timeout(HELD_CALL_BOUND, run_to_settle_ready(&service, &tenant))
+            .await
+            .expect("Review and Score finish on a pool of one");
+    let command = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command");
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (key, first_entry) = command
+        .keyed_entries(&tenant_ref)
+        .next()
+        .expect("at least one chunk");
+    index
+        .upsert(
+            &key,
+            &vec![9.9_f32; first_entry.embedding.len()],
+            &dependency_content_hash(b"conflicting-content"),
+        )
+        .unwrap();
+    let failed = tokio::time::timeout(HELD_CALL_BOUND, service.process_run(&tenant, run.run_id))
+        .await
+        .expect("the content-conflict branch never waits for a second connection")
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_CONFLICT_LABEL)
+    );
+    assert_eq!(failed.index_write_state, "failed");
 }
 
 /// Amendments-971 A9: each instrument settles as an independent leg with no

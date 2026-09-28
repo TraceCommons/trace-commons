@@ -1839,6 +1839,13 @@ impl PgPipelineStore {
     /// Settle records a result only once a leg completes. An award naming
     /// an instrument that `payout_rails` does not cover fails the whole
     /// commit with the safe label `settlement_adapter_missing`.
+    ///
+    /// Score read its input (`load_approved_bytes`) in an earlier
+    /// transaction that has committed, so a withdrawal can land between
+    /// that read and this commit. This re-checks the submission under this
+    /// transaction (`submission_guard_on_tx`, after the run row's lock) and
+    /// refuses the whole commit with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`:
+    /// no outcome, no settlement rows, no run update.
     pub async fn commit_score(
         &self,
         run: &PipelineRunRecord,
@@ -1857,6 +1864,12 @@ impl PgPipelineStore {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
+        if !Self::submission_guard_on_tx(&tx, run).await?.operable {
+            // Dropping the transaction rolls it back: nothing was written.
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
 
         insert_outcome(
             &tx,
@@ -2016,19 +2029,37 @@ impl PgPipelineStore {
             .transpose()
     }
 
-    /// Records progress on the run's index dispatch (port 2258 to 2285):
-    /// `pending` after `persist_settle_selection` decides an include,
-    /// `complete` once every entry has been applied, `failed` on a content
-    /// conflict, `cancelled` when the submission stopped being operable
-    /// before dispatch could run.
+    /// Records progress on the run's index dispatch (port 2258 to 2285), in
+    /// a transaction of its own: `pending` after `persist_settle_selection`
+    /// decides an include, `complete` once every entry has been applied,
+    /// `failed` on a content conflict, `cancelled` when the submission
+    /// stopped being operable before dispatch could run. The dispatch
+    /// records `complete` and `cancelled` on the transaction that holds the
+    /// submission guard (`set_index_write_state_on_tx`); it calls this for
+    /// `failed`, after it has dropped that transaction.
     pub async fn mark_index_write_state(
         &self,
         run: &PipelineRunRecord,
         index_write_state: &str,
     ) -> Result<PipelineRunRecord, DatabaseError> {
-        let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let updated = Self::set_index_write_state_on_tx(&tx, run, index_write_state).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// `mark_index_write_state`'s update, with the same lease check, on the
+    /// caller's transaction: Settle's index dispatch records `complete` or
+    /// `cancelled` in the transaction that holds the submission guard
+    /// (`submission_guard_on_tx`), so the record commits together with the
+    /// release of that lock.
+    pub async fn set_index_write_state_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        index_write_state: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let lease_token = required_lease_token(run)?;
         let row = tx
             .query_opt(
                 "UPDATE pipeline_runs
@@ -2045,9 +2076,52 @@ impl PgPipelineStore {
             )
             .await?
             .ok_or_else(stale_lease_error)?;
-        let updated = pipeline_run_from_row(&row)?;
-        tx.commit().await?;
-        Ok(updated)
+        pipeline_run_from_row(&row)
+    }
+
+    /// Whether the submission behind `run` is operable for Score and Settle:
+    /// accepted, not revoked, not purged, not expired, and with no
+    /// `trace_withdrawals` row. Runs on the caller's transaction and holds
+    /// the submission row `FOR SHARE` until that transaction ends, so a
+    /// withdrawal (which locks the row `FOR UPDATE`) waits for whatever the
+    /// caller commits under the guard. Callers that also lock the run row
+    /// (`ensure_current_lease`) take it first: run row, then submission row,
+    /// the order `commit_review` documents.
+    ///
+    /// Two statements: lock first, read second, as `settle_internal_credit`
+    /// does. A single locking read waits for a withdrawal that holds the row
+    /// and then still evaluates the `trace_withdrawals` subquery against the
+    /// snapshot it took before the wait, so it misses a withdrawal row that
+    /// transaction inserted without changing the submission row. Under READ
+    /// COMMITTED the second statement takes a new snapshot after the lock
+    /// is held, so it sees that withdrawal.
+    pub async fn submission_guard_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+    ) -> Result<SubmissionGuard, DatabaseError> {
+        tx.query_opt(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR SHARE",
+            &[&run.tenant_id, &run.submission_id],
+        )
+        .await?;
+        let row = tx
+            .query_opt(
+                "SELECT s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                        AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                        AND NOT EXISTS (
+                            SELECT 1 FROM trace_withdrawals w
+                             WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+                        )
+                   FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2
+                  FOR SHARE OF s",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?;
+        let operable = row.map(|row| row.get::<_, bool>(0)).unwrap_or(false);
+        Ok(SubmissionGuard { operable })
     }
 
     /// Commits the Settle outcome and completes the run (port 2287 to
@@ -3867,32 +3941,19 @@ impl PipelineService {
         Ok(())
     }
 
-    /// Whether the submission behind a run is still operable right now:
-    /// accepted, not revoked, not purged, not expired, and not withdrawn.
-    /// Settle reads this fresh (under `FOR SHARE OF s`) both before it
-    /// decides index membership and again immediately before it dispatches
-    /// to the index, since the two checks can be far apart in wall-clock
-    /// time across a crash and retry.
+    /// Whether the submission behind a run is still operable right now
+    /// (`PgPipelineStore::submission_guard_on_tx`), read in a transaction of
+    /// its own that commits at once. Settle reads this fresh before it
+    /// decides index membership and again before its settlement legs,
+    /// since those checks can be far apart in wall-clock time across a
+    /// crash and retry. The index dispatch does not use it: it reads the
+    /// guard on its own transaction and holds it until the write commits.
     async fn submission_guard(&self, run: &PipelineRunRecord) -> anyhow::Result<SubmissionGuard> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
-        let row = tx
-            .query_opt(
-                "SELECT s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
-                        AND (s.expires_at IS NULL OR s.expires_at > NOW())
-                        AND NOT EXISTS (
-                            SELECT 1 FROM trace_withdrawals w
-                             WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
-                        )
-                   FROM trace_submissions s
-                  WHERE s.tenant_id = $1 AND s.submission_id = $2
-                  FOR SHARE OF s",
-                &[&run.tenant_id, &run.submission_id],
-            )
-            .await?;
+        let guard = PgPipelineStore::submission_guard_on_tx(&tx, run).await?;
         tx.commit().await?;
-        let operable = row.map(|row| row.get::<_, bool>(0)).unwrap_or(false);
-        Ok(SubmissionGuard { operable })
+        Ok(guard)
     }
 
     /// Confirms the lease this call still holds is the current one,
@@ -4757,8 +4818,9 @@ impl PipelineService {
 
     /// Reads and decrypts the bytes stored at `object_ref_id` for `run`,
     /// under the port's operability predicate (the submission must not be
-    /// revoked/expired/purged, the object ref must not be invalidated or
-    /// deleted), inside one tenant-scoped `FOR SHARE` transaction, then
+    /// revoked/expired/purged or have a `trace_withdrawals` row, the object
+    /// ref must not be invalidated or deleted), inside one tenant-scoped
+    /// `FOR SHARE` transaction, then
     /// decodes the P1 wrapper back to the exact bytes. Shared by
     /// `load_source_bytes` and `load_approved_bytes`, which differ only in
     /// which object ref id they read and what they do with the bytes
@@ -4784,6 +4846,11 @@ impl PipelineService {
                     AND submission.revoked_at IS NULL
                     AND submission.purged_at IS NULL
                     AND (submission.expires_at IS NULL OR submission.expires_at > NOW())
+                    AND NOT EXISTS (
+                        SELECT 1 FROM trace_withdrawals w
+                         WHERE w.tenant_id = submission.tenant_id
+                           AND w.submission_id = submission.submission_id
+                    )
                     AND object_ref.invalidated_at IS NULL
                     AND object_ref.deleted_at IS NULL
                   FOR SHARE OF submission, object_ref",
@@ -4809,7 +4876,7 @@ impl PipelineService {
 
     /// Reads the source envelope bytes the receipt staged at Admission,
     /// decoding the P1 wrapper back to the exact bytes Task 9 stored.
-    async fn load_source_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+    pub async fn load_source_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
         self.load_object_bytes(run, run.source_object_ref_id).await
     }
 
@@ -5560,12 +5627,17 @@ impl PipelineService {
             .map_err(|error| match &error {
                 // The store's Display prefixes every Constraint error
                 // ("Constraint violation: ..."), which would not match
-                // decision P2's fixed allowlist verbatim; re-raise the one
-                // label the allowlist expects as a bare anyhow error.
+                // decision P2's fixed allowlist verbatim; re-raise the
+                // labels the allowlist expects as bare anyhow errors.
                 DatabaseError::Constraint(label)
                     if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL =>
                 {
                     anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL)
+                }
+                DatabaseError::Constraint(label)
+                    if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+                {
+                    anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
                 }
                 _ => anyhow::Error::from(error),
             })?;
@@ -5714,19 +5786,33 @@ impl PipelineService {
 
         // Step 5: dispatch to the index only when a prior attempt left it
         // pending (an include whose entries are not yet all applied). The
-        // guard is read fresh here too, directly before this dispatch --
-        // its own external effect -- rather than trusting whatever Step 3
-        // saw, since a withdrawal can land in the gap between them.
+        // guard is read here too, rather than trusting whatever Step 3 saw,
+        // since a withdrawal can land in the gap between them. It is also
+        // held (brief section 2): one transaction reads the guard, keeps the
+        // submission row locked `FOR SHARE` through every upsert, and
+        // commits the `index_write_state` it records. A withdrawal locks
+        // that row `FOR UPDATE`, so it either commits before the guard read
+        // (the dispatch then sees it and cancels) or waits until the write
+        // and its `complete` have committed.
         if run.index_write_state == "pending" {
-            let guard = self.submission_guard(&run).await?;
+            // Both reads below come before the dispatch transaction opens:
+            // `ensure_live_lease` checks out a pooled connection of its own,
+            // and the dispatch never holds two at once (with a pool of one it
+            // would wait for itself). The stored command's error is raised
+            // only once the guard lets the write go ahead: a cancelled
+            // dispatch does not need the command.
+            self.ensure_live_lease(&run).await?;
+            let command = self.load_index_command(&run, &score_evidence).await;
+            let mut client = self.backend.trace_pool().get().await?;
+            let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+            // Lock order: the run row (`ensure_current_lease`), then the
+            // submission row (the guard).
+            ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
+            let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
             if !guard.operable {
-                run = self.store.mark_index_write_state(&run, "cancelled").await?;
+                run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "cancelled").await?;
             } else {
-                self.ensure_live_lease(&run).await?;
-                let command = self
-                    .load_index_command(&run, &score_evidence)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+                let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
                 let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
                 // Each entry is written under its own key: the command pairs
                 // them, so one entry is never stored under another's key.
@@ -5741,21 +5827,33 @@ impl PipelineService {
                             // dependency failure, like Score's own
                             // `index_unavailable` -- an uncharged
                             // suspension, which the Settle code records
-                            // itself rather than returning an `Err`.
+                            // itself rather than returning an `Err`. Ruling
+                            // S5: the transaction (rolled back, `pending`
+                            // stays) and its pooled client go before the
+                            // store call, which checks out its own.
+                            drop(tx);
+                            drop(client);
                             return Ok(self
                                 .store
                                 .mark_transient_retry(&run, PIPELINE_INDEX_UNAVAILABLE_LABEL)
                                 .await?);
                         }
                         Err(IndexWriteError::ContentConflict) => {
+                            // Ruling S5, as above.
+                            drop(tx);
+                            drop(client);
                             self.store.mark_index_write_state(&run, "failed").await?;
                             return Err(anyhow::anyhow!(PIPELINE_INDEX_CONFLICT_LABEL));
                         }
                     }
                 }
+                // A crash here drops the transaction, so `pending` stays; the
+                // retry applies the same entries again, which the index
+                // reports as unchanged.
                 self.inject_crash(PipelineCrashPoint::AfterIndexApply)?;
-                run = self.store.mark_index_write_state(&run, "complete").await?;
+                run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "complete").await?;
             }
+            tx.commit().await?;
         }
 
         // Step 6: each settlement row Score seeded settles as an independent
