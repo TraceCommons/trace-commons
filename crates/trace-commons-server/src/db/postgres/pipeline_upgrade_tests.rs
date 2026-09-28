@@ -140,11 +140,6 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_bundle_packages", "INSERT", &[]),
     ("pipeline_active_bundles", "SELECT", &[]),
     ("pipeline_active_bundles", "INSERT", &[]),
-    (
-        "pipeline_active_bundles",
-        "UPDATE",
-        &["bundle_id", "selected_at"],
-    ),
     ("pipeline_bundle_policy_status", "SELECT", &[]),
     ("pipeline_bundle_policy_status", "INSERT", &[]),
     ("pipeline_receipt_artifacts", "SELECT", &[]),
@@ -180,20 +175,24 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
 ];
 
 /// The privileges non-owner roles hold on the pipeline tables, table-wide and
-/// per column, as sorted `(grantee, table, column, privilege)` rows; the
-/// column is empty for a table-wide privilege.
-async fn pipeline_table_grants(client: &Client) -> Vec<(String, String, String, String)> {
+/// per column, as sorted `(grantee, table, column, privilege, is_grantable)`
+/// rows; the column is empty for a table-wide privilege. `is_grantable` is
+/// PostgreSQL's own name for `WITH GRANT OPTION`: a role holding it can grant
+/// the privilege on to others, which is broader than holding the privilege
+/// itself and is never something a plain `GRANT ... TO trace_ingest_runtime`
+/// (no `WITH GRANT OPTION`) produces.
+async fn pipeline_table_grants(client: &Client) -> Vec<(String, String, String, String, bool)> {
     let tables: Vec<&str> = PIPELINE_TABLES.to_vec();
     let rows = client
         .query(
             "SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::TEXT END,
-                    c.relname::TEXT, '', a.privilege_type
+                    c.relname::TEXT, '', a.privilege_type, a.is_grantable
                FROM pg_class c, aclexplode(c.relacl) a
               WHERE c.relnamespace = 'public'::regnamespace
                 AND c.relname = ANY($1) AND a.grantee <> c.relowner
              UNION ALL
              SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::TEXT END,
-                    c.relname::TEXT, att.attname::TEXT, a.privilege_type
+                    c.relname::TEXT, att.attname::TEXT, a.privilege_type, a.is_grantable
                FROM pg_class c
                JOIN pg_attribute att ON att.attrelid = c.oid
                , aclexplode(att.attacl) a
@@ -203,9 +202,9 @@ async fn pipeline_table_grants(client: &Client) -> Vec<(String, String, String, 
         )
         .await
         .expect("read the pipeline tables' privileges");
-    let mut grants: Vec<(String, String, String, String)> = rows
+    let mut grants: Vec<(String, String, String, String, bool)> = rows
         .iter()
-        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4)))
         .collect();
     grants.sort();
     grants
@@ -270,8 +269,9 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     assert!(!claim_function, "no cross-tenant claim function may exist");
 
     // Least privilege for the ingest runtime, pinned: exactly these grants on
-    // the pipeline tables, to trace_ingest_runtime only.
-    let mut expected: Vec<(String, String, String, String)> = RUNTIME_PIPELINE_GRANTS
+    // the pipeline tables, to trace_ingest_runtime only, and none of them
+    // `WITH GRANT OPTION`.
+    let mut expected: Vec<(String, String, String, String, bool)> = RUNTIME_PIPELINE_GRANTS
         .iter()
         .flat_map(|(table, privilege, columns)| {
             let columns: Vec<&str> = if columns.is_empty() {
@@ -285,6 +285,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
                     table.to_string(),
                     column.to_string(),
                     privilege.to_string(),
+                    false,
                 )
             })
         })
@@ -294,7 +295,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         pipeline_table_grants(&admin).await,
         expected,
         "the pipeline tables must grant trace_ingest_runtime what the pipeline code uses, \
-         and nothing to anyone else"
+         nothing to anyone else, and none of it WITH GRANT OPTION"
     );
 
     // Isolation as a role that cannot bypass RLS.

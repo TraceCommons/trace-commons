@@ -247,11 +247,13 @@ GRANT UPDATE (lease_token, lease_expires_at, attempt_count, next_attempt_at,
 GRANT SELECT, INSERT ON pipeline_bundle_packages TO trace_ingest_runtime;
 
 -- pipeline_active_bundles: registering the default bundle inserts the
--- tenant's selection if it has none; switching the active bundle
--- (`activate_bundle`, an INSERT ... ON CONFLICT DO UPDATE) rewrites
--- bundle_id and selected_at. The receipt reads it. Nothing deletes it.
+-- tenant's selection if it has none (`activate_bundle_if_none`, an
+-- INSERT ... ON CONFLICT DO NOTHING, which needs no UPDATE). The receipt
+-- reads it. Nothing deletes it. Switching a tenant to a different bundle
+-- (`activate_bundle`, an INSERT ... ON CONFLICT DO UPDATE) is an operator
+-- action, not something ingest calls on its own, so the runtime holds no
+-- UPDATE here.
 GRANT SELECT, INSERT ON pipeline_active_bundles TO trace_ingest_runtime;
-GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;
 
 -- pipeline_bundle_policy_status: registering a bundle inserts one row per
 -- phase, and the receipt and the worker read whether a phase is runnable.

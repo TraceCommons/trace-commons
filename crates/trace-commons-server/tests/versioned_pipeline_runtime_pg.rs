@@ -3397,6 +3397,8 @@ struct ReceiptArtifactRow {
     state: String,
     object_key: String,
     ciphertext_sha256: Option<String>,
+    /// Whether `cleanup_after` has already passed.
+    due_now: bool,
 }
 
 /// Every `pipeline_receipt_artifacts` row of `tenant_id`, oldest first, in
@@ -3413,7 +3415,7 @@ async fn receipt_artifact_rows(
     let tx = tenant_tx(&mut client, tenant_id).await;
     let rows = tx
         .query(
-            "SELECT state, object_key, ciphertext_sha256
+            "SELECT state, object_key, ciphertext_sha256, cleanup_after <= NOW() AS due_now
                FROM pipeline_receipt_artifacts
               WHERE tenant_id = $1
               ORDER BY staged_at, object_key",
@@ -3427,6 +3429,7 @@ async fn receipt_artifact_rows(
             state: row.get("state"),
             object_key: row.get("object_key"),
             ciphertext_sha256: row.get("ciphertext_sha256"),
+            due_now: row.get("due_now"),
         })
         .collect()
 }
@@ -3886,6 +3889,156 @@ async fn a_tombstone_during_the_write_refuses_the_commit_and_deletes_the_object(
         count_files_under(dir.path()),
         0,
         "the refused attempt deleted its own object"
+    );
+    assert_eq!(count_admission_usage(&backend, &tenant).await, 1);
+}
+
+/// A store like `HookedWriteStore`'s `inner`, except its `delete_artifact`
+/// always fails: proves that when a refused attempt's best-effort object
+/// delete cannot succeed, `PipelineService::discard_receipt_attempt`
+/// restages the row (`restage_receipt_artifact_due_now`) rather than losing
+/// track of it or leaving it not due.
+struct FailingDeleteArtifactStore {
+    inner: Arc<dyn TraceArtifactStore>,
+}
+
+impl TraceArtifactStore for FailingDeleteArtifactStore {
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("test-injected delete failure")
+    }
+}
+
+/// The restage path: a tombstone that arrives during the object write
+/// refuses the commit the same way as
+/// `a_tombstone_during_the_write_refuses_the_commit_and_deletes_the_object`,
+/// but here the discard's object delete fails, so
+/// `restage_receipt_artifact_due_now` runs instead of removing the row: it
+/// stays `staged` and becomes due now, for the sweeper to retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tombstone_during_the_write_restages_the_row_when_its_delete_fails() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("receipt-late-tombstone-restage-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let store = HookedWriteStore::new(
+        Arc::new(FailingDeleteArtifactStore {
+            inner: artifact_store(&dir),
+        }),
+        Box::new({
+            let backend = backend.clone();
+            let tenant = tenant.clone();
+            let redaction_hash = env.privacy.redaction_hash.clone();
+            move || {
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::block_in_place(|| {
+                    handle.block_on(seed_redaction_tombstone(&backend, &tenant, &redaction_hash))
+                });
+            }
+        }),
+    );
+    let (service, _, _) = test_service(
+        backend.clone(),
+        Arc::new(store),
+        minimal_config(false),
+        None,
+    )
+    .await;
+
+    let result = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .unwrap();
+    assert!(matches!(result, PipelineReceiptResult::Tombstoned));
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+
+    let rows = receipt_artifact_rows(&backend, &tenant).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "a failed discard restages the row instead of removing it"
+    );
+    assert_eq!(rows[0].state, "staged");
+    assert!(rows[0].due_now, "a failed discard is restaged due now");
+    assert_eq!(
+        count_files_under(dir.path()),
+        1,
+        "the object stays because its delete failed"
     );
     assert_eq!(count_admission_usage(&backend, &tenant).await, 1);
 }
@@ -7673,10 +7826,37 @@ async fn activation_does_not_rebind_an_existing_run() {
         .register_bundle(&tenant, &package_b)
         .await
         .expect("register bundle B");
-    service
-        .activate_bundle(&tenant, &package_b.bundle_id)
+
+    // Switching a tenant's active bundle is an operator action, not
+    // something the runtime login does: it holds no UPDATE on
+    // pipeline_active_bundles. Activate bundle B through an owner
+    // connection instead, reproducing PgPipelineStore::activate_bundle's own
+    // statement directly.
+    let mut owner = owner_client().await;
+    let tx = owner
+        .transaction()
         .await
-        .expect("activate bundle B");
+        .expect("tx for activating bundle B as the operator");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("set tenant for activating bundle B");
+    let activated = tx
+        .execute(
+            "INSERT INTO pipeline_active_bundles (tenant_id, bundle_id)
+             SELECT $1, bundle_id
+             FROM pipeline_bundle_packages
+             WHERE tenant_id = $1 AND bundle_id = $2
+             ON CONFLICT (tenant_id) DO UPDATE
+                SET bundle_id = EXCLUDED.bundle_id, selected_at = NOW()",
+            &[&tenant, &package_b.bundle_id],
+        )
+        .await
+        .expect("activate bundle B as the operator");
+    assert_eq!(activated, 1, "bundle B exists to activate");
+    tx.commit().await.expect("commit activating bundle B");
 
     // Process the run to completion: every outcome stays bound to A.
     service

@@ -67,6 +67,13 @@ static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::Once
 /// Returns `None` only when the variable is unset; every failure after that
 /// panics. Everything this suite does in PostgreSQL goes through this URL,
 /// the fixture rows its owner connections write included.
+///
+/// The database is force-dropped (`WITH (FORCE)`, which disconnects any
+/// other session on it) and recreated once, the first time this process
+/// calls this function; every later call in the same process reuses it.
+/// Two test processes pointed at the same `TRACE_COMMONS_PG_TEST_DATABASE_URL`
+/// at once would each force-drop the sibling database the other is mid-setup
+/// on or already running against -- do not run this suite that way.
 async fn pipeline_http_database_url() -> Option<String> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
     Some(

@@ -41,10 +41,14 @@ injects a pipeline runtime. The repository binary injects none.
 
 Activation replaces this list with qualified routing.
 
-The pipeline's tables grant the ingest runtime group, `trace_ingest_runtime`,
-exactly what the pipeline reads and writes, so an ingest login in that group
-needs no further grant for the pipeline ([deployment.md](deployment.md), "V92
-to V95: the pipeline tables").
+The pipeline's own tables (V92 to V95) grant the ingest runtime group,
+`trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
+pipeline also reads and writes tables from V62 and earlier -- submissions,
+object refs, derived records, tombstones, withdrawals, credit holds, and the
+Trace Credit ledger and settlement batches -- which no pipeline migration
+grants anything on; an ingest login in the group needs the pilot's V62-era
+table grants for those too, or the pipeline fails closed with `permission
+denied` ([deployment.md](deployment.md), "V92 to V95: the pipeline tables").
 
 ## Fail-closed dependency qualification
 

@@ -871,6 +871,12 @@ impl PgPipelineStore {
         Ok(())
     }
 
+    /// Switches a tenant to a different, already-registered bundle. This is
+    /// an operator action: no ingest route calls it, only
+    /// `activate_bundle_if_none` (below) does, and the ingest runtime login
+    /// holds no `UPDATE` on `pipeline_active_bundles`, so this call fails
+    /// with a database permission error unless it runs through a role that
+    /// has been separately granted on the table.
     pub async fn activate_bundle(
         &self,
         tenant_id: &str,
@@ -3315,6 +3321,8 @@ impl PipelineService {
         Ok(())
     }
 
+    /// An operator action; see `PgPipelineStore::activate_bundle`. A service
+    /// built with the ingest runtime login cannot call this successfully.
     pub async fn activate_bundle(&self, tenant_id: &str, bundle_id: &str) -> anyhow::Result<()> {
         self.store.activate_bundle(tenant_id, bundle_id).await?;
         Ok(())

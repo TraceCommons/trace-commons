@@ -20,11 +20,21 @@ use super::pilot_runtime_grants::{PILOT_V62_RUNTIME_GRANTS, PILOT_V74_RUNTIME_GR
 /// hand-made grants.
 pub const PILOT_GRANTS_VERSION: i32 = 62;
 
+/// The first migration that grants to `trace_ingest_runtime` itself (V90;
+/// matches the constant of the same name in `migration_atomicity_pg.rs`).
+/// The pilot took the V74 grant by hand well before this, so this harness
+/// applies it at that point in the migration order too, not after the
+/// database reaches the current head.
+const RUNTIME_GRANTS_VERSION: i32 = 90;
+
 /// Migrates the database at `url` the way the pilot's was migrated: every
 /// migration through V62, then the pilot's hand-made grants to
-/// `trace_ingest_runtime`, then the rest through the real runner, then the one
-/// grant the pilot took by hand at V74. Every table created after V62 is then
-/// visible to the group only through the grants its own migration makes.
+/// `trace_ingest_runtime`, then every migration up to V90 with the pilot's
+/// V74 grant taken partway through, at its own version -- the way the pilot
+/// took it and `migration_atomicity_pg` reproduces it, not after the
+/// database reaches the current head -- then the rest through the real
+/// runner. Every table created after V62 is then visible to the group only
+/// through the grants its own migration makes.
 ///
 /// Needs a fresh database. A database already past V62 is accepted only when
 /// it carries the pilot's grants, which only this function gives: past that
@@ -91,6 +101,32 @@ pub async fn migrate_like_the_pilot(url: &str) {
             .await
             .expect("the pilot's V62 runtime grants");
     }
+
+    // The rest up to V90, the first migration that grants to
+    // trace_ingest_runtime itself, applied one at a time so the V74 grant
+    // can land right after V74 -- at its own version, as the pilot took it
+    // and migration_atomicity_pg reproduces it -- rather than after the
+    // database reaches the current head.
+    let recorded: std::collections::BTreeSet<i32> = client
+        .query("SELECT version FROM _trace_commons_migrations", &[])
+        .await
+        .expect("read the migration history")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    for (version, name, sql) in registered_migrations().iter().filter(|(version, ..)| {
+        *version > PILOT_GRANTS_VERSION
+            && *version < RUNTIME_GRANTS_VERSION
+            && !recorded.contains(version)
+    }) {
+        apply_and_record_migration(&mut client, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply V{version}: {error:?}"));
+    }
+    client
+        .batch_execute(PILOT_V74_RUNTIME_GRANT)
+        .await
+        .expect("the pilot's V74 runtime grant");
     drop(client);
     let _ = connection.await;
 
@@ -98,14 +134,6 @@ pub async fn migrate_like_the_pilot(url: &str) {
         .await
         .expect("connect as the migration owner");
     owner.run_migrations().await.expect("apply migrations");
-    owner
-        .trace_pool_for_test()
-        .get()
-        .await
-        .expect("owner client")
-        .batch_execute(PILOT_V74_RUNTIME_GRANT)
-        .await
-        .expect("the pilot's V74 runtime grant");
 }
 
 /// Makes `login` a `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS` role whose only
@@ -168,7 +196,18 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
                       UNION ALL
                       SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a
                        WHERE a.grantee = to_regrole($1)
-                  ) own)",
+                  ) own),
+                 -- Role memberships are per server, not per database: a role
+                 -- granted trace_ingest_runtime by one grantor in one test
+                 -- run and by a different grantor in another (both on this
+                 -- same PostgreSQL server) leaves two pg_auth_members rows
+                 -- for the same (roleid, member) pair, one per grantor.
+                 -- DISTINCT compares the set of role names, which is what
+                 -- this assertion means, and still catches a genuinely new
+                 -- role name.
+                 (SELECT array_agg(DISTINCT g.rolname::TEXT ORDER BY g.rolname::TEXT)
+                    FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+                   WHERE m.member = 'trace_ingest_runtime'::regrole)",
             &[&login],
         )
         .await
@@ -176,6 +215,7 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
     let memberships: Vec<String> = row.get::<_, Option<Vec<String>>>(0).unwrap_or_default();
     let group_privileged: bool = row.get(1);
     let own_privileges: i64 = row.get(2);
+    let group_memberships: Vec<String> = row.get::<_, Option<Vec<String>>>(3).unwrap_or_default();
     assert_eq!(
         memberships,
         vec!["trace_ingest_runtime".to_string()],
@@ -188,6 +228,19 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
     assert_eq!(
         own_privileges, 0,
         "the runtime login must hold no privilege of its own; use a fresh database"
+    );
+    // trace_ingest_runtime is itself a member of only the two roles a
+    // migration grants it: trace_witness_evidence_runtime (V90) and
+    // trace_public_run_runtime (the V74 grant, applied above). A broader
+    // membership widens every login the group carries, so catch it here
+    // rather than in whatever test happens to exercise it.
+    assert_eq!(
+        group_memberships,
+        vec![
+            "trace_public_run_runtime".to_string(),
+            "trace_witness_evidence_runtime".to_string(),
+        ],
+        "trace_ingest_runtime must be a member of only the V74 and V90 roles it is granted"
     );
     drop(client);
     let _ = connection.await;
