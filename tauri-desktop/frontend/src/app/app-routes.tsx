@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { ComputePage } from "../features/compute";
 import { HistoryPage } from "../features/history";
 import { InsightsPage } from "../features/insights";
@@ -12,7 +12,7 @@ import { SettingsPage } from "../features/settings";
 import { WaitingPage } from "../features/waiting";
 import type { useCoreStatus } from "../lib/tauri/use-core-status";
 import { NotFoundPage } from "./not-found-page";
-import { routePaths } from "./routes";
+import { flowPaths, routePaths } from "./routes";
 
 export function AppRoutes({
   requiresOnboarding,
@@ -48,7 +48,7 @@ export function AppRoutes({
       />
       <Route
         path={routePaths.settings}
-        element={<SettingsPage key={core.scope} />}
+        element={<SettingsWithGrantEntry key={core.scope} />}
       />
       <Route
         path={routePaths.compute}
@@ -76,7 +76,45 @@ export function AppRoutes({
           />
         }
       />
+      <Route
+        path={flowPaths["automatic-contributing"]}
+        element={
+          core.data?.daemon.logged_in === true ? (
+            <AutomaticContributingFlow key={core.scope} />
+          ) : (
+            <Navigate to={routePaths.settings} replace />
+          )
+        }
+      />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
+  );
+}
+
+/**
+ * The Flow 1 grant screens again, for an enrolled contributor (K10): from
+ * the scope picker on, through the path, both disclosures and the grant, so
+ * a re-grant is fresh consent under the settings now in force. Giving the
+ * grant clears the grant's void notice; finishing returns to Settings.
+ */
+function AutomaticContributingFlow() {
+  const navigate = useNavigate();
+  return (
+    <OnboardingPage
+      alreadyEnrolled
+      onComplete={() => navigate(routePaths.settings)}
+    />
+  );
+}
+
+/** Settings, with its way into the grant screens. */
+function SettingsWithGrantEntry() {
+  const navigate = useNavigate();
+  return (
+    <SettingsPage
+      onTurnOnAutomaticContributing={() =>
+        navigate(flowPaths["automatic-contributing"])
+      }
+    />
   );
 }
