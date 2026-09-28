@@ -104,6 +104,10 @@ pub struct AccountAdmissionResult {
     pub decision: AdmissionDecision,
     pub authority: Option<&'static str>,
     pub retry_after_seconds: Option<i64>,
+    /// On `Exhausted` only: the account's spend in the refused period, in
+    /// processing-cost units. Read by the earned-trust shadow counter, which
+    /// never changes the decision.
+    pub period_spend: Option<i64>,
 }
 impl From<AdmissionDecision> for AccountAdmissionResult {
     fn from(decision: AdmissionDecision) -> Self {
@@ -111,6 +115,7 @@ impl From<AdmissionDecision> for AccountAdmissionResult {
             decision,
             authority: None,
             retry_after_seconds: None,
+            period_spend: None,
         }
     }
 }
@@ -485,6 +490,7 @@ impl PgBackend {
                     decision: AdmissionDecision::Exhausted,
                     authority: Some("bounded"),
                     retry_after_seconds,
+                    period_spend: Some(total_used),
                 });
             }
             tx.execute("UPDATE trace_account_admission_budget SET cost_used=$4 WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3", &[&tenant,&account,&period_id,&(used + r.policy.processing_cost_bound())]).await.map_err(|_|database_refused())?;
@@ -509,6 +515,7 @@ impl PgBackend {
             decision: AdmissionDecision::Reserved,
             authority: Some(if charged { "bounded" } else { "invited" }),
             retry_after_seconds: None,
+            period_spend: None,
         })
     }
 

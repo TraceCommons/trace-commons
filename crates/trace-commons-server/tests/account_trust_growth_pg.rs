@@ -1319,3 +1319,72 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
         tx.rollback().await.unwrap();
     }
 }
+
+/// V88 (M5): each reservation can name the tier and evaluation it relied on.
+/// Nullable: NULL is "no growth rule applied", which is every reservation
+/// while growth is shadow-only. The runtime's existing table-wide grants
+/// cover the columns; nothing new is granted.
+#[tokio::test]
+async fn reservation_rows_carry_nullable_earned_tier_columns() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    async fn insert_reservation(
+        admin: &deadpool_postgres::Object,
+        tenant: &str,
+        account: Uuid,
+        tier: Option<i32>,
+        digest: Option<String>,
+    ) -> Result<u64, tokio_postgres::Error> {
+        {
+            admin
+                .execute(
+                    "INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,
+                        account_id,body_hash,authority_kind,trust_version,policy_version,period_id,
+                        status,lease_id,lease_expires_at,last_cost_bound,last_charged,earned_tier,
+                        trust_evaluation_digest)
+                     VALUES($1,$2,$3,$4,'account',1,'v1','v1:lifetime','reserved',$5,now(),1,TRUE,
+                        $6,$7)",
+                    &[
+                        &tenant,
+                        &Uuid::new_v4(),
+                        &account,
+                        &"c".repeat(64),
+                        &Uuid::new_v4(),
+                        &tier,
+                        &digest,
+                    ],
+                )
+                .await
+        }
+    }
+    let insert = |tier: Option<i32>, digest: Option<String>| {
+        insert_reservation(admin, &tenant, account, tier, digest)
+    };
+    assert!(insert(None, None).await.is_ok(), "shadow: nothing applied");
+    assert!(
+        insert(Some(2), Some(format!("sha256:{}", "d".repeat(64))))
+            .await
+            .is_ok()
+    );
+    assert!(insert(Some(-1), None).await.is_err());
+    assert!(
+        insert(Some(1), Some("not-a-digest".into())).await.is_err(),
+        "hash-only"
+    );
+    let runtime_can_write: bool = admin
+        .query_one(
+            "SELECT has_column_privilege('trace_account_admission_runtime',
+                'trace_account_admission_submissions','earned_tier','INSERT')
+                AND has_column_privilege('trace_account_admission_runtime',
+                'trace_account_admission_submissions','trust_evaluation_digest','UPDATE')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(runtime_can_write);
+}
