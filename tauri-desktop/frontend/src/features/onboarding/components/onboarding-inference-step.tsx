@@ -1,0 +1,210 @@
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useInferenceConnectionCopy } from "../../../lib/tauri/use-contributor-copy";
+import { useOnboardingInference } from "../hooks/use-onboarding-inference";
+import type { OnboardingStepProps } from "./onboarding-step-types";
+
+const backClass =
+  "rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary";
+
+// Connecting inference (K12): optional, and one route to a witness. Every
+// sentence is the core's (`consent_copy::inference_connection_copy`, and an
+// offer's disclosure picked per version). Nothing is chosen for the
+// contributor: no offer is pre-selected, choosing records it on the account
+// and installs nothing, and installing is a separate confirmation that says
+// first what it stops. Skipping, the non-consequential action, comes before
+// every action that changes something, and none of them is accented.
+export function OnboardingInferenceStep({
+  onboarding,
+  busy,
+}: Pick<OnboardingStepProps, "onboarding" | "busy">) {
+  const copyQuery = useInferenceConnectionCopy();
+  const copy = copyQuery.data;
+  const inference = useOnboardingInference();
+  const [chosen, setChosen] = useState<string | null>(null);
+  const working = busy || inference.busy;
+  const view = inference.view;
+  const skip = (
+    <Button
+      type="button"
+      variant="outline"
+      onClick={onboarding.finishInference}
+      disabled={working}
+    >
+      {view.kind === "installed" || view.kind === "none" ? "Continue" : "Skip"}
+    </Button>
+  );
+  return (
+    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
+      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        CONNECT INFERENCE (OPTIONAL)
+      </span>
+      <h2 id="onboarding-inference-heading">Connect inference?</h2>
+      {!copy ? (
+        <p
+          className={`m-0 text-[12px] ${copyQuery.isError ? "text-destructive" : "text-muted-foreground"}`}
+          role={copyQuery.isError ? "alert" : "status"}
+        >
+          {copyQuery.isError
+            ? "This step's wording could not be loaded. You can skip it."
+            : "Loading…"}
+        </p>
+      ) : (
+        <div className="grid gap-3 text-[12px]">
+          <p className="m-0">{copy.why}</p>
+          <p className="m-0">{copy.grants_nothing}</p>
+          {view.kind === "sign_in" && (
+            <>
+              <p className="m-0">{copy.sign_in}</p>
+              {inference.signInFailed && (
+                <p className="m-0 text-destructive" role="alert">
+                  {copy.sign_in_failed}
+                </p>
+              )}
+            </>
+          )}
+          {view.kind === "loading" && inference.failed && (
+            <p className="m-0 text-destructive" role="alert">
+              {copy.load_failed}
+            </p>
+          )}
+          {view.kind === "none" && <p className="m-0">{copy.none_offered}</p>}
+          {view.kind === "choose" && (
+            <>
+              {view.reselect && <p className="m-0">{copy.reselect}</p>}
+              {view.otherDevice ? (
+                <p className="m-0 font-bold">{copy.other_device}</p>
+              ) : (
+                <p className="m-0">{copy.one_device}</p>
+              )}
+              <RadioGroup
+                aria-labelledby="onboarding-inference-heading"
+                className="gap-px border-t border-border"
+                value={chosen ?? ""}
+                onValueChange={(value) => setChosen(value as string)}
+              >
+                {view.offers.map((offer) => (
+                  <label
+                    key={offer.offer_id}
+                    className="flex items-start gap-2.5 border-b border-border py-2.5 font-normal text-foreground"
+                  >
+                    <RadioGroupItem value={offer.offer_id} disabled={working} />
+                    <span>
+                      <strong>{offer.provider_id}</strong>
+                      <small className="block">{offer.disclosure}</small>
+                    </span>
+                  </label>
+                ))}
+              </RadioGroup>
+              {inference.selectFailed && (
+                <p className="m-0 text-destructive" role="alert">
+                  {copy.select_failed}
+                </p>
+              )}
+            </>
+          )}
+          {view.kind === "install" && (
+            <>
+              {inference.previousRemoved && (
+                <p className="m-0">{copy.previous_removed}</p>
+              )}
+              <p className="m-0 font-bold">{copy.install}</p>
+              {inference.installFailed && (
+                <p className="m-0 text-destructive" role="alert">
+                  {copy.install_failed}
+                </p>
+              )}
+            </>
+          )}
+          {view.kind === "installed" && (
+            <>
+              <p className="m-0" role="status">
+                {copy.installed}
+              </p>
+              <p className="m-0 text-muted-foreground">{copy.disconnect}</p>
+            </>
+          )}
+          {inference.disconnectPending && (
+            <p className="m-0" role="status">
+              {copy.disconnect_pending}
+            </p>
+          )}
+        </div>
+      )}
+      <div className="mt-6 flex flex-wrap gap-2.5">
+        <Button
+          className={backClass}
+          type="button"
+          onClick={onboarding.back}
+          disabled={working}
+        >
+          Back
+        </Button>
+        {skip}
+        {copy && view.kind === "sign_in" && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={inference.signIn}
+            disabled={working}
+          >
+            Sign in
+          </Button>
+        )}
+        {copy && inference.signInUrl && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={inference.openSignInUrl}
+          >
+            Open sign-in page
+          </Button>
+        )}
+        {copy && view.kind === "loading" && inference.failed && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={inference.retry}
+            disabled={working}
+          >
+            Try again
+          </Button>
+        )}
+        {copy && view.kind === "choose" && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              const offer = view.offers.find((o) => o.offer_id === chosen);
+              if (offer) inference.select(offer, view.expectedVersion);
+            }}
+            disabled={working || chosen === null}
+          >
+            Connect
+          </Button>
+        )}
+        {copy && view.kind === "install" && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => inference.install(view.target)}
+            disabled={working}
+          >
+            Use this witness on this device
+          </Button>
+        )}
+        {copy && view.kind === "installed" && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => inference.disconnect(view.connectionId)}
+            disabled={working}
+          >
+            Disconnect
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}

@@ -280,6 +280,7 @@ fn sample_credit_event(
         actor_principal_ref: format!("principal:{tenant_id}"),
         actor_role: "system".to_string(),
         settlement_state: TraceCreditSettlementState::Pending,
+        witness_provenance_class: None,
     }
 }
 

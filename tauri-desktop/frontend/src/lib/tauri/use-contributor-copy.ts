@@ -6,6 +6,7 @@ import {
   getEligibilityCopy,
   getEligibilityGroupCopy,
   getGrantVoidNotice,
+  getInferenceConnectionCopy,
   getProjectIgnoreCopy,
   getQuitConfirmationCopy,
   getRedactionSummary,
@@ -25,6 +26,7 @@ const copyKeys = {
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
   grantVoid: (id: number) => ["contributor-copy", "grant-void", id] as const,
+  inferenceConnection: ["contributor-copy", "inference-connection"] as const,
   witnessCapacity: (waiting: number) =>
     ["contributor-copy", "witness-capacity", waiting] as const,
   eligibility: (label: string, reason: string | null) =>
@@ -76,6 +78,15 @@ export function useArmingOfferCopy(projectLabel: string, count: number) {
 }
 
 /** The notice for one void. Keyed by its id, which is never reused. */
+/** The connect-inference step's sentences (K12). */
+export function useInferenceConnectionCopy() {
+  return useQuery({
+    queryKey: copyKeys.inferenceConnection,
+    queryFn: getInferenceConnectionCopy,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useGrantVoidNotice(id: number, wire: Record<string, unknown>) {
   return useQuery({
     queryKey: copyKeys.grantVoid(id),

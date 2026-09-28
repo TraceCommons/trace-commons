@@ -803,3 +803,175 @@ async fn pg_witness_evidence_signed_source_is_immutable_even_for_the_owner() {
         .expect("the derived artifact link may move");
     assert_eq!(rebound, 1);
 }
+
+fn current_object(tenant: &str, submission: Uuid, artifact: &str) -> TraceObjectRefWrite {
+    TraceObjectRefWrite {
+        object_ref_id: Uuid::new_v4(),
+        tenant_id: tenant.into(),
+        submission_id: submission,
+        artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: "test-encrypted".into(),
+        object_key: format!("object-{submission}"),
+        content_sha256: format!("sha256:{artifact}"),
+        encryption_key_ref: "tenant:test".into(),
+        size_bytes: 10,
+        compression: None,
+        created_by_job_id: None,
+    }
+}
+
+/// #1059: the batch current-object read that export and the reviewer list use
+/// agrees with the single read for every submission, stays tenant scoped, and
+/// the credit ledger records the resulting label without touching the amount.
+#[tokio::test]
+async fn pg_provenance_labels_batch_read_and_credit_ledger() {
+    use trace_commons_server::trace_corpus_storage::{
+        TraceCreditEventType, TraceCreditEventWrite, TraceCreditSettlementState,
+        TraceWitnessProvenanceClass as Class,
+    };
+    let Some(db) = backend().await else {
+        eprintln!("skipping PostgreSQL: no test URL");
+        return;
+    };
+    db.run_migrations().await.expect("migrate");
+    let tenant = format!("z2-label-{}", Uuid::new_v4());
+    let other_tenant = format!("z2-label-other-{}", Uuid::new_v4());
+    let artifact = "a".repeat(64);
+    let mut expected = Vec::new();
+    for (class, legacy, with_object, label) in [
+        (
+            AttestationClass::ProviderTeeFinalCall,
+            false,
+            true,
+            Class::ProviderTeeFinalCall,
+        ),
+        (
+            AttestationClass::GatewayFinalCall,
+            false,
+            true,
+            Class::GatewayFinalCall,
+        ),
+        // Verified v2 evidence, but no current object: no claim.
+        (
+            AttestationClass::ProviderTeeFinalCall,
+            false,
+            false,
+            Class::Unattested,
+        ),
+        (AttestationClass::Unattested, false, true, Class::Unattested),
+        (AttestationClass::Unattested, true, true, Class::LegacyV1),
+    ] {
+        let id = Uuid::new_v4();
+        let (evidence, _, _) = signed_evidence(&tenant, id, class, &artifact, legacy);
+        db.upsert_trace_submission_with_witness(sample_submission(&tenant, id), Some(evidence))
+            .await
+            .unwrap();
+        if with_object {
+            db.append_trace_object_ref(current_object(&tenant, id, &artifact))
+                .await
+                .unwrap();
+        }
+        expected.push((id, label));
+    }
+    let without_evidence = Uuid::new_v4();
+    db.upsert_trace_submission(sample_submission(&tenant, without_evidence))
+        .await
+        .unwrap();
+    expected.push((without_evidence, Class::Unattested));
+    let unknown = Uuid::new_v4();
+    let mut ids = expected.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    ids.push(unknown);
+
+    let batch = db
+        .list_current_verified_witness_evidence(&tenant, &ids)
+        .await
+        .unwrap();
+    for (id, label) in &expected {
+        let single = db
+            .get_current_verified_witness_evidence(&tenant, *id)
+            .await
+            .unwrap();
+        assert_eq!(batch.get(id), Some(&single), "batch disagrees for {id}");
+        assert_eq!(Class::from_claim(&single), *label, "{id}");
+    }
+    assert!(
+        !batch.contains_key(&unknown),
+        "a submission this tenant does not hold has no row"
+    );
+    assert!(
+        db.list_current_verified_witness_evidence(&other_tenant, &ids)
+            .await
+            .unwrap()
+            .is_empty(),
+        "another tenant's submissions are invisible to the batch read"
+    );
+    assert!(
+        db.list_current_verified_witness_evidence(&tenant, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let (labelled, _) = expected[1];
+    let event = |id: Uuid, class: Option<Class>| TraceCreditEventWrite {
+        credit_event_id: Uuid::new_v4(),
+        tenant_id: tenant.clone(),
+        submission_id: id,
+        trace_id: Uuid::new_v4(),
+        credit_account_ref: "principal:test".into(),
+        event_type: TraceCreditEventType::Accepted,
+        points_delta: "1.0000".into(),
+        reason: "accepted".into(),
+        external_ref: None,
+        actor_principal_ref: "principal:test".into(),
+        actor_role: "system".into(),
+        settlement_state: TraceCreditSettlementState::Pending,
+        witness_provenance_class: class,
+    };
+    let with_label = event(labelled, Some(Class::GatewayFinalCall));
+    let without_label = event(without_evidence, None);
+    db.append_trace_credit_event(with_label.clone())
+        .await
+        .unwrap();
+    db.append_trace_credit_event(without_label.clone())
+        .await
+        .unwrap();
+    let events = db.list_trace_credit_events(&tenant).await.unwrap();
+    let read = |id: Uuid| {
+        events
+            .iter()
+            .find(|event| event.credit_event_id == id)
+            .expect("event reads back")
+    };
+    assert_eq!(
+        read(with_label.credit_event_id).witness_provenance_class,
+        Some(Class::GatewayFinalCall)
+    );
+    assert_eq!(read(with_label.credit_event_id).points_delta, "1.0000");
+    assert_eq!(
+        read(without_label.credit_event_id).witness_provenance_class,
+        None
+    );
+
+    // The column holds one of the four labels or nothing: no free text, so no
+    // raw URL, signer or model name can land in it.
+    let mut client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let refused = tx
+        .execute(
+            "UPDATE trace_credit_ledger SET witness_provenance_class = 'verified'
+             WHERE tenant_id = $1 AND credit_event_id = $2",
+            &[&tenant, &without_label.credit_event_id],
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "an unknown provenance label must be refused"
+    );
+}
