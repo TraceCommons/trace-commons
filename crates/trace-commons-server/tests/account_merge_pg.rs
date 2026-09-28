@@ -997,13 +997,19 @@ async fn restricted_merge_backend(backend: &PgBackend) -> PgBackend {
         .await
         .expect("raw connection");
     client
+        // One transaction under an advisory lock: the suite runs in parallel,
+        // and concurrent GRANTs on one table fail with "tuple concurrently
+        // updated" (and concurrent CREATE ROLE with a duplicate key).
         .batch_execute(
-            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+            "BEGIN;
+             SELECT pg_advisory_xact_lock(hashtextextended('account_merge_pg restricted login', 0));
+             DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_trust_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
                  trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_trust_merge_runtime;
-             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;",
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;
+             COMMIT;",
         )
         .await
         .expect("provision restricted merge login");
@@ -1286,6 +1292,440 @@ async fn merge_revocation_of_same_invite_wins_over_survivor_grant() {
         trust_state(&backend, &tenant, a).await,
         Some(("bounded".into(), 4)),
         "with no unrevoked grant left, the survivor is bounded at a new version"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NEAR anchor and provisioned-device carry-over (V82).
+//
+// Rule: every `trace_near_account_anchors` row of the absorbed account, and
+// every `trace_near_provisioned_devices` row hanging off those anchors, is
+// re-keyed onto the survivor. Nothing else about the rows changes: a device
+// whose key is revoked stays revoked (revocation lives on `device_keys`, which
+// the merge does not touch), and a survivor that already holds an anchor ends
+// up holding both. The same NEAR account cannot be anchored on both sides, and
+// the same device cannot be provisioned to both, because `anchor_hash` and
+// `(tenant_id, device_key_id)` are UNIQUE; the re-key is therefore
+// collision-free by construction.
+// ---------------------------------------------------------------------------
+
+/// A NEAR-shaped tenant id, so the readiness check treats it as one.
+fn unique_near_tenant() -> String {
+    format!(
+        "near-{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
+async fn seed_near_anchor(backend: &PgBackend, tenant_id: &str, account_id: Uuid) -> String {
+    let anchor_hash = unique_code_hash();
+    raw_execute(
+        backend,
+        tenant_id,
+        "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name,
+             index_pepper_ref, account_name_key_ref)
+         VALUES (trace_current_tenant_id(), $1, $2, $3, 'fixture-pepper', 'fixture-key')",
+        &[
+            &account_id,
+            &anchor_hash,
+            &serde_json::json!({"test_fixture": true}),
+        ],
+    )
+    .await;
+    anchor_hash
+}
+
+/// A NEAR-provisioned device for `principal_ref` on `account_id`, provisioned
+/// under `anchor_hash`. The principal is linked if it is not already.
+async fn seed_near_device(
+    backend: &PgBackend,
+    tenant_id: &str,
+    account_id: Uuid,
+    principal_ref: &str,
+    anchor_hash: &str,
+    revoked: bool,
+) -> String {
+    let device_key_id = unique_code_hash();
+    let revoked_sql = if revoked { "now()" } else { "NULL" };
+    raw_execute(
+        backend,
+        tenant_id,
+        &format!(
+            "INSERT INTO device_keys
+                (device_key_id, tenant_id, public_key, invite_subject_hash,
+                 onboarding_origin, revoked_at)
+             VALUES ($1, trace_current_tenant_id(), 'fixture-public-key', NULL,
+                 'near', {revoked_sql})"
+        ),
+        &[&device_key_id],
+    )
+    .await;
+    raw_execute(
+        backend,
+        tenant_id,
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES (trace_current_tenant_id(), $1, $2)
+         ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
+        &[&account_id, &principal_ref],
+    )
+    .await;
+    raw_execute(
+        backend,
+        tenant_id,
+        "INSERT INTO trace_near_provisioned_devices
+            (tenant_id, principal_ref, account_id, device_key_id, anchor_hash)
+         VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
+        &[&principal_ref, &account_id, &device_key_id, &anchor_hash],
+    )
+    .await;
+    device_key_id
+}
+
+/// `trace_account_admission_live_device`, the check admission makes per
+/// request, as the tenant.
+async fn live_near_device(
+    backend: &PgBackend,
+    tenant_id: &str,
+    account_id: Uuid,
+    principal_ref: &str,
+) -> bool {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("raw tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set tenant context");
+    let live: bool = tx
+        .query_one(
+            "SELECT public.trace_account_admission_live_device($1, $2, $3)",
+            &[&tenant_id, &account_id, &principal_ref],
+        )
+        .await
+        .expect("live device")
+        .get(0);
+    tx.rollback().await.expect("rollback");
+    live
+}
+
+/// `trace_account_admission_linkage_ready()` as it would answer for a fleet
+/// holding only `tenant_id`.
+///
+/// The function is fleet-wide and this database is shared with every other
+/// test in the suite, which CI runs in parallel. Inside one transaction the
+/// tables that decide readiness are locked against concurrent writers, every
+/// other tenant's devices are revoked, its accounts closed, and every
+/// legacy-link conflict (V81) resolved -- then the real function is asked,
+/// and the transaction is rolled back. Only other tenants' rows are hidden,
+/// so the answer is exactly what the function says about this tenant; the
+/// predicate itself is never restated here.
+async fn linkage_ready_for_tenant(backend: &PgBackend, tenant_id: &str) -> bool {
+    for _ in 0..1000 {
+        match linkage_ready_for_tenant_once(backend, tenant_id).await {
+            Ok(ready) => return ready,
+            // Another test holds a lock the probe needs. Back off and try
+            // again rather than wait: see `lock_timeout` below.
+            Err(error)
+                if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+                    || error.code()
+                        == Some(&tokio_postgres::error::SqlState::T_R_DEADLOCK_DETECTED) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("readiness probe: {error:?}"),
+        }
+    }
+    panic!("readiness probe could not lock the readiness tables");
+}
+
+async fn linkage_ready_for_tenant_once(
+    backend: &PgBackend,
+    tenant_id: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await?;
+    // Freeze every table whose OTHER-tenant rows can make readiness false.
+    // SHARE ROW EXCLUSIVE blocks concurrent writes (and other probes) until
+    // the rollback, so a row another test commits between the isolating
+    // UPDATEs and the readiness call cannot reach the function. Without it
+    // the suite's parallel tests raced this probe in CI.
+    //
+    // A short `lock_timeout` covers both the table locks and the row locks
+    // the UPDATEs can meet (a merge holds its absorbed account `FOR UPDATE`,
+    // which the table lock does not exclude). The probe gives up and retries
+    // well inside `deadlock_timeout`, so while it holds the table locks it
+    // never waits long enough to be half of a deadlock that the server
+    // resolves by aborting another test's merge.
+    tx.batch_execute(
+        "SET LOCAL lock_timeout = '50ms';
+         LOCK TABLE trace_accounts, device_keys, trace_legacy_invite_link_conflicts
+            IN SHARE ROW EXCLUSIVE MODE",
+    )
+    .await?;
+    tx.execute(
+        "UPDATE device_keys SET revoked_at = now()
+          WHERE tenant_id <> $1 AND revoked_at IS NULL",
+        &[&tenant_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_accounts SET closed_at = now()
+          WHERE tenant_id <> $1 AND closed_at IS NULL",
+        &[&tenant_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_legacy_invite_link_conflicts SET resolved_at = now()
+          WHERE resolved_at IS NULL",
+        &[],
+    )
+    .await?;
+    let ready: bool = tx
+        .query_one("SELECT public.trace_account_admission_linkage_ready()", &[])
+        .await?
+        .get(0);
+    tx.rollback().await?;
+    Ok(ready)
+}
+
+/// `(account_id, count)` of the tenant's rows in `table`, sorted.
+async fn near_rows_by_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+    table: &str,
+) -> Vec<(Uuid, i64)> {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    client
+        .query(
+            &format!(
+                "SELECT account_id, count(*) FROM {table}
+                  WHERE tenant_id = $1 GROUP BY account_id ORDER BY account_id"
+            ),
+            &[&tenant_id],
+        )
+        .await
+        .expect("read near rows")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+#[tokio::test]
+async fn merge_carries_near_anchors_and_devices_to_survivor() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let tenant = unique_near_tenant();
+    let account_a = backend
+        .create_or_reuse_account(&tenant, "principal:near-a")
+        .await
+        .expect("mint A");
+    let account_b = backend
+        .create_or_reuse_account(&tenant, "principal:near-b-live")
+        .await
+        .expect("mint B");
+    // Both sides anchored, each to its own NEAR account.
+    let anchor_a = seed_near_anchor(&backend, &tenant, account_a).await;
+    let anchor_b = seed_near_anchor(&backend, &tenant, account_b).await;
+    seed_near_device(
+        &backend,
+        &tenant,
+        account_a,
+        "principal:near-a",
+        &anchor_a,
+        false,
+    )
+    .await;
+    seed_near_device(
+        &backend,
+        &tenant,
+        account_b,
+        "principal:near-b-live",
+        &anchor_b,
+        false,
+    )
+    .await;
+    let revoked_device = seed_near_device(
+        &backend,
+        &tenant,
+        account_b,
+        "principal:near-b-revoked",
+        &anchor_b,
+        true,
+    )
+    .await;
+    assert!(
+        live_near_device(&backend, &tenant, account_b, "principal:near-b-live").await,
+        "fixture: B's device is live on B before the merge"
+    );
+    assert!(
+        linkage_ready_for_tenant(&backend, &tenant).await,
+        "fixture: the tenant is linkage-ready before the merge"
+    );
+
+    let code_hash = unique_code_hash();
+    seed_login_link(&backend, &tenant, account_b, &code_hash, false, false).await;
+    let staged = backend
+        .stage_merge_proposal(&tenant, account_a, &code_hash)
+        .await
+        .expect("stage ok")
+        .expect("staged some");
+    restricted_merge_backend(&backend)
+        .await
+        .execute_merge(&tenant, account_a, staged.proposal_id)
+        .await
+        .expect("execute ok")
+        .expect("executed some");
+
+    assert_eq!(
+        near_rows_by_account(&backend, &tenant, "trace_near_account_anchors").await,
+        vec![(account_a, 2)],
+        "both anchors end on the survivor; none stay on the closed account"
+    );
+    assert_eq!(
+        near_rows_by_account(&backend, &tenant, "trace_near_provisioned_devices").await,
+        vec![(account_a, 3)],
+        "every provisioned device follows its anchor"
+    );
+    assert!(
+        live_near_device(&backend, &tenant, account_a, "principal:near-b-live").await,
+        "a device provisioned to the absorbed account is a live device of the survivor"
+    );
+    assert!(
+        live_near_device(&backend, &tenant, account_a, "principal:near-a").await,
+        "the survivor's own device is untouched"
+    );
+    assert!(
+        !live_near_device(&backend, &tenant, account_a, "principal:near-b-revoked").await,
+        "a revoked device stays revoked"
+    );
+    let still_revoked = raw_scalar_i64(
+        &backend,
+        &tenant,
+        "SELECT count(*) FROM device_keys
+          WHERE tenant_id = trace_current_tenant_id() AND device_key_id = $1
+            AND revoked_at IS NOT NULL",
+        &[&revoked_device],
+    )
+    .await;
+    assert_eq!(still_revoked, 1);
+    // A returning sign-in finds its account by anchor among OPEN accounts
+    // only; with the anchor left on the closed account it would find none and
+    // be refused.
+    assert_eq!(
+        raw_opt_uuid(
+            &backend,
+            &tenant,
+            "SELECT a.account_id FROM trace_near_account_anchors n
+               JOIN trace_accounts a USING (tenant_id, account_id)
+              WHERE n.anchor_hash = $1 AND a.closed_at IS NULL",
+            &[&anchor_b],
+        )
+        .await,
+        Some(account_a),
+        "the absorbed account's NEAR anchor resolves to the open survivor"
+    );
+    assert!(
+        linkage_ready_for_tenant(&backend, &tenant).await,
+        "a merge does not strand a live NEAR device on a closed account"
+    );
+
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let metadata: serde_json::Value = client
+        .query_one(
+            "SELECT safe_metadata FROM trace_account_audit
+              WHERE tenant_id = $1 AND action = 'account_merged'",
+            &[&tenant],
+        )
+        .await
+        .expect("merge audit")
+        .get(0);
+    assert_eq!(metadata["near_anchors_carried"], 1);
+    assert_eq!(metadata["near_devices_carried"], 2);
+
+    // Outside the consuming transaction the function authorizes nothing.
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("tenant context");
+    let replay = tx
+        .query_one(
+            "SELECT * FROM public.trace_near_account_merge($1, $2, $3, $4)",
+            &[&tenant, &account_a, &account_b, &staged.proposal_id],
+        )
+        .await
+        .expect_err("a proposal consumed by an earlier transaction authorizes nothing");
+    assert_eq!(
+        replay.as_db_error().map(|e| e.message()),
+        Some("near_account_merge_unauthorized"),
+        "refused by the function's own proof, not by its absence"
+    );
+    tx.rollback().await.expect("rollback");
+
+    let guard = client
+        .query_one(
+            "SELECT r.rolcanlogin, r.rolbypassrls, r.rolsuper,
+                    pg_get_userbyid(p.proowner) = r.rolname, p.prosecdef
+               FROM pg_proc p, pg_roles r
+              WHERE p.proname = 'trace_near_account_merge'
+                AND r.rolname = 'trace_near_account_merge_guard'",
+            &[],
+        )
+        .await
+        .expect("inspect guard");
+    assert!(!guard.get::<_, bool>(0), "guard cannot log in");
+    assert!(!guard.get::<_, bool>(1), "guard does not bypass RLS");
+    assert!(!guard.get::<_, bool>(2), "guard is not a superuser");
+    assert!(guard.get::<_, bool>(3), "guard owns the function");
+    assert!(guard.get::<_, bool>(4), "function is SECURITY DEFINER");
+}
+
+#[tokio::test]
+async fn merge_without_near_rows_carries_nothing() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let (tenant, _a, _b, metadata) = merge_with_trust(
+        &backend,
+        "near-none",
+        TrustSeed {
+            trust: None,
+            grants: &[],
+        },
+        TrustSeed {
+            trust: None,
+            grants: &[],
+        },
+    )
+    .await;
+    assert_eq!(metadata["near_anchors_carried"], 0);
+    assert_eq!(metadata["near_devices_carried"], 0);
+    assert!(
+        near_rows_by_account(&backend, &tenant, "trace_near_account_anchors")
+            .await
+            .is_empty()
     );
 }
 

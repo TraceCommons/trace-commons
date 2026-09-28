@@ -43,6 +43,11 @@ never observable. It:
 - moves B's **WebAuthn authenticators** to A;
 - **clears B's payout designation** (a single account may designate at most one
   active payout NEAR identity; B's stale designation must not survive);
+- moves B's **NEAR account anchors and NEAR-provisioned devices** to A, so a
+  device provisioned to B is a live device of A and B's NEAR account signs in
+  to A. Revoked devices move and stay revoked. This runs through V82's
+  `trace_near_account_merge`; the rule is stated in
+  [`account-invite-trust.md`](./account-invite-trust.md#account-merge);
 - **revokes B's sessions** (B can no longer be used);
 - **closes B** (B is a closed account from here on; see
   [`pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) for what
