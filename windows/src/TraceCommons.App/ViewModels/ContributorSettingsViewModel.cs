@@ -137,6 +137,42 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public ObservableCollection<ConnectionStatusViewModel> ConnectionRows { get; } = new();
 
+    /// <summary>
+    /// K11: what leaves this machine, to whom, and where the witness came
+    /// from, as rows. Every row is <see cref="RouteDisclosureSurface"/>'s,
+    /// which is the Rust's words for the daemon's <c>route_disclosure</c>.
+    /// </summary>
+    public ObservableCollection<DisclosureRow> DisclosureRows { get; } = new();
+
+    private string _disclosureTitle = string.Empty;
+
+    /// <summary>The section title, from the Rust. Empty when unreadable.</summary>
+    public string DisclosureTitle => _disclosureTitle;
+
+    /// <summary>
+    /// Ask the daemon what leaves this machine and lay out the Rust's words
+    /// for it. A failed call or an unreadable answer is said as such and is
+    /// never drawn as some other route.
+    /// </summary>
+    public async Task RefreshDisclosureAsync()
+    {
+        DaemonResponse response = await _host
+            .CallAsync(DaemonProtocol.Methods.RouteDisclosure)
+            .ConfigureAwait(true);
+        RouteDisclosure? disclosure = response.IsError || response.Result is null
+            ? null
+            : RouteDisclosureSurface.ForFacts(response.Result.Value.GetRawText());
+        DisclosureRows.Clear();
+        foreach (DisclosureRow row in RouteDisclosureSurface.PanelRows(
+            disclosure, disclosure is null ? RouteDisclosureSurface.Unreadable() : null))
+        {
+            DisclosureRows.Add(row);
+        }
+
+        _disclosureTitle = disclosure?.Copy.Title ?? string.Empty;
+        Raise(nameof(DisclosureTitle));
+    }
+
     public ObservableCollection<ConsentScopeViewModel> AlwaysIncluded { get; } = new();
 
     public ObservableCollection<ConsentScopeViewModel> OptionalScopes { get; } = new();
@@ -973,6 +1009,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             // calls take no handle, and this card has to be able to say what
             // would happen to a session even where nothing is running.
             RefreshWitness();
+            await RefreshDisclosureAsync().ConfigureAwait(true);
 
             DaemonResponse optionsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.ConsentOptions)
@@ -1541,6 +1578,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             Notice = result.Code == 0 ? string.Empty : WriteFailedNotice;
             RefreshWitness();
+            await RefreshDisclosureAsync().ConfigureAwait(true);
         }
         finally
         {
@@ -1577,6 +1615,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             Notice = result.Code < 0 ? WriteFailedNotice : string.Empty;
             RefreshWitness();
+            await RefreshDisclosureAsync().ConfigureAwait(true);
         }
         finally
         {
