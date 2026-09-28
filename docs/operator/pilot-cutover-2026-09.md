@@ -26,19 +26,21 @@ on until later work lands:
   unaffected (tested).
 - **Witness certificate v2** is not understood by 0.12.x clients.
 
-Two operator-side problems come with the cutover and do not affect clients:
+The rehearsal found two operator-side problems. Neither affects clients, and
+both are fixed when the target build includes #1095 and #1100:
 
-- After the first post-cutover event, the audit-chain drill and the
-  db-reconciliation drill report `ready: false` for every tenant that has
-  pre-cutover audit rows. `scripts/operator/smoke-gate.sh` requires both, so
-  it fails.
-- **Binary rollback is one-way.** Rolling back to `5f239be4` works for
-  clients. Rolling forward again afterwards makes every submission fail for
-  each tenant that was active in between. `/v1/admin/audit-chain-repair`
-  refuses to repair it (`file_head_not_in_db`). Do not roll back unless you
-  will stay rolled back until a fix ships.
+- **Drills after the cutover.** Before #1095, the audit-chain and
+  db-reconciliation drills reported `ready: false` after the first
+  post-cutover event, for every tenant with pre-cutover audit rows.
+  `scripts/operator/smoke-gate.sh` requires both drills, so it failed. With
+  #1095, the pre-cutover rows are reported as a legacy prefix
+  (`db_legacy_prefix_event_count`, `db_audit_legacy_prefix_row_count`), not as
+  failures.
+- **Binary rollback.** Before #1100, a rollback was one-way. With #1100, rolling
+  forward again needs one reviewed repair per tenant that was active during
+  the rollback. See [Rollback](#rollback).
 
-Fix both before the cutover, or accept them explicitly. See
+Without them in the target, treat both as described in
 [What breaks](#what-breaks-and-the-mitigation).
 
 ## Scope
@@ -249,8 +251,10 @@ sessions.
    removed from the path** (see the client defect above), then confirm.
 6. With `daemon run --dry-run` running, `daemon withdraw <id>` returns
    `withdrawn: true`. The server status becomes `revoked`.
-7. Run the drills. `postgres-rls` and `rollback` should be `ready`. For
-   `audit-chain` and `db-reconciliation`, see below.
+7. Run the drills. `postgres-rls` and `rollback` should be `ready`. With
+   #1095 in the target, `audit-chain` and `db-reconciliation` should be
+   `ready` too, with the pre-cutover rows counted as a legacy prefix (row 4
+   of What breaks).
 
 ## Switch-on order, after the cutover is stable
 
@@ -308,14 +312,31 @@ the cutover itself.
 - **What works.** Reinstall the `5f239be4` binaries. Released clients kept
   submitting and reading status against the V89 schema (tested). The schema
   stays at V89; the old build ignores the new tables.
-- **What does not: rolling forward again.** While the old build runs, it
-  appends file audit events whose DB mirrors carry no chain hash.
+- **Rolling forward again needs one repair per affected tenant** (#1100 in
+  the roll-forward build). While the old build runs, it appends file audit
+  events whose DB mirrors carry no chain hash, or whose events are file-only.
   - The new build then chains from the file head. The DB's latest hashed row
-    is older, so every mirrored append is refused as stale.
-  - Under `REQUIRE_DB_MIRROR_WRITES`, every submission for those tenants
-    fails. `audit-chain-repair` refuses with `file_head_not_in_db`.
-  - Treat a rollback as final until a fix ships. The fix: the repair, or the
-    append check, must accept a file that ran ahead through unhashed mirrors.
+    is older, so every mirrored append is refused as stale. Under
+    `REQUIRE_DB_MIRROR_WRITES`, every audited write fails for each tenant that
+    was active during the rollback.
+  - For each such tenant, run `POST /v1/admin/audit-chain-repair` as that
+    tenant's admin:
+    1. Dry run (the default). Expect `divergence:
+       "file_ahead_through_legacy_rows"`, and segment counts that fit the
+       traffic the rollback served. A tenant that was not active reports
+       `clean`.
+    2. `{"dry_run": false, "accept_legacy_segment": true}`. Without
+       `accept_legacy_segment` the repair refuses
+       `legacy_segment_not_accepted` and writes nothing. Expect
+       `chain_resumed: true`.
+    3. Run it once more: `clean`. Then confirm one submission succeeds, and
+       run the audit-chain and db-reconciliation drills.
+  - Any other refusal label (`db_head_not_in_file`,
+    `file_chain_break_after_db_head`, `legacy_row_mismatch`,
+    `file_head_not_in_db`) is not a rollback. Stop and treat it as chain drift.
+    The procedure and labels are in `audit-trail-forensics.md`, "Rolling
+    forward after a binary rollback".
+  - Without #1100 in the roll-forward build, treat a rollback as final.
 - **Schema.** Schema rollback is a Cloud SQL restore. It loses every write
   since the backup.
 
@@ -326,8 +347,8 @@ the cutover itself.
 | 1 | New uploads and all status writes 500 (V78 tables not granted) | every client | V78 grants, same session as the migrations |
 | 2 | Re-POSTs 500, and witnessed submissions cannot persist evidence (V76) | every client | `GRANT trace_witness_evidence_runtime` |
 | 3 | Withdrawal 500; revocation, purge and rescrub hit the token trigger. Pre-existing since V65–V68. | every client using withdraw; operators | token-bundle grant |
-| 4 | Audit-chain and db-reconciliation drills `ready: false` after the first new event per tenant, so `smoke-gate.sh` fails | operators | Fix the drill to restart the chain at the first hashed row after unhashed legacy rows. Until then, read the gap as the known transition, one per tenant. |
-| 5 | Rollback, then roll-forward, locks tenants out of submissions | everyone, after a rollback | Do not roll forward again after a rollback without a repair fix |
+| 4 | Audit-chain and db-reconciliation drills `ready: false` after the first new event per tenant, so `smoke-gate.sh` fails | operators | Fixed by #1095. The first hashed row may chain from the file history, pre-cutover rows are counted as a legacy prefix, and reader parity compares them without chain fields. Without #1095 in the target, read the gap as the known transition, one per tenant. |
+| 5 | Rollback, then roll-forward, locks tenants out of submissions | everyone, after a rollback | Fixed by #1100. Run the audit-chain repair per affected tenant: dry run, then `accept_legacy_segment: true`. See [Rollback](#rollback). Without #1100 in the roll-forward build, do not roll forward again. |
 | 6 | Account admission refuses 0.12.x NEAR uploads with 422 | NEAR-provisioned clients | Keep it off until a `source_session` client is adopted |
 | 7 | Account admission refuses to boot while the runtime can UPDATE `trace_accounts.account_id` | operators | Narrow the grant (switch-on step 4) |
 | 8 | Witness v2 certificates rejected by 0.12.x | witnessed clients | Keep the witness at `v1` |
@@ -369,7 +390,7 @@ A local rehearsal on PostgreSQL 14, built to match the pilot:
 | Candidate plus account admission, runtime role granted, pilot `trace_accounts` UPDATE | boot refused, `account_admission_permissions_or_linkage_not_ready` |
 | The same, with `trace_accounts` UPDATE narrowed | boot ok. Legacy individual, pooled, and newly enrolled pooled devices all submit `accepted`. |
 | Rollback to `5f239be4` after candidate traffic | submits and status pass |
-| Roll forward again | **every submit fails**; repair refuses `file_head_not_in_db` |
+| Roll forward again (build without #1100) | **every submit fails**; repair refuses `file_head_not_in_db`. #1100 reproduces this in `audit_chain_repair_resumes_the_chain_after_a_binary_rollback` and repairs it. |
 | Fresh database, V1–V89 as the non-superuser migrator | pass. The schema is identical to the upgraded database's, apart from the emulated runtime grants. |
 | `witness_certificate_cross_implementation` and `witness_admission_chain` tests on the candidate | 5 and 13 passed |
 

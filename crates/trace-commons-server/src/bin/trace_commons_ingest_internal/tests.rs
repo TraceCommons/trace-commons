@@ -29451,9 +29451,47 @@ async fn audit_chain_repair_resumes_the_chain_after_a_binary_rollback() {
         "a dry run writes nothing to the DB"
     );
 
+    // A non-dry run without the explicit acceptance refuses, and writes
+    // nothing: resuming across rows it cannot verify is a separate act.
+    for body in [
+        serde_json::json!({"dry_run": false, "purpose": "operator free text rollback"}),
+        serde_json::json!({
+            "dry_run": false,
+            "accept_legacy_segment": false,
+            "purpose": "operator free text rollback"
+        }),
+    ] {
+        let (status, refused) = post_audit_chain_repair(state.clone(), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert!(
+            refused.to_string().contains("legacy_segment_not_accepted"),
+            "{refused}"
+        );
+        assert_eq!(
+            read_all_audit_events(temp.path(), "tenant-a")
+                .expect("file log")
+                .len(),
+            file_count,
+            "an unaccepted repair writes nothing to the file"
+        );
+        assert_eq!(
+            backend
+                .list_trace_audit_events("tenant-a")
+                .await
+                .expect("DB rows")
+                .len(),
+            db_count,
+            "an unaccepted repair writes nothing to the DB"
+        );
+    }
+
     let (status, repaired) = post_audit_chain_repair(
         state.clone(),
-        serde_json::json!({"dry_run": false, "purpose": "operator free text rollback"}),
+        serde_json::json!({
+            "dry_run": false,
+            "accept_legacy_segment": true,
+            "purpose": "operator free text rollback"
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{repaired}");

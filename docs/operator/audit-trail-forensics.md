@@ -210,7 +210,18 @@ segment the old build wrote:
    there) and `legacy_segment_file_only_events` (those file events with no DB
    row of their id). Check they fit the traffic the rollback served.
    `chain_resumed` is `false`, and nothing is written.
-2. Run it with `"dry_run": false`. It appends one `audit_chain_repair` event,
+2. Run it with `"dry_run": false` **and** `"accept_legacy_segment": true`.
+   The second flag is the explicit acceptance of rows the repair cannot
+   verify by hash, the unhashed rows the rolled-back build wrote. Without it
+   a non-dry run refuses `legacy_segment_not_accepted` and writes nothing.
+
+   ```bash
+   curl -sS -X POST "$INGEST/v1/admin/audit-chain-repair" \
+     -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"dry_run": false, "accept_legacy_segment": true, "purpose": "INC-1234 roll forward after rollback to <build>"}'
+   ```
+
+   It appends one `audit_chain_repair` event,
    chained from the file head like any other event, to the file and then to
    the DB. Its `decision_inputs_hash` is the DB's latest hashed row's
    `event_hash`: the row names the exact point the DB chain resumes from. The
@@ -218,7 +229,8 @@ segment the old build wrote:
    event. It holds only counts and the purpose's hash.
 3. Run it again. It reports `clean`. Then confirm one submission succeeds,
    and run the audit-chain and db-reconciliation drills: neither reports a
-   chain failure.
+   chain failure. The acceptance flag is not needed here, because a clean
+   run takes no legacy path.
 
 What it verifies before writing anything, holding the tenant's append lock:
 - The DB's latest hashed row is a file event, with the same chain fields.
@@ -236,6 +248,7 @@ It refuses anything else with a `409` and writes nothing:
 | `db_head_not_in_file` | The DB's latest hashed row is not a file event, or its chain fields differ. A fork or a tampered row, not a rollback. | P0 chain drift: do not edit either log. |
 | `file_chain_break_after_db_head` | The file does not chain on from the DB's latest hashed row, or an event after it does not reproduce its hash. | P0: the file was edited or forked. |
 | `legacy_row_mismatch` | An unhashed DB row disagrees with the file event of its id. The old build copied those fields from the event, so this is not its doing. | P0: treat as tampering. |
+| `legacy_segment_not_accepted` | The state is a legacy segment the repair can resume across, but the non-dry run did not carry `"accept_legacy_segment": true`. Nothing was written. | Review the dry run's counts, then rerun with the flag. |
 | `file_head_not_in_db` | The file is ahead with no unhashed DB rows after the DB head. | See the table above. |
 
 How the drills read it afterwards. The DB chain is the hashed rows in order,

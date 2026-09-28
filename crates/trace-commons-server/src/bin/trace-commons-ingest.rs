@@ -66337,6 +66337,14 @@ struct TraceAuditChainRepairRequest {
     /// Defaults to true: a repair writes only when asked to.
     #[serde(default = "default_audit_chain_repair_dry_run")]
     dry_run: bool,
+    /// Required, on top of `dry_run: false`, before a repair resumes the DB
+    /// chain across a legacy segment (`file_ahead_through_legacy_rows`).
+    /// That path accepts DB rows it cannot verify by hash -- the unhashed
+    /// rows a rolled-back build wrote -- so it is a separate, deliberate act
+    /// after reviewing the dry run's counts. Without it such a run refuses
+    /// `legacy_segment_not_accepted` and writes nothing.
+    #[serde(default)]
+    accept_legacy_segment: bool,
 }
 
 /// Hash-only: counts, the purpose's hash, and the ids of the audit events
@@ -66472,6 +66480,9 @@ async fn run_audit_chain_repair(
                         restored_event_ids: Vec::new(),
                     },
                     Some(resume) => {
+                        if !request.dry_run && !request.accept_legacy_segment {
+                            return Err(refuse("legacy_segment_not_accepted"));
+                        }
                         let resume_event_id = if request.dry_run {
                             None
                         } else {
