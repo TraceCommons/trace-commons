@@ -51,6 +51,11 @@ pub mod native_flow;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
 pub mod notify;
+#[cfg(feature = "test-credential-store")]
+pub(crate) mod test_credential_store;
+// Under `test-credential-store` (test builds only) nothing outside the manual
+// round-trip tests constructs the OS store, by design.
+#[cfg_attr(all(feature = "test-credential-store", not(test)), allow(dead_code))]
 pub(crate) mod os_secret_store;
 pub mod policy;
 pub mod preview;

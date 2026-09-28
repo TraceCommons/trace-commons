@@ -25,6 +25,14 @@ pub(crate) struct OsSecretBackend {
 
 impl OsSecretBackend {
     pub(crate) fn new() -> Result<Self, CredentialError> {
+        // A test build never touches the user's real credential store. The
+        // two production call sites already route to the test file store
+        // under this feature; this refuses any path added later that does not.
+        // (`cfg(test)` is exempt: only the manual, `#[ignore]`d round trips
+        // below construct this there, and they exist to reach the real store.)
+        if cfg!(all(feature = "test-credential-store", not(test))) {
+            return Err(CredentialError::Unavailable);
+        }
         #[cfg(target_os = "macos")]
         let store: Arc<NativeStore> =
             apple_native_keyring_store::keychain::Store::new().map_err(storage_error)?;
