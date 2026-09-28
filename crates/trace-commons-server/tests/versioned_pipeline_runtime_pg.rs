@@ -6920,6 +6920,127 @@ async fn adapter_result_that_differs_from_the_selection_fails_closed() {
     );
 }
 
+/// Rewrites the `bundle_id` of a run's stored Score decision, as the
+/// database owner, with the outcome immutability trigger disabled only
+/// inside the one transaction that makes the change.
+async fn tamper_stored_score_bundle_id(tenant_id: &str, run_id: uuid::Uuid, bundle_id: &str) {
+    let mut client = owner_client().await;
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("disable the immutability trigger");
+    let updated = tx
+        .execute(
+            "UPDATE phase_outcomes
+                SET decision = jsonb_set(decision, '{bundle_id}', to_jsonb($3::TEXT))
+              WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'",
+            &[&tenant_id, &run_id, &bundle_id],
+        )
+        .await
+        .expect("tamper the stored Score decision");
+    assert_eq!(updated, 1, "one stored Score decision");
+    tx.batch_execute("ALTER TABLE phase_outcomes ENABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("enable the immutability trigger");
+    tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// A stored Score decision records the bundle identifier it was built
+/// under, loads unverified, and becomes a decision Settle can use only
+/// against the run's bound manifest. A stored decision whose `bundle_id`
+/// names another bundle is refused at Settle as `score_outcome_invalid`: a
+/// charged retry, with no adapter call and no leg dispatched. A run of the
+/// same tenant whose decision is untouched settles.
+#[tokio::test]
+async fn a_stored_score_decision_under_another_bundle_is_refused_at_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-score-bundle-{}", uuid::Uuid::new_v4());
+    let (tampered, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let (untouched, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let stored = service
+        .store()
+        .outcome_for_phase(&tenant, tampered.run_id, Phase::Score)
+        .await
+        .unwrap()
+        .expect("Score outcome recorded");
+    assert_eq!(
+        stored.decision["bundle_id"].as_str(),
+        Some(tampered.bundle_id.as_str()),
+        "the stored decision records the run's bound bundle"
+    );
+
+    let other_bundle = dependency_content_hash(b"another-bundle-manifest");
+    tamper_stored_score_bundle_id(&tenant, tampered.run_id, &other_bundle).await;
+    let reloaded = service
+        .store()
+        .outcome_for_phase(&tenant, tampered.run_id, Phase::Score)
+        .await
+        .expect("a stored decision under another bundle still loads, unverified")
+        .expect("Score outcome recorded");
+    assert_eq!(
+        reloaded.decision["bundle_id"].as_str(),
+        Some(other_bundle.as_str())
+    );
+
+    let refused = service
+        .process_run(&tenant, tampered.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs and retries");
+    assert_eq!(refused.state, PipelineRunState::Retry);
+    assert_eq!(
+        refused.last_error_label.as_deref(),
+        Some("score_outcome_invalid")
+    );
+    assert_eq!(
+        refused.attempt_count,
+        tampered.attempt_count + 1,
+        "the refusal is charged"
+    );
+    let rows = settlement_rows(&backend, &tenant, tampered.run_id).await;
+    for instrument in ["storage_rebate", "trace_credit"] {
+        assert_eq!(leg_state(&rows, instrument), "pending", "{instrument}");
+        assert!(!leg_dispatched(&rows, instrument), "{instrument}");
+    }
+    for adapter in &adapters {
+        assert!(adapter.requests().is_empty(), "no adapter call");
+    }
+    assert!(
+        !service
+            .store()
+            .list_outcomes(&tenant, tampered.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Settle),
+        "no Settle outcome for a refused decision"
+    );
+
+    let settled = service
+        .process_run(&tenant, untouched.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    for adapter in &adapters {
+        assert_eq!(adapter.requests().len(), 1, "the untouched run settles");
+    }
+}
+
 /// 3A acceptance: a run keeps the bundle it was bound to at receipt even
 /// after another bundle is activated for the tenant. Activating bundle B
 /// changes what a *new* receipt binds to; it never rebinds a run already in

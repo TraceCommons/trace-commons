@@ -20,7 +20,7 @@ use trace_commons_gate_api::pipeline::{
     PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult, PolicyError, PrivacyRisk, ReasonCode,
     ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision,
     ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision,
-    SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef,
+    SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
@@ -2947,7 +2947,10 @@ fn validate_outcome_payload(
             let _: ReviewEvaluation = decode(evaluation)?;
         }
         Phase::Score => {
-            let _: ScoreDecision = decode(decision)?;
+            // A stored Score decision loads without its manifest, so it
+            // loads unverified; Settle verifies it against the run's bound
+            // manifest before it uses it.
+            let _: UnverifiedScoreDecision = decode(decision)?;
             let _: ScoreEvidence = decode(evidence)?;
             let _: ScoreEvaluation = decode(evaluation)?;
         }
@@ -4834,12 +4837,14 @@ impl PipelineService {
             })
             .await?;
         let (result, command, neighbor) = output.into_parts();
-        // A7: before any artifact is stored, every award must name an
-        // instrument this bundle's manifest pins.
-        bundle
-            .package
-            .manifest
-            .require_pinned(result.decision.awards())
+        // Before any artifact is stored, the decision must be bound to the
+        // run's bundle: it records the bound manifest's bundle identifier,
+        // and every award names an instrument that manifest pins. A policy
+        // can build a decision under a manifest of its own making, so the
+        // pin check alone does not bind the decision to the run.
+        result
+            .decision
+            .require_bound(&bundle.package.manifest)
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
         // M4: a Trace Credit award must fit the ledger's signed 64-bit
         // microcredit column; refuse one that does not here, before any
@@ -4941,8 +4946,15 @@ impl PipelineService {
             .outcome_for_phase(&run.tenant_id, run.run_id, Phase::Score)
             .await?
             .ok_or_else(|| anyhow::anyhow!("score_outcome_invalid"))?;
-        let score_decision = serde_json::from_value::<ScoreDecision>(score_outcome.decision)
-            .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+        // The stored decision loads unverified and becomes a
+        // `ScoreDecision` only against the run's bound manifest: a decision
+        // under another bundle, or an award for an instrument that manifest
+        // does not pin, fails closed before anything settles.
+        let score_decision =
+            serde_json::from_value::<UnverifiedScoreDecision>(score_outcome.decision)
+                .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?
+                .verify(&bundle.package.manifest)
+                .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
         let score_evidence = serde_json::from_value::<ScoreEvidence>(score_outcome.evidence)
             .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
         let score_evaluation = serde_json::from_value::<ScoreEvaluation>(score_outcome.evaluation)
