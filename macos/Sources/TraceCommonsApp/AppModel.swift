@@ -80,7 +80,24 @@ final class AppModel: ObservableObject {
     init(daemonStartup: DaemonStartup? = nil) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
     }
-    @Published private(set) var status: DaemonStatus = .unknown
+    @Published private(set) var status: DaemonStatus = .unknown {
+        didSet {
+            // Worded across the ABI once per notice the daemon sends, not on
+            // every re-render of the card.
+            if status.legacyInviteMigration != oldValue.legacyInviteMigration {
+                legacyMigrationNotice = status.legacyInviteMigration.noticeJSON
+                    .flatMap(legacyMigrationWording)
+                    .flatMap(LegacyMigrationNotice.decode(fromJSON:))
+            }
+        }
+    }
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the Rust's words, or nil when there is none or it cannot be read.
+    @Published private(set) var legacyMigrationNotice: LegacyMigrationNotice?
+    /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
+    /// replaced only by tests.
+    var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
+        forNotice:)
     @Published private(set) var pending: [QueueEntry] = [] {
         didSet { recomputeWaiting() }
     }
