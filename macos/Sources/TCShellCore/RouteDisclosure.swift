@@ -100,6 +100,16 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
     public static let consumedCopyFields = [
         "title", "route", "witness", "local_filter", "receipts", "attested_bodies", "session",
     ]
+    /// The same, for the nested `copy.witness` block -- where the
+    /// both-enclaves and origin sentences live.
+    public static let consumedWitnessCopyFields = [
+        "heading", "address_label", "signing_label", "measurements_label", "check",
+        "classifier", "origin",
+    ]
+    /// The same, for the nested `copy.session` block.
+    public static let consumedSessionCopyFields = [
+        "heading", "before_label", "before_line", "after_label", "after_line",
+    ]
 
     /// Whether a session leaves this machine unredacted.
     public var sendsToWitness: Bool { facts.route == "witness" }
