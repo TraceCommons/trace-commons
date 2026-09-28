@@ -3,6 +3,7 @@ import {
   getArmingOfferCopy,
   getArmingRewordedNotice,
   getAutomaticGrantCopy,
+  getCertificateDetail,
   getContributorDisclosureCopy,
   getEligibilityCopy,
   getEligibilityGroupCopy,
@@ -13,12 +14,22 @@ import {
   getQuitConfirmationCopy,
   getRedactionSummary,
   getResidualSecretLine,
+  getRouteDisclosure,
   getWithdrawalConfirmationPrompt,
   getWitnessCapacityNotice,
   getWitnessReviewCopy,
 } from "./contributor-copy-api";
 
+/**
+ * K11's disclosure facts change whenever the witness does, so they live
+ * under the account and are invalidated by every witness change.
+ */
+export const routeDisclosureKey = (account: string) =>
+  ["account", account, "route-disclosure"] as const;
+
 const copyKeys = {
+  certificateDetail: (entryId: string) =>
+    ["contributor-copy", "certificate-detail", entryId] as const,
   armingOffer: (projectLabel: string, count: number) =>
     ["contributor-copy", "arming-offer", projectLabel, count] as const,
   disclosure: ["contributor-copy", "disclosure"] as const,
@@ -136,6 +147,34 @@ export function useWitnessCapacityNotice(
     queryKey: copyKeys.witnessCapacity(waiting),
     queryFn: () => getWitnessCapacityNotice(wire),
     staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * K11: what leaves this machine, to whom, and what this client checked --
+ * the daemon's facts with the core's words. Re-read each time a disclosure
+ * surface opens: the witness, its origin and the filter can all change.
+ */
+export function useRouteDisclosure(account: string, enabled: boolean) {
+  return useQuery({
+    queryKey: routeDisclosureKey(account),
+    queryFn: getRouteDisclosure,
+    enabled,
+    staleTime: 0,
+  });
+}
+
+/**
+ * The certificate a pending entry holds, as checked at review. Only asked
+ * for an entry whose `holds_certificate` is true; the daemon refuses others.
+ */
+export function useCertificateDetail(entryId: string | null) {
+  return useQuery({
+    queryKey: copyKeys.certificateDetail(entryId ?? ""),
+    queryFn: () => getCertificateDetail(entryId ?? ""),
+    enabled: entryId !== null && entryId.length > 0,
+    staleTime: 0,
+    gcTime: 0,
   });
 }
 

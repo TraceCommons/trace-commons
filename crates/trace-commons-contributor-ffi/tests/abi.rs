@@ -2553,6 +2553,7 @@ fn write_enrolled_config(
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -2786,6 +2787,19 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
     assert_eq!(json["url"], serde_json::json!("https://witness.example"));
     assert_eq!(json["signing_address"], serde_json::json!("0xfeed"));
     assert_eq!(json["pinned_measurement_count"], serde_json::json!(1));
+    // K11: a witness configured through the ABI is one typed into a shell's
+    // Settings, and the config says so for the disclosure screens.
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+    let cfg = store.load_config().unwrap().unwrap();
+    assert_eq!(
+        cfg.witness_origin_view(),
+        Some(
+            trace_commons_contributor::config::WitnessOriginView::Recorded(
+                trace_commons_contributor::config::WitnessOrigin::Settings
+            )
+        )
+    );
 
     // Clearing is 1 the first time and 0 the second: idempotent, and the
     // return distinguishes "removed one" from "there was none".
@@ -2797,6 +2811,8 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
         unsafe { tc_witness_trust_state(path.as_ptr()) },
         TC_WITNESS_STATE_ABSENT
     );
+    let cfg = store.load_config().unwrap().unwrap();
+    assert!(cfg.witness_origin.is_none(), "cleared with its witness");
 }
 
 /// The ABI refuses to create the refusing state it can report.

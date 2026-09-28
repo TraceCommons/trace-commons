@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "../../components/page-header";
+import { RouteDisclosurePanel } from "../../components/route-disclosure";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
 import { AuditPanel } from "./components/audit-panel";
 import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
@@ -205,6 +206,7 @@ export function SettingsPage({
             onRefresh={settings.refresh}
             onSave={(setting, value) => behavior.save(setting, value)}
           />
+          <RouteDisclosurePanel />
           <WitnessPanel
             data={witness.data}
             state={witness.state}

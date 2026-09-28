@@ -18,7 +18,6 @@ const common = {
   path_automatic: "PATH AUTOMATIC",
   path_ask_first: "PATH ASK FIRST",
   raw_send: "RAW SEND",
-  witness_origin: "WITNESS ORIGIN",
 };
 
 const patternsOnly = {

@@ -38,6 +38,8 @@ const TAURI_COMMANDS: &[&str] = &[
     "witness_status",
     "configure_witness",
     "clear_witness",
+    "route_disclosure",
+    "certificate_detail",
     "discover_routing",
     "configure_routing",
     "probe_routing",
