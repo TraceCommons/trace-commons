@@ -6,6 +6,10 @@ import { invokeTauri } from "./core-api";
 
 export type { AutomaticGrantCopy } from "./automatic-grant-copy";
 import {
+  type InferenceConnectionCopy,
+  parseInferenceConnectionCopy,
+} from "./inference-connection-copy";
+import {
   type GrantVoidNotice,
   parseGrantVoidNotice,
 } from "./grant-void-notice";
@@ -575,6 +579,16 @@ export async function getEligibilityGroupCopy(
 
 /** The quit prompt that is true for this process right now. */
 /** The core's notice for one `status.grant_voids` element, passed through. */
+/**
+ * The connect-inference step's sentences (K12), from `consent_copy`. An
+ * offer's own disclosure arrives with the offer; see `inference-connection.ts`.
+ */
+export async function getInferenceConnectionCopy(): Promise<InferenceConnectionCopy> {
+  return parseInferenceConnectionCopy(
+    await invokeTauri("inference_connection_copy"),
+  );
+}
+
 export async function getGrantVoidNotice(
   wire: Record<string, unknown>,
 ): Promise<GrantVoidNotice> {
