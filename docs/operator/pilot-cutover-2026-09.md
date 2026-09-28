@@ -357,12 +357,14 @@ sessions.
    - `accepted_current_derived_without_active_vector_entry=<n>`: accepted
      traces the vector worker has not indexed yet. It shrinks as the worker
      catches up. The pre-cutover baseline had it too.
-   - After the step 6 withdrawal: `status_mismatches=1`,
-     `derived_status_mismatches=1`, and reader-parity failures
-     (`contributor_credit_reader_parity`, `reviewer_metadata_reader_parity`,
-     `analytics_reader_parity`, `db_reader_parity_failures`). Withdrawal
-     updates the database but not the file-side record, so the file still
-     says `accepted`. See row 12 of What breaks.
+   - After the step 6 withdrawal, only on a target without #1112:
+     `status_mismatches=1`, `derived_status_mismatches=1`, and reader-parity
+     failures (`contributor_credit_reader_parity`,
+     `reviewer_metadata_reader_parity`, `analytics_reader_parity`,
+     `db_reader_parity_failures`). Before #1112, withdrawal updates the
+     database but not the file-side record, so the file still says
+     `accepted`. See row 12 of What breaks. With #1112, these gaps after a
+     withdrawal are a finding.
 
    Record the full `blocking_gaps` for each tenant, so a later run can be
    compared. `scripts/operator/smoke-gate.sh` requires db-reconciliation to be
@@ -467,7 +469,7 @@ the cutover itself.
 | 9 | 0.12.6 `account login` prints a URL that 404s | clients withdrawing | Strip `/v1/traces` from the printed URL. #1096 fixes the client, but it is merged, not released. |
 | 10 | Drill responses: `purpose` became `purpose_hash` (#1044); rollback drill adds `legacy_submit_audit_row_count` | anyone parsing drill JSON | No in-repo script reads `purpose`. `smoke-gate.sh` and `rotate-kek.sh` read only `ready`, `blocking_gaps`, `success` and `required_checks`. Update any out-of-repo parser. |
 | 11 | Out-of-repo deploy scripts are pinned to `5f239be4` / `EXPECT_MAX_MIGRATION=74` | operators | Re-pin to the target, with the maximum at 91 |
-| 12 | After a withdrawal, the file-side submission record still says `accepted`, so db-reconciliation reports `status_mismatches` and reader-parity failures for that tenant | operators | Present on `5f239be4` and on `main`. Read these gaps as the withdrawal, and check that the DB says `revoked`. |
+| 12 | After a withdrawal, the file-side submission record still says `accepted`, so db-reconciliation reports `status_mismatches` and reader-parity failures for that tenant | operators | Present on `5f239be4`, and on `main` up to #1112, which writes the file tombstone and marks the file records revoked. With #1112 in the target, new withdrawals leave no such gap. A withdrawal made before it keeps the gap: read it as that withdrawal, and check that the DB says `revoked`. |
 
 ## Evidence
 
