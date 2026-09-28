@@ -34,6 +34,19 @@ public static class DaemonProtocol
     {
         public const string Hello = "hello";
         public const string Status = "status";
+
+        /// <summary>
+        /// K11: what leaves this machine, to whom, and what this client
+        /// checked. Read-only, no network. Words come from
+        /// <see cref="RouteDisclosureSurface"/>, never from here.
+        /// </summary>
+        public const string RouteDisclosure = "route_disclosure";
+
+        /// <summary>
+        /// The held certificate's claims for one pending entry whose
+        /// <c>holds_certificate</c> is true.
+        /// </summary>
+        public const string CertificateDetail = "certificate_detail";
         public const string ListPending = "list_pending";
 
         /// <summary>

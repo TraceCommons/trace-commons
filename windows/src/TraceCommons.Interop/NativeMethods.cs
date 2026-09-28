@@ -303,6 +303,33 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string capacityJson);
 
     /// <summary>
+    /// K11: the daemon's <c>route_disclosure</c> result in, as sent;
+    /// <c>{"facts", "copy"}</c> out -- the facts canonicalised and the words
+    /// for exactly those facts. Owned; release with
+    /// <see cref="tc_string_free"/>, which <see cref="TakeOwnedString"/>
+    /// does. NULL for anything unreadable, including a route or origin newer
+    /// than this build, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_route_disclosure_copy(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string factsJson);
+
+    /// <summary>
+    /// What a disclosure surface says when <see cref="tc_route_disclosure_copy"/>
+    /// answers NULL: <c>panel</c> and <c>session</c>. Owned. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_route_disclosure_unreadable_copy();
+
+    /// <summary>
+    /// The labels for the daemon's <c>certificate_detail</c>. Owned. NULL
+    /// only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_certificate_detail_copy();
+
+    /// <summary>
     /// Every fixed word on the private-inference offer and settings card, as
     /// an owned JSON object.
     ///
