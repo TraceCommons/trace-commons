@@ -7,11 +7,15 @@ final class RouteDisclosureTests: XCTestCase {
     private func payload(
         route: String = "witness",
         witness: Bool = true,
+        witnessWords: Bool? = nil,
         classifier: Bool = true,
         localFilter: String? = nil,
         receipts: Bool = true,
-        attestedBodies: Bool = false
+        attestedBodies: Bool = false,
+        attestedBodiesWords: Bool? = nil
     ) -> String {
+        let witnessWords = witnessWords ?? witness
+        let attestedBodiesWords = attestedBodiesWords ?? attestedBodies
         var facts: [String: Any] = [
             "route": route,
             "local_filter": route == "local" ? "near_ai" : NSNull(),
@@ -27,7 +31,7 @@ final class RouteDisclosureTests: XCTestCase {
         let copy: [String: Any] = [
             "title": "TITLE",
             "route": "ROUTE",
-            "witness": witness
+            "witness": witnessWords
                 ? [
                     "heading": "W", "address_label": "A", "signing_label": "S",
                     "measurements_label": "M", "check": "CHECK",
@@ -36,7 +40,7 @@ final class RouteDisclosureTests: XCTestCase {
                 : NSNull(),
             "local_filter": localFilter ?? NSNull(),
             "receipts": receipts ? "RECEIPTS" : NSNull(),
-            "attested_bodies": attestedBodies ? "BODIES" : NSNull(),
+            "attested_bodies": attestedBodiesWords ? "BODIES" : NSNull(),
             "session": [
                 "heading": "H", "before_label": "B", "before_line": "BL",
                 "after_label": "AF", "after_line": "AL",
@@ -74,6 +78,36 @@ final class RouteDisclosureTests: XCTestCase {
         // The witness route with no filter line but one supplied.
         XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(localFilter: "FILTER")))
         XCTAssertNil(RouteDisclosure.decode(fromJSON: "not json"))
+    }
+
+    /// The attested-bodies line is said exactly when the facts say prompts
+    /// and replies go to the witness: on the witness route with the setting
+    /// on, and nowhere else.
+    func testMismatchedAttestedBodiesWordsAreRefused() {
+        XCTAssertNotNil(RouteDisclosure.decode(fromJSON: payload(attestedBodies: true)))
+        // The setting is on, but the words for it are missing.
+        XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(
+            attestedBodies: true, attestedBodiesWords: false)))
+        // The setting is off, but the words claim it is on.
+        XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(
+            attestedBodies: false, attestedBodiesWords: true)))
+        // A refusing witness is sent nothing, whatever the setting says.
+        XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(
+            route: "witness_refusing", classifier: false, receipts: false,
+            attestedBodies: true, attestedBodiesWords: true)))
+        XCTAssertNotNil(RouteDisclosure.decode(fromJSON: payload(
+            route: "witness_refusing", classifier: false, receipts: false,
+            attestedBodies: true, attestedBodiesWords: false)))
+    }
+
+    /// Words for a witness the facts do not name are refused, and so is a
+    /// named witness with no words for it.
+    func testWitnessWordsWithoutWitnessFactsAreRefused() {
+        XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(
+            route: "local", witness: false, witnessWords: true, classifier: false,
+            localFilter: "FILTER", receipts: false)))
+        XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(witness: false, witnessWords: true)))
+        XCTAssertNil(RouteDisclosure.decode(fromJSON: payload(witness: true, witnessWords: false)))
     }
 
     func testACertificateIsWordedOnlyForTheVerificationItNames() {

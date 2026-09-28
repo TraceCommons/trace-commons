@@ -45,24 +45,46 @@ struct RouteDisclosureBody: View {
 }
 
 /// The Settings section. Unreadable is said as such and never drawn as some
-/// other route.
+/// other route; before the first answer it shows that it is loading.
 struct RouteDisclosureSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: TC.Space.s) {
-            if let disclosure = model.routeDisclosure {
+            switch model.routeDisclosureState {
+            case .shown(let disclosure):
                 TCSectionHeader(title: disclosure.copy.title)
                 RouteDisclosureBody(disclosure: disclosure)
-            } else if model.routeDisclosureUnreadable,
-                let line = model.routeDisclosureUnreadableCopy?.panel
-            {
-                Text(line)
-                    .font(TC.Font_.caption)
-                    .foregroundStyle(TC.Tone.attention.textColor)
+            case .loading:
+                ProgressView().controlSize(.small)
+            case .unreadable:
+                RouteDisclosureUnreadableLine(line: model.routeDisclosureUnreadableCopy?.panel)
             }
         }
         .onAppear { model.refreshRouteDisclosure() }
+    }
+}
+
+/// The unreadable state. Marked by a glyph as well as colour, so it
+/// survives greyscale and colour-blindness; and drawn even when the Rust's
+/// sentence for it could not be read, so the panel is never simply empty.
+struct RouteDisclosureUnreadableLine: View {
+    let line: String?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+            Image(systemName: TC.Tone.attention.symbol)
+                .imageScale(.small)
+                .foregroundStyle(TC.Tone.attention.color)
+                .accessibilityHidden(line != nil)
+            if let line {
+                Text(line)
+                    .font(TC.Font_.caption)
+                    .foregroundStyle(TC.Tone.attention.textColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -102,12 +124,10 @@ struct SessionSendDisclosureView: View {
                 }
                 .font(TC.Font_.caption)
                 .fixedSize(horizontal: false, vertical: true)
-            } else if model.routeDisclosureUnreadable,
-                let line = model.routeDisclosureUnreadableCopy?.session
-            {
-                Text(line)
-                    .font(TC.Font_.caption)
-                    .foregroundStyle(TC.Tone.attention.textColor)
+            } else if model.routeDisclosureState == .loading {
+                ProgressView().controlSize(.small)
+            } else {
+                RouteDisclosureUnreadableLine(line: model.routeDisclosureUnreadableCopy?.session)
             }
         }
         .onAppear {
