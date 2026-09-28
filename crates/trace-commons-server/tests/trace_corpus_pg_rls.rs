@@ -280,6 +280,7 @@ fn sample_credit_event(
         actor_principal_ref: format!("principal:{tenant_id}"),
         actor_role: "system".to_string(),
         settlement_state: TraceCreditSettlementState::Pending,
+        witness_provenance_class: None,
     }
 }
 
@@ -1566,6 +1567,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V81__legacy_invite_link.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V86__account_trust_evaluations.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1668,6 +1672,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!(
         "../../../migrations/V81__legacy_invite_link.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V86__account_trust_evaluations.sql"
     ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));

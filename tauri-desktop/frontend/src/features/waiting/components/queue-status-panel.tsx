@@ -3,6 +3,7 @@ import {
   WITNESS_SATURATED_LABEL,
   type WitnessCapacity,
 } from "../../../lib/tauri/witness-capacity";
+import { GATE_HELD_LABEL, parseGateHeld } from "../../../lib/tauri/switch-on-notices";
 import { NEAR_AI_NOTICE_LABEL } from "../health-recovery";
 import { NearAiNoticeRecovery } from "./near-ai-notice-recovery";
 import { WitnessCapacityNotice } from "./witness-capacity-notice";
@@ -58,18 +59,35 @@ function readCapacity(
   }
 }
 
+function gateHeldIsDrawn(value: unknown): boolean {
+  try {
+    return parseGateHeld(value) !== null;
+  } catch {
+    // Unreadable: the app shell draws its fallback line instead.
+    return true;
+  }
+}
+
 export function QueueStatusPanel({
   health,
   budget,
   routing,
   witnessCapacity,
+  gateHeld,
 }: {
   health: Health;
   budget?: Budget;
   routing?: Routing;
   witnessCapacity?: unknown;
+  gateHeld?: unknown;
 }) {
   const capacity = readCapacity(witnessCapacity);
+  // The held notice, drawn above every page from
+  // `status.automatic_contribution_held`, says everything this label would
+  // in the core's words, so the generic line steps aside for it whenever
+  // that notice (or its unreadable fallback) is drawn.
+  const heldShownByNotice =
+    health.last_error_label === GATE_HELD_LABEL && gateHeldIsDrawn(gateHeld);
   // The capacity notice says everything this label would, in the core's
   // words, so the generic line steps aside for it -- but only when the
   // notice (or its unreadable fallback) is actually drawn.
@@ -111,7 +129,8 @@ export function QueueStatusPanel({
         )}
         {health.last_error_label &&
           health.last_error_label !== NEAR_AI_NOTICE_LABEL &&
-          !saturatedShownByNotice && (
+          !saturatedShownByNotice &&
+          !heldShownByNotice && (
           <div className="text-destructive">
             <strong>Daemon needs attention</strong>
             <span>

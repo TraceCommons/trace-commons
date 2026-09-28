@@ -53,10 +53,29 @@ the caller's tenant context and only for a proposal consumed by the same
 transaction, the same proof the reward and source-session merge hooks use.
 `account_merge_pg` runs it under a merge login that has no trust-table rights.
 
-Still not transferred: `trace_near_account_anchors` and
-`trace_near_provisioned_devices` rows stay on the absorbed account, so a NEAR
-device provisioned to it is not a live device of the survivor. That is a
-separate identity rule and is not decided here.
+NEAR anchors and NEAR-provisioned devices follow the identity too (V82):
+
+- Every `trace_near_account_anchors` row of the absorbed account, and every
+  `trace_near_provisioned_devices` row provisioned under those anchors, is
+  re-keyed onto the survivor. Only `account_id` changes; no row is created or
+  deleted. A device provisioned to the absorbed account is then a live device
+  of the survivor, and the absorbed account's NEAR account signs in to the
+  survivor. Left on the closed account, those devices would stop being live
+  and `trace_account_admission_linkage_ready()` would turn false.
+- A survivor that already holds an anchor ends up holding both. The same NEAR
+  account cannot be anchored on both sides, and the same device cannot be
+  provisioned to both: `anchor_hash` and `(tenant_id, device_key_id)` are
+  UNIQUE, so the re-key cannot collide.
+- Revocation lives on `device_keys`, which the merge does not touch. A revoked
+  device moves with its anchor and stays revoked.
+- The merge audit row records `near_anchors_carried` and
+  `near_devices_carried` as counts only.
+
+This runs through `trace_near_account_merge`, owned by the NOLOGIN,
+NOBYPASSRLS `trace_near_account_merge_guard`, under the same tenant check and
+consumed-proposal proof. The guard can read only the tenant, account, and
+anchor columns and can update only `account_id`; it never reads the sealed
+account name. `account_merge_pg` runs it under the same restricted merge login.
 
 ## Activation blockers
 
@@ -70,11 +89,11 @@ admission or folder arming (the merge half of the second is covered above):
   the account without spending a use, is countersigned by ingest, and is
   refused for pooled tenants and revoked invites. Client grant-identity
   re-baselining is still a separate contributor PR.
-- Account merge: trust, grants, and trust events are handled by V80 as
-  described under "Account merge" above, with real PostgreSQL coverage of
-  authorization, versions, revocation, and audit. The NEAR anchor and
-  provisioned-device rows are still not transferred and still need a reviewed
-  rule before activation.
+- Account merge: trust, grants, and trust events are handled by V80, and NEAR
+  anchors and provisioned devices by V82, as described under "Account merge"
+  above, with real PostgreSQL coverage of authorization, versions,
+  revocation, device liveness, readiness, and audit. No merge blocker
+  remains.
 
 V75 permits only `invited` trust. The future account-admission V77 migration
 broadens that constraint to `bounded`; bounded-to-invited promotion must be

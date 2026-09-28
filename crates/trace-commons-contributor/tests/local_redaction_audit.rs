@@ -458,10 +458,12 @@ fn count_pem_private_key(hay: &str) -> usize {
 /// This matcher deliberately does NOT mirror a single detector regex, and it
 /// is the one place in this file where being broader than production is
 /// correct. Production covers bearer tokens through the cue-gated entropy
-/// rule. #193 closed the short-cued (8–15) and cued-lowercase-hex≥32
-/// evasions; a realistic opaque token can still evade in two deliberate
-/// ways — a UUID-shaped token is allowlisted, and a low-entropy static
-/// credential falls under the 3.2 bits/char threshold — plus the accepted
+/// rule. #193 closed the short-cued (10–15 chars, given at least 10
+/// distinct characters; 8–9 cannot reach 3.2 bits/char) and
+/// cued-lowercase-hex≥32 evasions; a realistic opaque token can still evade
+/// in two deliberate ways — a UUID-shaped token is allowlisted, and a
+/// low-entropy static credential (including any token over 9 or fewer
+/// distinct characters) falls under the 3.2 bits/char threshold — plus the accepted
 /// zero-separator form (`BearerSECRET`). A bearer header is an unambiguous
 /// declaration that what follows is a credential, so anything of plausible
 /// token shape after it is worth surfacing even when production would not
@@ -754,6 +756,7 @@ fn audit_cfg() -> ContributorConfig {
     ContributorConfig {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "https://issuer.tracecommons.ai".into(),

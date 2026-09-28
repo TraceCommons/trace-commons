@@ -91,6 +91,7 @@ fn configured_shared(
             witness: None,
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
         })
         .expect("save synthetic contributor config");

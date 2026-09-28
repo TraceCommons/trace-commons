@@ -389,6 +389,10 @@ CREATE TABLE trace_credit_ledger (
     actor_principal_ref TEXT NOT NULL,
     actor_role TEXT NOT NULL,
     settlement_state TEXT NOT NULL CHECK (settlement_state IN ('pending', 'final', 'reversed')),
+    -- V89 (#1059): the credited trace's verified witness provenance when the
+    -- event was written. A label for analysis; it never changes points_delta.
+    -- NULL = not recorded (pre-V89 events, or the read was unavailable).
+    witness_provenance_class TEXT CHECK (witness_provenance_class IS NULL OR witness_provenance_class IN ('provider_tee_final_call', 'gateway_final_call', 'unattested', 'legacy_v1')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     FOREIGN KEY (tenant_id, submission_id) REFERENCES trace_submissions(tenant_id, submission_id) ON DELETE CASCADE
 );
