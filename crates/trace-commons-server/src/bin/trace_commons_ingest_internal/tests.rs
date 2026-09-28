@@ -17405,7 +17405,7 @@ fn db_reconciliation_projects_db_audit_hash_chain_mismatch_as_blocking_gap() {
 
     let events = vec![event];
     let chain_report =
-        verify_db_audit_chain_records(&events).expect("DB audit chain report computes");
+        verify_db_audit_chain_records(&events, &[]).expect("DB audit chain report computes");
     assert!(!chain_report.verified);
     assert!(
         chain_report
@@ -17414,7 +17414,7 @@ fn db_reconciliation_projects_db_audit_hash_chain_mismatch_as_blocking_gap() {
             .any(|failure| { failure.contains("previous_event_hash mismatch") })
     );
 
-    let failures = collect_db_audit_hash_chain_failures(&events);
+    let failures = collect_db_audit_hash_chain_failures(&events, &[]);
 
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].audit_event_id, canonical_event.event_id);
@@ -17467,7 +17467,7 @@ fn db_audit_hash_chain_reports_noncanonical_event_hash() {
 
     let events = vec![event];
     let chain_report =
-        verify_db_audit_chain_records(&events).expect("DB audit chain report computes");
+        verify_db_audit_chain_records(&events, &[]).expect("DB audit chain report computes");
     assert!(!chain_report.verified);
     assert!(
         chain_report
@@ -17478,7 +17478,7 @@ fn db_audit_hash_chain_reports_noncanonical_event_hash() {
         chain_report.failures
     );
 
-    let failures = collect_db_audit_hash_chain_failures(&events);
+    let failures = collect_db_audit_hash_chain_failures(&events, &[]);
 
     assert_eq!(failures.len(), 1);
     assert!(
@@ -17487,6 +17487,175 @@ fn db_audit_hash_chain_reports_noncanonical_event_hash() {
             .contains("event_hash has invalid format"),
         "{failures:?}"
     );
+}
+
+/// Appends `count` chained file events for `tenant-a` under `root`, the way
+/// both builds wrote the file log.
+fn chained_file_read_events(root: &Path, count: usize) -> Vec<TraceCommonsAuditEvent> {
+    let auth = test_reviewer_auth("tenant-a");
+    (0..count)
+        .map(|_| {
+            append_audit_event(
+                root,
+                "tenant-a",
+                TraceCommonsAuditEvent::trace_content_read(
+                    &auth,
+                    Uuid::new_v4(),
+                    "review_decision",
+                    None,
+                ),
+            )
+            .expect("file audit event appends")
+        })
+        .collect()
+}
+
+/// The DB row a file event was mirrored as. `hashed: false` is the shape a
+/// build before #1043 wrote under required mirror writes: the row went in
+/// before the file append chained the event, so it has no chain fields.
+fn db_audit_row_for_file_event(
+    event: &TraceCommonsAuditEvent,
+    audit_sequence: i64,
+    hashed: bool,
+) -> StorageTraceAuditEventRecord {
+    StorageTraceAuditEventRecord {
+        audit_event_id: event.event_id,
+        tenant_id: event.tenant_id.clone(),
+        audit_sequence,
+        actor_principal_ref: event.actor_principal_ref.clone().unwrap_or_default(),
+        actor_role: "reviewer".to_string(),
+        action: StorageTraceAuditAction::Read,
+        reason: event.reason.clone(),
+        request_id: None,
+        submission_id: Some(event.submission_id),
+        object_ref_id: None,
+        export_manifest_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: hashed.then(|| event.previous_event_hash.clone()).flatten(),
+        event_hash: hashed.then(|| event.event_hash.clone()).flatten(),
+        canonical_event_json: None,
+        metadata: StorageTraceAuditSafeMetadata::Empty,
+        occurred_at: event.created_at,
+    }
+}
+
+#[test]
+fn db_audit_chain_accepts_a_legacy_unhashed_prefix_before_the_first_hashed_row() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_events = chained_file_read_events(temp.path(), 4);
+    // Two rows from before the cutover, then two the new build mirrored with
+    // the file's chain fields. The first hashed row chains from the file
+    // log's head at the cutover, not from genesis.
+    let rows = vec![
+        db_audit_row_for_file_event(&file_events[0], 1, false),
+        db_audit_row_for_file_event(&file_events[1], 2, false),
+        db_audit_row_for_file_event(&file_events[2], 3, true),
+        db_audit_row_for_file_event(&file_events[3], 4, true),
+    ];
+
+    let report =
+        verify_db_audit_chain_records(&rows, &file_events).expect("DB audit chain report computes");
+    assert!(report.verified, "{:?}", report.failures);
+    assert_eq!(report.legacy_event_count, 2);
+    assert_eq!(report.legacy_prefix_event_count, 2);
+    assert_eq!(
+        report.last_event_hash.as_deref(),
+        file_events[3].event_hash.as_deref()
+    );
+    let failures = collect_db_audit_hash_chain_failures(&rows, &file_events);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(db_audit_legacy_prefix_row_count(&rows), 2);
+}
+
+#[test]
+fn db_audit_chain_still_reports_a_break_after_the_first_hashed_row() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_events = chained_file_read_events(temp.path(), 4);
+    let mut rows = vec![
+        db_audit_row_for_file_event(&file_events[0], 1, false),
+        db_audit_row_for_file_event(&file_events[1], 2, false),
+        db_audit_row_for_file_event(&file_events[2], 3, true),
+        db_audit_row_for_file_event(&file_events[3], 4, true),
+    ];
+    rows[3].previous_event_hash = Some(sha256_prefixed("forged-previous"));
+
+    let report =
+        verify_db_audit_chain_records(&rows, &file_events).expect("DB audit chain report computes");
+    assert!(!report.verified);
+    assert_eq!(report.mismatch_count, 1, "{:?}", report.failures);
+    assert!(
+        report.failures[0].contains("db row 4"),
+        "{:?}",
+        report.failures
+    );
+    let failures = collect_db_audit_hash_chain_failures(&rows, &file_events);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].audit_event_id, file_events[3].event_id);
+}
+
+#[test]
+fn db_audit_chain_reports_a_first_hashed_row_that_chains_from_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_events = chained_file_read_events(temp.path(), 3);
+    // The first hashed row after the prefix claims a previous hash no file
+    // event carries: neither genesis nor the file event it mirrors.
+    let mut rows = vec![
+        db_audit_row_for_file_event(&file_events[0], 1, false),
+        db_audit_row_for_file_event(&file_events[1], 2, true),
+        db_audit_row_for_file_event(&file_events[2], 3, true),
+    ];
+    rows[1].previous_event_hash = Some(sha256_prefixed("chains-from-nothing"));
+
+    let report =
+        verify_db_audit_chain_records(&rows, &file_events).expect("DB audit chain report computes");
+    assert!(!report.verified);
+    assert!(
+        report.failures[0].contains("db row 2")
+            && report.failures[0].contains("previous_event_hash mismatch"),
+        "{:?}",
+        report.failures
+    );
+    let failures = collect_db_audit_hash_chain_failures(&rows, &file_events);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert_eq!(failures[0].audit_event_id, file_events[1].event_id);
+
+    // A hashed row with no file event of its id cannot anchor to the file
+    // either, even when its previous hash is some file event's hash.
+    let mut orphan = db_audit_row_for_file_event(&file_events[2], 2, true);
+    orphan.audit_event_id = Uuid::new_v4();
+    let rows = vec![
+        db_audit_row_for_file_event(&file_events[0], 1, false),
+        orphan,
+    ];
+    let failures = collect_db_audit_hash_chain_failures(&rows, &file_events);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        !verify_db_audit_chain_records(&rows, &file_events)
+            .expect("DB audit chain report computes")
+            .verified
+    );
+}
+
+#[test]
+fn db_audit_chain_is_not_restarted_by_an_unhashed_row_between_hashed_rows() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_events = chained_file_read_events(temp.path(), 2);
+    // A row the store wrote for itself, between two mirrored rows: it is not
+    // part of the chain, and the append-time check skips it the same way.
+    let mut store_row = db_audit_row_for_file_event(&file_events[0], 2, false);
+    store_row.audit_event_id = Uuid::new_v4();
+    let rows = vec![
+        db_audit_row_for_file_event(&file_events[0], 1, true),
+        store_row,
+        db_audit_row_for_file_event(&file_events[1], 3, true),
+    ];
+
+    let report =
+        verify_db_audit_chain_records(&rows, &file_events).expect("DB audit chain report computes");
+    assert!(report.verified, "{:?}", report.failures);
+    assert_eq!(report.legacy_event_count, 1);
+    assert_eq!(report.legacy_prefix_event_count, 0);
+    assert!(collect_db_audit_hash_chain_failures(&rows, &file_events).is_empty());
 }
 
 #[tokio::test]
@@ -27787,7 +27956,7 @@ async fn assert_db_audit_mirrors_file_log(
         projection_failures.is_empty(),
         "{context}: {projection_failures:?}"
     );
-    let chain_failures = collect_db_audit_hash_chain_failures(&db_events)
+    let chain_failures = collect_db_audit_hash_chain_failures(&db_events, &file_events)
         .into_iter()
         .map(|failure| failure.first_failure)
         .collect::<Vec<_>>();
@@ -34855,6 +35024,182 @@ async fn maintenance_reconciliation_reports_db_audit_hash_chain_drift() {
             .blocking_gaps
             .iter()
             .any(|gap| { gap == "db_audit_hash_chain_failures=1" })
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+async fn run_audit_chain_and_reconciliation_drills(
+    state: &Arc<AppState>,
+    record_evidence: bool,
+) -> (
+    TraceAuditChainDrillResponse,
+    TraceDbReconciliationDrillResponse,
+) {
+    let Json(audit_chain) = audit_chain_drill_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceAuditChainDrillRequest {
+            purpose: None,
+            record_evidence,
+        }),
+    )
+    .await
+    .expect("audit-chain drill runs");
+    let Json(reconciliation) = db_reconciliation_drill_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceDbReconciliationDrillRequest {
+            purpose: None,
+            record_evidence: false,
+        }),
+    )
+    .await
+    .expect("db-reconciliation drill runs");
+    (audit_chain, reconciliation)
+}
+
+/// A deployment upgraded across #1043: its DB audit rows from before the
+/// cutover carry no chain fields, and the first row the new build mirrors
+/// chains from the file log's head at the cutover. Both drills that
+/// smoke-gate.sh requires must read that as clean, count the legacy rows
+/// apart, and still catch a real break after the first hashed row.
+#[tokio::test]
+async fn audit_drills_accept_the_legacy_prefix_of_a_deployment_upgraded_across_the_cutover() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    // Before the cutover, under required mirror writes, the old build wrote
+    // the DB row from the unchained event and then chained it into the file.
+    let auth = test_reviewer_auth("tenant-a");
+    for _ in 0..3 {
+        let unchained = TraceCommonsAuditEvent::trace_content_read(
+            &auth,
+            Uuid::new_v4(),
+            "review_decision",
+            None,
+        );
+        mirror_audit_event_to_db(
+            state.as_ref(),
+            &auth,
+            &unchained,
+            StorageTraceAuditAction::Read,
+            StorageTraceAuditSafeMetadata::Empty,
+        )
+        .await
+        .expect("legacy unhashed DB row writes");
+        append_audit_event(temp.path(), "tenant-a", unchained).expect("legacy file event appends");
+    }
+    let legacy_rows = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("legacy DB rows list");
+    assert_eq!(legacy_rows.len(), 3);
+    assert!(legacy_rows.iter().all(|row| row.event_hash.is_none()));
+
+    // After the cutover: two events the new build mirrors with chain fields.
+    run_audit_chain_and_reconciliation_drills(&state, true).await;
+    run_audit_chain_and_reconciliation_drills(&state, true).await;
+    let rows = backend
+        .list_trace_audit_events("tenant-a")
+        .await
+        .expect("DB rows list");
+    let hashed = rows
+        .iter()
+        .filter(|row| row.event_hash.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(hashed.len(), 2);
+    let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file log reads");
+    assert_eq!(
+        hashed[0].previous_event_hash, file_events[2].event_hash,
+        "the first hashed row chains from the file head at the cutover"
+    );
+
+    let (audit_chain, reconciliation) =
+        run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(audit_chain.ready, "{:?}", audit_chain.blocking_gaps);
+    assert_eq!(audit_chain.db_verified, Some(true));
+    assert_eq!(audit_chain.db_mismatch_count, Some(0));
+    assert_eq!(audit_chain.db_legacy_event_count, Some(3));
+    assert_eq!(audit_chain.db_legacy_prefix_event_count, Some(3));
+    assert!(
+        !reconciliation
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap.starts_with("db_audit_hash_chain_failures")),
+        "{:?}",
+        reconciliation.blocking_gaps
+    );
+    assert_eq!(reconciliation.db_audit_legacy_prefix_row_count, 3);
+    // Not asserting `ready`: the recent-sample reader parity check compares
+    // chain fields too, and still differs while a legacy row is among the
+    // latest 16. That gap predates the cutover and is not this rule's.
+
+    // A real break after the first hashed row still fails both drills.
+    {
+        let mut client = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("owner connection");
+        let tx = client.transaction().await.expect("tamper transaction");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&"tenant-a"],
+        )
+        .await
+        .expect("set tamper tenant context");
+        let updated = tx
+            .execute(
+                "UPDATE trace_audit_events
+                    SET previous_event_hash = $3
+                  WHERE tenant_id = $1 AND audit_event_id = $2",
+                &[
+                    &"tenant-a",
+                    &hashed[1].audit_event_id,
+                    &sha256_prefixed("forged-previous"),
+                ],
+            )
+            .await
+            .expect("owner breaks the chain after the first hashed row");
+        assert_eq!(updated, 1);
+        tx.commit().await.expect("tamper commits");
+    }
+    let (audit_chain, reconciliation) =
+        run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(!audit_chain.ready);
+    assert_eq!(audit_chain.db_verified, Some(false));
+    assert!(
+        audit_chain
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap.starts_with("db_audit_chain_mismatch_count")),
+        "{:?}",
+        audit_chain.blocking_gaps
+    );
+    assert!(!reconciliation.ready);
+    assert!(
+        reconciliation
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap == "db_audit_hash_chain_failures=1"),
+        "{:?}",
+        reconciliation.blocking_gaps
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
