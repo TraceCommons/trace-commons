@@ -63,8 +63,18 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTAssertTrue(task.stale_reasons.contains(.attributionPendingQualification))
         let copy = try XCTUnwrap(TCInsights.copy())
         _ = NSApplication.shared
+        let selection = InsightsStoreSelection.custom(store.path)
+        // The view's own models, held here so the capture waits for what the
+        // screen shows to be loaded -- a timer raced the store reads on a
+        // loaded machine.
+        let router = InsightsServiceRouter(selection: selection)
+        let service: InsightsModel.Service = { try await router.call($0) }
+        let insights = InsightsModel(service: service)
+        let tasks = ComparisonTasksModel(service: service)
+        let specifications = ComparisonSpecificationsModel(service: service)
         let size = CGSize(width: 1_180, height: 3_200)
-        let content = InsightsView(storeSelection: .custom(store.path), storeCopy: copy)
+        let content = InsightsView(storeSelection: selection, storeCopy: copy, model: insights,
+                                   comparisonModel: tasks, specificationModel: specifications)
             .frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let hosting = NSHostingView(rootView: content)
@@ -72,11 +82,35 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         hosting.frame = bounds
         let window = NSWindow(contentRect: bounds, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = hosting
+        // Pinned light appearance. The raster otherwise follows the host's
+        // system appearance, and dark-mode pixels (light text on a near-black
+        // window background) are a different OCR input on a developer
+        // machine than on the runner.
+        window.appearance = NSAppearance(named: .aqua)
         defer { window.close() }
-        for _ in 0..<100 {
+        // Wait for the models to be populated with this store's data, not for
+        // a timer: the view's `onAppear` opens them, so layout is driven until
+        // every section this test reads has its data.
+        let taskID = try XCTUnwrap(seeded.taskID)
+        let specificationID = try XCTUnwrap(seeded.specificationID)
+        var populated = false
+        for _ in 0..<1_000 {
             hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            populated = !insights.busy && !insights.episodeBusy && !insights.loadingSummary
+                && !tasks.busy && !specifications.busy
+                && insights.summary != nil && insights.snapshots.map(\.id) == [seeded.snapshotID]
+                && tasks.tasks.map(\.id) == [taskID]
+                && specifications.specifications.map(\.id) == [specificationID]
+            if populated { break }
             try await Task.sleep(for: .milliseconds(10))
         }
+        XCTAssertTrue(populated, "the Insights models never loaded the selected store: "
+            + "\(insights.error ?? "-") \(tasks.error ?? "-") \(specifications.error ?? "-")")
+        // The data is in the models; lay out and draw it once more before the
+        // capture so the frame reflects it.
+        hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        await Task.yield()
+        hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
         // Rasterize at a pinned 2x rather than at the host's backing scale.
         // `bitmapImageRepForCachingDisplay` follows the display, so this render
         // was 2x on a Retina developer machine and 1x on the CI runner, where
@@ -97,8 +131,15 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
             try png.write(to: URL(fileURLWithPath: path))
         }
         XCTAssertNotNil(seeded.taskID); XCTAssertNotNil(seeded.specificationID)
+        // The location line is asserted on the view's own string. It is a
+        // caption-sized absolute temp path of ~100 characters, and OCR reads
+        // it inconsistently ("nsights store:/var/tolders/..."), which says
+        // nothing about whether the view named the store. What the pixels
+        // must still show is that a line naming this store is at the top.
+        XCTAssertEqual(InsightsView.storeLocationLine(selection, copy: copy),
+                       (copy["insights_store_title"] ?? "") + ": " + store.path)
+        XCTAssertEqual(copy["insights_store_title"], "Insights store")
         let topText = try recognizedText(bitmap, region: .init(x: 0, y: 0.94, width: 1, height: 0.06))
-        XCTAssertTrue(topText.contains("Insights store"), topText)
         XCTAssertTrue(topText.contains("selected-store"), topText)
         let text = try recognizedText(bitmap)
         let normalizedText = Self.normalizedOCR(text)
@@ -216,8 +257,30 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
                      specificationID: try XCTUnwrap(specResponse.specification?.id))
     }
 
+    /// OCR of `region` (normalized, bottom-left origin), read in bands.
+    ///
+    /// One request over the whole 2360x6400 raster returned a single line on
+    /// macOS 26/27 -- the recognizer scales its input to a fixed working size,
+    /// and at this aspect ratio caption text falls below what it can read. So
+    /// the region is read as overlapping horizontal bands no taller than a
+    /// screenful; the overlap means a line cut by one band boundary is whole in
+    /// the next band.
     private func recognizedText(_ bitmap: NSBitmapImageRep, region: CGRect = .init(x: 0, y: 0, width: 1, height: 1))
         throws -> String {
+        let band = 0.08, overlap = 0.02
+        var readings: [String] = []
+        var bottom = region.minY
+        repeat {
+            let top = min(bottom + band, region.maxY)
+            readings.append(try recognizedBand(
+                bitmap, region: CGRect(x: region.minX, y: bottom, width: region.width, height: top - bottom)))
+            if top >= region.maxY { break }
+            bottom = top - overlap
+        } while true
+        return readings.joined(separator: "\n")
+    }
+
+    private func recognizedBand(_ bitmap: NSBitmapImageRep, region: CGRect) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false

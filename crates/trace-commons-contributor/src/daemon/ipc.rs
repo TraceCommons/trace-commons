@@ -4076,9 +4076,64 @@ fn witness_review_response(mut response: Response) -> Response {
     let Some(error) = response.error.as_ref() else {
         return response;
     };
+    // A busy witness already carries its own view, written by the handler,
+    // which alone knows when to try again.
+    if response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("view"))
+        .is_some()
+    {
+        return response;
+    }
     let message = crate::witness_copy::witness_refusal_line(Some(error.message.as_str()));
     let value = response.result.get_or_insert_with(|| serde_json::json!({}));
     value["view"] = serde_json::json!({"state": "Refused", "message": message});
+    response
+}
+
+/// How long a busy witness asked a person to wait before reviewing again,
+/// or `None` when this failure is not a busy witness.
+///
+/// The token-bundle route carries the transport's typed error with the
+/// witness's own (bounded) delay; the ordinary route reaches here as the
+/// typed error too (`build_witnessed_preview` restores it). A bare
+/// `witness_saturated` label with no delay is the contract's default, never
+/// "try now".
+fn witness_review_busy_secs(error: &anyhow::Error) -> Option<u32> {
+    use trace_commons_protocol::witness_pacing::{
+        WITNESS_SATURATED_ERROR, WITNESS_SATURATED_RETRY_AFTER_SECS,
+    };
+    match error.downcast_ref::<crate::witness::WitnessTrustError>() {
+        Some(crate::witness::WitnessTrustError::WitnessSaturated { retry_after_secs }) => {
+            Some(*retry_after_secs)
+        }
+        Some(_) => None,
+        None => (error.to_string() == WITNESS_SATURATED_ERROR)
+            .then_some(WITNESS_SATURATED_RETRY_AFTER_SECS),
+    }
+}
+
+/// The distinct outcome for a review a person asked for that met a busy
+/// witness: nothing was judged and nothing pinned, so it is not a refusal.
+/// The words are the review copy's; the time is when the witness asked to be
+/// tried again, which the shell renders in local time.
+fn witness_review_busy(id: u64, retry_after_secs: u32) -> Response {
+    let review = crate::witness_copy::witness_copy().review;
+    let retry_at = Utc::now() + chrono::Duration::seconds(i64::from(retry_after_secs));
+    let mut response = Response::err(
+        id,
+        ERR_UNAVAILABLE,
+        trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
+    );
+    response.result = Some(serde_json::json!({
+        "view": {
+            "state": "Busy",
+            "message": review.failed_busy,
+            "retry_at": retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "retry_label": review.busy_retry_at,
+        }
+    }));
     response
 }
 
@@ -4095,6 +4150,9 @@ fn witness_review_response(mut response: Response) -> Response {
 /// the closed set and returns that crate's own constant, so the only strings
 /// that can cross are ones a shell has words for.
 fn witness_review_refusal(error: &anyhow::Error) -> &'static str {
+    if let Some(witness) = error.downcast_ref::<crate::witness::WitnessTrustError>() {
+        return witness.refusal_label();
+    }
     crate::witness::WitnessTrustError::refusal_label_from(&error.to_string())
         .unwrap_or("witness-review-failed")
 }
@@ -4220,6 +4278,9 @@ async fn handle_witness_preview_request_inner(
     let review = match built {
         Ok(review) => review,
         Err(error) => {
+            if let Some(secs) = witness_review_busy_secs(&error) {
+                return witness_review_busy(req.id, secs);
+            }
             return Response::err(req.id, ERR_UNAVAILABLE, witness_review_refusal(&error));
         }
     };
@@ -6024,6 +6085,66 @@ mod tests {
             Some(refusal),
             "the refusal was replaced with a word that names nothing"
         );
+    }
+
+    /// A review a person asked for, met by a busy witness, is a busy witness:
+    /// its own state, the busy sentence, and the time to try again -- not a
+    /// refusal. Nothing is pinned, so the entry can be reviewed again.
+    ///
+    /// Both review routes reach here: the token-bundle route carries the
+    /// transport's typed error, and the ordinary route the refusal label with
+    /// the delay recovered by `build_witnessed_preview`.
+    #[tokio::test]
+    async fn a_busy_witness_is_a_distinct_try_again_outcome_for_a_person() {
+        let saturated = crate::witness::WitnessTrustError::WitnessSaturated {
+            retry_after_secs: 45,
+        };
+        for (error, secs) in [
+            (anyhow::Error::new(saturated.clone()), 45),
+            (anyhow::anyhow!(saturated.refusal_label()), 30),
+        ] {
+            let (s, id, _dir, _review) = recorded_witness_review().await;
+            let before = Utc::now();
+            let response = witness_review_response(
+                handle_witness_preview_request_inner(
+                    &s,
+                    &req(
+                        "witness_preview_request",
+                        serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+                    ),
+                    Some(Err(error)),
+                )
+                .await,
+            );
+            let after = Utc::now();
+            assert_eq!(
+                response.error.as_ref().map(|e| e.message.as_str()),
+                Some("witness_saturated")
+            );
+            let view = &response.result.as_ref().expect("a view")["view"];
+            assert_eq!(view["state"], "Busy", "{view}");
+            assert_eq!(
+                view["message"],
+                crate::witness_copy::witness_copy().review.failed_busy
+            );
+            assert_eq!(
+                view["retry_label"],
+                crate::witness_copy::witness_copy().review.busy_retry_at
+            );
+            let retry_at =
+                chrono::DateTime::parse_from_rfc3339(view["retry_at"].as_str().expect("retry_at"))
+                    .unwrap()
+                    .with_timezone(&Utc);
+            assert!(
+                retry_at >= before + chrono::Duration::seconds(secs) - chrono::Duration::seconds(1)
+            );
+            assert!(
+                retry_at <= after + chrono::Duration::seconds(secs) + chrono::Duration::seconds(1)
+            );
+            let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
+            assert_eq!(entry.state, QueueState::Pending);
+            assert!(entry.previewed_envelope_digest.is_none());
+        }
     }
 
     /// The fail-closed half. A failure that is not a witness refusal keeps the
