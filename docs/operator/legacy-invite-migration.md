@@ -105,7 +105,9 @@ The tenant must already exist (it is created on first redemption). The
 
 Candidates to review before enabling linking: every tenant whose invite
 `max_uses` is far above the individual shape (3), and every catch-all tenant
-that more than one invite routes to. Decide each one; do not mark by rule.
+that more than one invite routes to. `legacy_invite_tenants|review_before_linking`
+in the [counts query](./legacy-invite-counts.md) counts the unmarked ones.
+Decide each one; do not mark by rule.
 
 Marking changes nothing for the tenant's devices: they onboard and contribute
 exactly as before (`legacy_invite_link_pg` asserts it for a Devfolio-shaped
@@ -150,7 +152,9 @@ tenant). Revoking an invite does not revoke devices already onboarded with it.
 
 ## Readiness under coexistence
 
-Ingest refuses to start with account admission on
+`readiness_blockers` in the [counts query](./legacy-invite-counts.md)
+counts each rule below separately. Ingest refuses to start with account
+admission on
 (`account_admission_permissions_or_linkage_not_ready`) while
 `trace_account_admission_linkage_ready()` is false. Since V81 it is false only
 when one of these exists:
