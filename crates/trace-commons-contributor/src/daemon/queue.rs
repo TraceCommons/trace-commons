@@ -69,6 +69,51 @@ pub enum QueueState {
 /// The derive changes nothing about the wire or on-disk contract: no
 /// `#[serde(default)]` is added by it, so every field that was required in
 /// `daemon-queue.jsonl` is still required.
+/// The shape of a session, for the queue rows, the review sheet's header and
+/// the past-session picker: when it started and ended, and how many prompts
+/// the person gave.
+///
+/// `user_turns` counts what someone reading the session would call a turn --
+/// a prompt they typed -- and is deliberately not `preview_turns`'
+/// `turn_count`, which indexes every event of the redacted envelope, tool
+/// calls and results included.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionShape {
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub user_turns: u32,
+}
+
+impl SessionShape {
+    pub fn of(transcript: &crate::source::SessionTranscript) -> Self {
+        let stamps = transcript.events.iter().filter_map(|e| e.timestamp);
+        let first = stamps.clone().min();
+        let last = stamps.max();
+        Self {
+            started_at: transcript.started_at.or(first),
+            ended_at: last,
+            user_turns: transcript
+                .events
+                .iter()
+                .filter(|e| e.kind == crate::source::SessionEventKind::User)
+                .count()
+                .try_into()
+                .unwrap_or(u32::MAX),
+        }
+    }
+
+    /// Wall-clock length, when both ends are known and in order.
+    pub fn duration_secs(&self) -> Option<i64> {
+        match (self.started_at, self.ended_at) {
+            (Some(start), Some(end)) if end >= start => Some((end - start).num_seconds()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub entry_id: Uuid,
@@ -315,6 +360,11 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// When the session ran and how many prompts it had, from the loaded
+    /// transcript. Metadata, not content: timestamps and a count, never a
+    /// word of what was said. `None` on an entry written before this existed.
+    #[serde(default)]
+    pub shape: Option<SessionShape>,
     /// The `modified_at` of the observation this entry was built from --
     /// the group mtime for a claude-code session, the file's own mtime for
     /// every single-file source. Pairs with `size_bytes`, which is the
@@ -1820,6 +1870,62 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(
+        kind: crate::source::SessionEventKind,
+        at: Option<&str>,
+    ) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            kind,
+            timestamp: at.map(|t| t.parse().unwrap()),
+            ..Default::default()
+        }
+    }
+
+    /// K1: a session's shape is its first and last timestamps and the prompts
+    /// the person gave, never the tool calls between them.
+    #[test]
+    fn a_session_shape_is_its_timing_and_prompts() {
+        use crate::source::SessionEventKind::{Assistant, ToolCall, ToolResult, User};
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                event(User, Some("2026-09-12T10:00:00Z")),
+                event(Assistant, Some("2026-09-12T10:01:00Z")),
+                event(ToolCall, None),
+                event(ToolResult, Some("2026-09-12T10:05:00Z")),
+                event(User, Some("2026-09-12T11:18:00Z")),
+            ],
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&transcript);
+        assert_eq!(shape.user_turns, 2);
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(
+            shape.ended_at,
+            Some("2026-09-12T11:18:00Z".parse().unwrap())
+        );
+        assert_eq!(shape.duration_secs(), Some(78 * 60));
+
+        let declared = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T09:59:00Z".parse().unwrap()),
+            ..transcript
+        };
+        assert_eq!(
+            SessionShape::of(&declared).started_at,
+            declared.started_at,
+            "the source's own start wins"
+        );
+        assert_eq!(SessionShape::default().duration_secs(), None);
+        let backwards = SessionShape {
+            started_at: Some("2026-09-12T11:00:00Z".parse().unwrap()),
+            ended_at: Some("2026-09-12T10:00:00Z".parse().unwrap()),
+            user_turns: 0,
+        };
+        assert_eq!(backwards.duration_secs(), None, "no negative lengths");
+    }
 
     /// R5, the queue half: an unattended approval held after the witness
     /// goes back to waiting with its certified review pinned, and nothing

@@ -1176,6 +1176,7 @@ fn visit_session(
         approved_at: None,
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
+        shape: Some(super::queue::SessionShape::of(&transcript)),
         // The observation this entry is made of, so the next poll
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
@@ -3092,6 +3093,51 @@ mod tests {
                 .is_empty(),
             "a scoped pass records nothing"
         );
+    }
+
+    /// K1: a watched session reaches `list_pending` with its shape, and its
+    /// project's row in `list_projects` counts the sessions seen in it.
+    #[tokio::test]
+    async fn a_watched_session_carries_its_shape_to_the_queue_and_its_project() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 2);
+        f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        let call = |method: &str| {
+            super::super::ipc::handle_request(
+                &f.shared,
+                &super::super::ipc::Request {
+                    id: 1,
+                    method: method.to_string(),
+                    params: serde_json::json!({}),
+                },
+            )
+            .result
+            .unwrap()
+        };
+        let pending = call("list_pending");
+        let entries = pending["pending"].as_array().expect("pending");
+        let turns: std::collections::BTreeSet<u64> = entries
+            .iter()
+            .map(|e| e["user_turns"].as_u64().expect("user_turns"))
+            .collect();
+        assert_eq!(turns, [1, 3].into_iter().collect(), "{entries:?}");
+        for e in entries {
+            assert_eq!(e["started_at"], "2026-08-08T10:00:00Z", "{e}");
+            assert_eq!(e["duration_secs"], 0, "{e}");
+        }
+
+        let projects = call("list_projects");
+        let row = projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["project_label"] == "proj")
+            .expect("the project is listed")
+            .clone();
+        assert_eq!(row["session_count"], 2, "{row}");
+        assert!(row["last_session_at"].is_string(), "{row}");
     }
 
     #[tokio::test]

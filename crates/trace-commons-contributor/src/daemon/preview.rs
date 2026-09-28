@@ -412,6 +412,13 @@ pub struct PreviewSummary {
     pub raw_session_bytes: u64,
     pub event_count: usize,
     pub opening_prompt: String,
+    /// A short name for the session, for a row or a sheet header: the first
+    /// line of the redacted opening prompt, cut to [`TITLE_MAX_CHARS`]. Trace
+    /// content under the preview exemption, like `opening_prompt`, so it is
+    /// served only where `opening_prompt` is. `None` when the session has no
+    /// task to name it by.
+    #[serde(default)]
+    pub title: Option<String>,
     pub redactions: std::collections::BTreeMap<String, u32>,
     /// Distinct values removed per label, beside the occurrence counts in
     /// `redactions`. A shell renders "185 local path (12 distinct)".
@@ -497,6 +504,13 @@ pub struct PreviewCardSummary {
     pub raw_session_bytes: u64,
     pub event_count: usize,
     pub opening_prompt: String,
+    /// A short name for the session, for a row or a sheet header: the first
+    /// line of the redacted opening prompt, cut to [`TITLE_MAX_CHARS`]. Trace
+    /// content under the preview exemption, like `opening_prompt`, so it is
+    /// served only where `opening_prompt` is. `None` when the session has no
+    /// task to name it by.
+    #[serde(default)]
+    pub title: Option<String>,
     pub redactions: std::collections::BTreeMap<String, u32>,
     /// Distinct values removed per label, beside the occurrence counts in
     /// `redactions`. A shell renders "185 local path (12 distinct)".
@@ -521,6 +535,7 @@ impl PreviewCardSummary {
             raw_session_bytes: self.raw_session_bytes,
             event_count: self.event_count,
             opening_prompt: self.opening_prompt,
+            title: self.title,
             redactions: self.redactions,
             redactions_distinct: self.redactions_distinct,
             pii_labels_present: self.pii_labels_present,
@@ -765,6 +780,7 @@ fn summarize_envelope(
         .filter_map(|e| e.redacted_content.as_deref())
         .find_map(task_prompt)
         .unwrap_or("No task description found.");
+    let title = title_of(opening_prompt);
     let opening_prompt = truncate_chars(opening_prompt, 200);
 
     // The redaction pipeline's own counts describe what it TOOK OUT. Nothing
@@ -796,6 +812,7 @@ fn summarize_envelope(
         raw_session_bytes,
         event_count,
         opening_prompt,
+        title,
         redactions,
         redactions_distinct,
         pii_labels_present,
@@ -1238,6 +1255,31 @@ fn task_prompt(mut text: &str) -> Option<&str> {
 }
 
 /// Truncate to at most `max_chars` characters, always on a char boundary.
+/// How long a session title may be, in characters.
+pub const TITLE_MAX_CHARS: usize = 60;
+
+/// The session's title: the first non-empty line of its redacted opening
+/// prompt, cut at a word boundary to [`TITLE_MAX_CHARS`] with an ellipsis
+/// when cut. `None` when there is no task description.
+fn title_of(opening_prompt: &str) -> Option<String> {
+    if opening_prompt == "No task description found." {
+        return None;
+    }
+    let line = opening_prompt
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?;
+    if line.chars().count() <= TITLE_MAX_CHARS {
+        return Some(line.to_string());
+    }
+    let cut = truncate_chars(line, TITLE_MAX_CHARS - 1);
+    let at_word = cut
+        .rfind(char::is_whitespace)
+        .filter(|&i| i > TITLE_MAX_CHARS / 2)
+        .map_or(cut.as_str(), |i| &cut[..i]);
+    Some(format!("{}…", at_word.trim_end()))
+}
+
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
@@ -1245,6 +1287,31 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// K1: the title is the first line of the redacted prompt, cut at a word
+    /// with an ellipsis, and absent when there is no task.
+    #[test]
+    fn a_title_is_the_first_line_of_the_redacted_prompt() {
+        assert_eq!(
+            title_of("add rate limiter\nwith a 100 req/min ceiling").as_deref(),
+            Some("add rate limiter")
+        );
+        assert_eq!(
+            title_of("\n  fix payments retry test  \n").as_deref(),
+            Some("fix payments retry test")
+        );
+        assert_eq!(title_of("No task description found."), None);
+        assert_eq!(title_of("   "), None);
+        let long =
+            "migrate the configuration loader to the new layered format and keep the old one";
+        let t = title_of(long).unwrap();
+        assert!(t.chars().count() <= TITLE_MAX_CHARS, "{t}");
+        assert!(t.ends_with('…'), "{t}");
+        assert!(
+            long.starts_with(t.trim_end_matches('…')),
+            "cut at a word: {t}"
+        );
+    }
     use crate::envelope::build_raw_contribution;
     use crate::source::claude_code::ClaudeCodeSource;
     use trace_commons_protocol::trace_contribution::RESIDUAL_SECRET_AT_PREFIX;
