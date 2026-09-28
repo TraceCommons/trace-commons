@@ -43444,6 +43444,10 @@ struct TraceAuditChainDrillResponse {
     db_event_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_legacy_event_count: Option<usize>,
+    /// The legacy rows before the DB's first hashed row: a deployment's
+    /// history from before the DB carried the chain. Not a gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_prefix_event_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_payload_verified_event_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45329,6 +45333,9 @@ struct TraceDbReconciliationDrillResponse {
     db_ranking_worker_run_count: usize,
     file_audit_event_count: usize,
     db_audit_event_count: usize,
+    /// DB audit rows before the first hashed row, mirrored by a build from
+    /// before the DB carried the chain. Not blocking.
+    db_audit_legacy_prefix_row_count: usize,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
     db_export_manifest_item_count: usize,
@@ -45407,6 +45414,7 @@ async fn run_db_reconciliation_drill(
         db_ranking_worker_run_count: report.db_ranking_worker_run_count,
         file_audit_event_count: report.file_audit_event_count,
         db_audit_event_count: report.db_audit_event_count,
+        db_audit_legacy_prefix_row_count: report.db_audit_legacy_prefix_row_count,
         file_replay_export_manifest_count: report.file_replay_export_manifest_count,
         db_export_manifest_count: report.db_export_manifest_count,
         db_export_manifest_item_count: report.db_export_manifest_item_count,
@@ -45538,6 +45546,7 @@ async fn run_audit_chain_drill(
         file_verified: report.verified,
         file_event_count: report.event_count,
         file_legacy_event_count: report.legacy_event_count,
+        db_legacy_prefix_event_count: db_report.map(|report| report.legacy_prefix_event_count),
         file_mismatch_count: report.mismatch_count,
         file_last_event_hash: report.last_event_hash,
         db_verified,
@@ -58337,11 +58346,88 @@ fn legacy_submit_audit_rows(
     legacy
 }
 
+/// The DB audit rows before the first hashed row. A deployment upgraded
+/// across #1043 has these: its builds before then mirrored rows without the
+/// file log's chain fields. They are history, not drift.
+fn db_audit_legacy_prefix_row_count(events: &[StorageTraceAuditEventRecord]) -> usize {
+    events
+        .iter()
+        .take_while(|event| event.event_hash.is_none())
+        .count()
+}
+
+/// Where the DB audit hash chain may start.
+///
+/// The DB row carries the file event's chain fields (#1043), and the file
+/// chain is older than that: the first event a new build mirrors chains from
+/// the file log's head at that moment, which is genesis only for a tenant with
+/// no file history. The append-time check agrees -- it compares against the
+/// latest hashed row, and before there is one it accepts any previous hash.
+///
+/// So the first hashed row may chain from genesis, or carry exactly the chain
+/// fields of the file event with its id, when that event's previous hash is
+/// itself a file event's hash. Anything else chains from nothing. Every later
+/// hashed row must chain from the hashed row before it.
+struct DbAuditChainFileAnchors<'a> {
+    by_id: BTreeMap<Uuid, &'a TraceCommonsAuditEvent>,
+    event_hashes: BTreeSet<&'a str>,
+}
+
+impl<'a> DbAuditChainFileAnchors<'a> {
+    fn new(file_events: &'a [TraceCommonsAuditEvent]) -> Self {
+        Self {
+            by_id: file_events
+                .iter()
+                .map(|event| (event.event_id, event))
+                .collect(),
+            event_hashes: file_events
+                .iter()
+                .filter_map(|event| event.event_hash.as_deref())
+                .collect(),
+        }
+    }
+
+    fn accepts_chain_start(
+        &self,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
+        if previous_event_hash == TRACE_AUDIT_EVENT_GENESIS_HASH {
+            return true;
+        }
+        let Some(file_event) = self.by_id.get(&row.audit_event_id) else {
+            return false;
+        };
+        file_event.previous_event_hash.as_deref() == Some(previous_event_hash)
+            && file_event.event_hash.as_deref() == Some(event_hash)
+            && self.event_hashes.contains(previous_event_hash)
+    }
+
+    /// Whether a hashed row chains: from the hashed row before it, or, for
+    /// the first hashed row (`expected_previous_hash` is `None`), from a
+    /// start [`Self::accepts_chain_start`] allows.
+    fn chains(
+        &self,
+        expected_previous_hash: Option<&str>,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
+        match expected_previous_hash {
+            Some(expected) => previous_event_hash == expected,
+            None => self.accepts_chain_start(row, previous_event_hash, event_hash),
+        }
+    }
+}
+
 fn collect_db_audit_hash_chain_failures(
     events: &[StorageTraceAuditEventRecord],
+    file_events: &[TraceCommonsAuditEvent],
 ) -> Vec<TraceDbAuditHashChainFailure> {
+    let anchors = DbAuditChainFileAnchors::new(file_events);
     let mut failures = Vec::new();
-    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    let mut expected_previous_hash: Option<String> = None;
     for (index, event) in events.iter().enumerate() {
         let row_number = index + 1;
         let Some(event_hash) = event.event_hash.as_deref() else {
@@ -58349,7 +58435,8 @@ fn collect_db_audit_hash_chain_failures(
             // store writes for itself, and rows mirrored before the DB carried
             // the file log's chain. The chain is the hashed rows, in order --
             // the same rule the append-time stale-previous-hash check applies
-            // -- so an unhashed row neither breaks nor restarts it.
+            // -- so an unhashed row neither breaks nor restarts it. Where the
+            // chain starts is `DbAuditChainFileAnchors`'s rule.
             continue;
         };
         let mut event_failures = Vec::new();
@@ -58369,7 +58456,12 @@ fn collect_db_audit_hash_chain_failures(
                 event.audit_event_id
             ));
         }
-        if previous_event_hash != expected_previous_hash {
+        if !anchors.chains(
+            expected_previous_hash.as_deref(),
+            event,
+            previous_event_hash,
+            event_hash,
+        ) {
             event_failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
                 event.audit_event_id
@@ -58392,7 +58484,7 @@ fn collect_db_audit_hash_chain_failures(
                 first_failure: first_failure.clone(),
             });
         }
-        expected_previous_hash = event_hash.to_string();
+        expected_previous_hash = Some(event_hash.to_string());
     }
     failures
 }
@@ -67204,7 +67296,8 @@ async fn verify_audit_chain(
 ) -> anyhow::Result<TraceAuditChainReport> {
     let mut report = verify_file_audit_chain(&state.root, tenant_id)?;
     if let Some(db) = state.db_mirror.as_ref() {
-        report.db_mirror = Some(verify_db_audit_chain(db.as_ref(), tenant_id).await?);
+        let file_events = read_all_audit_events(&state.root, tenant_id)?;
+        report.db_mirror = Some(verify_db_audit_chain(db.as_ref(), tenant_id, &file_events).await?);
     }
     Ok(report)
 }
@@ -67281,25 +67374,34 @@ fn verify_file_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<Trace
 async fn verify_db_audit_chain(
     db: &dyn Database,
     tenant_id: &str,
+    file_events: &[TraceCommonsAuditEvent],
 ) -> anyhow::Result<TraceDbAuditChainReport> {
     let events = db
         .list_trace_audit_events(tenant_id)
         .await
         .context("failed to list DB audit events for hash-chain verification")?;
-    verify_db_audit_chain_records(&events)
+    verify_db_audit_chain_records(&events, file_events)
 }
 
+/// Verifies the DB audit hash chain under the rule
+/// [`collect_db_audit_hash_chain_failures`] applies: the chain is the hashed
+/// rows in order, it starts where [`DbAuditChainFileAnchors`] allows, and an
+/// unhashed row neither breaks nor restarts it.
 fn verify_db_audit_chain_records(
     events: &[StorageTraceAuditEventRecord],
+    file_events: &[TraceCommonsAuditEvent],
 ) -> anyhow::Result<TraceDbAuditChainReport> {
+    let anchors = DbAuditChainFileAnchors::new(file_events);
     let mut report = TraceDbAuditChainReport::default();
-    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    let mut expected_previous_hash: Option<String> = None;
     for (index, event) in events.iter().enumerate() {
         let row_number = index + 1;
         report.event_count += 1;
         let Some(event_hash) = event.event_hash.as_deref() else {
             report.legacy_event_count += 1;
-            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+            if expected_previous_hash.is_none() {
+                report.legacy_prefix_event_count += 1;
+            }
             continue;
         };
         if !is_canonical_sha256_prefixed_hash(event_hash) {
@@ -67318,7 +67420,12 @@ fn verify_db_audit_chain_records(
                 event.audit_event_id
             ));
         }
-        if previous_event_hash != expected_previous_hash {
+        if !anchors.chains(
+            expected_previous_hash.as_deref(),
+            event,
+            previous_event_hash,
+            event_hash,
+        ) {
             report.failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
                 event.audit_event_id
@@ -67345,7 +67452,7 @@ fn verify_db_audit_chain_records(
         } else {
             report.payload_unverified_event_count += 1;
         }
-        expected_previous_hash = event_hash.to_string();
+        expected_previous_hash = Some(event_hash.to_string());
         report.last_event_hash = Some(event_hash.to_string());
     }
     report.mismatch_count = report.failures.len();
@@ -69656,7 +69763,9 @@ async fn reconcile_db_mirror(
         .difference(&file_audit_event_ids)
         .copied()
         .collect::<Vec<_>>();
-    let db_audit_hash_chain_failures = collect_db_audit_hash_chain_failures(&db_audit_events);
+    let db_audit_hash_chain_failures =
+        collect_db_audit_hash_chain_failures(&db_audit_events, &file_audit_events);
+    let db_audit_legacy_prefix_row_count = db_audit_legacy_prefix_row_count(&db_audit_events);
     let db_audit_canonical_projection_failures =
         collect_db_audit_canonical_projection_failures(&db_audit_events);
     let mut db_object_ref_count = 0usize;
@@ -70115,6 +70224,7 @@ async fn reconcile_db_mirror(
         missing_audit_event_ids_in_db,
         missing_audit_event_ids_in_files,
         legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
+        db_audit_legacy_prefix_row_count,
         db_audit_hash_chain_failures,
         db_audit_canonical_projection_failures,
         db_audit_submission_metadata_mismatches,
@@ -72825,6 +72935,10 @@ struct TraceDbAuditChainReport {
     verified: bool,
     event_count: usize,
     legacy_event_count: usize,
+    /// The unhashed rows before the first hashed row, a subset of
+    /// `legacy_event_count`: the history of a deployment upgraded from a
+    /// build that mirrored no chain fields. Not a failure.
+    legacy_prefix_event_count: usize,
     payload_verified_event_count: usize,
     payload_unverified_event_count: usize,
     mismatch_count: usize,
@@ -72918,6 +73032,10 @@ struct TraceDbReconciliationReport {
     /// Submit audit rows in the pre-file-event shape: an id derived from the
     /// submission, no canonical payload. Reported, not blocking.
     legacy_submit_audit_row_count: usize,
+    /// DB audit rows before the first hashed row: mirrored by a build from
+    /// before the DB carried the file log's chain fields. Reported, not
+    /// blocking.
+    db_audit_legacy_prefix_row_count: usize,
     db_audit_hash_chain_failures: Vec<TraceDbAuditHashChainFailure>,
     db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
     db_audit_submission_metadata_mismatches: Vec<TraceDbAuditSubmissionMetadataMismatch>,
