@@ -2,6 +2,7 @@ import { OnboardingConnectStep } from "./onboarding-connect-step";
 import { OnboardingConsentStep } from "./onboarding-consent-step";
 import { OnboardingDoneStep } from "./onboarding-done-step";
 import { OnboardingGrantStep } from "./onboarding-grant-step";
+import { OnboardingInferenceStep } from "./onboarding-inference-step";
 import { OnboardingPathStep } from "./onboarding-path-step";
 import { OnboardingPrivacyStep } from "./onboarding-privacy-step";
 import { OnboardingProjectsStep } from "./onboarding-projects-step";
@@ -25,6 +26,8 @@ export function OnboardingStepContent(props: OnboardingStepProps) {
       return <OnboardingPathStep {...props} />;
     case "privacy":
       return <OnboardingPrivacyStep {...props} />;
+    case "inference":
+      return <OnboardingInferenceStep {...props} />;
     case "disclosure_scrub":
       return <OnboardingScrubDisclosureStep {...props} />;
     case "disclosure_witness":

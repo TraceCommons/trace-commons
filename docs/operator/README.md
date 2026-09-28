@@ -56,6 +56,7 @@ the link.
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
 | Recovering a corrupted vector index | [`./vector-replay.md`](./vector-replay.md) |
 | Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
+| A tenant's audited writes fail after a file append failed in required-mirror mode | [`./audit-trail-forensics.md#repairing-a-required-mirror-lockout`](./audit-trail-forensics.md#repairing-a-required-mirror-lockout) |
 | Reading hash-only error classes from logs | [`./hash-only-logging.md`](./hash-only-logging.md) |
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
@@ -114,7 +115,8 @@ Every runbook in this directory, with a one-line description.
   redeploy moves `compose_hash` and therefore MRCONFIGID) with the
   stale-container trap, what a contributor needs, and rollback to dormant.
 - [`./audit-trail-forensics.md`](./audit-trail-forensics.md) — how to query
-  and verify the audit chain when investigating a dispute or anomaly.
+  and verify the audit chain when investigating a dispute or anomaly, and
+  how to repair a required-mirror lockout (`/v1/admin/audit-chain-repair`).
 - [`./backup-restore.md`](./backup-restore.md) — what is backed up where,
   restore procedures, and honest RPO/RTO targets.
 - [`./corpus-validity-battery.md`](./corpus-validity-battery.md) — the
