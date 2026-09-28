@@ -109,9 +109,12 @@ pub const PIPELINE_SETTLEMENT_UNRECONCILED_LABEL: &str = "settlement_unreconcile
 /// The label on a leg whose adapter returned a receipt that does not answer
 /// the leg's request: a result reference other than the one the persisted
 /// selection expects, or an external receipt that another leg already
-/// recorded (one external receipt answers one leg). The effect is unknown.
-/// The leg is never dispatched again, and a failed run leaves it `failed`
-/// with this label for an operator to reconcile by `operation_ref_hash`.
+/// recorded (one external receipt answers one leg). The leg is never
+/// dispatched again. When its run fails, a leg of an external instrument
+/// stays `failed` with this label, since its effect is unknown, for an
+/// operator to reconcile by `operation_ref_hash`. A Trace Credit leg is
+/// forfeited as `run_failed` instead: it pays only through the ledger row
+/// that commits with its completion, and a mismatch writes no ledger row.
 pub const PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL: &str = "settlement_result_mismatch";
 /// The label on a leg whose settlement request cannot be formed:
 /// `SettlementRequest::new` refuses its references or its amount. No adapter
@@ -150,44 +153,67 @@ const PIPELINE_RECEIPT_OBJECT_MISMATCH_LABEL: &str = "receipt_object_mismatch";
 const PIPELINE_RECEIPT_OBJECT_TASK_FAILED_LABEL: &str = "receipt_object_task_failed";
 
 /// The SQL form of `settlement_leg_is_unresolved`, over a row aliased `s`.
+/// `COALESCE` makes a `failed` leg with no label unresolved, as in Rust: a
+/// comparison with a `NULL` label is `NULL`, which would otherwise leave the
+/// leg matched by neither this predicate nor its negation.
 const UNRESOLVED_SETTLEMENT_LEG_SQL: &str = "(s.operation_state NOT IN ('complete', 'forfeited')
       AND NOT (
           s.operation_state = 'failed'
-          AND s.last_error_label IN ('settlement_unreconciled', 'settlement_result_mismatch')
+          AND COALESCE(
+              s.last_error_label = 'settlement_unreconciled'
+              OR (
+                  s.last_error_label = 'settlement_result_mismatch'
+                  AND s.instrument_id <> 'trace_credit'
+              ),
+              FALSE
+          )
       ))";
 
 /// Whether a failure path still has to resolve a leg. `complete` and
-/// `forfeited` never change. A leg `failed` as `settlement_unreconciled` or
-/// `settlement_result_mismatch` is resolved: the adapter may have taken
-/// effect, and only its records can say. A leg `failed` as
-/// `settlement_request_conflict` or `settlement_request_rejected` is
-/// unresolved: no effect happened, and the failure path forfeits it under
+/// `forfeited` never change. A leg `failed` as `settlement_unreconciled` is
+/// resolved: its adapter may have taken effect, and only its records can
+/// say. So is a leg of an external instrument `failed` as
+/// `settlement_result_mismatch`. A Trace Credit leg `failed` as
+/// `settlement_result_mismatch` is unresolved: no ledger row was written, so
+/// nothing was paid, and the failure path forfeits it as `run_failed`. A leg
+/// `failed` as `settlement_request_conflict` or `settlement_request_rejected`
+/// is unresolved: no effect happened, and the failure path forfeits it under
 /// its own label. A leg `failed` for any other reason (an amount over the
-/// cap, a request that cannot be formed) is one Step 6 retries, so it is
-/// unresolved. `UNRESOLVED_SETTLEMENT_LEG_SQL` is the same rule in SQL.
-fn settlement_leg_is_unresolved(operation_state: &str, last_error_label: Option<&str>) -> bool {
+/// cap, a request that cannot be formed, or no label at all) is one Step 6
+/// retries, so it is unresolved. `UNRESOLVED_SETTLEMENT_LEG_SQL` is the same
+/// rule in SQL.
+fn settlement_leg_is_unresolved(
+    instrument_id: &str,
+    operation_state: &str,
+    last_error_label: Option<&str>,
+) -> bool {
     match operation_state {
         "complete" | "forfeited" => false,
-        "failed" => !matches!(
-            last_error_label,
-            Some(
-                PIPELINE_SETTLEMENT_UNRECONCILED_LABEL | PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL
-            )
-        ),
+        "failed" => match last_error_label {
+            Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL) => false,
+            Some(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL) => {
+                instrument_id == InstrumentId::trace_credit().as_str()
+            }
+            _ => true,
+        },
         _ => true,
     }
 }
 
 /// The SQL form of `settlement_leg_is_open_to_dispatch`, over a row aliased
-/// `s`.
+/// `s`. `COALESCE` makes a `failed` leg with no label open to dispatch, as in
+/// Rust.
 const SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL: &str =
     "(s.operation_state NOT IN ('complete', 'forfeited')
       AND NOT (
           s.operation_state = 'failed'
-          AND s.last_error_label IN (
-              'settlement_result_mismatch',
-              'settlement_request_conflict',
-              'settlement_request_rejected'
+          AND COALESCE(
+              s.last_error_label IN (
+                  'settlement_result_mismatch',
+                  'settlement_request_conflict',
+                  'settlement_request_rejected'
+              ),
+              FALSE
           )
       ))";
 
@@ -1912,7 +1938,8 @@ impl PgPipelineStore {
     /// `'complete'` and is `NULL` for every other state
     /// (`pipeline_run_settlements_external_receipt_shape`); a hash another
     /// leg of the tenant already recorded is refused by
-    /// `pipeline_run_settlements_external_receipt_unique`. `credit_event_id`/`settlement_batch_id` only move from `NULL`
+    /// `pipeline_run_settlements_external_receipt_unique`.
+    /// `credit_event_id`/`settlement_batch_id` only move from `NULL`
     /// to a value (never overwritten or cleared); `payout_state` is written
     /// only when the caller supplies one. `attempt_count` increments on
     /// `'retry'`/`'failed'` (not `'forfeited'` -- forfeiture is not a
@@ -2317,7 +2344,8 @@ async fn receipt_is_tombstoned(
 /// only its adapter can say. Every other open leg is `forfeited` /
 /// `run_failed`: one never dispatched paid nothing, and a Trace Credit leg
 /// pays only through the ledger row that commits with its completion, so an
-/// incomplete one paid nothing either. Every leg it touches loses its lease
+/// incomplete one paid nothing either -- a Trace Credit leg `failed` as
+/// `settlement_result_mismatch` included. Every leg it touches loses its lease
 /// columns (`pipeline_run_settlements_lease_shape`); a resolved leg (see
 /// `settlement_leg_is_unresolved`) is never touched. With a worker present,
 /// `PipelineService::reconcile_dispatched_settlement_legs` has already
@@ -4514,9 +4542,12 @@ impl PipelineService {
     /// submission that is no longer operable.
     ///
     /// A leg that is never dispatched again (`settlement_leg_is_open_to_dispatch`)
-    /// gets no call: a `settlement_result_mismatch` leg is already resolved,
-    /// and a `settlement_request_conflict` or `settlement_request_rejected`
-    /// leg is forfeited by the transaction that fails the run.
+    /// gets no call: an external leg `failed` as `settlement_result_mismatch`
+    /// is already resolved and stays `failed`, and a
+    /// `settlement_request_conflict` or `settlement_request_rejected` leg is
+    /// forfeited by the transaction that fails the run. (A Trace Credit leg
+    /// gets no call either; that transaction forfeits it, a
+    /// `settlement_result_mismatch` one included.)
     ///
     /// Each call is fenced by `ensure_live_lease` and each record by the run
     /// lease, so a stale lease here ends as `lease_expired`, never as a
@@ -4539,6 +4570,7 @@ impl PipelineService {
                 settlement.dispatched_at.is_some()
                     && settlement.instrument_id != InstrumentId::trace_credit().as_str()
                     && settlement_leg_is_unresolved(
+                        &settlement.instrument_id,
                         &settlement.operation_state,
                         settlement.last_error_label.as_deref(),
                     )
@@ -5119,13 +5151,16 @@ impl PipelineService {
             // credit that did not is forfeited, the same as every other
             // instrument -- there is no special case for Trace Credit here.
             //
-            // A leg forfeited here may already have been dispatched: a leg
-            // left `retry` by an `Unavailable` answer, a `leased` leg of an
-            // interrupted attempt, or a `settlement_result_mismatch` leg. Its
-            // external effect may have happened. This forfeit does not
-            // reconcile it against its adapter; the leg keeps its
-            // `dispatched_at`, and the adapter's records for its
-            // `operation_ref_hash` are the only evidence of the effect.
+            // Any leg of an external instrument whose `dispatched_at` is set
+            // may have taken effect when it is forfeited here, whatever its
+            // state or label: its adapter was called at least once. That
+            // includes a `settlement_unreconciled` leg of a live run and a leg
+            // dispatched earlier and later refused by a lowered cap. This
+            // forfeit does not reconcile it against its adapter; the leg
+            // keeps its `dispatched_at`, and the adapter's records for its
+            // `operation_ref_hash` are the only evidence of the effect. A
+            // Trace Credit leg that is not `complete` paid nothing: it pays
+            // only through the ledger row that commits with its completion.
             for settlement in &settlements {
                 if settlement.operation_state != "complete" {
                     self.store
@@ -6254,57 +6289,86 @@ mod tests {
     }
 
     /// A failure path still resolves a leg unless it is `complete`,
-    /// `forfeited`, or already `failed` as `settlement_unreconciled` or
-    /// `settlement_result_mismatch` (its effect is unknown). A leg `failed`
-    /// with a `Conflict` or `Rejected` label is still unresolved (the failure
-    /// path forfeits it), and so is one `failed` for a reason Step 6 retries
-    /// (an amount over the cap, a request that cannot be formed).
+    /// `forfeited`, or already `failed` as `settlement_unreconciled`, or an
+    /// external leg `failed` as `settlement_result_mismatch` (its effect is
+    /// unknown). A Trace Credit leg `failed` as `settlement_result_mismatch`
+    /// is unresolved (no ledger row was written, and the failure path
+    /// forfeits it as `run_failed`). So is a leg `failed` with a `Conflict`
+    /// or `Rejected` label (the failure path forfeits it), and one `failed`
+    /// for a reason Step 6 retries (an amount over the cap, a request that
+    /// cannot be formed, or no label at all). The SQL form names the same
+    /// labels, the Trace Credit exception, and the `COALESCE` that makes a
+    /// missing label unresolved.
     #[test]
     fn a_leg_is_unresolved_until_it_is_resolved() {
-        for state in ["pending", "leased", "retry", "held"] {
-            assert!(settlement_leg_is_unresolved(state, None), "{state}");
+        let trace_credit = InstrumentId::trace_credit();
+        for instrument in ["storage_rebate", trace_credit.as_str()] {
+            for state in ["pending", "leased", "retry", "held"] {
+                assert!(
+                    settlement_leg_is_unresolved(instrument, state, None),
+                    "{instrument} {state}"
+                );
+            }
+            for label in [
+                None,
+                Some(SettlementError::Conflict.label()),
+                Some(SettlementError::Rejected.label()),
+                Some(PIPELINE_CREDIT_CAP_LABEL),
+                Some(PIPELINE_SETTLEMENT_REQUEST_INVALID_LABEL),
+            ] {
+                assert!(
+                    settlement_leg_is_unresolved(instrument, "failed", label),
+                    "{instrument} {label:?}"
+                );
+            }
+            assert!(!settlement_leg_is_unresolved(
+                instrument,
+                "failed",
+                Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+            ));
+            assert!(!settlement_leg_is_unresolved(instrument, "complete", None));
+            for label in [
+                PIPELINE_SETTLEMENT_RUN_FAILED_LABEL,
+                SettlementError::Conflict.label(),
+            ] {
+                assert!(!settlement_leg_is_unresolved(
+                    instrument,
+                    "forfeited",
+                    Some(label)
+                ));
+            }
         }
-        for label in [
-            SettlementError::Conflict.label(),
-            SettlementError::Rejected.label(),
-            PIPELINE_CREDIT_CAP_LABEL,
-            PIPELINE_SETTLEMENT_REQUEST_INVALID_LABEL,
+        assert!(!settlement_leg_is_unresolved(
+            "storage_rebate",
+            "failed",
+            Some(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL)
+        ));
+        assert!(settlement_leg_is_unresolved(
+            trace_credit.as_str(),
+            "failed",
+            Some(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL)
+        ));
+        for fragment in [
+            format!("'{PIPELINE_SETTLEMENT_UNRECONCILED_LABEL}'"),
+            format!("'{PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL}'"),
+            format!("s.instrument_id <> '{}'", trace_credit.as_str()),
+            "COALESCE(".to_string(),
+            "FALSE".to_string(),
         ] {
             assert!(
-                settlement_leg_is_unresolved("failed", Some(label)),
-                "{label}"
+                UNRESOLVED_SETTLEMENT_LEG_SQL.contains(&fragment),
+                "{fragment}"
             );
         }
-        for label in [
-            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL,
-            PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL,
-        ] {
-            assert!(
-                !settlement_leg_is_unresolved("failed", Some(label)),
-                "{label}"
-            );
-            // The SQL form names the same resolved labels.
-            assert!(
-                UNRESOLVED_SETTLEMENT_LEG_SQL.contains(&format!("'{label}'")),
-                "{label}"
-            );
-        }
-        assert!(!settlement_leg_is_unresolved("complete", None));
-        assert!(!settlement_leg_is_unresolved(
-            "forfeited",
-            Some(PIPELINE_SETTLEMENT_RUN_FAILED_LABEL)
-        ));
-        assert!(!settlement_leg_is_unresolved(
-            "forfeited",
-            Some(SettlementError::Conflict.label())
-        ));
     }
 
     /// A leg failed as `settlement_result_mismatch`,
     /// `settlement_request_conflict`, or `settlement_request_rejected` is
     /// never dispatched again, and neither is a `complete` or `forfeited`
     /// leg. Every other leg -- a `settlement_unreconciled` leg of a live run
-    /// included -- is open to dispatch. The SQL form names the same labels.
+    /// and a `failed` leg with no label included -- is open to dispatch. The
+    /// SQL form names the same labels, and its `COALESCE` keeps a missing
+    /// label open.
     #[test]
     fn a_leg_failed_closed_is_never_dispatched_again() {
         assert_eq!(
@@ -6342,6 +6406,8 @@ mod tests {
             );
         }
         assert!(settlement_leg_is_open_to_dispatch("failed", None));
+        assert!(SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL.contains("COALESCE("));
+        assert!(SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL.contains("FALSE"));
     }
 
     /// A transient database failure -- the pool

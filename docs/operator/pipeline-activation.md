@@ -181,13 +181,14 @@ and `dispatched_at` records that the leg was sent. When a Settle run fails
 or `index_key_conflict`), no leg stays open:
 
 - A leg that was never dispatched is `forfeited` with `run_failed`. So is a
-  Trace Credit leg: it pays only through the ledger row that commits with
-  its completion.
+  Trace Credit leg that is not `complete`, one `failed` with
+  `settlement_result_mismatch` included: it pays only through the ledger
+  row that commits with its completion, so it paid nothing.
 - A leg `failed` with `settlement_request_conflict` or
   `settlement_request_rejected` is `forfeited` and keeps its label: no
-  effect happened. A leg `failed` with `settlement_result_mismatch` stays
-  `failed` with its label: its effect is unknown. Neither gets another
-  adapter call.
+  effect happened. A leg of another instrument `failed` with
+  `settlement_result_mismatch` stays `failed` with its label: its effect is
+  unknown. Neither gets another adapter call.
 - Any other dispatched leg of another instrument gets one more adapter call
   from the worker that fails the run. A result equal to the selected result
   reference makes the leg `complete`. Any other outcome makes it `failed`
@@ -197,23 +198,26 @@ or `index_key_conflict`), no leg stays open:
   leg -- because none was ever seeded, or because the persisted selection
   does not decode.
 - When the next claim fails a crashed worker's run (`attempts_exhausted`
-  after its lease expired), no worker can call the adapter. Every
-  dispatched leg of another instrument is then `settlement_unreconciled`.
+  after its lease expired), no worker can call the adapter. The first two
+  rules still apply; every other dispatched leg of another instrument is
+  then `settlement_unreconciled`.
 
-`settlement_unreconciled` and `settlement_result_mismatch` mean the
-external payment may have happened. Find the leg's `operation_ref_hash` in
-the adapter's records and reconcile it by hand. Nothing retries it once the
-run has failed.
+`settlement_unreconciled`, and `settlement_result_mismatch` on a leg of
+another instrument, mean the external payment may have happened. Find the
+leg's `operation_ref_hash` in the adapter's records and reconcile it by
+hand. Nothing retries it once the run has failed. On a run that is still
+live, Settle dispatches a `settlement_unreconciled` leg again on its next
+attempt -- the label only means the *last* reconciling call did not confirm
+a match, not that the leg is done being tried.
 
 A withdrawal forfeits every leg that is not `complete` without an adapter
-call, including a leg that was already dispatched (`retry` after
-`settlement_adapter_unavailable`, `leased`, or `failed` with
-`settlement_result_mismatch`). The external payment for such a leg may
-have happened: the leg keeps its `dispatched_at`, and only the adapter's
-records for its `operation_ref_hash` show whether it did. On a run that is
-still live, Settle dispatches a `settlement_unreconciled` leg again on its
-next attempt -- the label only means the *last* reconciling call did not
-confirm a match, not that the leg is done being tried.
+call. Any leg of another instrument whose `dispatched_at` is set may have
+taken effect when it is forfeited this way, whatever its state or label:
+its adapter was called at least once. That includes a
+`settlement_unreconciled` leg of a live run and a leg dispatched earlier
+and later refused by a lowered cap. The leg keeps its `dispatched_at`, and
+only the adapter's records for its `operation_ref_hash` show whether the
+payment happened. A Trace Credit leg that is not `complete` paid nothing.
 
 ## Receipt staging and the orphan sweep
 

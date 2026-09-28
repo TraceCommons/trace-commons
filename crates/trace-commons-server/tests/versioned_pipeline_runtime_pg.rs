@@ -8166,14 +8166,19 @@ fn leg_dispatched(rows: &BTreeMap<String, serde_json::Value>, instrument: &str) 
     !leg_field(rows, instrument, "dispatched_at").is_null()
 }
 
-/// The resolved states a leg of a failed run may end in.
+/// The resolved states a leg of a failed run may end in. A Trace Credit leg
+/// `failed` as `settlement_result_mismatch` is not one of them: the failure
+/// path forfeits it.
 fn leg_is_resolved(rows: &BTreeMap<String, serde_json::Value>, instrument: &str) -> bool {
     match leg_state(rows, instrument) {
         "complete" | "forfeited" => true,
-        "failed" => matches!(
-            leg_label(rows, instrument),
-            Some("settlement_unreconciled" | "settlement_result_mismatch")
-        ),
+        "failed" => match leg_label(rows, instrument) {
+            Some("settlement_unreconciled") => true,
+            Some("settlement_result_mismatch") => {
+                instrument != InstrumentId::trace_credit().as_str()
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -9519,6 +9524,299 @@ async fn external_receipt_hashes_are_checked_by_the_database() {
         "pipeline settlement identity is immutable"
     );
     tx.rollback().await.unwrap();
+}
+
+/// A Trace Credit leg pays only through the ledger row that commits with
+/// its completion. When its adapter answers with a receipt that does not
+/// answer the request, the leg fails closed as `settlement_result_mismatch`
+/// with no ledger row, is never dispatched again, and every attempt while it
+/// exists is charged. When the attempts run out, the failure path forfeits
+/// it as `run_failed`: nothing was paid. No reconciling call is made for it.
+#[tokio::test]
+async fn a_trace_credit_leg_with_a_mismatched_receipt_is_forfeited_when_its_run_fails() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage_rebate = CountingSettlementAdapter::new(RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    ));
+    let trace_credit = CountingSettlementAdapter::new(Arc::new(MismatchingSettlementAdapter {
+        instrument_id: InstrumentId::trace_credit(),
+    }));
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            trace_credit.clone() as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let tenant = format!("settle-credit-mismatch-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let settle_attempts = run.max_attempts - run.attempt_count;
+    assert!(settle_attempts >= 2, "the fixture leaves Settle a retry");
+
+    for attempt in 1..=settle_attempts {
+        force_due(&backend, &tenant, run.run_id).await;
+        let processed = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("the Settle attempt runs");
+        if attempt < settle_attempts {
+            assert_eq!(
+                processed.state,
+                PipelineRunState::Retry,
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                processed.last_error_label.as_deref(),
+                Some("settlement_operation_retry"),
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                processed.attempt_count,
+                run.attempt_count + attempt,
+                "attempt {attempt}: the retry is charged"
+            );
+            let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+            assert_eq!(leg_state(&rows, "trace_credit"), "failed");
+            assert_eq!(
+                leg_label(&rows, "trace_credit"),
+                Some(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL)
+            );
+        }
+        assert_eq!(trace_credit.calls(), 1, "attempt {attempt}");
+    }
+
+    let failed = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "trace_credit"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "trace_credit"),
+        Some(PIPELINE_SETTLEMENT_RUN_FAILED_LABEL)
+    );
+    assert!(leg_dispatched(&rows, "trace_credit"));
+    assert!(leg_holds_no_lease(&rows, "trace_credit"));
+    assert!(leg_field(&rows, "trace_credit", "result_ref_hash").is_null());
+    assert!(leg_field(&rows, "trace_credit", "credit_event_id").is_null());
+    assert_eq!(leg_state(&rows, "storage_rebate"), "complete");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "no ledger row: nothing was paid"
+    );
+    assert_eq!(
+        trace_credit.calls(),
+        1,
+        "the adapter was called once, and no reconciling call was made"
+    );
+    assert_eq!(storage_rebate.calls(), 1);
+}
+
+/// The reconciling call a worker makes before it fails a run records a
+/// receipt only when that receipt answers this leg alone. A receipt whose
+/// external hash another leg of the tenant already recorded does not
+/// reconcile the leg: it ends `failed` / `settlement_unreconciled`, with no
+/// result and no external receipt hash, and the first leg keeps its receipt.
+#[tokio::test]
+async fn a_reused_external_receipt_does_not_reconcile_a_leg() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let receipt_hash = dependency_content_hash(b"external-receipt-reused-on-reconcile");
+    let rebate_recording = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let storage_rebate = CountingSettlementAdapter::new(Arc::new(ExternalReceiptAdapter {
+        inner: rebate_recording.clone(),
+        receipt_hash: receipt_hash.clone(),
+    }));
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_test_only",
+                "none",
+            ) as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let tenant = format!("settle-reconcile-reused-receipt-{}", uuid::Uuid::new_v4());
+
+    let (first, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let settled = service
+        .process_run(&tenant, first.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+
+    // The second run's leg is dispatched and left waiting by an
+    // `Unavailable` answer.
+    let (second, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    rebate_recording.fail_next();
+    let waited = service
+        .process_run(&tenant, second.run_id)
+        .await
+        .unwrap()
+        .expect("the Settle attempt waits");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    let rows = settlement_rows(&backend, &tenant, second.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "retry");
+    assert!(leg_dispatched(&rows, "storage_rebate"));
+    assert_eq!(leg_state(&rows, "trace_credit"), "complete");
+
+    // The run then fails on its tampered package. The reconciling call is
+    // answered with the receipt the first run's leg already recorded.
+    let calls_before = storage_rebate.calls();
+    tamper_stored_bundle_package(&tenant, &second.bundle_id).await;
+    force_due(&backend, &tenant, second.run_id).await;
+    let failed = service
+        .process_run(&tenant, second.run_id)
+        .await
+        .unwrap()
+        .expect("the run fails on its tampered package");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some("bundle_package_invalid")
+    );
+    assert_eq!(
+        storage_rebate.calls(),
+        calls_before + 1,
+        "the reconciling call was made"
+    );
+    let rows = settlement_rows(&backend, &tenant, second.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
+    assert!(leg_field(&rows, "storage_rebate", "result_ref_hash").is_null());
+    assert!(leg_field(&rows, "storage_rebate", "external_receipt_hash").is_null());
+    assert!(leg_holds_no_lease(&rows, "storage_rebate"));
+    let first_rows = settlement_rows(&backend, &tenant, first.run_id).await;
+    assert_eq!(
+        leg_field(&first_rows, "storage_rebate", "external_receipt_hash").as_str(),
+        Some(receipt_hash.as_str()),
+        "the first leg keeps its receipt"
+    );
+}
+
+/// A `failed` leg with no label is a state no writer produces today, but
+/// the schema allows it. The SQL predicates treat it the way their Rust
+/// forms do: it is open to dispatch, so Step 6 leases and settles it, and it
+/// is unresolved, so a failure path resolves it (here the claim sweep: the
+/// dispatched external leg is `settlement_unreconciled`, the Trace Credit leg
+/// is forfeited as `run_failed`).
+#[tokio::test]
+async fn a_failed_leg_without_a_label_is_dispatched_and_resolved() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+
+    let tenant = format!("settle-unlabeled-dispatch-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_run_settlements
+                SET operation_state = 'failed', last_error_label = NULL
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'storage_rebate'",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(adapters[0].requests().len(), 1, "the leg was dispatched");
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "complete");
+
+    let sweep_tenant = format!("settle-unlabeled-sweep-{}", uuid::Uuid::new_v4());
+    let (swept_run, _evidence) = run_to_settle_ready(&service, &sweep_tenant).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &sweep_tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs
+                SET state = 'leased', lease_token = $3,
+                    lease_expires_at = NOW() - INTERVAL '1 second',
+                    attempt_count = max_attempts
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&sweep_tenant, &swept_run.run_id, &uuid::Uuid::new_v4()],
+        )
+        .await
+        .unwrap();
+        tx.execute(
+            "UPDATE pipeline_run_settlements
+                SET operation_state = 'failed', last_error_label = NULL,
+                    dispatched_at = CASE
+                        WHEN instrument_id = 'storage_rebate' THEN NOW() - INTERVAL '2 seconds'
+                    END
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&sweep_tenant, &swept_run.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let claimed = service.process_one(&sweep_tenant).await.unwrap();
+    assert!(claimed.is_none(), "an exhausted run is not claimed");
+    let rows = settlement_rows(&backend, &sweep_tenant, swept_run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
+    assert_eq!(leg_state(&rows, "trace_credit"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "trace_credit"),
+        Some(PIPELINE_SETTLEMENT_RUN_FAILED_LABEL)
+    );
+    assert_eq!(
+        adapters[0].requests().len(),
+        1,
+        "the sweep calls no adapter"
+    );
 }
 
 /// A `settlement_unreconciled` leg on a run that is still live -- left
