@@ -16928,6 +16928,71 @@ async fn delete_withdrawn_trace_objects(
     Ok(())
 }
 
+/// Record a withdrawal on the file side, as `revoke_submission` does for an
+/// operator revocation: a first-writer-wins revocation tombstone, and the
+/// submission and derived records marked revoked. The submission record also
+/// takes the DB's `purged_at`, which withdrawal sets because the content is
+/// deleted.
+///
+/// Without this the DB says `revoked` while the file records keep their old
+/// status. The reconciliation drill then reports a status mismatch and reader
+/// parity failures for every withdrawal, and file-driven maintenance keeps
+/// treating the trace as live, for example expiring it. A submission with no
+/// file-side record (written to the DB only) has nothing to update.
+///
+/// Must run before the content is deleted: the tombstone's redaction hash
+/// comes from the stored envelope. On a retry the tombstone already exists
+/// and is left as first written.
+async fn revoke_withdrawn_trace_file_records(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> anyhow::Result<()> {
+    let record = read_submission_record(&state.root, tenant_id, submission_id)?;
+    let derived = read_derived_record(&state.root, tenant_id, submission_id)?;
+    if record.is_none() && derived.is_none() {
+        return Ok(());
+    }
+    if read_revocation(&state.root, tenant_id, submission_id)?.is_none() {
+        write_revocation(
+            &state.root,
+            &TraceCommonsRevocation {
+                tenant_id: tenant_id.to_string(),
+                tenant_storage_ref: tenant_storage_ref(tenant_id),
+                submission_id,
+                revoked_at: Utc::now(),
+                reason: TRACE_WITHDRAWAL_REASON.to_string(),
+                redaction_hash: record
+                    .as_ref()
+                    .and_then(|record| redaction_hash_for_record(state, record)),
+                canonical_summary_hash: derived
+                    .as_ref()
+                    .map(|derived| derived.canonical_summary_hash.clone()),
+            },
+        )?;
+    }
+    if let Some(mut record) = record {
+        let purged_at = db
+            .get_trace_submission(tenant_id, submission_id)
+            .await?
+            .and_then(|db_record| db_record.purged_at)
+            .or(record.purged_at);
+        if record.status != TraceCorpusStatus::Revoked || record.purged_at != purged_at {
+            record.status = TraceCorpusStatus::Revoked;
+            record.purged_at = purged_at;
+            write_submission_record(&state.root, &record)?;
+        }
+    }
+    if let Some(mut derived) = derived
+        && derived.status != TraceCorpusStatus::Revoked
+    {
+        derived.status = TraceCorpusStatus::Revoked;
+        write_derived_record(&state.root, &derived)?;
+    }
+    Ok(())
+}
+
 /// Evict a withdrawn trace from every derived surface that would otherwise
 /// keep its content alive in derived form: the vector index (both the DB rows
 /// and the gate service's in-memory ANN index), the dedup clusters, and future
@@ -17142,6 +17207,14 @@ async fn account_trace_withdraw_handler(
     let credit_retained = affected_ids.iter().all(|affected_id| {
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
     });
+
+    // The file side records the withdrawal too, before any content is deleted:
+    // the file tombstone's redaction hash is read from the stored envelope.
+    for affected_id in affected_ids.iter().copied() {
+        revoke_withdrawn_trace_file_records(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+    }
 
     // Retained mappings make this list stable across retries. Complete the
     // external deletion for every content version before reporting success.

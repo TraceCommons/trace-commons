@@ -29803,6 +29803,159 @@ async fn db_reconciliation_drill_records_clean_smoke_evidence() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// An account withdrawal revokes the trace on the file side too, as an
+/// operator revocation does. Before this, the DB said `revoked` while the file
+/// submission and derived records kept saying `accepted` and no file tombstone
+/// existed: the reconciliation drill reported `status_mismatches` and reader
+/// parity failures for every withdrawal, and file-driven maintenance still
+/// treated the trace as live.
+#[tokio::test]
+async fn account_withdrawal_revokes_the_file_side_records() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
+    let _ = vector_index_handler(
+        State(state.clone()),
+        auth_headers("vector-worker-token-a"),
+        Json(TraceVectorIndexRequest {
+            purpose: Some("withdrawal reconciliation vector index".to_string()),
+            dry_run: false,
+            limit: None,
+        }),
+    )
+    .await
+    .expect("vector worker indexes the accepted submission");
+    assert_eq!(
+        read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("file record reads")
+            .expect("file record exists")
+            .status,
+        TraceCorpusStatus::Accepted
+    );
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let Json(withdrawn) =
+        account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(submission_id))
+            .await
+            .expect("own trace withdraws");
+    assert_eq!(withdrawn.prior_status, "accepted");
+
+    // The file side now agrees with the DB.
+    assert_eq!(
+        backend
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .expect("DB record reads")
+            .expect("DB record exists")
+            .status,
+        StorageTraceCorpusStatus::Revoked
+    );
+    assert_eq!(
+        read_submission_record(temp.path(), "tenant-a", submission_id)
+            .expect("file record reads")
+            .expect("file record is kept, as a revocation keeps it")
+            .status,
+        TraceCorpusStatus::Revoked
+    );
+    assert_eq!(
+        read_derived_record(temp.path(), "tenant-a", submission_id)
+            .expect("derived record reads")
+            .expect("derived record exists")
+            .status,
+        TraceCorpusStatus::Revoked
+    );
+    let tombstone = read_revocation(temp.path(), "tenant-a", submission_id)
+        .expect("file tombstone reads")
+        .expect("withdrawal writes a file tombstone");
+    assert_eq!(tombstone.reason, TRACE_WITHDRAWAL_REASON);
+
+    // Withdrawing again converges and does not rewrite the tombstone.
+    let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+    let _ = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(submission_id))
+        .await
+        .expect("withdrawing twice is idempotent");
+    assert_eq!(
+        read_revocation(temp.path(), "tenant-a", submission_id)
+            .expect("file tombstone reads")
+            .expect("file tombstone is kept")
+            .revoked_at,
+        tombstone.revoked_at
+    );
+
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/admin/db-reconciliation-drill")
+                .header(AUTHORIZATION, "Bearer admin-token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "purpose": "withdrawal reconciliation" }).to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("DB reconciliation drill response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).expect("DB reconciliation drill response parses");
+    let gaps = value["blocking_gaps"]
+        .as_array()
+        .expect("blocking gaps array")
+        .iter()
+        .map(|gap| gap.as_str().expect("gap label").to_string())
+        .collect::<Vec<_>>();
+    for label in [
+        "status_mismatches",
+        "derived_status_mismatches",
+        "contributor_credit_reader_parity",
+        "reviewer_metadata_reader_parity",
+        "analytics_reader_parity",
+        "db_reader_parity_failures",
+    ] {
+        assert!(
+            !gaps.iter().any(|gap| gap.starts_with(label)),
+            "withdrawal left reconciliation gap {label}: {gaps:?}"
+        );
+    }
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
 /// An accepted trace the PII backstop has released has NO active
 /// `submitted_envelope` ref (the release invalidates it) and an active
 /// `rescrubbed_envelope` ref instead. The reconciliation drill must read the
