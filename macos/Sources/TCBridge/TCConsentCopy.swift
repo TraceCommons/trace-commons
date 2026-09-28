@@ -56,4 +56,32 @@ public enum TCConsentCopy {
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// K11: the daemon's `route_disclosure` result in, `{facts, copy}` out,
+    /// from `tc_route_disclosure_copy`. Decoded by
+    /// `TCShellCore.RouteDisclosure`.
+    ///
+    /// Nil for anything the ABI cannot read, including a route or origin
+    /// newer than this build: the shell says it could not be read.
+    public static func routeDisclosureJSON(forFacts factsJSON: String) -> String? {
+        let raw = factsJSON.withCString { tc_route_disclosure_copy($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// What a disclosure surface says when `routeDisclosureJSON` is nil:
+    /// `panel` and `session`, from `tc_route_disclosure_unreadable_copy`.
+    public static func routeDisclosureUnreadableJSON() -> String? {
+        guard let raw = tc_route_disclosure_unreadable_copy() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The labels for `certificate_detail`, from `tc_certificate_detail_copy`.
+    public static func certificateDetailCopyJSON() -> String? {
+        guard let raw = tc_certificate_detail_copy() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
 }

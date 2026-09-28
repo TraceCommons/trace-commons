@@ -140,6 +140,7 @@ struct SettingsContent: View {
             watchedFolders
             routing
             privateInference
+            RouteDisclosureSection()
             witness
             projects
             audit

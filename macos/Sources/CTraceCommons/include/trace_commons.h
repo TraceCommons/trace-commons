@@ -1541,6 +1541,35 @@ char*       tc_grant_void_notice(const char* void_json);
  */
 char*       tc_witness_capacity_notice(const char* capacity_json);
 
+/* K11: what leaves this machine, to whom, and what this client checked.
+ *
+ * facts_json is the daemon's route_disclosure result, passed through as sent.
+ * Returns an owned JSON object {"facts": ..., "copy": ...}: the facts,
+ * canonicalised, and the words for exactly those facts -- title, route,
+ * witness (check, classifier, origin and labels, or null), local_filter,
+ * receipts, attested_bodies (each a sentence or null) and session (the
+ * per-session labels and lines). A block is present only when it is true of
+ * the route; render what is there and decide nothing. Free it with
+ * tc_string_free.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, for a route or origin
+ * this build does not know, and on a caught panic. Say it could not be read
+ * then; do not write a sentence natively.
+ */
+char*       tc_route_disclosure_copy(const char* facts_json);
+
+/* The labels for the daemon's certificate_detail: heading, measurement_label,
+ * signer_label and verified_at_review. Owned JSON; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_certificate_detail_copy(void);
+
+/* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
+ * panel and session. Owned JSON; free it with tc_string_free. NULL only on a
+ * caught panic.
+ */
+char*       tc_route_disclosure_unreadable_copy(void);
+
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
  * the opencode-export-version-unsupported health label. No daemon handle needed. */

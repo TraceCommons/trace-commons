@@ -4929,6 +4929,78 @@ fn a_witness_capacity_notice_crosses_the_abi_as_the_rust_builds_it() {
     assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
 }
 
+/// K11: the daemon's `route_disclosure` answer goes in as sent, and the facts
+/// come back beside the core's words for them, byte for byte what the core
+/// builds.
+#[test]
+fn the_route_disclosure_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "route": "witness",
+        "witness": {
+            "state": "pinned",
+            "url": "https://witness.example",
+            "signing_address": "0xab",
+            "pinned_measurements": ["mrtd=aa"],
+            "origin": "published_at_join",
+        },
+        "local_filter": null,
+        "receipts": {"endpoint_configured": true, "check_attestation": false},
+        "attested_bodies": false,
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_route_disclosure_copy(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        copy::route_disclosure_for_wire(&wire).expect("readable")
+    );
+    assert_eq!(
+        parsed["copy"]["witness"]["origin"],
+        serde_json::json!(copy::DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN)
+    );
+}
+
+/// A shape this build cannot read is NULL, never the nearest route.
+#[test]
+fn an_unreadable_route_disclosure_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor_ffi::tc_route_disclosure_copy;
+    assert!(unsafe { tc_route_disclosure_copy(std::ptr::null()) }.is_null());
+    for text in ["not json", "[]", r#"{"route":"somewhere_new"}"#] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_route_disclosure_copy(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_unreadable_disclosure_lines_are_the_cores() {
+    let json = take_owned(trace_commons_contributor_ffi::tc_route_disclosure_unreadable_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(trace_commons_contributor::consent_copy::disclosure_unreadable_copy())
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_certificate_detail_labels_are_the_cores() {
+    let json = take_owned(trace_commons_contributor_ffi::tc_certificate_detail_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(trace_commons_contributor::consent_copy::certificate_detail_copy())
+            .unwrap()
+    );
+}
+
 #[test]
 fn nothing_waiting_on_the_witness_gets_null() {
     use std::ffi::CString;
