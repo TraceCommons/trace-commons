@@ -41,6 +41,11 @@ injects a pipeline runtime. The repository binary injects none.
 
 Activation replaces this list with qualified routing.
 
+The pipeline's tables grant the ingest runtime group, `trace_ingest_runtime`,
+exactly what the pipeline reads and writes, so an ingest login in that group
+needs no further grant for the pipeline ([deployment.md](deployment.md), "V92
+to V95: the pipeline tables").
+
 ## Fail-closed dependency qualification
 
 `assemble_ingest_pipeline_runtime` refuses to start an injected pipeline

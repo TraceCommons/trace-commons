@@ -293,3 +293,35 @@ DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_run_settlements;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_run_settlements
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
+
+-- The ingest runtime's grants on what this migration adds, on V92's terms:
+-- what the pipeline code reads and writes, and nothing broader. The columns
+-- added to trace_credit_ledger, trace_credit_settlement_batches and
+-- trace_near_credit_outbox need nothing here: those tables are older than
+-- V62, and the pilot's runtime holds table-wide privileges on them, which
+-- cover a column added later.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
+        RAISE EXCEPTION 'V94: trace_ingest_runtime is missing; V90 creates it';
+    END IF;
+END $$;
+
+-- pipeline_runs: the Score commit records its index command and neighbor
+-- reference, and Settle persists its selection and advances the index write.
+GRANT UPDATE (index_command_ref, index_command_hash, index_write_state,
+              score_neighbor_ref, score_neighbor_hash, settle_selection,
+              settle_selection_hash)
+    ON pipeline_runs TO trace_ingest_runtime;
+
+-- pipeline_run_settlements: the Score commit inserts one leg per award, and
+-- Settle, reconciliation, and failing a run advance each leg. UPDATE is per
+-- column: nothing updates a leg's identity (run, instrument, amount,
+-- operation reference), its payout rail, or created_at, and V94's trigger
+-- refuses those too. Nothing deletes a leg; it leaves with its run, through
+-- the foreign key's cascade, which runs as the table owner.
+GRANT SELECT, INSERT ON pipeline_run_settlements TO trace_ingest_runtime;
+GRANT UPDATE (operation_state, result_ref_hash, external_receipt_hash,
+              credit_event_id, settlement_batch_id, payout_state, lease_token,
+              lease_expires_at, dispatched_at, attempt_count, last_error_label,
+              updated_at)
+    ON pipeline_run_settlements TO trace_ingest_runtime;

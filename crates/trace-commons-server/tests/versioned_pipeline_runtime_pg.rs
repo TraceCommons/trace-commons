@@ -1,6 +1,12 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Versioned pipeline runtime against PostgreSQL, as a role that cannot bypass RLS.
+//! Versioned pipeline runtime against PostgreSQL, as a login that cannot bypass
+//! RLS and holds only what the ingest runtime group, `trace_ingest_runtime`, holds.
+
+#[path = "support/pilot_runtime_grants.rs"]
+mod pilot_runtime_grants;
+#[path = "support/pilot_runtime_login.rs"]
+mod pilot_runtime_login;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -27,7 +33,7 @@ use trace_commons_protocol::trace_contribution::{
     retention_policy_for_trace,
 };
 use trace_commons_server::config::DatabaseConfig;
-use trace_commons_server::db::{Database, postgres::PgBackend};
+use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
@@ -48,35 +54,30 @@ use trace_commons_server::versioned_pipeline_credit::{
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 
+use pilot_runtime_login::{migrate_like_the_pilot, provision_member_only_login};
+
+/// The login every test here connects as. Its only privilege source is
+/// membership in `trace_ingest_runtime`, the ingest runtime group V90 names.
 const RUNTIME_ROLE: &str = "trace_pipeline_runtime_test";
-static SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 /// `None` only when the variable is unset. Every failure after that panics.
+///
+/// The pipeline service connects as the pilot's least-privilege runtime, not
+/// as a role with blanket grants: the database is migrated the way the
+/// pilot's was (`migrate_like_the_pilot`), and the login holds nothing but
+/// membership in `trace_ingest_runtime` (`provision_member_only_login`). The
+/// pipeline tables are created after V62, so the runtime reaches them only
+/// through the grants their own migrations make, and a missing grant fails
+/// here with `permission denied`, as it would on the pilot.
 async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
-    let _guard = SETUP_LOCK.lock().await;
-    let owner = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
-        .await
-        .expect("connect as migration owner");
-    owner.run_migrations().await.expect("apply migrations");
-    let client = owner
-        .trace_pool_for_test()
-        .get()
-        .await
-        .expect("owner client");
-    client
-        .batch_execute(&format!(
-            "DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RUNTIME_ROLE}')
-            THEN CREATE ROLE {RUNTIME_ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
-            END IF;
-         END $$;
-         GRANT USAGE ON SCHEMA public TO {RUNTIME_ROLE};
-         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {RUNTIME_ROLE};
-         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {RUNTIME_ROLE};"
-        ))
-        .await
-        .expect("provision runtime role");
+    PROVISIONED
+        .get_or_init(|| async {
+            migrate_like_the_pilot(&url).await;
+            provision_member_only_login(&url, RUNTIME_ROLE).await;
+        })
+        .await;
     let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
     runtime_url
         .set_username(RUNTIME_ROLE)
@@ -1213,6 +1214,11 @@ async fn tamper_stored_bundle_package(tenant_id: &str, bundle_id: &str) {
     tx.commit().await.expect("commit the tampering transaction");
 }
 
+/// The two statements an append-only outcome must refuse.
+const OUTCOME_UPDATE: &str = "UPDATE phase_outcomes SET decision = decision
+     WHERE tenant_id = $1 AND outcome_id = $2";
+const OUTCOME_DELETE: &str = "DELETE FROM phase_outcomes WHERE tenant_id = $1 AND outcome_id = $2";
+
 #[tokio::test]
 async fn outcomes_are_immutable_and_tenant_scoped() {
     let Some(backend) = runtime_backend(4).await else {
@@ -1260,54 +1266,58 @@ async fn outcomes_are_immutable_and_tenant_scoped() {
     assert_eq!(outcomes.len(), 1);
     let outcome_id = outcomes[0].outcome_id;
 
-    // An UPDATE inside a tenant-scoped transaction, as `PgPipelineStore`
-    // itself would open one, is rejected by the immutability trigger.
+    // Two layers keep an outcome as it was committed. The runtime holds no
+    // UPDATE or DELETE on phase_outcomes, so inside a tenant-scoped
+    // transaction, as `PgPipelineStore` itself would open one, both are
+    // refused by privilege.
     let mut client = backend
         .trace_pool_for_test()
         .get()
         .await
-        .expect("client for update attempt");
-    let tx = client.transaction().await.expect("tx for update attempt");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant],
-    )
-    .await
-    .expect("set tenant for update attempt");
-    let update_err = tx
-        .execute(
-            "UPDATE phase_outcomes SET decision = decision
-             WHERE tenant_id = $1 AND outcome_id = $2",
-            &[&tenant, &outcome_id],
+        .expect("client for the runtime's attempts");
+    for statement in [OUTCOME_UPDATE, OUTCOME_DELETE] {
+        let tx = client
+            .transaction()
+            .await
+            .expect("tx for a runtime attempt");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant],
         )
         .await
-        .expect_err("update must be rejected");
-    assert!(
-        db_error_message(&update_err).contains("phase outcomes are immutable"),
-        "unexpected update error: {update_err:?}"
-    );
-    drop(tx);
-
-    // A DELETE, in a fresh transaction, is rejected the same way.
-    let tx = client.transaction().await.expect("tx for delete attempt");
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&tenant],
-    )
-    .await
-    .expect("set tenant for delete attempt");
-    let delete_err = tx
-        .execute(
-            "DELETE FROM phase_outcomes WHERE tenant_id = $1 AND outcome_id = $2",
-            &[&tenant, &outcome_id],
+        .expect("set tenant for a runtime attempt");
+        let error = tx
+            .execute(statement, &[&tenant, &outcome_id])
+            .await
+            .expect_err("the runtime may not change an outcome");
+        assert!(
+            db_error_message(&error).contains("permission denied for table phase_outcomes"),
+            "unexpected runtime error: {error:?}"
+        );
+        drop(tx);
+    }
+    // A role that holds both privileges, the owner, is refused by the
+    // immutability trigger.
+    let mut owner = owner_client().await;
+    for statement in [OUTCOME_UPDATE, OUTCOME_DELETE] {
+        let tx = owner.transaction().await.expect("tx for an owner attempt");
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant],
         )
         .await
-        .expect_err("delete must be rejected");
-    assert!(
-        db_error_message(&delete_err).contains("phase outcomes are immutable"),
-        "unexpected delete error: {delete_err:?}"
-    );
-    drop(tx);
+        .expect("set tenant for an owner attempt");
+        let error = tx
+            .execute(statement, &[&tenant, &outcome_id])
+            .await
+            .expect_err("an outcome is immutable to its owner too");
+        assert!(
+            db_error_message(&error).contains("phase outcomes are immutable"),
+            "unexpected owner error: {error:?}"
+        );
+        drop(tx);
+    }
+    drop(owner);
 
     let other_tenant = format!("outcome-other-{}", uuid::Uuid::new_v4());
     let other_outcomes = store
@@ -8703,7 +8713,7 @@ impl CompletionFault {
             .await
             .batch_execute(&format!(
                 "CREATE SEQUENCE {name};
-                 GRANT USAGE ON SEQUENCE {name} TO {RUNTIME_ROLE};
+                 GRANT USAGE ON SEQUENCE {name} TO trace_ingest_runtime;
                  CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
                  BEGIN
                      IF nextval('{name}') = 1 THEN
@@ -10490,8 +10500,32 @@ async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
     let tenant = format!("outcome-delete-refused-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
 
+    // The runtime holds no DELETE on phase_outcomes at all.
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
+    let error = tx
+        .execute(
+            "DELETE FROM phase_outcomes WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect_err("the runtime may not delete an outcome");
+    assert!(
+        db_error_message(&error).contains("permission denied for table phase_outcomes"),
+        "unexpected runtime error: {error:?}"
+    );
+    drop(tx);
+    drop(client);
+
+    // The owner holds it, and the trigger refuses a direct delete.
+    let mut owner = owner_client().await;
+    let tx = owner.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
     let error = tx
         .execute(
             "DELETE FROM phase_outcomes WHERE tenant_id = $1 AND run_id = $2",
@@ -10501,6 +10535,6 @@ async fn a_direct_outcome_delete_is_still_refused_while_its_run_exists() {
         .expect_err("an outcome delete is refused while its run still exists");
     assert!(
         db_error_message(&error).contains("phase outcomes are immutable"),
-        "unexpected error: {error:?}"
+        "unexpected owner error: {error:?}"
     );
 }

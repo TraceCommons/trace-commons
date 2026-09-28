@@ -132,3 +132,32 @@ CREATE TRIGGER phase_outcomes_reject_update
 CREATE TRIGGER phase_outcomes_reject_delete
     BEFORE DELETE ON phase_outcomes
     FOR EACH ROW EXECUTE FUNCTION reject_phase_outcome_mutation();
+
+-- The ingest runtime's grants on these tables: what the pipeline code reads
+-- and writes, and nothing broader. A least-privilege deployment connects
+-- ingest as a login that owns nothing and holds its privileges through
+-- trace_ingest_runtime (V90). pg_default_acl is empty, so a table is invisible
+-- to that group until the migration that creates it grants on it; V90 (#1098)
+-- repaired the same gap for the tables V62 to V78 left out. Each pipeline
+-- migration grants on what it creates, so each stands on its own.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
+        RAISE EXCEPTION 'V92: trace_ingest_runtime is missing; V90 creates it';
+    END IF;
+END $$;
+
+-- pipeline_runs: the receipt inserts the run; claims, phase commits, retries,
+-- failures and the lease sweep read and update it (`SELECT ... FOR UPDATE`
+-- too, which needs UPDATE on some column). UPDATE is per column: nothing
+-- updates the run's identity, created_at, or its admission decision. V93, V94
+-- and V95 grant UPDATE on the columns they add that the code updates.
+GRANT SELECT, INSERT ON pipeline_runs TO trace_ingest_runtime;
+GRANT UPDATE (next_phase, state, approved_revision_id, last_error_label,
+              index_membership, updated_at)
+    ON pipeline_runs TO trace_ingest_runtime;
+
+-- phase_outcomes: append-only. Each phase commit inserts its outcome, and
+-- inspection and the later phases read them. No UPDATE or DELETE: the
+-- triggers above refuse both, and a run's outcomes leave only with the run,
+-- through its foreign key's cascade, which runs as the table owner.
+GRANT SELECT, INSERT ON phase_outcomes TO trace_ingest_runtime;

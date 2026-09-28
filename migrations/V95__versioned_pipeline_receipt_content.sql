@@ -46,3 +46,20 @@ DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_admission_usage;
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_admission_usage
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
+
+-- The ingest runtime's grants on what this migration adds, on V92's terms:
+-- what the pipeline code reads and writes, and nothing broader.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
+        RAISE EXCEPTION 'V95: trace_ingest_runtime is missing; V90 creates it';
+    END IF;
+END $$;
+
+-- pipeline_runs: the Review commit records the approved content.
+GRANT UPDATE (approved_object_ref_id, approved_content_hash)
+    ON pipeline_runs TO trace_ingest_runtime;
+
+-- pipeline_admission_usage: the receipt counts a key once (INSERT ... ON
+-- CONFLICT DO NOTHING) and reads the counts for its quota. Usage rows are
+-- never updated or deleted by the runtime.
+GRANT SELECT, INSERT ON pipeline_admission_usage TO trace_ingest_runtime;

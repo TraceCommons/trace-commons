@@ -19,6 +19,11 @@
 
 use super::*;
 
+#[path = "../../../tests/support/pilot_runtime_grants.rs"]
+mod pilot_runtime_grants;
+#[path = "../../../tests/support/pilot_runtime_login.rs"]
+mod pilot_runtime_login;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -46,57 +51,84 @@ use trace_commons_server::versioned_pipeline_credit::{
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::witness_service;
 
-/// This suite's own runtime role, distinct from `trace_pipeline_runtime_test`
-/// (`tests/versioned_pipeline_runtime_pg.rs`, Task 8) so the two suites never
-/// contend over the same role's grants even if a future job runs them
-/// against databases on the same server.
+/// This suite's own runtime login, distinct from `trace_pipeline_runtime_test`
+/// (`tests/versioned_pipeline_runtime_pg.rs`). Like that one, its only
+/// privilege source is membership in `trace_ingest_runtime`, the ingest
+/// runtime group V90 names.
 const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
-static PIPELINE_HTTP_SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
 
-/// Connects as a `NOBYPASSRLS`, `NOSUPERUSER` runtime role, the way every
-/// PostgreSQL pipeline test must (global constraints, "The pipeline service
-/// connects as a `NOBYPASSRLS`, `NOSUPERUSER` runtime role"). Copied from the
-/// Task 8 harness (`tests/versioned_pipeline_runtime_pg.rs::runtime_backend`)
-/// rather than shared with it: that helper is private to its own
-/// integration-test binary. Not `postgres_backend_for_ingest_test` (this
-/// file's sibling in `tests.rs`): that helper also reads `DATABASE_URL` and
-/// skips on any setup failure, which the controller ruled out here -- this
-/// suite reads only `TRACE_COMMONS_PG_TEST_DATABASE_URL` and panics on any
-/// failure once it is set. Returns `None` only when the variable is unset.
-///
-/// Also grants EXECUTE on `trace_reserve_admission`/`trace_transition_admission`
-/// (the migration owner already holds both `WITH GRANT OPTION`, from the same
-/// migration that revokes them from `PUBLIC`): a real HTTP submission through
-/// a NEAR-admission-gated tenant calls these through `state.db_mirror`, which
-/// runs as this suite's runtime role, not the migration owner.
-async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
+/// The database this suite runs in, created once per process: a sibling of
+/// `TRACE_COMMONS_PG_TEST_DATABASE_URL`'s database named
+/// `<that database>_pilot`, migrated the way the pilot's was
+/// (`migrate_like_the_pilot`). Not the configured database itself: the other
+/// ingest tests share that one and migrate it straight through, and the
+/// pilot's V62 grants can only be given to a database that has stopped at V62.
+/// Returns `None` only when the variable is unset; every failure after that
+/// panics. Everything this suite does in PostgreSQL goes through this URL,
+/// the fixture rows its owner connections write included.
+async fn pipeline_http_database_url() -> Option<String> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
-    let _guard = PIPELINE_HTTP_SETUP_LOCK.lock().await;
-    let owner = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
-        .await
-        .expect("connect as migration owner");
-    owner.run_migrations().await.expect("apply migrations");
-    let client = owner
-        .trace_pool_for_test()
-        .get()
-        .await
-        .expect("owner client");
-    client
-        .batch_execute(&format!(
-            "DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{PIPELINE_HTTP_RUNTIME_ROLE}')
-            THEN CREATE ROLE {PIPELINE_HTTP_RUNTIME_ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
-            END IF;
-         END $$;
-         GRANT USAGE ON SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};
-         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};
-         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {PIPELINE_HTTP_RUNTIME_ROLE};
-         GRANT EXECUTE ON FUNCTION trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),
-                                   trace_transition_admission(TEXT,UUID,UUID,TEXT)
-               TO {PIPELINE_HTTP_RUNTIME_ROLE};"
-        ))
-        .await
-        .expect("provision runtime role");
+    Some(
+        PIPELINE_HTTP_DATABASE
+            .get_or_init(|| async {
+                let mut pilot_url = reqwest::Url::parse(&url).expect("parse test URL");
+                let database = format!("{}_pilot", pilot_url.path().trim_start_matches('/'));
+                assert!(
+                    database
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                    "the test database name must be lowercase letters, digits and underscores"
+                );
+                pilot_url.set_path(&format!("/{database}"));
+                let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                    .await
+                    .expect("connect to the configured test database");
+                let connection = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                // Separate statements: neither may run inside a transaction.
+                client
+                    .execute(
+                        &format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"),
+                        &[],
+                    )
+                    .await
+                    .expect("drop the pilot-shaped database an earlier run left");
+                client
+                    .execute(&format!("CREATE DATABASE {database}"), &[])
+                    .await
+                    .expect("create the pilot-shaped database");
+                drop(client);
+                let _ = connection.await;
+                let pilot_url = pilot_url.to_string();
+                pilot_runtime_login::migrate_like_the_pilot(&pilot_url).await;
+                pilot_runtime_login::provision_member_only_login(
+                    &pilot_url,
+                    PIPELINE_HTTP_RUNTIME_ROLE,
+                )
+                .await;
+                pilot_url
+            })
+            .await
+            .clone(),
+    )
+}
+
+/// Connects to `pipeline_http_database_url` as this suite's runtime login, a
+/// `NOBYPASSRLS`, `NOSUPERUSER` role, the way every PostgreSQL pipeline test
+/// must. Not `postgres_backend_for_ingest_test` (this file's sibling in
+/// `tests.rs`): that helper also reads `DATABASE_URL` and skips on any setup
+/// failure; this suite reads only `TRACE_COMMONS_PG_TEST_DATABASE_URL` and
+/// panics on any failure once it is set. Returns `None` only when the
+/// variable is unset.
+///
+/// The login's privileges are the pilot's: a real HTTP submission runs the
+/// legacy ingest path (`state.db_mirror`, the NEAR admission functions) and
+/// the pipeline as this login, so both are held to what
+/// `trace_ingest_runtime` is granted.
+async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
+    let url = pipeline_http_database_url().await?;
     let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
@@ -1125,7 +1157,8 @@ async fn real_http_pipeline_receipt_replays_on_retry() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+    let url = pipeline_http_database_url()
+        .await
         .expect("checked by runtime_backend, which already returned Some");
     let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
         .await
@@ -1304,7 +1337,8 @@ async fn real_http_pipeline_receipt_refuses_a_different_devices_retry() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+    let url = pipeline_http_database_url()
+        .await
         .expect("checked by runtime_backend, which already returned Some");
     let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
         .await
@@ -1587,7 +1621,8 @@ async fn real_http_pipeline_receipt_falls_back_to_legacy_record_without_a_run() 
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+    let url = pipeline_http_database_url()
+        .await
         .expect("checked by runtime_backend, which already returned Some");
     let admin = PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
         .await

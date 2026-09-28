@@ -224,3 +224,46 @@ DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON pipeline_receipt_artifact
 CREATE POLICY trace_corpus_tenant_isolation ON pipeline_receipt_artifacts
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
+
+-- The ingest runtime's grants on what this migration adds, on V92's terms:
+-- what the pipeline code reads and writes, and nothing broader.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
+        RAISE EXCEPTION 'V93: trace_ingest_runtime is missing; V90 creates it';
+    END IF;
+END $$;
+
+-- pipeline_runs: a claim sets the lease and charges an attempt, a release or
+-- an uncharged retry gives the attempt back, and every phase commit and retry
+-- moves next_attempt_at; phase commits also reset phase_started_at. Nothing
+-- updates max_attempts.
+GRANT UPDATE (lease_token, lease_expires_at, attempt_count, next_attempt_at,
+              phase_started_at)
+    ON pipeline_runs TO trace_ingest_runtime;
+
+-- pipeline_bundle_packages: append-only. Registering a bundle inserts the
+-- package, and every receipt and phase reads it back. No UPDATE or DELETE:
+-- the triggers above refuse both.
+GRANT SELECT, INSERT ON pipeline_bundle_packages TO trace_ingest_runtime;
+
+-- pipeline_active_bundles: registering the default bundle inserts the
+-- tenant's selection if it has none; switching the active bundle
+-- (`activate_bundle`, an INSERT ... ON CONFLICT DO UPDATE) rewrites
+-- bundle_id and selected_at. The receipt reads it. Nothing deletes it.
+GRANT SELECT, INSERT ON pipeline_active_bundles TO trace_ingest_runtime;
+GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;
+
+-- pipeline_bundle_policy_status: registering a bundle inserts one row per
+-- phase, and the receipt and the worker read whether a phase is runnable.
+-- Nothing updates or deletes it.
+GRANT SELECT, INSERT ON pipeline_bundle_policy_status TO trace_ingest_runtime;
+
+-- pipeline_receipt_artifacts: the receipt's staging transaction inserts an
+-- attempt's row, its final transaction locks it `FOR UPDATE` and moves it to
+-- committed (state, committed_at), and a refused attempt whose object could
+-- not be deleted is made due now (cleanup_after, through INSERT ... ON
+-- CONFLICT DO UPDATE). A refused attempt's row and the sweeper's due rows
+-- are deleted.
+GRANT SELECT, INSERT, DELETE ON pipeline_receipt_artifacts TO trace_ingest_runtime;
+GRANT UPDATE (state, committed_at, cleanup_after)
+    ON pipeline_receipt_artifacts TO trace_ingest_runtime;

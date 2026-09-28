@@ -1,0 +1,194 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! A database migrated the way the pilot's was, and a runtime login that
+//! connects to it the way the pilot's ingest does: through the ingest runtime
+//! group, `trace_ingest_runtime`, and nothing else. Included with `#[path]`
+//! beside `pilot_runtime_grants.rs`, which the includer declares as a sibling
+//! module.
+
+use tokio_postgres::NoTls;
+use trace_commons_server::config::DatabaseConfig;
+use trace_commons_server::db::Database;
+use trace_commons_server::db::postgres::{
+    PgBackend, apply_and_record_migration, registered_migrations,
+};
+
+use super::pilot_runtime_grants::{PILOT_V62_RUNTIME_GRANTS, PILOT_V74_RUNTIME_GRANT};
+
+/// The last migration the pilot had applied when its runtime group got its
+/// hand-made grants.
+pub const PILOT_GRANTS_VERSION: i32 = 62;
+
+/// Migrates the database at `url` the way the pilot's was migrated: every
+/// migration through V62, then the pilot's hand-made grants to
+/// `trace_ingest_runtime`, then the rest through the real runner, then the one
+/// grant the pilot took by hand at V74. Every table created after V62 is then
+/// visible to the group only through the grants its own migration makes.
+///
+/// Needs a fresh database. A database already past V62 is accepted only when
+/// it carries the pilot's grants, which only this function gives: past that
+/// point there is no way to grant them where the pilot did.
+pub async fn migrate_like_the_pilot(url: &str) {
+    let (mut client, connection) = tokio_postgres::connect(url, NoTls)
+        .await
+        .expect("connect as the migration owner");
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    // The group exists before any migration, made by hand, as on the pilot.
+    client
+        .batch_execute(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
+                     CREATE ROLE trace_ingest_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+                 END IF;
+             END $$;
+             CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                 version INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+             );",
+        )
+        .await
+        .expect("create the runtime group and the migration history table");
+    let recorded: std::collections::BTreeSet<i32> = client
+        .query("SELECT version FROM _trace_commons_migrations", &[])
+        .await
+        .expect("read the migration history")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    if recorded
+        .iter()
+        .any(|version| *version > PILOT_GRANTS_VERSION)
+    {
+        let staged: bool = client
+            .query_one(
+                "SELECT has_table_privilege(
+                     'trace_ingest_runtime', 'public.trace_submissions', 'INSERT')",
+                &[],
+            )
+            .await
+            .expect("check for the pilot's grants")
+            .get(0);
+        assert!(
+            staged,
+            "this suite needs a fresh database: this one is past V{PILOT_GRANTS_VERSION} \
+             without the pilot's runtime grants"
+        );
+    } else {
+        for (version, name, sql) in registered_migrations()
+            .iter()
+            .filter(|(version, ..)| *version <= PILOT_GRANTS_VERSION && !recorded.contains(version))
+        {
+            apply_and_record_migration(&mut client, *version, name, sql)
+                .await
+                .unwrap_or_else(|error| panic!("apply V{version}: {error:?}"));
+        }
+        client
+            .batch_execute(PILOT_V62_RUNTIME_GRANTS)
+            .await
+            .expect("the pilot's V62 runtime grants");
+    }
+    drop(client);
+    let _ = connection.await;
+
+    let owner = PgBackend::new(&DatabaseConfig::from_postgres_url(url, 2))
+        .await
+        .expect("connect as the migration owner");
+    owner.run_migrations().await.expect("apply migrations");
+    owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("owner client")
+        .batch_execute(PILOT_V74_RUNTIME_GRANT)
+        .await
+        .expect("the pilot's V74 runtime grant");
+}
+
+/// Makes `login` a `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS` role whose only
+/// privilege source is membership in `trace_ingest_runtime`, and checks that
+/// it is: no other membership, a group that cannot bypass RLS, and no
+/// privilege of its own on any schema, table, column, sequence, or function
+/// in the database at `url`.
+pub async fn provision_member_only_login(url: &str, login: &str) {
+    let (client, connection) = tokio_postgres::connect(url, NoTls)
+        .await
+        .expect("connect as the migration owner");
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let sixteen_or_later: bool = client
+        .query_one(
+            "SELECT current_setting('server_version_num')::int >= 160000",
+            &[],
+        )
+        .await
+        .expect("server version")
+        .get(0);
+    // Since PostgreSQL 16 a membership carries its own inherit option, taken
+    // from the member's INHERIT attribute when it is granted. Say it outright,
+    // so a membership granted while the login was NOINHERIT is repaired too.
+    let membership = if sixteen_or_later {
+        format!("GRANT trace_ingest_runtime TO {login} WITH INHERIT TRUE;")
+    } else {
+        format!("GRANT trace_ingest_runtime TO {login};")
+    };
+    client
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{login}') THEN
+                     CREATE ROLE {login} LOGIN;
+                 END IF;
+             END $$;
+             ALTER ROLE {login} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+             {membership}"
+        ))
+        .await
+        .expect("provision the runtime login");
+    let row = client
+        .query_one(
+            "SELECT
+                 (SELECT array_agg(g.rolname::TEXT ORDER BY g.rolname)
+                    FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+                   WHERE m.member = to_regrole($1)),
+                 (SELECT rolsuper OR rolbypassrls FROM pg_roles
+                   WHERE rolname = 'trace_ingest_runtime'),
+                 (SELECT COUNT(*) FROM (
+                      SELECT 1 FROM pg_class c, aclexplode(c.relacl) a
+                       WHERE a.grantee = to_regrole($1)
+                      UNION ALL
+                      SELECT 1 FROM pg_attribute att, aclexplode(att.attacl) a
+                       WHERE a.grantee = to_regrole($1)
+                      UNION ALL
+                      SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a
+                       WHERE a.grantee = to_regrole($1)
+                      UNION ALL
+                      SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a
+                       WHERE a.grantee = to_regrole($1)
+                  ) own)",
+            &[&login],
+        )
+        .await
+        .expect("read the runtime login's privileges");
+    let memberships: Vec<String> = row.get::<_, Option<Vec<String>>>(0).unwrap_or_default();
+    let group_privileged: bool = row.get(1);
+    let own_privileges: i64 = row.get(2);
+    assert_eq!(
+        memberships,
+        vec!["trace_ingest_runtime".to_string()],
+        "the runtime login must be a member of trace_ingest_runtime and of nothing else"
+    );
+    assert!(
+        !group_privileged,
+        "trace_ingest_runtime must be neither SUPERUSER nor BYPASSRLS"
+    );
+    assert_eq!(
+        own_privileges, 0,
+        "the runtime login must hold no privilege of its own; use a fresh database"
+    );
+    drop(client);
+    let _ = connection.await;
+}

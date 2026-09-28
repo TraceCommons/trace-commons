@@ -95,6 +95,122 @@ const PIPELINE_TABLES: [&str; 8] = [
     "pipeline_admission_usage",
 ];
 
+/// Every privilege any role but the owner holds on the pipeline tables once
+/// V92 to V95 have run, as `(table, privilege, columns)`; no columns means
+/// the whole table. The ingest runtime group, `trace_ingest_runtime`, is the
+/// only grantee, and it holds what the pipeline code reads and writes and
+/// nothing broader. A privilege the code comes to need goes into its
+/// migration and into this list in the same change.
+const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
+    ("pipeline_runs", "SELECT", &[]),
+    ("pipeline_runs", "INSERT", &[]),
+    (
+        "pipeline_runs",
+        "UPDATE",
+        &[
+            // V92
+            "next_phase",
+            "state",
+            "approved_revision_id",
+            "last_error_label",
+            "index_membership",
+            "updated_at",
+            // V93
+            "lease_token",
+            "lease_expires_at",
+            "attempt_count",
+            "next_attempt_at",
+            "phase_started_at",
+            // V94
+            "index_command_ref",
+            "index_command_hash",
+            "index_write_state",
+            "score_neighbor_ref",
+            "score_neighbor_hash",
+            "settle_selection",
+            "settle_selection_hash",
+            // V95
+            "approved_object_ref_id",
+            "approved_content_hash",
+        ],
+    ),
+    ("phase_outcomes", "SELECT", &[]),
+    ("phase_outcomes", "INSERT", &[]),
+    ("pipeline_bundle_packages", "SELECT", &[]),
+    ("pipeline_bundle_packages", "INSERT", &[]),
+    ("pipeline_active_bundles", "SELECT", &[]),
+    ("pipeline_active_bundles", "INSERT", &[]),
+    (
+        "pipeline_active_bundles",
+        "UPDATE",
+        &["bundle_id", "selected_at"],
+    ),
+    ("pipeline_bundle_policy_status", "SELECT", &[]),
+    ("pipeline_bundle_policy_status", "INSERT", &[]),
+    ("pipeline_receipt_artifacts", "SELECT", &[]),
+    ("pipeline_receipt_artifacts", "INSERT", &[]),
+    ("pipeline_receipt_artifacts", "DELETE", &[]),
+    (
+        "pipeline_receipt_artifacts",
+        "UPDATE",
+        &["state", "committed_at", "cleanup_after"],
+    ),
+    ("pipeline_run_settlements", "SELECT", &[]),
+    ("pipeline_run_settlements", "INSERT", &[]),
+    (
+        "pipeline_run_settlements",
+        "UPDATE",
+        &[
+            "operation_state",
+            "result_ref_hash",
+            "external_receipt_hash",
+            "credit_event_id",
+            "settlement_batch_id",
+            "payout_state",
+            "lease_token",
+            "lease_expires_at",
+            "dispatched_at",
+            "attempt_count",
+            "last_error_label",
+            "updated_at",
+        ],
+    ),
+    ("pipeline_admission_usage", "SELECT", &[]),
+    ("pipeline_admission_usage", "INSERT", &[]),
+];
+
+/// The privileges non-owner roles hold on the pipeline tables, table-wide and
+/// per column, as sorted `(grantee, table, column, privilege)` rows; the
+/// column is empty for a table-wide privilege.
+async fn pipeline_table_grants(client: &Client) -> Vec<(String, String, String, String)> {
+    let tables: Vec<&str> = PIPELINE_TABLES.to_vec();
+    let rows = client
+        .query(
+            "SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::TEXT END,
+                    c.relname::TEXT, '', a.privilege_type
+               FROM pg_class c, aclexplode(c.relacl) a
+              WHERE c.relnamespace = 'public'::regnamespace
+                AND c.relname = ANY($1) AND a.grantee <> c.relowner
+             UNION ALL
+             SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::TEXT END,
+                    c.relname::TEXT, att.attname::TEXT, a.privilege_type
+               FROM pg_class c
+               JOIN pg_attribute att ON att.attrelid = c.oid
+               , aclexplode(att.attacl) a
+              WHERE c.relnamespace = 'public'::regnamespace
+                AND c.relname = ANY($1) AND a.grantee <> c.relowner",
+            &[&tables],
+        )
+        .await
+        .expect("read the pipeline tables' privileges");
+    let mut grants: Vec<(String, String, String, String)> = rows
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .collect();
+    grants.sort();
+    grants
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
@@ -152,6 +268,34 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .unwrap()
         .get(0);
     assert!(!claim_function, "no cross-tenant claim function may exist");
+
+    // Least privilege for the ingest runtime, pinned: exactly these grants on
+    // the pipeline tables, to trace_ingest_runtime only.
+    let mut expected: Vec<(String, String, String, String)> = RUNTIME_PIPELINE_GRANTS
+        .iter()
+        .flat_map(|(table, privilege, columns)| {
+            let columns: Vec<&str> = if columns.is_empty() {
+                vec![""]
+            } else {
+                columns.to_vec()
+            };
+            columns.into_iter().map(move |column| {
+                (
+                    "trace_ingest_runtime".to_string(),
+                    table.to_string(),
+                    column.to_string(),
+                    privilege.to_string(),
+                )
+            })
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(
+        pipeline_table_grants(&admin).await,
+        expected,
+        "the pipeline tables must grant trace_ingest_runtime what the pipeline code uses, \
+         and nothing to anyone else"
+    );
 
     // Isolation as a role that cannot bypass RLS.
     admin

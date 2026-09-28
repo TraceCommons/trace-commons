@@ -558,6 +558,38 @@ GRANT trace_ingest_runtime TO <ingest runtime login>;
 
 A deployment that migrates and serves as one role needs nothing.
 
+### V92 to V95: the pipeline tables
+
+V92 to V95 create the versioned pipeline's tables. Each of them grants
+`trace_ingest_runtime`, the group V90 names, what the pipeline code reads and
+writes on the tables it creates, and nothing broader. Each refuses to apply if
+the group does not exist; V90 creates it. The grants are these:
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, or its admission decision |
+| `phase_outcomes` | `SELECT, INSERT` | each phase commit appends its outcome, and later phases read it |
+| `pipeline_bundle_packages` | `SELECT, INSERT` | registering a bundle appends its package, and every phase reads it |
+| `pipeline_active_bundles` | `SELECT, INSERT, UPDATE (bundle_id, selected_at)` | startup selects the default bundle for a tenant that has none; switching a tenant's bundle rewrites the selection; the receipt reads it |
+| `pipeline_bundle_policy_status` | `SELECT, INSERT` | registering a bundle adds one row per phase; the receipt and the worker read whether a phase is runnable |
+| `pipeline_receipt_artifacts` | `SELECT, INSERT, DELETE, UPDATE (state, committed_at, cleanup_after)` | receipt staging, its final commit, a refused attempt's clean-up, and the orphan sweep |
+| `pipeline_run_settlements` | `SELECT, INSERT`; `UPDATE` on `operation_state`, `result_ref_hash`, `external_receipt_hash`, `credit_event_id`, `settlement_batch_id`, `payout_state`, `lease_token`, `lease_expires_at`, `dispatched_at`, `attempt_count`, `last_error_label`, `updated_at` | Score adds one leg per award; Settle, reconciliation, and a failed run advance each leg. Nothing updates a leg's identity, its payout rail, or `created_at` |
+| `pipeline_admission_usage` | `SELECT, INSERT` | the receipt counts each key once and reads the counts for its quota |
+
+No grant allows `DELETE` on runs, outcomes, or legs. They go only with their
+submission or tenant, through foreign-key cascades, which run as the table
+owner. Outcomes and bundle packages also refuse `UPDATE` and a direct `DELETE`
+by trigger.
+
+The pipeline also uses tables older than V62: it inserts submissions, object
+refs and derived records, sets a submission's review status, reads
+withdrawals, tombstones and credit holds, and writes the Trace Credit ledger
+and settlement batches. The pilot's group holds table-wide privileges on all
+of these since V62, so V92 to V95 grant nothing on them.
+
+Where the ingest login already holds `trace_ingest_runtime` (the pilot, or a
+deployment that followed V90), nothing is left to do by hand.
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and
