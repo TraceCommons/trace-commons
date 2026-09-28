@@ -1568,6 +1568,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V81__legacy_invite_link.sql"
     ));
     sql.push_str(include_str!(
+        "../../../migrations/V86__account_trust_evaluations.sql"
+    ));
+    sql.push_str(include_str!(
         "../../../migrations/V91__legacy_invite_link_devices.sql"
     ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
@@ -1672,6 +1675,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!(
         "../../../migrations/V81__legacy_invite_link.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V86__account_trust_evaluations.sql"
     ));
     sql.push_str(include_str!(
         "../../../migrations/V91__legacy_invite_link_devices.sql"
