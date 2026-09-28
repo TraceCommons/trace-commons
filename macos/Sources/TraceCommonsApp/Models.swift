@@ -268,6 +268,13 @@ struct DaemonStatus: Decodable, Equatable {
     /// Approved sessions held because the privacy witness is busy. A daemon
     /// that predates the field holds nothing on it.
     let witnessCapacity: WitnessCapacity
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5). A daemon that predates the
+    /// field has reworded nothing it can report.
+    let armingRewordings: [ArmingRewordingWire]
+    /// What the automatic-contribution gate held at the last full pass. A
+    /// daemon that predates the field holds nothing.
+    let gateHeld: GateHeld
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -282,6 +289,8 @@ struct DaemonStatus: Decodable, Equatable {
         case routing
         case grantVoids = "grant_voids"
         case witnessCapacity = "witness_capacity"
+        case armingRewordings = "arming_rewordings"
+        case gateHeld = "automatic_contribution_held"
     }
 
     init(
@@ -296,7 +305,9 @@ struct DaemonStatus: Decodable, Equatable {
         dailyBudget: DailyBudget = .unknown,
         routing: RoutingStatus = .notDeclared,
         grantVoids: [GrantVoidWire] = [],
-        witnessCapacity: WitnessCapacity = .none
+        witnessCapacity: WitnessCapacity = .none,
+        armingRewordings: [ArmingRewordingWire] = [],
+        gateHeld: GateHeld = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -310,6 +321,8 @@ struct DaemonStatus: Decodable, Equatable {
         self.routing = routing
         self.grantVoids = grantVoids
         self.witnessCapacity = witnessCapacity
+        self.armingRewordings = armingRewordings
+        self.gateHeld = gateHeld
     }
 
     init(from decoder: Decoder) throws {
@@ -330,6 +343,9 @@ struct DaemonStatus: Decodable, Equatable {
         grantVoids = try c.decodeIfPresent([GrantVoidWire].self, forKey: .grantVoids) ?? []
         witnessCapacity =
             try c.decodeIfPresent(WitnessCapacity.self, forKey: .witnessCapacity) ?? .none
+        armingRewordings =
+            try c.decodeIfPresent([ArmingRewordingWire].self, forKey: .armingRewordings) ?? []
+        gateHeld = try c.decodeIfPresent(GateHeld.self, forKey: .gateHeld) ?? .none
     }
 
     static let unknown = DaemonStatus(

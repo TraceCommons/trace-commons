@@ -52,6 +52,32 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertFalse(status.witnessCapacity.waiting)
     }
 
+    // MARK: - Switch-on notices
+
+    /// `arming_rewordings` (K5) and `automatic_contribution_held` decode off
+    /// status, beside `health`.
+    func testStatusDecodesRewordingsAndWhatTheGateHolds() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":"queue-full","since":null},
+         "arming_rewordings":[{"id":7,"project_id":"p","project_label":"api",
+                               "was":"model_scrubbed","now":"patterns_only"}],
+         "automatic_contribution_held":{"held_sessions":2,"reasons":["r"],
+                                        "projects":[{"project_id":"p","project_label":"api","held_sessions":2}]}}
+        """)
+        XCTAssertEqual(status.armingRewordings.map(\.id), [7])
+        XCTAssertEqual(status.gateHeld.heldSessions, 2)
+    }
+
+    func testStatusFromAnOlderDaemonHasNoRewordingsAndHoldsNothing() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertEqual(status.armingRewordings, [])
+        XCTAssertFalse(status.gateHeld.held)
+    }
+
     func testStatusFromAnOlderDaemonHasNoGrantVoids() throws {
         let status = try decode(DaemonStatus.self, """
         {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
