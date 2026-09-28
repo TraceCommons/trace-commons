@@ -52,6 +52,8 @@ export type WitnessReviewCopy = {
   failed_too_large: string;
   failed_not_connected: string;
   failed_receipt_declined: string;
+  failed_busy: string;
+  busy_retry_at: string;
   immutable: string;
 };
 
@@ -252,6 +254,8 @@ function parseWitnessReview(value: unknown): WitnessReviewCopy {
     failed_too_large: string(item, "failed_too_large"),
     failed_not_connected: string(item, "failed_not_connected"),
     failed_receipt_declined: string(item, "failed_receipt_declined"),
+    failed_busy: string(item, "failed_busy"),
+    busy_retry_at: string(item, "busy_retry_at"),
     immutable: string(item, "immutable"),
   };
 }

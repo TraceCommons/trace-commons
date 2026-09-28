@@ -394,6 +394,10 @@ pub struct WitnessReviewCopy {
     /// Apart from [`Self::failed_unreachable`] because it is not a fault:
     /// the reviewer answered, on purpose, that it is busy.
     pub failed_busy: &'static str,
+    /// The label beside the time a busy witness asked to be tried again
+    /// after, rendered by the shell in local time. Shown with
+    /// [`Self::failed_busy`] when the daemon gave a time; omitted with it.
+    pub busy_retry_at: &'static str,
     pub immutable: &'static str,
 }
 
@@ -703,6 +707,7 @@ pub fn witness_copy() -> WitnessCopy {
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this session's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
             failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other sessions. Nothing was sent and nothing has been approved. Try again in a minute or two.",
+            busy_retry_at: "Try again after",
             immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
         wallet: WalletCopy {
@@ -1069,7 +1074,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            17,
+            18,
             "a field added to WitnessReviewCopy must be counted here"
         );
 
