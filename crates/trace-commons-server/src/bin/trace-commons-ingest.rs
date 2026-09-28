@@ -937,6 +937,17 @@ const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
 /// 210 others were never touched, because the driver takes them oldest-first
 /// and nothing bounded the first one.
 const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
+/// The unbound-account reaper (Z2 S5). Off unless `_ENABLED`; when on it needs
+/// its own least-privilege login, never the runtime URL.
+const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
+const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
+const TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS: &str = "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS";
+const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
+const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
+const TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS: u64 = 3600;
+/// Batches one tick may run back to back while each one comes back full.
+const TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK: usize = 10;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1434,6 +1445,7 @@ pub async fn run_ingest(
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
+    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1763,6 +1775,10 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
+    /// Unbound passkey-account reaper. `None` (the default) means it is off;
+    /// `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` turns it on. Its own pool, built
+    /// at boot from its own login, so the runtime pool never runs the sweep.
+    unbound_account_reaper: Option<UnboundAccountReaperConfig>,
     /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
     /// posture every deployment ships in -- means an arriving certificate is
     /// ignored entirely and every content-bearing trace holds exactly as it
@@ -2088,6 +2104,18 @@ struct PiiBackstopDriverConfig {
     max_attempts: i32,
     backoff_base_seconds: i64,
     per_submission_timeout: StdDuration,
+}
+
+/// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
+/// driver it has no bearer-token worker route; unlike it, the cross-tenant
+/// pool is the reaper's own, held here rather than in `PgBackend`, and the
+/// only thing it can run is the V99 definer function.
+#[derive(Clone)]
+struct UnboundAccountReaperConfig {
+    interval: StdDuration,
+    ttl_days: i64,
+    batch_size: i32,
+    reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
 }
 
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
@@ -4023,6 +4051,7 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
+        let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
         // Fail closed on configuration. An enabled bypass missing its signing
         // address, its measurement set, or its policy allowlist refuses to
         // boot naming the control, rather than running with a control an
@@ -4392,6 +4421,7 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
+            unbound_account_reaper,
             witness_bypass,
             witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
@@ -6927,6 +6957,55 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
         max_attempts: max_attempts as i32,
         backoff_base_seconds,
         per_submission_timeout: StdDuration::from_secs(per_submission_timeout_seconds as u64),
+    }))
+}
+
+/// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
+/// existing deployments and CI are unaffected until an operator opts in.
+///
+/// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
+/// missing-control label rather than silently leaving the reaper off. The
+/// error text never includes the URL. The TTL defaults to 30 days and cannot
+/// be set under one day; the V99 function refuses that too.
+fn parse_unbound_account_reaper_config_from_env()
+-> anyhow::Result<Option<UnboundAccountReaperConfig>> {
+    use trace_commons_server::account_reaper::{
+        DEFAULT_BATCH, DEFAULT_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS, MIN_TTL_DAYS,
+        UnboundAccountReaper,
+    };
+    if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
+        return Ok(None);
+    }
+    let Some(url) = optional_trimmed_env(TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL)? else {
+        anyhow::bail!(
+            "{TRACE_COMMONS_UNBOUND_REAPER_ENABLED}=true but {TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is not set"
+        );
+    };
+    let ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS,
+        DEFAULT_TTL_DAYS,
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
+        TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
+        60,
+        86_400,
+    )?;
+    let batch_size = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE,
+        i64::from(DEFAULT_BATCH),
+        1,
+        i64::from(MAX_BATCH),
+    )?;
+    let reaper = UnboundAccountReaper::connect(&url)
+        .map_err(|_| anyhow::anyhow!("{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is invalid"))?;
+    Ok(Some(UnboundAccountReaperConfig {
+        interval: StdDuration::from_secs(interval_seconds),
+        ttl_days,
+        batch_size: batch_size as i32,
+        reaper,
     }))
 }
 
@@ -10101,6 +10180,7 @@ const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
 const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
+const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
 
 /// Every driver the liveness registry knows about. The distinctness test
 /// reads this; keep it in sync when adding a driver.
@@ -10117,6 +10197,7 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
+    UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
 ];
 
 /// Run `tick` forever on `interval`, recording liveness and emitting the
@@ -10280,6 +10361,58 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     "Trace Commons PII backstop driver tick completed"
                 );
                 pii_backstop_tick_outcome(&summary)
+            }
+        },
+    );
+}
+
+/// Spawn the in-process unbound-account reaper (Z2 S5). Copies
+/// `spawn_pii_backstop_driver_task`: `spawn_driver_loop`, a cross-tenant pool
+/// that is not the runtime pool, no bearer-token worker route, hash-free
+/// count-only logging. A tick runs bounded batches back to back while each
+/// comes back full of deletions, up to `TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK`.
+fn spawn_unbound_account_reaper_task(
+    state: &Arc<AppState>,
+    config: Option<UnboundAccountReaperConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        ttl_days = config.ttl_days,
+        batch_size = config.batch_size,
+        "Trace Commons unbound account reaper enabled"
+    );
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
+        config.interval,
+        move |_state| {
+            let config = tick_config.clone();
+            async move {
+                let mut reaped = 0u64;
+                let mut skipped = 0u64;
+                for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
+                    let summary = config
+                        .reaper
+                        .reap(config.ttl_days, config.batch_size)
+                        .await
+                        .context("unbound account reaper batch failed")?;
+                    reaped += summary.reaped;
+                    skipped += summary.skipped;
+                    if summary.reaped < u64::try_from(config.batch_size).unwrap_or(0) {
+                        break;
+                    }
+                }
+                tracing::info!(
+                    reaped,
+                    skipped,
+                    ttl_days = config.ttl_days,
+                    "Trace Commons unbound account reaper tick completed"
+                );
+                Ok(())
             }
         },
     );
