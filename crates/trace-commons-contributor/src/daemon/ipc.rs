@@ -145,6 +145,7 @@ use super::audit::{self, AuditEntry};
 use super::enroll;
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
+use super::notify;
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
     UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
@@ -1512,7 +1513,7 @@ impl DaemonShared {
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
-            "next_digest_at": self.next_digest_at(),
+            "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
                 "since": health.since,
@@ -1738,12 +1739,22 @@ impl DaemonShared {
         })
     }
 
-    fn next_digest_at(&self) -> Option<chrono::DateTime<Utc>> {
+    /// The next time a digest is expected, or `None` when nothing has fired
+    /// yet under `Interval` -- there is no fixed clock to project forward
+    /// from in that case, only "some time after the interval next elapses".
+    /// `Evening` always answers `Some`: the next local `hour` is knowable
+    /// whether or not a digest has ever fired.
+    fn next_digest_at(&self, now: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
         let state = self.state.lock().expect("state lock");
         let settings = self.settings.lock().expect("settings lock");
-        state
-            .last_digest_at
-            .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64))
+        match settings.digest_schedule {
+            super::settings::DigestSchedule::Interval => state
+                .last_digest_at
+                .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64)),
+            super::settings::DigestSchedule::Evening { hour } => {
+                Some(notify::next_evening_at(now, hour, &chrono::Local))
+            }
+        }
     }
 
     fn snapshot_value(&self) -> serde_json::Value {
