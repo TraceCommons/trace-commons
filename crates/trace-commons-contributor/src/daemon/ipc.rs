@@ -296,6 +296,7 @@ pub const METHODS: &[&str] = &[
     "grant_automatic",
     "withdraw_automatic_grant",
     "certificate_detail",
+    "route_disclosure",
     "cancel",
     "clear_public_profile",
     "consent_options",
@@ -1937,6 +1938,35 @@ macro_rules! try_response {
 /// Return only the signed certificate claims that are safe and useful for a
 /// review surface. Raw envelope bytes, signature bytes and certificate JSON
 /// never cross this boundary.
+/// K11: what leaves this machine, to whom, and what this client checked, as
+/// facts for the disclosure screens. Read-only; no network call.
+///
+/// Answered by the daemon because the daemon is the process that sends: the
+/// environment's privacy filter is this process's environment, and the
+/// attested-bodies switch is this daemon's setting. A shell turns the answer
+/// into sentences with `consent_copy::route_disclosure_copy`.
+fn handle_route_disclosure(shared: &DaemonShared, req: &Request) -> Response {
+    let attested_bodies = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .ironwire_attested_bodies;
+    let loaded = shared.store.load_config();
+    let config = match &loaded {
+        Ok(cfg) => Ok(cfg.as_ref()),
+        Err(_) => Err(()),
+    };
+    let facts = crate::disclosure::route_disclosure(
+        config,
+        attested_bodies,
+        crate::disclosure::env_filter(),
+    );
+    match serde_json::to_value(facts) {
+        Ok(value) => Response::ok(req.id, value),
+        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "route-disclosure-unavailable"),
+    }
+}
+
 fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
     let id = try_response!(entry_id_param(req));
     let entry = try_response!(entry_by_id(shared, req, id));
@@ -2109,6 +2139,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         ),
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
+        "route_disclosure" => handle_route_disclosure(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         // The one project worth offering to arm right now, or nothing.
@@ -4053,9 +4084,64 @@ fn witness_review_response(mut response: Response) -> Response {
     let Some(error) = response.error.as_ref() else {
         return response;
     };
+    // A busy witness already carries its own view, written by the handler,
+    // which alone knows when to try again.
+    if response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("view"))
+        .is_some()
+    {
+        return response;
+    }
     let message = crate::witness_copy::witness_refusal_line(Some(error.message.as_str()));
     let value = response.result.get_or_insert_with(|| serde_json::json!({}));
     value["view"] = serde_json::json!({"state": "Refused", "message": message});
+    response
+}
+
+/// How long a busy witness asked a person to wait before reviewing again,
+/// or `None` when this failure is not a busy witness.
+///
+/// The token-bundle route carries the transport's typed error with the
+/// witness's own (bounded) delay; the ordinary route reaches here as the
+/// typed error too (`build_witnessed_preview` restores it). A bare
+/// `witness_saturated` label with no delay is the contract's default, never
+/// "try now".
+fn witness_review_busy_secs(error: &anyhow::Error) -> Option<u32> {
+    use trace_commons_protocol::witness_pacing::{
+        WITNESS_SATURATED_ERROR, WITNESS_SATURATED_RETRY_AFTER_SECS,
+    };
+    match error.downcast_ref::<crate::witness::WitnessTrustError>() {
+        Some(crate::witness::WitnessTrustError::WitnessSaturated { retry_after_secs }) => {
+            Some(*retry_after_secs)
+        }
+        Some(_) => None,
+        None => (error.to_string() == WITNESS_SATURATED_ERROR)
+            .then_some(WITNESS_SATURATED_RETRY_AFTER_SECS),
+    }
+}
+
+/// The distinct outcome for a review a person asked for that met a busy
+/// witness: nothing was judged and nothing pinned, so it is not a refusal.
+/// The words are the review copy's; the time is when the witness asked to be
+/// tried again, which the shell renders in local time.
+fn witness_review_busy(id: u64, retry_after_secs: u32) -> Response {
+    let review = crate::witness_copy::witness_copy().review;
+    let retry_at = Utc::now() + chrono::Duration::seconds(i64::from(retry_after_secs));
+    let mut response = Response::err(
+        id,
+        ERR_UNAVAILABLE,
+        trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
+    );
+    response.result = Some(serde_json::json!({
+        "view": {
+            "state": "Busy",
+            "message": review.failed_busy,
+            "retry_at": retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "retry_label": review.busy_retry_at,
+        }
+    }));
     response
 }
 
@@ -4072,6 +4158,9 @@ fn witness_review_response(mut response: Response) -> Response {
 /// the closed set and returns that crate's own constant, so the only strings
 /// that can cross are ones a shell has words for.
 fn witness_review_refusal(error: &anyhow::Error) -> &'static str {
+    if let Some(witness) = error.downcast_ref::<crate::witness::WitnessTrustError>() {
+        return witness.refusal_label();
+    }
     crate::witness::WitnessTrustError::refusal_label_from(&error.to_string())
         .unwrap_or("witness-review-failed")
 }
@@ -4197,6 +4286,9 @@ async fn handle_witness_preview_request_inner(
     let review = match built {
         Ok(review) => review,
         Err(error) => {
+            if let Some(secs) = witness_review_busy_secs(&error) {
+                return witness_review_busy(req.id, secs);
+            }
             return Response::err(req.id, ERR_UNAVAILABLE, witness_review_refusal(&error));
         }
     };
@@ -6003,6 +6095,66 @@ mod tests {
         );
     }
 
+    /// A review a person asked for, met by a busy witness, is a busy witness:
+    /// its own state, the busy sentence, and the time to try again -- not a
+    /// refusal. Nothing is pinned, so the entry can be reviewed again.
+    ///
+    /// Both review routes reach here: the token-bundle route carries the
+    /// transport's typed error, and the ordinary route the refusal label with
+    /// the delay recovered by `build_witnessed_preview`.
+    #[tokio::test]
+    async fn a_busy_witness_is_a_distinct_try_again_outcome_for_a_person() {
+        let saturated = crate::witness::WitnessTrustError::WitnessSaturated {
+            retry_after_secs: 45,
+        };
+        for (error, secs) in [
+            (anyhow::Error::new(saturated.clone()), 45),
+            (anyhow::anyhow!(saturated.refusal_label()), 30),
+        ] {
+            let (s, id, _dir, _review) = recorded_witness_review().await;
+            let before = Utc::now();
+            let response = witness_review_response(
+                handle_witness_preview_request_inner(
+                    &s,
+                    &req(
+                        "witness_preview_request",
+                        serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+                    ),
+                    Some(Err(error)),
+                )
+                .await,
+            );
+            let after = Utc::now();
+            assert_eq!(
+                response.error.as_ref().map(|e| e.message.as_str()),
+                Some("witness_saturated")
+            );
+            let view = &response.result.as_ref().expect("a view")["view"];
+            assert_eq!(view["state"], "Busy", "{view}");
+            assert_eq!(
+                view["message"],
+                crate::witness_copy::witness_copy().review.failed_busy
+            );
+            assert_eq!(
+                view["retry_label"],
+                crate::witness_copy::witness_copy().review.busy_retry_at
+            );
+            let retry_at =
+                chrono::DateTime::parse_from_rfc3339(view["retry_at"].as_str().expect("retry_at"))
+                    .unwrap()
+                    .with_timezone(&Utc);
+            assert!(
+                retry_at >= before + chrono::Duration::seconds(secs) - chrono::Duration::seconds(1)
+            );
+            assert!(
+                retry_at <= after + chrono::Duration::seconds(secs) + chrono::Duration::seconds(1)
+            );
+            let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
+            assert_eq!(entry.state, QueueState::Pending);
+            assert!(entry.previewed_envelope_digest.is_none());
+        }
+    }
+
     /// The fail-closed half. A failure that is not a witness refusal keeps the
     /// fixed word: the messages on this path are internal strings, and a route
     /// that forwarded whatever `anyhow` happened to hold would put them in
@@ -7271,6 +7423,7 @@ mod tests {
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -9640,6 +9793,52 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    /// K11: the disclosure screens read what leaves this machine from the
+    /// daemon that sends it, not from a shell's reading of the config.
+    #[test]
+    fn route_disclosure_reports_the_witness_its_pins_and_where_it_came_from() {
+        let s = shared();
+        let unenrolled = handle_request(&s, &req("route_disclosure", serde_json::json!({})));
+        assert_eq!(unenrolled.result.unwrap()["route"], "not_enrolled");
+
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        let pin = format!("mrtd={}", "ab".repeat(48));
+        cfg.set_witness(
+            crate::config::WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0x0000000000000000000000000000000000000001".into(),
+                expected_measurements: vec![pin.clone()],
+                admission_evidence: false,
+            },
+            crate::config::WitnessOrigin::PublishedAtJoin,
+        );
+        cfg.inference_receipt_endpoint = Some("https://receipts.example/v1".into());
+        s.store.save_config(&cfg).unwrap();
+        s.settings.lock().unwrap().ironwire_attested_bodies = true;
+
+        let r = handle_request(&s, &req("route_disclosure", serde_json::json!({})));
+        let facts = r.result.expect("the facts");
+        assert_eq!(facts["route"], "witness");
+        assert_eq!(facts["witness"]["url"], "https://witness.example");
+        assert_eq!(
+            facts["witness"]["signing_address"],
+            "0x0000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            facts["witness"]["pinned_measurements"],
+            serde_json::json!([pin])
+        );
+        assert_eq!(facts["witness"]["origin"], "published_at_join");
+        assert_eq!(facts["local_filter"], serde_json::Value::Null);
+        assert_eq!(facts["receipts"]["endpoint_configured"], true);
+        assert_eq!(facts["attested_bodies"], true);
+        // The shape a shell hands to the copy function, unchanged.
+        let parsed: crate::disclosure::RouteDisclosure =
+            serde_json::from_value(facts).expect("the documented shape");
+        assert_eq!(parsed.route, crate::disclosure::Route::Witness);
+        assert!(METHODS.contains(&"route_disclosure"));
+    }
+
     #[test]
     fn admission_requirement_survives_settings_write() {
         let s = shared();
@@ -10975,6 +11174,7 @@ mod tests {
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -11664,7 +11864,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 47, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

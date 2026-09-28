@@ -4562,7 +4562,11 @@ pub unsafe extern "C" fn tc_witness_configure(
             }
         }
 
-        cfg.witness = Some(settings);
+        // Recorded as entered in Settings, for the disclosure screens (K11).
+        cfg.set_witness(
+            settings,
+            trace_commons_contributor::config::WitnessOrigin::Settings,
+        );
         if store.save_config(&cfg).is_err() {
             witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
             return Ok(-1);
@@ -4603,7 +4607,7 @@ pub unsafe extern "C" fn tc_witness_clear(config_dir: *const c_char, err: *mut *
         if cfg.witness.is_none() {
             return Ok(0);
         }
-        cfg.witness = None;
+        cfg.clear_witness();
         if store.save_config(&cfg).is_err() {
             witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
             return Ok(-1);
