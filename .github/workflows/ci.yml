@@ -303,6 +303,20 @@ jobs:
           grep -q 'test result: ok. 6 passed; 0 failed' r1-measurement.log
         env:
           TRACE_COMMONS_R1_MEASUREMENT_PG_TEST_URL: postgres://trace@127.0.0.1:5432/postgres
+      # The legacy invite counts query, through the real psql, on a current
+      # schema and one stopped at V80. Like r1 it creates its own databases,
+      # so it is held to "did not skip" here rather than by xact_commit.
+      - name: legacy_invite_counts
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --test legacy_invite_counts -- --nocapture 2>&1 | tee legacy-invite-counts.log
+          if grep -q '^skipping:' legacy-invite-counts.log; then
+            echo "legacy_invite_counts skipped its PostgreSQL tests" >&2
+            exit 1
+          fi
+          grep -q 'test result: ok. 5 passed; 0 failed' legacy-invite-counts.log
+        env:
+          TRACE_COMMONS_LEGACY_INVITE_COUNTS_PG_TEST_URL: postgres://trace@127.0.0.1:5432/postgres
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
