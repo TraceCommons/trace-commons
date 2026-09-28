@@ -56,12 +56,69 @@ pub struct Status {
     /// Absent on a daemon older than the field, which holds nothing on it.
     #[serde(default)]
     pub witness_capacity: WitnessCapacity,
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5). Kept as the daemon sent them:
+    /// each goes back to `consent_copy::arming_reworded_notice_for_wire`.
+    /// Absent on a daemon older than the field, which has reworded nothing.
+    #[serde(default)]
+    pub arming_rewordings: Vec<serde_json::Value>,
+    /// What the automatic-contribution gate held at the last full pass, as
+    /// the daemon sent it, for `consent_copy::gate_held_notice_for_wire`.
+    /// Absent on a daemon older than the field, which holds nothing.
+    #[serde(default)]
+    pub automatic_contribution_held: Option<serde_json::Value>,
     /// Whether moving a legacy invite identity to a NEAR AI account is
     /// offered, and the notice after it moved. Kept as the daemon sent it:
     /// the notice goes back to `consent_copy::legacy_migration_notice_for_wire`,
     /// which chooses the words. Absent on a daemon older than the field.
     #[serde(default)]
     pub legacy_invite_migration: serde_json::Value,
+}
+
+/// One rewording notice as the window draws it (K5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmingRewordingCard {
+    /// For `acknowledge_arming_rewordings`. An element without one is still
+    /// shown; it just cannot be acknowledged.
+    pub id: Option<u64>,
+    /// The core's words.
+    pub notice: trace_commons_contributor::consent_copy::ArmingRewordedNoticeCopy,
+    /// The project "Ask me first" switches, present only when the core
+    /// offered the button.
+    pub ask_first_project_id: Option<String>,
+}
+
+impl Status {
+    /// Every rewording, as the cards the window draws.
+    pub fn arming_rewording_notices(&self) -> Vec<ArmingRewordingCard> {
+        self.arming_rewordings
+            .iter()
+            .filter_map(|element| {
+                let notice = crate::copy::arming_reworded_notice_for_wire(element)?;
+                let ask_first_project_id = notice
+                    .ask_first_action
+                    .and_then(|_| element.get("project_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                Some(ArmingRewordingCard {
+                    id: element.get("id").and_then(serde_json::Value::as_u64),
+                    notice,
+                    ask_first_project_id,
+                })
+            })
+            .collect()
+    }
+
+    /// The core's notice for armed folders the gate holds, or `None` when
+    /// nothing is held. Never acknowledged: it goes when the hold does.
+    pub fn gate_held_notice(
+        &self,
+    ) -> Option<trace_commons_contributor::consent_copy::GateHeldNoticeCopy> {
+        self.automatic_contribution_held
+            .as_ref()
+            .and_then(crate::copy::gate_held_notice_for_wire)
+    }
 }
 
 /// `status.witness_capacity`. A count and one timestamp; nothing identifying.
@@ -87,8 +144,11 @@ impl Status {
         let witness = self.witness_capacity_line();
         let mut lines: Vec<String> = Vec::new();
         if let Some(label) = self.health.last_error_label.as_deref() {
+            // And `automatic-contribution-held`, whose card names the folders
+            // and says why, drawn beside the banner from its own object.
             let shown_below = (label == "daily-cap-reached" && self.daily_budget.blocked)
-                || (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some());
+                || (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
+                || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some());
             if !shown_below {
                 lines.push(crate::copy::health_sentence(label).to_string());
             }
@@ -1180,6 +1240,69 @@ mod tests {
         assert_eq!(notices[0].rearm_project_id.as_deref(), Some("p"));
         assert!(notices[0].notice.rearm_action.is_some());
         assert_eq!(notices[1].rearm_project_id, None);
+    }
+
+    /// K5: each rewording becomes the core's notice with its id, and "Ask
+    /// me first" targets the element's own project only when offered.
+    #[test]
+    fn each_arming_rewording_becomes_the_cores_notice_with_its_id() {
+        let element = serde_json::json!({
+            "id": 3, "project_id": "p", "project_label": "api",
+            "was": "model_scrubbed", "now": "patterns_only",
+        });
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "arming_rewordings": [element.clone(), { "id": 4 }],
+        }))
+        .expect("status decodes");
+        let cards = status.arming_rewording_notices();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].id, Some(3));
+        assert_eq!(
+            cards[0].notice,
+            trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(&element)
+                .unwrap()
+        );
+        assert_eq!(cards[0].ask_first_project_id.as_deref(), Some("p"));
+        assert_eq!(cards[1].ask_first_project_id, None, "no project to switch");
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.arming_rewording_notices().is_empty());
+        assert!(old.gate_held_notice().is_none());
+    }
+
+    /// The held notice is the core's, and the bare label steps aside for
+    /// it; with nothing held, the label's own sentence stays.
+    #[test]
+    fn what_the_gate_holds_gets_the_cores_notice_and_the_label_steps_aside() {
+        let held = serde_json::json!({
+            "held_sessions": 2,
+            "reasons": ["admission-evidence-is-per-session"],
+            "projects": [{ "project_id": "p", "project_label": "api", "held_sessions": 2 }],
+        });
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": "automatic-contribution-held", "since": null },
+            "automatic_contribution_held": held.clone(),
+        }))
+        .expect("status decodes");
+        assert_eq!(
+            status.gate_held_notice(),
+            trace_commons_contributor::consent_copy::gate_held_notice_for_wire(&held)
+        );
+        assert!(status.health_banner_lines().is_empty(), "the card says it");
+
+        let unheld: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "health": { "last_error_label": "automatic-contribution-held", "since": null },
+            "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
+        }))
+        .expect("status decodes");
+        assert!(unheld.gate_held_notice().is_none());
+        assert_eq!(
+            unheld.health_banner_lines(),
+            vec![crate::copy::health_sentence("automatic-contribution-held").to_string()]
+        );
     }
 
     fn status_with(health: Option<&str>, capacity: serde_json::Value) -> Status {

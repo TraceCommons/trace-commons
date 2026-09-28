@@ -626,6 +626,13 @@ final class DaemonClient {
         _ = try rawResult("acknowledge_grant_voids", params: ["ids": ids])
     }
 
+    /// Records that the rewording notices with these ids were shown (K5).
+    /// Only the ids actually drawn, with no "all". Changes nothing about the
+    /// folders.
+    func acknowledgeArmingRewordings(ids: [UInt64]) throws {
+        _ = try rawResult("acknowledge_arming_rewordings", params: ["ids": ids])
+    }
+
     /// Replaces the enrolled device's consent scopes. Local config write
     /// only -- no network I/O -- and requires an existing enrollment
     /// (`unavailable` / `not-logged-in` otherwise, per the contract). Used

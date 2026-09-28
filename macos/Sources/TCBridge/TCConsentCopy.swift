@@ -44,6 +44,29 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The notice for one armed folder whose arming wording no longer claims
+    /// a model scrubs its sessions (K5), from one element of
+    /// `status.arming_rewordings` passed through (`ArmingRewordingWire.json`).
+    /// Decoded by `TCShellCore.ArmingRewordedNotice`. Nil only for an
+    /// argument that is not an element, or on a caught panic.
+    public static func armingRewordedNoticeJSON(forRewording wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_arming_reworded_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The notice for armed folders the automatic-contribution gate is
+    /// holding, from `status.automatic_contribution_held` passed through
+    /// (`GateHeld.json`). Decoded by `TCShellCore.GateHeldNotice`. Nil when
+    /// nothing is held, for an unreadable argument, or on a caught panic.
+    public static func gateHeldNoticeJSON(forHeld wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_gate_held_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The notice after a legacy invite identity moved to a NEAR AI account,
     /// as a JSON object, from `status.legacy_invite_migration.notice`
     /// (`LegacyMigrationWire.noticeJSON`). Decoded by

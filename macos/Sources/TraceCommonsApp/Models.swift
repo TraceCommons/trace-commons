@@ -268,6 +268,13 @@ struct DaemonStatus: Decodable, Equatable {
     /// Approved sessions held because the privacy witness is busy. A daemon
     /// that predates the field holds nothing on it.
     let witnessCapacity: WitnessCapacity
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5). A daemon that predates the
+    /// field has reworded nothing it can report.
+    let armingRewordings: [ArmingRewordingWire]
+    /// What the automatic-contribution gate held at the last full pass. A
+    /// daemon that predates the field holds nothing.
+    let gateHeld: GateHeld
     /// The notice after a legacy invite identity moved to a NEAR AI account.
     /// A daemon that predates the field has nothing to show.
     let legacyInviteMigration: LegacyMigrationWire
@@ -285,6 +292,8 @@ struct DaemonStatus: Decodable, Equatable {
         case routing
         case grantVoids = "grant_voids"
         case witnessCapacity = "witness_capacity"
+        case armingRewordings = "arming_rewordings"
+        case gateHeld = "automatic_contribution_held"
         case legacyInviteMigration = "legacy_invite_migration"
     }
 
@@ -301,6 +310,8 @@ struct DaemonStatus: Decodable, Equatable {
         routing: RoutingStatus = .notDeclared,
         grantVoids: [GrantVoidWire] = [],
         witnessCapacity: WitnessCapacity = .none,
+        armingRewordings: [ArmingRewordingWire] = [],
+        gateHeld: GateHeld = .none,
         legacyInviteMigration: LegacyMigrationWire = .none
     ) {
         self.schemaVersion = schemaVersion
@@ -315,6 +326,8 @@ struct DaemonStatus: Decodable, Equatable {
         self.routing = routing
         self.grantVoids = grantVoids
         self.witnessCapacity = witnessCapacity
+        self.armingRewordings = armingRewordings
+        self.gateHeld = gateHeld
         self.legacyInviteMigration = legacyInviteMigration
     }
 
@@ -336,6 +349,9 @@ struct DaemonStatus: Decodable, Equatable {
         grantVoids = try c.decodeIfPresent([GrantVoidWire].self, forKey: .grantVoids) ?? []
         witnessCapacity =
             try c.decodeIfPresent(WitnessCapacity.self, forKey: .witnessCapacity) ?? .none
+        armingRewordings =
+            try c.decodeIfPresent([ArmingRewordingWire].self, forKey: .armingRewordings) ?? []
+        gateHeld = try c.decodeIfPresent(GateHeld.self, forKey: .gateHeld) ?? .none
         legacyInviteMigration =
             (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
             .flatMap { $0 } ?? .none

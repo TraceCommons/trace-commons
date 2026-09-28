@@ -221,6 +221,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
+    "trace_account_trust_evaluations",
     "trace_source_sessions",
     "trace_submission_sessions",
     "trace_account_inference_connections",
@@ -1439,6 +1440,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
     ),
     (
+        82,
+        "near_account_merge",
+        include_str!("../../../../migrations/V82__near_account_merge.sql"),
+    ),
+    (
         84,
         "account_trust_fact_kinds",
         include_str!("../../../../migrations/V84__account_trust_fact_kinds.sql"),
@@ -1448,8 +1454,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_fact_recorder",
         include_str!("../../../../migrations/V85__account_trust_fact_recorder.sql"),
     ),
-    // V82-V88 are reserved for work in flight; V89 is additive and depends on
-    // none of them.
+    (
+        86,
+        "account_trust_evaluations",
+        include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+    ),
+    // V83, V87 and V88 are reserved for work in flight; V89 is additive and
+    // depends on none of them.
     (
         89,
         "trace_credit_witness_provenance_class",
@@ -1514,6 +1525,31 @@ impl Database for PgBackend {
         limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
         PgBackend::list_account_trust_fact_candidates(self, account, limit).await
+    }
+
+    async fn account_trust_evaluation_inputs(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::account_trust_rule::EvaluationFact>, DatabaseError> {
+        PgBackend::account_trust_evaluation_inputs(self, account).await
+    }
+
+    async fn record_account_trust_evaluation(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        mode: &str,
+        evaluation: &crate::account_trust_rule::Evaluation,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::record_account_trust_evaluation(self, account, mode, evaluation).await
+    }
+
+    async fn latest_account_trust_evaluation(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        policy_version: &str,
+        mode: &str,
+    ) -> Result<Option<crate::account_trust_rule::Evaluation>, DatabaseError> {
+        PgBackend::latest_account_trust_evaluation(self, account, policy_version, mode).await
     }
     async fn legacy_admission_record(
         &self,
@@ -4741,6 +4777,31 @@ impl Database for PgBackend {
         };
         let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
 
+        // B's NEAR anchors and provisioned devices follow the identity, so a
+        // device provisioned to B is a live device of A and a returning NEAR
+        // sign-in resolves to A (V82 states the rule). This runs BEFORE B's
+        // row is locked below: the function takes the per-anchor advisory
+        // lock provisioning holds while it writes rows referencing B, and
+        // taking that lock while holding B's row lock could deadlock with a
+        // sign-in in flight. If B turns out to be closed, the early return
+        // below rolls this back with everything else. Same consumed-proposal
+        // proof as the hooks below, so it too must stay outside a SAVEPOINT.
+        let near_carried = tx
+            .query_one(
+                "SELECT anchors_carried, devices_carried
+                   FROM public.trace_near_account_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let near_anchors_carried: i64 = near_carried.get(0);
+        let near_devices_carried: i64 = near_carried.get(1);
+
         // Re-check B is still open. If B closed between stage and execute, abandon
         // the whole merge: return Ok(None) WITHOUT committing so the consume above
         // (and any reads) roll back and the proposal remains usable.
@@ -4914,6 +4975,8 @@ impl Database for PgBackend {
             "public_runs_moved": public_runs_moved,
             "source_sessions_moved": source_sessions_moved,
             "invite_grants_carried": invite_grants_carried,
+            "near_anchors_carried": near_anchors_carried,
+            "near_devices_carried": near_devices_carried,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (
@@ -7379,6 +7442,7 @@ mod tests {
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7407,6 +7471,7 @@ mod tests {
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
