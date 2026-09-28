@@ -14,18 +14,35 @@ pub struct TrustAccount {
     account_id: Uuid,
 }
 
-/// A stable server-side source. Recording either fact never raises allowance;
-/// a later reviewed policy may evaluate the deduplicated history.
+/// A stable server-side source. The definer function verifies each against
+/// the server row it names before recording it; a caller-supplied claim alone
+/// never creates a fact. Recording a fact never raises an allowance: no
+/// admission policy reads these rows (the growth rule is shadow-only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustFactSource {
+    /// A submission ID with an `accepted` credit-ledger event.
     AcceptedSubmission(Uuid),
+    /// A gate decision ID.
     GateEvaluation(Uuid),
+    /// A submission ID whose `withdrawn_at` is set: a contributor withdrawal.
+    SubmissionWithdrawn(Uuid),
+    /// A submission ID revoked by an operator or policy, not withdrawn.
+    SubmissionRevoked(Uuid),
+    /// A submission ID the privacy pipeline quarantined.
+    SubmissionQuarantined(Uuid),
+    /// An `abuse_penalty` credit-ledger event ID.
+    AbusePenalty(Uuid),
 }
 
 impl TrustFactSource {
     pub fn source_id(self) -> Uuid {
         match self {
-            Self::AcceptedSubmission(id) | Self::GateEvaluation(id) => id,
+            Self::AcceptedSubmission(id)
+            | Self::GateEvaluation(id)
+            | Self::SubmissionWithdrawn(id)
+            | Self::SubmissionRevoked(id)
+            | Self::SubmissionQuarantined(id)
+            | Self::AbusePenalty(id) => id,
         }
     }
 
@@ -33,31 +50,90 @@ impl TrustFactSource {
         match self {
             Self::AcceptedSubmission(_) => "accepted_submission",
             Self::GateEvaluation(_) => "gate_evaluation",
+            Self::SubmissionWithdrawn(_) => "submission_withdrawn",
+            Self::SubmissionRevoked(_) => "submission_revoked",
+            Self::SubmissionQuarantined(_) => "submission_quarantined",
+            Self::AbusePenalty(_) => "abuse_penalty",
         }
+    }
+
+    /// The inverse of [`Self::kind`]; `None` for any label outside the closed set.
+    pub fn from_storage(kind: &str, source_id: Uuid) -> Option<Self> {
+        Some(match kind {
+            "accepted_submission" => Self::AcceptedSubmission(source_id),
+            "gate_evaluation" => Self::GateEvaluation(source_id),
+            "submission_withdrawn" => Self::SubmissionWithdrawn(source_id),
+            "submission_revoked" => Self::SubmissionRevoked(source_id),
+            "submission_quarantined" => Self::SubmissionQuarantined(source_id),
+            "abuse_penalty" => Self::AbusePenalty(source_id),
+            _ => return None,
+        })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustFactOutcome {
     Accepted,
+    /// Accepted through a review approved by a principal of the same account.
+    /// Recorded so the exclusion is auditable; it never counts toward trust.
+    AcceptedSelfReviewed,
+    /// Accepted, but the approving principal could not be established.
+    /// Fails closed: it never counts toward trust.
+    AcceptedApproverUnknown,
     EvaluatedPassed,
     EvaluatedFailed,
     EvaluatedNotAccepted,
+    Withdrawn,
+    Revoked,
+    Quarantined,
+    Penalized,
 }
 
 impl TrustFactOutcome {
     pub fn from_storage(value: &str) -> Option<Self> {
         match value {
             "accepted" => Some(Self::Accepted),
+            "accepted_self_reviewed" => Some(Self::AcceptedSelfReviewed),
+            "accepted_approver_unknown" => Some(Self::AcceptedApproverUnknown),
             "evaluated_passed" => Some(Self::EvaluatedPassed),
             "evaluated_failed" => Some(Self::EvaluatedFailed),
             "evaluated_not_accepted" => Some(Self::EvaluatedNotAccepted),
+            "withdrawn" => Some(Self::Withdrawn),
+            "revoked" => Some(Self::Revoked),
+            "quarantined" => Some(Self::Quarantined),
+            "penalized" => Some(Self::Penalized),
             _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::AcceptedSelfReviewed => "accepted_self_reviewed",
+            Self::AcceptedApproverUnknown => "accepted_approver_unknown",
+            Self::EvaluatedPassed => "evaluated_passed",
+            Self::EvaluatedFailed => "evaluated_failed",
+            Self::EvaluatedNotAccepted => "evaluated_not_accepted",
+            Self::Withdrawn => "withdrawn",
+            Self::Revoked => "revoked",
+            Self::Quarantined => "quarantined",
+            Self::Penalized => "penalized",
         }
     }
 }
 
 impl TrustAccount {
+    /// An account named by the earned-trust worker's enumeration seam, which
+    /// lists only open accounts in anchored tenants. It carries no
+    /// authentication: use it for batch fact recording and evaluation, never
+    /// to authorize a request.
+    pub(crate) fn from_worker_enumeration(tenant_id: String, account_id: Uuid) -> Self {
+        Self {
+            tenant_id,
+            account_id,
+        }
+    }
+
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
