@@ -423,21 +423,29 @@ pub async fn fetch_receipt(
 /// second call site cannot omit it, and the body is bounded after reading
 /// because a chunked response declares no length. Returns the raw JSON;
 /// parsing is `attestation_report::model_ed25519_keys`'s job.
-async fn fetch_attestation_report(
+///
+/// `bearer` is for the NEAR AI gateway, which is the only host that serves
+/// the per-model registry and refuses it without a key. It is attached only
+/// after the allowlist has passed the URL, and only to the URL built from
+/// `base` -- the host the caller holds the key for.
+pub(crate) async fn fetch_attestation_report(
     client: &reqwest::Client,
     allowlist: &HostAllowlist,
     base: &str,
     model: &str,
     nonce: &str,
+    bearer: Option<&str>,
 ) -> Result<String, ReceiptFetchError> {
     let url = super::attestation_report::attestation_report_url(base, model, nonce)
         .map_err(|_| ReceiptFetchError::SignerNotAttested)?;
     allowlist
         .check(&url)
         .map_err(|_| ReceiptFetchError::EndpointNotAllowed)?;
-    let response = client
-        .get(url)
-        .timeout(FETCH_TIMEOUT)
+    let mut request = client.get(url).timeout(FETCH_TIMEOUT);
+    if let Some(bearer) = bearer {
+        request = request.bearer_auth(bearer);
+    }
+    let response = request
         .send()
         .await
         .map_err(|_| ReceiptFetchError::Unreachable)?;
@@ -464,7 +472,7 @@ async fn fetch_attestation_report(
 ///
 /// Freshly random per call so a report bound to it cannot be a replay of one
 /// fetched for a previous submission.
-fn fresh_nonce_hex() -> Result<String, ReceiptFetchError> {
+pub(crate) fn fresh_nonce_hex() -> Result<String, ReceiptFetchError> {
     let mut bytes = [0u8; 32];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| ReceiptFetchError::Unreachable)?;
@@ -628,7 +636,8 @@ pub async fn receipt_for_attested_call(
         let verdict = receipt_matches_call(&payload, call, model)?;
 
         let nonce = fresh_nonce_hex()?;
-        let report = fetch_attestation_report(&client, allowlist, endpoint, model, &nonce).await?;
+        let report =
+            fetch_attestation_report(&client, allowlist, endpoint, model, &nonce, None).await?;
         // The whole verdict, not just the signer: the comparison needs the
         // *verified* signer (equal to the claimed one by the time this runs,
         // and taking it from the verdict is what keeps that true if the two
@@ -640,7 +649,7 @@ pub async fn receipt_for_attested_call(
     Ok(payload)
 }
 
-fn receipt_http_client() -> Result<reqwest::Client, ReceiptFetchError> {
+pub(crate) fn receipt_http_client() -> Result<reqwest::Client, ReceiptFetchError> {
     reqwest::Client::builder()
         // The configured provider cannot delegate this call's identifier.
         .redirect(reqwest::redirect::Policy::none())
