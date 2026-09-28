@@ -174,6 +174,17 @@ of these takes the admin bearer:
   run. The check is not in the required rollout-smoke set while growth is
   shadow-only.
 
+An account merge carries the absorbed account's trust facts to the survivor
+(V87), each source once. Evaluations are not carried: the next evaluation run
+re-evaluates the survivor over the union of facts. Each account reservation
+row has nullable `earned_tier` and `trust_evaluation_digest` columns (V88).
+They are NULL on every reservation while growth is shadow-only. When a
+reservation is refused as `account_limit_reached` and the account's fresh
+shadow evaluation would have fitted it under the candidate policy, ingest logs
+the label-only line `account_trust_shadow_would_admit` with a process-local
+running count. That is the number the switch-on decision turns on. It never
+changes the refusal.
+
 The runtime can insert trust rows and can update only authority, version, and
 timestamp, including demotion after invite revocation. An inserted or updated
 authority field alone cannot grant invited admission: reserve and

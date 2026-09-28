@@ -1728,3 +1728,272 @@ async fn merge_without_near_rows_carries_nothing() {
             .is_empty()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Earned trust (V87, M4 of the earned-account-trust spec): a merge carries the
+// absorbed account's trust facts to the survivor inside the executing merge,
+// never duplicating one, and the union does not count a week twice.
+// ---------------------------------------------------------------------------
+
+/// An accepted submission from `principal`, with its `accepted` and passed
+/// `gate_evaluation` facts on `account`, at `at`. Returns the submission.
+async fn seed_trust_facts(
+    backend: &PgBackend,
+    tenant: &str,
+    account: Uuid,
+    principal: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Uuid {
+    let submission = Uuid::new_v4();
+    let decision = Uuid::new_v4();
+    let hash = "a".repeat(64);
+    raw_execute(
+        backend,
+        tenant,
+        "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+            schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+            redaction_pipeline_version,redaction_hash,received_at)
+         VALUES(trace_current_tenant_id(),$1,$2,$3,'v1','v1','test','accepted','low','test',$4,$5)",
+        &[&submission, &Uuid::new_v4(), &principal, &hash, &at],
+    )
+    .await;
+    raw_execute(
+        backend,
+        tenant,
+        "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,gate_policy_version,
+            gate_version_hash,perplexity_micros,tail_fraction_micros,perplexity_passed,
+            novelty_score_micros,nearest_neighbor_hash,novelty_passed,embedding_evidence_hash,
+            attestation_chain_hash,decided_at,dedup_cluster_id,dedup_signal_version)
+         VALUES(trace_current_tenant_id(),$1,$2,'gate-v1',$3,1,1,TRUE,1,$3,TRUE,$3,$3,$4,$5,
+            'events.v2+simhash.v2')",
+        &[&decision, &submission, &hash, &at, &Uuid::new_v4()],
+    )
+    .await;
+    raw_execute(
+        backend,
+        tenant,
+        "INSERT INTO trace_account_trust_facts(tenant_id,account_id,source_kind,source_id,
+            submission_id,outcome,evaluator_version,occurred_at)
+         VALUES(trace_current_tenant_id(),$1,'accepted_submission',$2,$2,'accepted',NULL,$3),
+               (trace_current_tenant_id(),$1,'gate_evaluation',$4,$2,'evaluated_passed','gate-v1',$3)",
+        &[&account, &submission, &at, &decision],
+    )
+    .await;
+    submission
+}
+
+async fn fact_keys(backend: &PgBackend, tenant: &str, account: Uuid) -> Vec<(String, Uuid)> {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw connection");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("tenant context");
+    let rows = tx
+        .query(
+            "SELECT source_kind, source_id FROM trace_account_trust_facts
+              WHERE tenant_id=$1 AND account_id=$2 ORDER BY source_kind, source_id",
+            &[&tenant, &account],
+        )
+        .await
+        .expect("facts");
+    tx.commit().await.expect("commit");
+    rows.into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+#[tokio::test]
+async fn merge_carries_trust_facts_once_and_does_not_double_count_a_week() {
+    use trace_commons_server::account_trust_rule::{evaluate, parse_shadow_growth_policy};
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let tenant = unique_tenant("trust-facts-merge");
+    let account_a = backend
+        .create_or_reuse_account(&tenant, "principal:facts-a")
+        .await
+        .expect("mint A");
+    let account_b = backend
+        .create_or_reuse_account(&tenant, "principal:facts-b")
+        .await
+        .expect("mint B");
+    // One qualified contribution each, in the same week; plus one fact that
+    // both accounts already hold for the same source.
+    // A day into last week's 7-day bucket, so both contributions (an hour
+    // apart) share one bucket whatever the wall clock says.
+    let bucket = chrono::Utc::now().timestamp().div_euclid(7 * 86_400) - 1;
+    let week = chrono::DateTime::from_timestamp(bucket * 7 * 86_400 + 86_400, 0).expect("time");
+    seed_trust_facts(&backend, &tenant, account_a, "principal:facts-a", week).await;
+    seed_trust_facts(
+        &backend,
+        &tenant,
+        account_b,
+        "principal:facts-b",
+        week + chrono::Duration::hours(1),
+    )
+    .await;
+    // A fact both accounts already hold for the same source: a quarantine of
+    // a submission with no acceptance, so it nets nothing out.
+    let shared = Uuid::new_v4();
+    raw_execute(
+        &backend,
+        &tenant,
+        "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+            schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+            redaction_pipeline_version,redaction_hash)
+         VALUES(trace_current_tenant_id(),$1,$2,'principal:facts-b','v1','v1','test',
+            'quarantined','medium','test',$3)",
+        &[&shared, &Uuid::new_v4(), &"b".repeat(64)],
+    )
+    .await;
+    for holder in [account_a, account_b] {
+        raw_execute(
+            &backend,
+            &tenant,
+            "INSERT INTO trace_account_trust_facts(tenant_id,account_id,source_kind,source_id,
+                submission_id,outcome,evaluator_version,occurred_at)
+             VALUES(trace_current_tenant_id(),$1,'submission_quarantined',$2,$2,'quarantined',
+                NULL,$3)",
+            &[&holder, &shared, &(week + chrono::Duration::hours(2))],
+        )
+        .await;
+    }
+    let before_a = fact_keys(&backend, &tenant, account_a).await;
+    let before_b = fact_keys(&backend, &tenant, account_b).await;
+    assert_eq!((before_a.len(), before_b.len()), (3, 3));
+    // B also holds a NEAR anchor, so one merge must run both V82's NEAR carry
+    // and V87's fact carry.
+    seed_near_anchor(&backend, &tenant, account_b).await;
+
+    let code_hash = unique_code_hash();
+    seed_login_link(&backend, &tenant, account_b, &code_hash, false, false).await;
+    let staged = backend
+        .stage_merge_proposal(&tenant, account_a, &code_hash)
+        .await
+        .expect("stage ok")
+        .expect("staged some");
+    let restricted = restricted_merge_backend(&backend).await;
+    let facts_rights: bool = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw")
+        .query_one(
+            "SELECT has_table_privilege('trace_trust_merge_runtime','trace_account_trust_facts','SELECT')
+                 OR has_table_privilege('trace_trust_merge_runtime','trace_account_trust_facts','INSERT')",
+            &[],
+        )
+        .await
+        .expect("inspect")
+        .get(0);
+    assert!(!facts_rights, "the merge login holds no facts rights");
+    restricted
+        .execute_merge(&tenant, account_a, staged.proposal_id)
+        .await
+        .expect("execute ok")
+        .expect("executed some");
+
+    let mut expected: Vec<(String, Uuid)> = before_a.iter().chain(&before_b).cloned().collect();
+    expected.sort();
+    expected.dedup();
+    assert_eq!(
+        fact_keys(&backend, &tenant, account_a).await,
+        expected,
+        "the survivor holds the union, each source once"
+    );
+    assert_eq!(
+        fact_keys(&backend, &tenant, account_b).await,
+        before_b,
+        "the absorbed account's rows stay, unreferenced, on the closed account"
+    );
+    assert_eq!(
+        near_rows_by_account(&backend, &tenant, "trace_near_account_anchors").await,
+        vec![(account_a, 1)],
+        "V82's NEAR carry ran in the same merge"
+    );
+
+    // Two contributions in one week, weekly cap 1: the union counts the week
+    // once and caps it, rather than adding each account's allowance of it.
+    let policy = parse_shadow_growth_policy(
+        &serde_json::json!({
+            "version": "merge-test-v1",
+            "processing_cost_bound": 1,
+            "bounded_allowance": 10,
+            "period": {"mode": "lifetime"},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 30 * 86400,
+                "weekly_cap": 1,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 10,
+                "evaluator_versions": ["gate-v1"],
+                "dedup_signal_versions": ["events.v2+simhash.v2"],
+                "tiers": [{"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1}]
+            }
+        })
+        .to_string(),
+        &["merge-test-v1"],
+    )
+    .expect("policy");
+    // `unique_tenant` is not an anchored tenant, so the worker enumeration
+    // never lists it; read the survivor's inputs directly.
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("raw");
+    let tx = client.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("tenant");
+    let rows = tx
+        .query(
+            "SELECT source_kind, source_id, submission_id, outcome, evaluator_version, occurred_at,
+                    credit_quality_micros, credit_quality_calibration_version,
+                    dedup_signal_version, first_in_cluster
+               FROM trace_account_trust_evaluation_inputs($1,$2)",
+            &[&tenant, &account_a],
+        )
+        .await
+        .expect("inputs");
+    tx.commit().await.expect("commit");
+    let facts: Vec<_> = rows
+        .into_iter()
+        .map(
+            |row| trace_commons_server::account_trust_rule::EvaluationFact {
+                source_kind: row.get(0),
+                source_id: row.get(1),
+                submission_id: row.get(2),
+                outcome: row.get(3),
+                evaluator_version: row.get(4),
+                occurred_at: row.get(5),
+                credit_quality_micros: row.get(6),
+                credit_quality_calibration_version: row.get(7),
+                dedup_signal_version: row.get(8),
+                first_in_cluster: row.get(9),
+            },
+        )
+        .collect();
+    let evaluation = evaluate(&policy, &facts, chrono::Utc::now());
+    assert_eq!(evaluation.units, 1, "weekly cap 1 over the union");
+    assert_eq!(
+        evaluation.units_capped, 1,
+        "the second contribution is capped, not added"
+    );
+    assert_eq!(
+        evaluation.active_weeks, 1,
+        "the merged week is counted once"
+    );
+}

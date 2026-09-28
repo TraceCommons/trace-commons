@@ -1459,8 +1459,18 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_evaluations",
         include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
     ),
-    // V83, V87 and V88 are reserved for work in flight; V89 is additive and
-    // depends on none of them.
+    (
+        87,
+        "account_trust_facts_merge",
+        include_str!("../../../../migrations/V87__account_trust_facts_merge.sql"),
+    ),
+    (
+        88,
+        "account_admission_earned_tier",
+        include_str!("../../../../migrations/V88__account_admission_earned_tier.sql"),
+    ),
+    // V83 is reserved for work in flight; V89 is additive and depends on none
+    // of the numbers before it.
     (
         89,
         "trace_credit_witness_provenance_class",
