@@ -1826,6 +1826,7 @@ mod tests {
                 .save_config(&crate::config::ContributorConfig {
                     inference_receipt_endpoint: None,
                     consent_scopes_chosen: false,
+                    witness_origin: None,
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                     issuer_url: issuer,
@@ -2899,6 +2900,7 @@ mod tests {
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "http://127.0.0.1:9".to_string(),

@@ -296,6 +296,7 @@ pub const METHODS: &[&str] = &[
     "grant_automatic",
     "withdraw_automatic_grant",
     "certificate_detail",
+    "route_disclosure",
     "cancel",
     "clear_public_profile",
     "consent_options",
@@ -1937,6 +1938,35 @@ macro_rules! try_response {
 /// Return only the signed certificate claims that are safe and useful for a
 /// review surface. Raw envelope bytes, signature bytes and certificate JSON
 /// never cross this boundary.
+/// K11: what leaves this machine, to whom, and what this client checked, as
+/// facts for the disclosure screens. Read-only; no network call.
+///
+/// Answered by the daemon because the daemon is the process that sends: the
+/// environment's privacy filter is this process's environment, and the
+/// attested-bodies switch is this daemon's setting. A shell turns the answer
+/// into sentences with `consent_copy::route_disclosure_copy`.
+fn handle_route_disclosure(shared: &DaemonShared, req: &Request) -> Response {
+    let attested_bodies = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .ironwire_attested_bodies;
+    let loaded = shared.store.load_config();
+    let config = match &loaded {
+        Ok(cfg) => Ok(cfg.as_ref()),
+        Err(_) => Err(()),
+    };
+    let facts = crate::disclosure::route_disclosure(
+        config,
+        attested_bodies,
+        crate::disclosure::env_filter(),
+    );
+    match serde_json::to_value(facts) {
+        Ok(value) => Response::ok(req.id, value),
+        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "route-disclosure-unavailable"),
+    }
+}
+
 fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
     let id = try_response!(entry_id_param(req));
     let entry = try_response!(entry_by_id(shared, req, id));
@@ -2109,6 +2139,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         ),
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
+        "route_disclosure" => handle_route_disclosure(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_projects" => handle_list_projects(shared, req),
         // The one project worth offering to arm right now, or nothing.
@@ -7392,6 +7423,7 @@ mod tests {
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -9761,6 +9793,52 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    /// K11: the disclosure screens read what leaves this machine from the
+    /// daemon that sends it, not from a shell's reading of the config.
+    #[test]
+    fn route_disclosure_reports_the_witness_its_pins_and_where_it_came_from() {
+        let s = shared();
+        let unenrolled = handle_request(&s, &req("route_disclosure", serde_json::json!({})));
+        assert_eq!(unenrolled.result.unwrap()["route"], "not_enrolled");
+
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        let pin = format!("mrtd={}", "ab".repeat(48));
+        cfg.set_witness(
+            crate::config::WitnessSettings {
+                url: "https://witness.example".into(),
+                signing_address: "0x0000000000000000000000000000000000000001".into(),
+                expected_measurements: vec![pin.clone()],
+                admission_evidence: false,
+            },
+            crate::config::WitnessOrigin::PublishedAtJoin,
+        );
+        cfg.inference_receipt_endpoint = Some("https://receipts.example/v1".into());
+        s.store.save_config(&cfg).unwrap();
+        s.settings.lock().unwrap().ironwire_attested_bodies = true;
+
+        let r = handle_request(&s, &req("route_disclosure", serde_json::json!({})));
+        let facts = r.result.expect("the facts");
+        assert_eq!(facts["route"], "witness");
+        assert_eq!(facts["witness"]["url"], "https://witness.example");
+        assert_eq!(
+            facts["witness"]["signing_address"],
+            "0x0000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            facts["witness"]["pinned_measurements"],
+            serde_json::json!([pin])
+        );
+        assert_eq!(facts["witness"]["origin"], "published_at_join");
+        assert_eq!(facts["local_filter"], serde_json::Value::Null);
+        assert_eq!(facts["receipts"]["endpoint_configured"], true);
+        assert_eq!(facts["attested_bodies"], true);
+        // The shape a shell hands to the copy function, unchanged.
+        let parsed: crate::disclosure::RouteDisclosure =
+            serde_json::from_value(facts).expect("the documented shape");
+        assert_eq!(parsed.route, crate::disclosure::Route::Witness);
+        assert!(METHODS.contains(&"route_disclosure"));
+    }
+
     #[test]
     fn admission_requirement_survives_settings_write() {
         let s = shared();
@@ -11096,6 +11174,7 @@ mod tests {
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -11785,7 +11864,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 47, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

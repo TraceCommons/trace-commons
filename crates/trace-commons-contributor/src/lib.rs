@@ -13,6 +13,7 @@ pub mod config;
 pub mod consent;
 pub mod consent_copy;
 pub mod daemon;
+pub mod disclosure;
 pub mod envelope;
 pub mod harness_state;
 pub mod history_copy;
