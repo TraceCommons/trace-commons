@@ -87,7 +87,7 @@ fn is_lower_hex(value: &str, len: usize) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn is_sha256(value: &str) -> bool {
+pub(crate) fn is_sha256(value: &str) -> bool {
     value
         .strip_prefix("sha256:")
         .is_some_and(|hex| is_lower_hex(hex, 64))
@@ -392,7 +392,7 @@ impl TryFrom<InstrumentAwardFields> for InstrumentAward {
     }
 }
 
-fn require_trace_credit_range(
+pub(crate) fn require_trace_credit_range(
     instrument_id: &InstrumentId,
     atomic_units: AtomicUnits,
 ) -> Result<(), ContractError> {
@@ -1270,12 +1270,15 @@ impl TryFrom<InstrumentSettlementFields> for InstrumentSettlement {
 pub enum InstrumentSettlementOutcome {
     Completed {
         result_ref_hash: String,
+        /// The adapter's external receipt hash, from
+        /// [`crate::settlement::SettlementReceipt`]. Absent for an effect
+        /// with no external record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        external_receipt_hash: Option<String>,
     },
     /// Withdrawal committed before the operation completed. Credit that is
     /// not settled is forfeited, as on the legacy path; settled credit stays.
-    Forfeited {
-        reason: ReasonCode,
-    },
+    Forfeited { reason: ReasonCode },
 }
 
 impl InstrumentSettlement {
@@ -1291,6 +1294,26 @@ impl InstrumentSettlement {
             operation_ref_hash.into(),
             InstrumentSettlementOutcome::Completed {
                 result_ref_hash: result_ref_hash.into(),
+                external_receipt_hash: None,
+            },
+        )
+    }
+
+    /// A completed leg that records the adapter's receipt, including its
+    /// external receipt hash.
+    pub fn completed(
+        instrument_id: InstrumentId,
+        atomic_units: AtomicUnits,
+        operation_ref_hash: impl Into<String>,
+        receipt: &crate::settlement::SettlementReceipt,
+    ) -> Result<Self, ContractError> {
+        Self::with_outcome(
+            instrument_id,
+            atomic_units,
+            operation_ref_hash.into(),
+            InstrumentSettlementOutcome::Completed {
+                result_ref_hash: receipt.result_ref_hash().to_string(),
+                external_receipt_hash: receipt.external_receipt_hash().map(str::to_string),
             },
         )
     }
@@ -1319,11 +1342,17 @@ impl InstrumentSettlement {
             return Err(ContractError::ZeroInstrumentAward);
         }
         require_trace_credit_range(&instrument_id, atomic_units)?;
-        let result_ref_hash = match &outcome {
-            InstrumentSettlementOutcome::Completed { result_ref_hash } => Some(result_ref_hash),
-            InstrumentSettlementOutcome::Forfeited { .. } => None,
+        let (result_ref_hash, external_receipt_hash) = match &outcome {
+            InstrumentSettlementOutcome::Completed {
+                result_ref_hash,
+                external_receipt_hash,
+            } => (Some(result_ref_hash), external_receipt_hash.as_deref()),
+            InstrumentSettlementOutcome::Forfeited { .. } => (None, None),
         };
-        if !is_sha256(&operation_ref_hash) || result_ref_hash.is_some_and(|hash| !is_sha256(hash)) {
+        if !is_sha256(&operation_ref_hash)
+            || result_ref_hash.is_some_and(|hash| !is_sha256(hash))
+            || external_receipt_hash.is_some_and(|hash| !is_sha256(hash))
+        {
             return Err(ContractError::InvalidSettlementReference);
         }
         Ok(Self {
@@ -1353,7 +1382,21 @@ impl InstrumentSettlement {
     /// The adapter result reference. `None` when the operation was forfeited.
     pub fn result_ref_hash(&self) -> Option<&str> {
         match &self.outcome {
-            InstrumentSettlementOutcome::Completed { result_ref_hash } => Some(result_ref_hash),
+            InstrumentSettlementOutcome::Completed {
+                result_ref_hash, ..
+            } => Some(result_ref_hash),
+            InstrumentSettlementOutcome::Forfeited { .. } => None,
+        }
+    }
+
+    /// The adapter's external receipt hash. `None` when the operation was
+    /// forfeited or its effect has no external record.
+    pub fn external_receipt_hash(&self) -> Option<&str> {
+        match &self.outcome {
+            InstrumentSettlementOutcome::Completed {
+                external_receipt_hash,
+                ..
+            } => external_receipt_hash.as_deref(),
             InstrumentSettlementOutcome::Forfeited { .. } => None,
         }
     }
@@ -2196,6 +2239,7 @@ impl SettleEvidence {
                 [
                     Some(progress.operation_ref_hash.as_str()),
                     progress.result_ref_hash.as_deref(),
+                    progress.external_receipt_hash.as_deref(),
                 ]
             }),
         ))
@@ -2220,6 +2264,8 @@ pub struct InstrumentSettlementProgress {
     pub operation_ref_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_ref_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_receipt_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2919,6 +2965,7 @@ mod tests {
                 instrument_id: InstrumentId::trace_credit(),
                 operation_ref_hash: hash(b"operation"),
                 result_ref_hash: Some(upper),
+                external_receipt_hash: None,
             });
         assert_eq!(settle.validate(), Err(ContractError::MalformedHash));
     }
@@ -4371,5 +4418,104 @@ mod tests {
             rebate.require_bound(&golden_manifest()),
             Err(ContractError::ScoreBundleMismatch)
         );
+    }
+
+    #[test]
+    fn completed_settlement_records_the_external_receipt() {
+        use crate::settlement::SettlementReceipt;
+        use serde_json::{from_value, json, to_value};
+
+        let receipt = SettlementReceipt::external(hash(b"result"), hash(b"receipt")).unwrap();
+        let leg = InstrumentSettlement::completed(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(3),
+            hash(b"operation"),
+            &receipt,
+        )
+        .unwrap();
+        assert_eq!(leg.result_ref_hash(), Some(hash(b"result").as_str()));
+        assert_eq!(leg.external_receipt_hash(), Some(hash(b"receipt").as_str()));
+        let stored = to_value(&leg).unwrap();
+        assert_eq!(
+            stored["outcome"],
+            json!({
+                "status": "completed",
+                "result_ref_hash": hash(b"result"),
+                "external_receipt_hash": hash(b"receipt"),
+            })
+        );
+        assert_eq!(from_value::<InstrumentSettlement>(stored).unwrap(), leg);
+
+        // An internal effect has no external receipt, and its stored form
+        // does not name one.
+        let internal = InstrumentSettlement::completed(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(3),
+            hash(b"operation"),
+            &SettlementReceipt::internal(hash(b"result")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(internal.external_receipt_hash(), None);
+        assert_eq!(
+            internal,
+            InstrumentSettlement::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(3),
+                hash(b"operation"),
+                hash(b"result"),
+            )
+            .unwrap()
+        );
+        let stored = to_value(&internal).unwrap();
+        assert!(stored["outcome"].get("external_receipt_hash").is_none());
+        assert_eq!(
+            from_value::<InstrumentSettlement>(stored).unwrap(),
+            internal
+        );
+
+        let forfeited = InstrumentSettlement::forfeited(
+            InstrumentId::trace_credit(),
+            AtomicUnits::from_raw(3),
+            hash(b"operation"),
+            ReasonCode::new("withdrawn").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(forfeited.external_receipt_hash(), None);
+    }
+
+    #[test]
+    fn loaded_settlement_refuses_a_malformed_external_receipt() {
+        use serde_json::{from_value, json};
+
+        for receipt in [
+            json!("0xabc"),
+            json!(hash(b"receipt").to_uppercase()),
+            json!(3),
+        ] {
+            let stored = json!({
+                "instrument_id": "trace_credit",
+                "atomic_units": "3",
+                "operation_ref_hash": hash(b"operation"),
+                "outcome": {
+                    "status": "completed",
+                    "result_ref_hash": hash(b"result"),
+                    "external_receipt_hash": receipt,
+                },
+            });
+            assert!(from_value::<InstrumentSettlement>(stored).is_err());
+        }
+
+        let mut settle = SettleEvidence::operations(false, 1);
+        settle
+            .settlement_progress
+            .push(InstrumentSettlementProgress {
+                instrument_id: InstrumentId::trace_credit(),
+                operation_ref_hash: hash(b"operation"),
+                result_ref_hash: Some(hash(b"result")),
+                external_receipt_hash: Some("0xabc".to_string()),
+            });
+        assert_eq!(settle.validate(), Err(ContractError::MalformedHash));
+        settle.settlement_progress[0].external_receipt_hash = Some(hash(b"receipt"));
+        assert_eq!(settle.validate(), Ok(()));
     }
 }

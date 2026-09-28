@@ -30,7 +30,7 @@ pub use perplexity::{
     TokenRarityScorer, scorer_status_is_transient,
 };
 pub use reference::{ReferenceEmbedder, ReferencePerplexityScorer};
-pub use settlement::{SettlementAdapter, SettlementError, SettlementRequest};
+pub use settlement::{SettlementAdapter, SettlementError, SettlementReceipt, SettlementRequest};
 pub use vector_index::{
     IndexEntryKey, IndexSnapshot, IndexUpsertResult, IndexWriteError, NearestNeighbor, VectorIndex,
     VectorIndexReader, VectorIndexSnapshot, VectorIndexWriter,
