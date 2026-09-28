@@ -2768,6 +2768,15 @@ A shell renders the words `consent_copy::route_disclosure_copy` gives for these
 facts and branches on neither. A shape it cannot read -- an unknown `route` or
 `origin` from a newer daemon -- is refused, not rendered as the nearest value.
 
+The native shells get the words through the C ABI rather than linking the
+crate: `tc_route_disclosure_copy(facts_json)` takes this method's result as
+sent and returns `{"facts": .., "copy": ..}`, or NULL for anything it cannot
+read; `tc_route_disclosure_unreadable_copy()` returns the sentences a surface
+shows in that case (`panel`, `session`); and `tc_certificate_detail_copy()`
+returns the labels for `certificate_detail`. GTK calls
+`consent_copy::route_disclosure_for_wire` directly. No shell writes a
+disclosure sentence of its own.
+
 ### The attested-inference record
 
 The attestation mark above is computed at discovery, before any receipt is

@@ -717,6 +717,51 @@ final class AppModel: ObservableObject {
         // just asked for, so it wins over a refused read.
         if case .refused(let writeLabel) = wrote { label = writeLabel }
         publishIfChanged(\.witnessLabel, label)
+        // The disclosure names the witness, so it moves with it.
+        refreshRouteDisclosure()
+    }
+
+    // MARK: - What leaves this machine (K11)
+
+    /// The daemon's facts in the shared crate's words, or nil when they
+    /// could not be read -- `routeDisclosureUnreadable` then says so, and
+    /// nothing is drawn in its place.
+    @Published private(set) var routeDisclosure: RouteDisclosure?
+    @Published private(set) var routeDisclosureUnreadable = false
+    /// The Rust's words for that case, read once: they do not change.
+    let routeDisclosureUnreadableCopy: RouteDisclosureUnreadable? =
+        TCConsentCopy.routeDisclosureUnreadableJSON().flatMap {
+            RouteDisclosureUnreadable.decode(fromJSON: $0)
+        }
+    /// Held certificates' claims, by entry id, for the review sheet.
+    @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
+
+    func refreshRouteDisclosure() {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let facts = try? client.routeDisclosureFactsJSON()
+            let disclosure = facts
+                .flatMap { TCConsentCopy.routeDisclosureJSON(forFacts: $0) }
+                .flatMap { RouteDisclosure.decode(fromJSON: $0) }
+            await MainActor.run {
+                self.publishIfChanged(\.routeDisclosure, disclosure)
+                self.publishIfChanged(\.routeDisclosureUnreadable, disclosure == nil)
+            }
+        }
+    }
+
+    /// Ask for the certificate one entry holds. Only for an entry whose
+    /// `holdsCertificate` is true; anything unreadable leaves nothing shown.
+    func loadCertificateDetail(entryID: String) {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let detail = (try? client.certificateDetailJSON(entryID: entryID)).flatMap { json in
+                TCConsentCopy.certificateDetailCopyJSON().flatMap {
+                    CertificateDetail.decode(detailJSON: json, copyJSON: $0)
+                }
+            }
+            await MainActor.run { self.certificateDetails[entryID] = detail }
+        }
     }
 
     @Published private(set) var outcomeCounts: [String: Int] = [:]

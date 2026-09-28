@@ -272,6 +272,14 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
+            // K11: what leaves this computer for this session, before and
+            // after redaction, and what its witness was checked against.
+            if let summary {
+                SessionSendDisclosureView(
+                    entry: entry,
+                    rawSessionBytes: summary.rawSessionBytes,
+                    wouldSendBytes: summary.wouldSendBytes)
+            }
             if let summary, let copy = model.publicRunCopy {
                 VStack(alignment: .leading, spacing: TC.Space.xxs) {
                     TCFieldLabel(copy.task)

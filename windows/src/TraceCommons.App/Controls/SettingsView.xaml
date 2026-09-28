@@ -24,6 +24,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:interop="using:TraceCommons.Interop"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -470,6 +471,47 @@
                                 HorizontalAlignment="Left"
                                 Click="OnOpenPrivateInference" />
                     </StackPanel>
+                </Border>
+
+                <!--
+                    K11: where sessions go. The raw send, both enclaves, and
+                    where the witness came from, above the witness card they
+                    name. Every row is RouteDisclosureSurface's, which is the
+                    Rust's words for the daemon's route_disclosure; there is
+                    not one string literal here. Machine values (address,
+                    signing key, each pinned measurement) are shown verbatim
+                    and selectable.
+                -->
+                <TextBlock Text="{x:Bind Settings.DisclosureTitle, Mode=OneWay}"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <ItemsControl ItemsSource="{x:Bind Settings.DisclosureRows}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="interop:DisclosureRow">
+                                <StackPanel Spacing="2" Margin="0,3">
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsHeading}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsText}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Value}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcMonoChipTextStyle}"
+                                               IsTextSelectionEnabled="True"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
                 </Border>
 
                 <!--

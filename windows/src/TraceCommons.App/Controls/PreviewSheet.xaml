@@ -380,6 +380,38 @@
                     </ItemsControl>
 
                     <!--
+                        K11, for this session: the size before redaction and
+                        after, where each goes, and what the witness was
+                        checked against when it reviewed it. Every row is
+                        RouteDisclosureSurface's, the Rust's words for the
+                        daemon's route_disclosure and certificate_detail. Raw
+                        text is never shown.
+                    -->
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.SessionDisclosureRows, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="interop:DisclosureRow">
+                                <StackPanel Spacing="2" Margin="0,2">
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsHeading}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsText}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Text}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcEyebrowTextStyle}" />
+                                    <TextBlock Text="{x:Bind Value}"
+                                               Visibility="{x:Bind IsValue}"
+                                               Style="{StaticResource TcMonoChipTextStyle}"
+                                               IsTextSelectionEnabled="True"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!--
                         The other half, and the reason this panel is worth
                         building. residual_secret_at counts a secret the scan
                         DETECTED AND DID NOT REMOVE, it arrives in the same map
