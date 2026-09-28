@@ -179,6 +179,10 @@ pub struct SettingsView {
     /// to a session, and what the last submission this process made
     /// actually did. Rebuilt on each render, because both are labels.
     witness_status: gtk::Box,
+    /// K11's disclosure: what leaves this machine, to whom, and where the
+    /// witness came from. Rebuilt from the daemon's `route_disclosure` on
+    /// each witness render; every row is `crate::disclosure`'s.
+    disclosure_rows: gtk::Box,
     /// The address, the signing key and the pins. Built once and only ever
     /// refilled, for the same reason the routing fields are: a refresh runs
     /// on every daemon event and would otherwise replace a half-typed
@@ -385,6 +389,14 @@ impl SettingsView {
         // core's own words -- the three shells print this card and a word
         // kept in three places is a privacy claim that stops matching
         // itself. Nothing here is authored in this view.
+        // K11: where sessions go, above the witness it names. Filled by
+        // `render_disclosure`; empty until the daemon answers.
+        content.append(&style::section(
+            trace_commons_contributor::consent_copy::DISCLOSURE_TITLE,
+        ));
+        let disclosure_rows = style::card(gtk::Orientation::Vertical, space::S);
+        content.append(&disclosure_rows);
+
         content.append(&style::section(copy::WITNESS_HEADING));
         let witness_card = style::card(gtk::Orientation::Vertical, space::M);
         style::append_body(&witness_card, copy::WITNESS_INTRO);
@@ -682,6 +694,7 @@ impl SettingsView {
             private_inference_link,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
+            disclosure_rows,
             witness_form,
             witness_url,
             witness_signing_address,
@@ -3120,7 +3133,18 @@ fn text_of(view: &gtk::TextView) -> String {
 /// is the card where that matters most: the difference between "redacted
 /// here" and "nothing left this machine" must survive a greyscale
 /// screenshot.
+/// K11: ask the daemon what leaves this machine and draw the core's words
+/// for it. A failed call is drawn as unreadable, never as a route.
+fn render_disclosure(app: &Rc<App>) {
+    app.call("route_disclosure", serde_json::json!({}), |app, result| {
+        let (_, rows) = crate::disclosure::panel(result.as_ref().ok());
+        super::fill_disclosure_rows(&app.settings.disclosure_rows, &rows);
+    });
+}
+
 pub fn render_witness(app: &Rc<App>) {
+    // The disclosure names the witness, so it is repainted with it.
+    render_disclosure(app);
     let status = witness_read(&app.worker.dir);
     let state = status.state;
     let actions = witness_actions(state);

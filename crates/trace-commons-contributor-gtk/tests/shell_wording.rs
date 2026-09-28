@@ -147,7 +147,28 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
 ///
 /// `ui/style.rs` and `ui/css_contract.rs` are not here: they hold CSS, which
 /// is not wording, and the scanner does not count it.
-const RUST_OWNED_SURFACES: &[&str] = &[];
+///
+/// `disclosure.rs` is K11's: the raw send, both enclaves and where the
+/// witness came from, every row from `consent_copy::route_disclosure_for_wire`.
+const RUST_OWNED_SURFACES: &[&str] = &["disclosure.rs"];
+
+/// K11's two surfaces draw their rows from `crate::disclosure` and nowhere
+/// else, so neither the Settings section nor the preview block can grow a
+/// sentence of its own beside the core's.
+#[test]
+fn the_disclosure_surfaces_draw_the_cores_rows() {
+    let read = |path: &str| {
+        std::fs::read_to_string(src_root().join(path)).unwrap_or_else(|_| panic!("{path}"))
+    };
+    let settings = read("ui/settings.rs");
+    assert!(settings.contains("crate::disclosure::panel(result.as_ref().ok())"));
+    assert!(settings.contains("consent_copy::DISCLOSURE_TITLE"));
+    let preview = read("ui/preview.rs");
+    assert!(preview.contains("crate::disclosure::session("));
+    assert!(preview.contains("\"certificate_detail\""));
+    let module = read("disclosure.rs");
+    assert!(module.contains("consent_copy::route_disclosure_for_wire"));
+}
 
 /// Words a sentence has and an identifier, a wire key, a CSS class or a
 /// format pattern does not.
