@@ -18,9 +18,17 @@ import {
   type QuitConfirmationCopy,
 } from "./quit-confirmation-copy";
 import {
+  type CertificateDetail,
+  parseCertificateDetail,
+  parseRouteDisclosure,
+  type RouteDisclosure,
+} from "./route-disclosure";
+import {
   parseWitnessCapacityNotice,
   type WitnessCapacityNotice,
 } from "./witness-capacity";
+
+export type { CertificateDetail, RouteDisclosure } from "./route-disclosure";
 
 export type { QuitConfirmationCopy } from "./quit-confirmation-copy";
 
@@ -609,6 +617,23 @@ export async function getWitnessCapacityNotice(
 ): Promise<WitnessCapacityNotice> {
   return parseWitnessCapacityNotice(
     await invokeTauri("witness_capacity_notice", { capacity: wire }),
+  );
+}
+
+/**
+ * K11: the daemon's `route_disclosure` facts and the core's words for them.
+ * Throws on a payload whose words do not match its facts.
+ */
+export async function getRouteDisclosure(): Promise<RouteDisclosure> {
+  return parseRouteDisclosure(await invokeTauri("route_disclosure"));
+}
+
+/** The certificate a pending entry holds, as checked at review. */
+export async function getCertificateDetail(
+  entryId: string,
+): Promise<CertificateDetail> {
+  return parseCertificateDetail(
+    await invokeTauri("certificate_detail", { entryId }),
   );
 }
 

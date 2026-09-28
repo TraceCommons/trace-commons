@@ -415,6 +415,10 @@ fn persist(
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness_origin: Some(crate::config::WitnessOriginRecord::for_witness(
+            &commons.witness,
+            crate::config::WitnessOrigin::PublishedAtJoin,
+        )),
         witness: Some(commons.witness),
         inference_receipt_endpoint: commons.receipt_endpoint,
         consent_scopes_chosen: false,
@@ -654,6 +658,13 @@ mod tests {
         assert_eq!(
             written.witness.as_ref().map(|w| w.url.as_str()),
             Some("https://witness.example")
+        );
+        // K11: the join says where the witness came from.
+        assert_eq!(
+            written.witness_origin_view(),
+            Some(crate::config::WitnessOriginView::Recorded(
+                crate::config::WitnessOrigin::PublishedAtJoin
+            ))
         );
         assert_eq!(
             written.inference_receipt_endpoint.as_deref(),
