@@ -35,6 +35,7 @@ use trace_commons_protocol::trace_contribution::{
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;
+use trace_commons_server::error::DatabaseError;
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
@@ -42,8 +43,8 @@ use trace_commons_server::trace_artifact_store::{
 };
 use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::trace_corpus_storage::{
-    TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite, TraceObjectArtifactKind,
-    TraceObjectRefWrite,
+    TraceCorpusStatus, TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite,
+    TraceObjectArtifactKind, TraceObjectRefWrite, TraceSourceSessionStatus, TraceSubmissionWrite,
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_authority::{
@@ -14452,4 +14453,1039 @@ async fn compatibility_credit_matches_main_gate_path() {
         Some("pending"),
         "a NoveltyUtility ledger row is never marked final"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Withdrawal (`PipelineService::withdraw_submission`)
+// ---------------------------------------------------------------------------
+
+/// The principal `receipt` submits as: the owner of every run this suite
+/// creates through a receipt.
+const RECEIPT_PRINCIPAL: &str = "principal_sha256:test";
+
+/// Withdraws `submission_id` as its owner, outside any source session.
+async fn withdraw(
+    service: &PipelineService,
+    tenant: &str,
+    submission_id: uuid::Uuid,
+) -> PipelineWithdrawalOutcome {
+    service
+        .withdraw_submission(tenant, submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner's withdrawal succeeds")
+}
+
+/// The run row's `xmax`, as text. While a transaction holds the row locked
+/// `FOR UPDATE`, this is that transaction's id.
+async fn run_row_locker(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) -> String {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let xid: String = tx
+        .query_one(
+            "SELECT xmax::text FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("read the run row's locker")
+        .get(0);
+    tx.commit().await.unwrap();
+    xid
+}
+
+/// Returns once PostgreSQL reports a session waiting for transaction `xid`
+/// to end, that is, a session blocked on a row lock `xid` holds. Panics if
+/// `task` finishes first, or if no session waits within the bound.
+async fn wait_for_a_waiter_on<T>(
+    backend: &PgBackend,
+    xid: &str,
+    task: &tokio::task::JoinHandle<T>,
+) {
+    let deadline = std::time::Instant::now() + HELD_CALL_BOUND;
+    loop {
+        let waiting: i64 = backend
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM pg_locks
+                  WHERE locktype = 'transactionid' AND NOT granted
+                    AND transactionid::text = $1",
+                &[&xid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting > 0 {
+            return;
+        }
+        assert!(
+            !task.is_finished(),
+            "the withdrawal finished without waiting for the lock holder"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no session waited for the lock holder within the bound"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Review Focus 1. Settle's index dispatch holds the run row and then the
+/// submission row for its whole write. A withdrawal that arrives during
+/// the write waits for it: PostgreSQL reports the withdrawal waiting for the
+/// dispatch's transaction, and the withdrawal has not finished 300 ms later.
+/// Only then is the write released. The withdrawal therefore reads the run
+/// after the dispatch committed `complete`, and it queues an invalidation of
+/// the revision, so the entries the write left do not stay visible (Task 8
+/// removes them). Neither side fails: a deadlock would fail the withdrawal
+/// or send Settle to `retry` as `database_unavailable`.
+///
+/// It cannot pass by luck: the release waits for PostgreSQL's own report of
+/// the lock wait, not for a sleep, so the order of the two commits is fixed
+/// in every run; and a withdrawal that read the run before the dispatch
+/// committed would see `pending`, cancel it, and fail the
+/// `index_write_state` assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawal_blocks_until_the_index_commit_and_then_invalidates() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) =
+        held_index_test_service(backend.clone(), artifact_store(&dir), minimal_config(true)).await;
+    let tenant = format!("withdraw-during-write-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let revision_id = run.approved_revision_id.expect("an approved revision");
+
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    let dispatch_xid = run_row_locker(&backend, &tenant, run.run_id).await;
+
+    let mut withdrawal = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let submission_id = run.submission_id;
+        async move {
+            service
+                .withdraw_submission(&tenant, submission_id, RECEIPT_PRINCIPAL, None)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &dispatch_xid, &withdrawal).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut withdrawal)
+            .await
+            .is_err(),
+        "the withdrawal must wait while the index write is in progress"
+    );
+
+    held.release();
+    let settled = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle finishes once released")
+        .expect("the Settle task did not panic")
+        .expect("Settle does not fail")
+        .expect("Settle runs");
+    let outcome = tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal finishes once the write commits")
+        .expect("the withdrawal task did not panic")
+        .expect("the withdrawal does not fail, with a deadlock or otherwise");
+
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_ne!(
+        settled.last_error_label.as_deref(),
+        Some(PIPELINE_DATABASE_UNAVAILABLE_LABEL),
+        "Settle was never a deadlock victim"
+    );
+    assert_eq!(settled.index_write_state, "complete");
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "the write finished before the withdrawal"
+    );
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(outcome.affected_submission_ids, vec![run.submission_id]);
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        rows,
+        vec![(
+            revision_id,
+            "withdrawn".to_string(),
+            "pending".to_string(),
+            true
+        )],
+        "one invalidation of the revision is queued, due at once"
+    );
+    assert_eq!(run_state, "pending");
+    let current = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.index_write_state, "complete");
+}
+
+/// Ruling T7-2: the withdrawal locks the run rows before the submission
+/// row, the order Settle's index dispatch uses. A transaction here plays the
+/// dispatch: it locks the run row, the withdrawal then waits for it, and
+/// the transaction then takes the submission row `FOR SHARE` as the
+/// dispatch's guard does. The share lock is granted at once, because the
+/// waiting withdrawal holds nothing yet. A withdrawal that locked the
+/// submission row first would hold it here, the share lock would wait for
+/// the withdrawal, and PostgreSQL would abort one side as a deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdrawal_locks_the_run_before_the_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-lock-order-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let mut holder_client = backend.trace_pool_for_test().get().await.unwrap();
+    let holder = tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    let holder_xid: String = holder
+        .query_one("SELECT pg_current_xact_id()::text", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let withdrawal = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let submission_id = run.submission_id;
+        async move {
+            service
+                .withdraw_submission(&tenant, submission_id, RECEIPT_PRINCIPAL, None)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &holder_xid, &withdrawal).await;
+
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        holder.query_one(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR SHARE",
+            &[&tenant, &run.submission_id],
+        ),
+    )
+    .await
+    .expect("the submission row is not held by the waiting withdrawal")
+    .expect("the share lock is granted, not a deadlock victim");
+    holder
+        .commit()
+        .await
+        .expect("the dispatch's stand-in commits");
+    drop(holder_client);
+
+    let outcome = tokio::time::timeout(HELD_CALL_BOUND, withdrawal)
+        .await
+        .expect("the withdrawal finishes once the run row is free")
+        .expect("the withdrawal task did not panic")
+        .expect("the withdrawal is not a deadlock victim");
+    assert_eq!(outcome.affected_submission_ids, vec![run.submission_id]);
+}
+
+/// A withdrawal after Score and before Settle selects: nothing was written
+/// to the index, so there is nothing to invalidate. Settle then excludes
+/// the index with `submission_inoperable` and never calls the writer. The
+/// unsettled Trace Credit award is reported as forfeited, and a second call
+/// after Settle forfeited it reports the same.
+#[tokio::test]
+async fn withdrawal_before_selection_excludes_the_index() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-before-selection-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::NotRequired
+    );
+    assert!(
+        outcome.trace_credit_forfeited,
+        "the Trace Credit award had not settled"
+    );
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(settled.index_write_state, "none");
+    assert_eq!(index.writer_calls(), 0, "the index writer is never called");
+    for adapter in &adapters {
+        assert_eq!(adapter.requests().len(), 0, "no settlement adapter call");
+    }
+    let settle_outcome = service
+        .store()
+        .outcome_for_phase(&tenant, run.run_id, Phase::Settle)
+        .await
+        .unwrap()
+        .expect("Settle outcome recorded");
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    match decision.index_membership {
+        IndexMembershipDecision::Exclude { reason } => {
+            assert_eq!(reason.as_str(), PIPELINE_SUBMISSION_INOPERABLE_LABEL);
+        }
+        IndexMembershipDecision::Include { .. } => {
+            panic!("a withdrawn submission must not commit an Include decision")
+        }
+    }
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert!(rows.is_empty(), "no invalidation is queued");
+    assert_eq!(run_state, "none");
+
+    let again = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        again.index_invalidation,
+        PipelineWithdrawalFollowUpState::NotRequired
+    );
+    assert!(
+        again.trace_credit_forfeited,
+        "a retry after Settle forfeited the award reports the same"
+    );
+    assert_eq!(again.withdrawal, outcome.withdrawal);
+}
+
+/// Ruling T7-3: a run whose index write is `pending` may be partly written.
+/// A withdrawal cancels the write, excludes the run from the index, and
+/// queues an invalidation in the same transaction. Settle then finishes
+/// without writing.
+#[tokio::test]
+async fn withdrawal_during_pending_index_work_cancels_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        Some(PipelineCrashPoint::AfterSettleSelection),
+    )
+    .await;
+    let tenant = format!("withdraw-pending-write-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let revision_id = run.approved_revision_id.expect("an approved revision");
+    let crashed = service.process_run(&tenant, run.run_id).await;
+    assert_eq!(
+        crashed
+            .expect_err("the injected crash must propagate as an error")
+            .to_string(),
+        INJECTED_PIPELINE_CRASH
+    );
+    let pending = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.index_write_state, "pending");
+    assert_eq!(pending.index_membership, "included");
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let cancelled = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.index_write_state, "cancelled");
+    assert_eq!(cancelled.index_membership, "excluded");
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        rows,
+        vec![(
+            revision_id,
+            "withdrawn".to_string(),
+            "pending".to_string(),
+            true
+        )]
+    );
+    assert_eq!(run_state, "pending");
+
+    expire_lease(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(index.writer_calls(), 0, "no index entry is written");
+}
+
+/// PR 2's rule: a withdrawal changes no settlement row, and Settle's next
+/// pass forfeits every leg that is not complete without an adapter call.
+/// Here the `trace_credit` leg completed and the `storage_rebate` adapter
+/// answered `Unavailable` once, so that leg waits in `retry` with
+/// `dispatched_at` set. `withdrawal_forfeit_label` flags a dispatched leg of
+/// an external instrument whose label does not say "no effect"
+/// (`Unavailable` is not `Conflict` or `Rejected`) as
+/// `settlement_unreconciled`. The Trace Credit leg stays complete, in its
+/// finalized batch.
+#[tokio::test]
+async fn withdrawal_forfeits_unsettled_and_keeps_settled_credit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let rebate = adapters[0].clone();
+    let tenant = format!("withdraw-forfeit-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    rebate.fail_next();
+    let waiting = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(waiting.state, PipelineRunState::Retry);
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "retry");
+    assert!(leg_dispatched(&rows, "storage_rebate"));
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(SettlementError::Unavailable.label())
+    );
+    assert_eq!(leg_state(&rows, "trace_credit"), "complete");
+    let rebate_calls = rebate.requests().len();
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert!(
+        !outcome.trace_credit_forfeited,
+        "the Trace Credit leg had already settled"
+    );
+    assert_eq!(
+        settlement_rows(&backend, &tenant, run.run_id).await,
+        rows,
+        "the withdrawal itself changes no settlement row"
+    );
+
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(
+        rebate.requests().len(),
+        rebate_calls,
+        "no adapter call for a forfeited leg"
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
+    assert!(
+        leg_dispatched(&rows, "storage_rebate"),
+        "dispatched_at is kept"
+    );
+    assert_credit_settled_once(
+        &backend,
+        &service,
+        &tenant,
+        run.run_id,
+        "settled before the withdrawal",
+    )
+    .await;
+}
+
+/// Another principal's withdrawal, and a withdrawal of a submission that
+/// does not exist, are both `NotFound`, and neither writes anything.
+#[tokio::test]
+async fn withdrawal_by_another_principal_is_not_found() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-not-owner-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    for (submission_id, principal) in [
+        (run.submission_id, "principal_sha256:someone_else"),
+        (uuid::Uuid::new_v4(), RECEIPT_PRINCIPAL),
+    ] {
+        let error = service
+            .withdraw_submission(&tenant, submission_id, principal, None)
+            .await
+            .expect_err("not the owner's submission");
+        assert!(
+            matches!(
+                error.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::NotFound { .. })
+            ),
+            "unexpected error: {error}"
+        );
+    }
+    assert_eq!(count_tenant_rows(&tenant, "trace_withdrawals").await, 0);
+    assert_eq!(count_tenant_rows(&tenant, "trace_tombstones").await, 0);
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_revocation_propagation_items").await,
+        0
+    );
+    let current = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current, run, "the run is unchanged");
+}
+
+/// `(status, withdrawn_at, revoked_at, purged_at)` of one submission, the
+/// three timestamps as "is set".
+async fn submission_withdrawal_columns(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) -> (String, bool, bool, bool) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT status, withdrawn_at IS NOT NULL, revoked_at IS NOT NULL,
+                    purged_at IS NOT NULL
+               FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1), row.get(2), row.get(3))
+}
+
+/// `SELECT COUNT(*) FROM {table} WHERE tenant_id = $1 AND {predicate}` for
+/// one submission (`$2`). `table` and `predicate` are literals, never input.
+async fn count_submission_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+    table: &str,
+    predicate: &str,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            &format!(
+                "SELECT COUNT(*) FROM {table}
+                  WHERE tenant_id = $1 AND submission_id = $2 AND {predicate}"
+            ),
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// The withdrawal's rows and follow-up for a run that finished with an
+/// index write, and a second call: the same answer and no new rows.
+#[tokio::test]
+async fn withdrawal_is_idempotent() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-idempotent-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.index_write_state, "complete");
+    let submission_id = run.submission_id;
+    let live_object_refs = count_submission_rows(
+        &backend,
+        &tenant,
+        submission_id,
+        "trace_object_refs",
+        "deleted_at IS NULL",
+    )
+    .await;
+    assert!(live_object_refs >= 2, "the source and the approved object");
+
+    let first = withdraw(&service, &tenant, submission_id).await;
+    assert_eq!(first.withdrawal.submission_id, submission_id);
+    assert_eq!(first.withdrawal.prior_status, "accepted");
+    assert_eq!(
+        first.withdrawal.distribution_reach,
+        "commons_not_distributed"
+    );
+    assert_eq!(first.affected_submission_ids, vec![submission_id]);
+    assert_eq!(
+        first.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(
+        first.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert!(!first.trace_credit_forfeited);
+    assert_eq!(
+        submission_withdrawal_columns(&backend, &tenant, submission_id).await,
+        ("revoked".to_string(), true, true, true)
+    );
+    let counts = || async {
+        (
+            count_tenant_rows(&tenant, "trace_withdrawals").await,
+            count_tenant_rows(&tenant, "trace_tombstones").await,
+            count_tenant_rows(&tenant, "trace_revocation_propagation_items").await,
+            count_tenant_rows(&tenant, "pipeline_index_invalidations").await,
+            count_submission_rows(
+                &backend,
+                &tenant,
+                submission_id,
+                "trace_object_refs",
+                "invalidated_at IS NOT NULL",
+            )
+            .await,
+            count_submission_rows(
+                &backend,
+                &tenant,
+                submission_id,
+                "trace_derived_records",
+                "status = 'revoked'",
+            )
+            .await,
+        )
+    };
+    let after_first = counts().await;
+    assert_eq!(
+        after_first,
+        (1, 1, live_object_refs, 1, live_object_refs, 1),
+        "one withdrawal, one tombstone, one payload deletion per live object, one \
+         index invalidation, every object ref invalidated, the derived record revoked"
+    );
+
+    let second = withdraw(&service, &tenant, submission_id).await;
+    assert_eq!(second, first, "the same withdrawal and follow-up states");
+    assert_eq!(counts().await, after_first, "no rows added");
+}
+
+/// Ruling T7-1: a withdrawal releases a run parked for review, due at once,
+/// so the runner ends it under PR 2's Review routing of
+/// `submission_inoperable` instead of leaving it parked forever. It is no
+/// longer in the review queue.
+#[tokio::test]
+async fn withdrawal_releases_a_parked_review_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-parked-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    set_next_attempt_at_in_the_future(&backend, &tenant, parked.run_id).await;
+
+    let outcome = withdraw(&service, &tenant, parked.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::NotRequired
+    );
+    assert_eq!(outcome.withdrawal.prior_status, "quarantined");
+    assert_eq!(outcome.withdrawal.distribution_reach, "not_distributed");
+    let released = service
+        .store()
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert!(
+        released.next_attempt_at <= chrono::Utc::now(),
+        "released due at once"
+    );
+    assert!(
+        service
+            .store()
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a withdrawn run is not waiting for review"
+    );
+
+    let processed = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("the runner claims the released run");
+    assert_eq!(processed.state, PipelineRunState::Failed);
+    assert_eq!(
+        processed.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+}
+
+/// Inserts a pipeline export snapshot carrying `run`'s approved revision,
+/// `complete` (delivered) or `ready`. Test setup through an owner
+/// connection: the runtime login holds no INSERT on the export tables.
+async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid::Uuid {
+    let snapshot_id = uuid::Uuid::new_v4();
+    let hash = |seed: &str| format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())));
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &run.tenant_id).await;
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshots (
+            tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash, item_count,
+            state, export_manifest_id, completed_at
+         ) VALUES ($1,$2,$3,'exporter_sha256:test','model_training',$4,'pipeline_export_v1',
+                   $5,1,$6,$7,$8)",
+        &[
+            &run.tenant_id,
+            &snapshot_id,
+            &hash(&format!("key-{snapshot_id}")),
+            &hash("purpose"),
+            &hash(&format!("sources-{snapshot_id}")),
+            &(if complete { "complete" } else { "ready" }),
+            &complete.then(uuid::Uuid::new_v4),
+            &complete.then(chrono::Utc::now),
+        ],
+    )
+    .await
+    .expect("insert the snapshot");
+    tx.execute(
+        "INSERT INTO pipeline_export_snapshot_items (
+            tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+            registry_revision_id, source_object_ref_id, source_content_hash, bundle_id,
+            outcome_schema_id, outcome_schema_version, authorized_view_schema_id,
+            consent_scopes, allowed_uses
+         ) VALUES ($1,$2,0,$3,$4,$5,$6,$7,$8,$9,'pipeline_outcome',1,'pipeline_view',
+                   '[]'::jsonb,'[]'::jsonb)",
+        &[
+            &run.tenant_id,
+            &snapshot_id,
+            &run.run_id,
+            &run.submission_id,
+            &run.trace_id,
+            &run.approved_revision_id.expect("an approved revision"),
+            &run.approved_object_ref_id.expect("an approved object"),
+            &run.approved_content_hash.clone().expect("an approved hash"),
+            &run.bundle_id,
+        ],
+    )
+    .await
+    .expect("insert the snapshot item");
+    tx.commit().await.unwrap();
+    snapshot_id
+}
+
+/// The withdrawal invalidates every pipeline export snapshot and item that
+/// carries the submission, in its own transaction. A delivered (`complete`)
+/// snapshot put copies out, so the withdrawal reports `commons_distributed`,
+/// as `main` does for a legacy export.
+#[tokio::test]
+async fn withdrawal_invalidates_pipeline_exports_and_reports_them_distributed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("withdraw-exported-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let delivered = insert_export_snapshot(&run, true).await;
+    let ready = insert_export_snapshot(&run, false).await;
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(outcome.withdrawal.distribution_reach, "commons_distributed");
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    for snapshot_id in [delivered, ready] {
+        let snapshot = tx
+            .query_one(
+                "SELECT state, invalidated_at IS NOT NULL FROM pipeline_export_snapshots
+                  WHERE tenant_id = $1 AND snapshot_id = $2",
+                &[&tenant, &snapshot_id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot.get::<_, String>(0), "invalidated");
+        assert!(snapshot.get::<_, bool>(1));
+        let item = tx
+            .query_one(
+                "SELECT invalidated_at IS NOT NULL, invalidation_reason
+                   FROM pipeline_export_snapshot_items
+                  WHERE tenant_id = $1 AND snapshot_id = $2",
+                &[&tenant, &snapshot_id],
+            )
+            .await
+            .unwrap();
+        assert!(item.get::<_, bool>(0));
+        assert_eq!(
+            item.get::<_, Option<String>>(1).as_deref(),
+            Some("withdrawn")
+        );
+    }
+    tx.commit().await.unwrap();
+}
+
+/// Adds an account to `tenant_id` and links the receipt principal to it, so
+/// the submissions that principal owns belong to the account
+/// (`source_submission_owned_by_account`).
+async fn link_receipt_principal_to_a_new_account(
+    backend: &PgBackend,
+    tenant_id: &str,
+) -> uuid::Uuid {
+    let account_id = uuid::Uuid::new_v4();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&tenant_id, &account_id],
+    )
+    .await
+    .expect("insert the account");
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&tenant_id, &account_id, &RECEIPT_PRINCIPAL],
+    )
+    .await
+    .expect("link the receipt principal");
+    tx.commit().await.unwrap();
+    account_id
+}
+
+/// A `PgBackend` connected as the database owner (the configured URL's own
+/// user), for fixture writes through `main`'s store methods that the
+/// runtime login does not hold the grants for.
+async fn owner_backend() -> PgBackend {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
+    PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        .await
+        .expect("connect as the database owner")
+}
+
+/// A legacy submission owned by the receipt principal, with no pipeline run.
+async fn insert_submission_without_a_run(backend: &PgBackend, tenant_id: &str) -> uuid::Uuid {
+    let submission_id = uuid::Uuid::new_v4();
+    backend
+        .upsert_trace_submission(TraceSubmissionWrite {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            trace_id: uuid::Uuid::new_v4(),
+            auth_principal_ref: RECEIPT_PRINCIPAL.to_string(),
+            contributor_pseudonym: None,
+            submitted_tenant_scope_ref: None,
+            schema_version: "ironclaw.trace_contribution.v1".to_string(),
+            consent_policy_version: "2026-04-24".to_string(),
+            consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["debugging".to_string()],
+            retention_policy_id: "private_corpus_revocable".to_string(),
+            status: TraceCorpusStatus::Quarantined,
+            privacy_risk: "low".to_string(),
+            redaction_pipeline_version: "deterministic-v1".to_string(),
+            redaction_counts: BTreeMap::new(),
+            redaction_hash: "sha256:redaction".to_string(),
+            canonical_summary_hash: None,
+            submission_score: None,
+            credit_points_pending: None,
+            credit_points_final: None,
+            expires_at: None,
+            residual_risk_basis: None,
+        })
+        .await
+        .expect("insert the submission");
+    submission_id
+}
+
+/// Owner ruling T7-7 (#1021): a withdrawal reaches the whole source
+/// session, as `main`'s does. The session holds a pipeline submission whose
+/// index write is `complete` and a sibling with no run. Withdrawing either
+/// one withdraws both, queues the invalidation of the pipeline revision,
+/// and marks the session withdrawn, so a later upload of the session is
+/// refused (the claim admission makes answers `Withdrawn`, which admission
+/// turns into `source_session_withdrawn`).
+#[tokio::test]
+async fn withdrawal_of_either_session_submission_withdraws_the_session() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    for withdraw_the_pipeline_submission in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let tenant = format!("withdraw-session-{}", uuid::Uuid::new_v4());
+        let (run, _) = run_to_settle_ready(&service, &tenant).await;
+        let settled = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs");
+        assert_eq!(settled.index_write_state, "complete");
+        let revision_id = run.approved_revision_id.expect("an approved revision");
+        let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+        let sibling = insert_submission_without_a_run(&backend, &tenant).await;
+        let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+            .as_slice()
+            .try_into()
+            .unwrap();
+        // Claiming a source session is account admission's write, not the
+        // ingest runtime's (V90), so the fixture claims it as the owner.
+        for submission_id in [run.submission_id, sibling] {
+            assert_eq!(
+                owner
+                    .claim_trace_source_session(&tenant, account_id, &digest, submission_id)
+                    .await
+                    .unwrap(),
+                TraceSourceSessionStatus::Active
+            );
+        }
+        let requested = if withdraw_the_pipeline_submission {
+            run.submission_id
+        } else {
+            sibling
+        };
+
+        let outcome = service
+            .withdraw_submission(&tenant, requested, RECEIPT_PRINCIPAL, Some(account_id))
+            .await
+            .expect("the owner's withdrawal succeeds");
+
+        let mut both = vec![run.submission_id, sibling];
+        both.sort();
+        assert_eq!(outcome.affected_submission_ids, both);
+        assert_eq!(outcome.withdrawal.submission_id, requested);
+        assert_eq!(
+            outcome.index_invalidation,
+            PipelineWithdrawalFollowUpState::Pending
+        );
+        for submission_id in [run.submission_id, sibling] {
+            assert_eq!(
+                count_submission_rows(
+                    &backend,
+                    &tenant,
+                    submission_id,
+                    "trace_withdrawals",
+                    "TRUE"
+                )
+                .await,
+                1
+            );
+            assert_eq!(
+                submission_withdrawal_columns(&backend, &tenant, submission_id).await,
+                ("revoked".to_string(), true, true, true)
+            );
+        }
+        let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+        assert_eq!(
+            rows,
+            vec![(
+                revision_id,
+                "withdrawn".to_string(),
+                "pending".to_string(),
+                true
+            )]
+        );
+        assert_eq!(run_state, "pending");
+        assert_eq!(
+            backend
+                .get_trace_source_session_status(&tenant, account_id, &digest)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Withdrawn
+        );
+        assert_eq!(
+            owner
+                .claim_trace_source_session(&tenant, account_id, &digest, uuid::Uuid::new_v4())
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Withdrawn,
+            "a later upload of the session is refused"
+        );
+    }
 }

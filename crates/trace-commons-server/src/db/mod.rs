@@ -22,6 +22,7 @@ mod trace_corpus_pg;
 
 pub(crate) use trace_corpus_pg::{
     insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
+    source_submission_owned_by_account,
 };
 
 pub use postgres::InviteRedemption;

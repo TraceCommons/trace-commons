@@ -1638,7 +1638,7 @@ async fn lock_source_submission_identity(
 
 /// Historical content and either admission ledger are independent ownership
 /// evidence. Missing principal/anchor linkage is not authority to claim a row.
-async fn source_submission_owned_by_account(
+pub(crate) async fn source_submission_owned_by_account(
     tx: &Transaction<'_>,
     tenant: &str,
     submission: Uuid,

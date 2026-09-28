@@ -1787,3 +1787,380 @@ async fn mark_admission_completed(
         .await
         .expect("insert fixture trace_admission_submissions row");
 }
+
+// ---------------------------------------------------------------------------
+// Withdrawal through the account session: the pipeline route and the legacy
+// route on a submission with a pipeline run (Rulings T7-4, T7-7, T7-8).
+//
+// These tests drive the run to completion through the service built at the
+// P5 seam (`assemble_test_pipeline_service`) and then exercise the handler
+// or the router: what they test is the withdrawal routes, not the receipt.
+// ---------------------------------------------------------------------------
+
+/// The migration owner, with the login-resolver pool, for the account side
+/// of the withdrawal tests: minting and redeeming an account session needs
+/// that pool (`docs/operator/login-resolver-role.md`), which the runtime-role
+/// backend above does not configure. The pipeline service itself still runs
+/// on the runtime role. Both connect to `pipeline_http_database_url`, the
+/// database the runtime login runs in, and so does the resolver pool: the
+/// resolver URL the database configuration reads names the configured test
+/// database, so its database is replaced with that one. Panics on any setup
+/// failure once `TRACE_COMMONS_PG_TEST_DATABASE_URL` is set.
+async fn account_owner_backend() -> Option<Arc<PgBackend>> {
+    let url = pipeline_http_database_url().await?;
+    let login_resolver_url = DatabaseConfig::login_resolver_url_from_env().map(|resolver| {
+        let mut resolver_url =
+            reqwest::Url::parse(resolver.expose_secret()).expect("parse the resolver URL");
+        resolver_url.set_path(
+            reqwest::Url::parse(&url)
+                .expect("parse the suite's database URL")
+                .path(),
+        );
+        SecretString::from(resolver_url.to_string())
+    });
+    let config = DatabaseConfig {
+        url: SecretString::from(url),
+        pool_size: 4,
+        ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    };
+    let backend = PgBackend::new(&config)
+        .await
+        .expect("connect as the migration owner");
+    backend.run_migrations().await.expect("apply migrations");
+    reset_account_rate_limiter_for_db_test().await;
+    Some(Arc::new(backend))
+}
+
+/// One tenant with two contributor tokens (an owner and another account), an
+/// `AppState` whose account side runs on the migration owner, and a pipeline
+/// service on the runtime role, injected into the state.
+struct WithdrawalFixture {
+    state: Arc<AppState>,
+    service: Arc<PipelineService>,
+    owner: Arc<PgBackend>,
+    runtime: Arc<PgBackend>,
+    tenant: String,
+    token: String,
+    other_token: String,
+    _dir: tempfile::TempDir,
+}
+
+async fn withdrawal_fixture() -> Option<WithdrawalFixture> {
+    let runtime = runtime_backend(4).await?;
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-withdraw-{suffix}");
+    let token = format!("token-withdraw-{suffix}");
+    let other_token = format!("token-withdraw-other-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    insert_token(&mut tokens, &tenant, &other_token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_withdrawal_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    Some(WithdrawalFixture {
+        state,
+        service,
+        owner,
+        runtime,
+        tenant,
+        token,
+        other_token,
+        _dir: dir,
+    })
+}
+
+/// A Low-risk receipt by `principal`, run through Review, Score, and Settle:
+/// the run is complete and its index write is `complete`.
+async fn completed_pipeline_run(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    service
+        .register_default_bundle(tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    for _ in 0..3 {
+        service
+            .process_run(tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let run = service
+        .store()
+        .get_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(run.index_write_state, "complete");
+    run
+}
+
+/// `(queued invalidations for the run, its index_invalidation_state)`.
+async fn queued_index_invalidation(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> (i64, String) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations i
+                      WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                        AND i.state = 'pending' AND i.reason_code = 'withdrawn'),
+                    r.index_invalidation_state
+               FROM pipeline_runs r WHERE r.tenant_id = $1 AND r.run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1))
+}
+
+/// Owner ruling T7-8: `main`'s legacy route `POST /v1/account/traces/{id}/withdraw`
+/// uses the pipeline withdrawal when the pipeline runtime is present and the
+/// session of the requested submission has a pipeline run. Here the session
+/// holds a pipeline submission whose index write is `complete` and a legacy
+/// sibling with no run. The legacy route, on the pipeline submission, returns
+/// its own response shape, queues the index invalidation, withdraws the
+/// sibling and the session, and still does `main`'s file-side cleanup (the
+/// pipeline's objects are deleted) and one hash-only revoke audit event per
+/// withdrawn submission. The legacy route on a submission with no pipeline
+/// run is unchanged: the existing legacy withdrawal tests cover that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_withdrawal_route_uses_the_pipeline_for_a_session_with_a_run() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let state = &fixture.state;
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(state, &fixture.token).await;
+    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let sibling = insert_account_test_submission(fixture.owner.as_ref(), tenant, &principal).await;
+    let ext = account_ctx_ext(state, &session).await;
+    let account_id = ext.0.account_id.as_uuid();
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    for submission_id in [run.submission_id, sibling] {
+        assert_eq!(
+            fixture
+                .owner
+                .claim_trace_source_session(tenant, account_id, &digest, submission_id)
+                .await
+                .unwrap(),
+            StorageTraceSourceSessionStatus::Active
+        );
+    }
+    let live_pipeline_objects = fixture
+        .owner
+        .list_trace_object_refs(tenant, run.submission_id)
+        .await
+        .unwrap();
+    assert!(!live_pipeline_objects.is_empty());
+
+    let Json(response) =
+        account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(run.submission_id))
+            .await
+            .expect("the owner withdraws the pipeline submission");
+
+    assert_eq!(response.submission_id, run.submission_id);
+    assert_eq!(response.prior_status, "accepted");
+    assert_eq!(response.distribution_reach, "commons_not_distributed");
+    assert!(!response.already_distributed);
+    assert!(response.credit_retained);
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+        (1, "pending".to_string()),
+        "the index invalidation is queued"
+    );
+    assert_eq!(
+        fixture
+            .owner
+            .get_trace_source_session_status(tenant, account_id, &digest)
+            .await
+            .unwrap(),
+        StorageTraceSourceSessionStatus::Withdrawn
+    );
+    let audit_client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    for submission_id in [run.submission_id, sibling] {
+        assert!(
+            fixture
+                .owner
+                .get_trace_withdrawal(tenant, submission_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "every submission of the session is withdrawn"
+        );
+        let revoke_events: i64 = audit_client
+            .query_one(
+                "SELECT count(*) FROM trace_audit_events
+                  WHERE submission_id = $1 AND action = 'revoke'",
+                &[&submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            revoke_events, 1,
+            "one hash-only revoke event per submission"
+        );
+    }
+    for object_ref in fixture
+        .owner
+        .list_trace_object_refs(tenant, run.submission_id)
+        .await
+        .unwrap()
+    {
+        assert!(
+            object_ref.deleted_at.is_some(),
+            "main's file-side cleanup deleted every pipeline object"
+        );
+    }
+}
+
+/// Ruling T7-4: `POST /v1/contributors/me/pipeline-submissions/{id}/withdraw`
+/// authenticates as `main`'s legacy withdrawal route does. A device bearer is
+/// refused; another account's session gets the same 404 as a missing id; the
+/// owner's session withdraws and gets the legacy response shape plus the
+/// pipeline follow-up states. Without a pipeline runtime the route is 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
+    use tower::ServiceExt;
+
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let state = &fixture.state;
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(state, &fixture.token).await;
+    let other_session = account_session_headers(state, &fixture.other_token).await;
+    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let post = |state: Arc<AppState>, submission_id: Uuid, headers: HeaderMap| async move {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/contributors/me/pipeline-submissions/{submission_id}/withdraw"
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.headers_mut().extend(headers);
+        let response = app(state).oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        (status, body)
+    };
+
+    let (status, _) = post(
+        state.clone(),
+        run.submission_id,
+        auth_headers(&fixture.token),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a device key cannot withdraw"
+    );
+    let (not_owned, not_owned_body) =
+        post(state.clone(), run.submission_id, other_session.clone()).await;
+    let (missing, missing_body) = post(state.clone(), Uuid::new_v4(), other_session).await;
+    assert_eq!(not_owned, StatusCode::NOT_FOUND);
+    assert_eq!(missing, StatusCode::NOT_FOUND);
+    assert_eq!(
+        not_owned_body, missing_body,
+        "not owned and not found are indistinguishable"
+    );
+    let mut without_runtime = state.clone();
+    Arc::make_mut(&mut without_runtime).pipeline_service = None;
+    let (status, _) = post(without_runtime, run.submission_id, session.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "no pipeline runtime, no route"
+    );
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+        (0, "none".to_string()),
+        "no refused request withdrew anything"
+    );
+
+    let (status, body) = post(state.clone(), run.submission_id, session).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["submission_id"], run.submission_id.to_string());
+    assert_eq!(body["prior_status"], "accepted");
+    assert_eq!(body["distribution_reach"], "commons_not_distributed");
+    assert_eq!(body["already_distributed"], false);
+    assert_eq!(body["credit_retained"], true);
+    assert_eq!(body["index_invalidation"], "pending");
+    assert_eq!(body["revocation_propagation"], "pending");
+    assert!(
+        !body.to_string().contains(tenant),
+        "the response carries no tenant id"
+    );
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+        (1, "pending".to_string())
+    );
+}

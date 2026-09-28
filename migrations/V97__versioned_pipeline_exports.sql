@@ -240,5 +240,17 @@ DO $$ BEGIN
 END $$;
 
 -- pipeline_export_snapshots: the lifecycle and operational summaries count
--- the tenant's snapshots by state.
+-- the tenant's snapshots by state, a withdrawal reads whether a snapshot
+-- carrying the submission was delivered, and it invalidates every snapshot
+-- that carries the submission (state, invalidated_at). Nothing updates a
+-- snapshot's identity, which the trigger above refuses too, and nothing
+-- inserts or deletes one here.
 GRANT SELECT ON pipeline_export_snapshots TO trace_ingest_runtime;
+GRANT UPDATE (state, invalidated_at) ON pipeline_export_snapshots TO trace_ingest_runtime;
+
+-- pipeline_export_snapshot_items: a withdrawal reads the items that carry
+-- the submission and invalidates them (invalidated_at, invalidation_reason).
+-- Nothing updates an item's identity, which the trigger above refuses too.
+GRANT SELECT ON pipeline_export_snapshot_items TO trace_ingest_runtime;
+GRANT UPDATE (invalidated_at, invalidation_reason)
+    ON pipeline_export_snapshot_items TO trace_ingest_runtime;

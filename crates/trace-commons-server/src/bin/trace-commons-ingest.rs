@@ -255,7 +255,8 @@ use trace_commons_server::trace_score_attestation::{
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
     PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineReviewClaim, PipelineRunState, PipelineService,
+    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
+    PipelineWithdrawalOutcome,
 };
 use uuid::Uuid;
 
@@ -7714,6 +7715,13 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/v1/account/traces/{submission_id}/withdraw",
             post(account_trace_withdraw_handler),
+        )
+        // Declared here, not beside the other `/v1/contributors/me/*` routes,
+        // so the account-session middleware covers it: a withdrawal needs an
+        // account session, never a device key, as the route above does.
+        .route(
+            "/v1/contributors/me/pipeline-submissions/{submission_id}/withdraw",
+            post(pipeline_submission_withdraw_handler),
         )
         .route(
             "/v1/account/traces/{submission_id}/publication",
@@ -17560,29 +17568,32 @@ async fn account_trace_withdraw_handler(
     Extension(ctx): Extension<AccountCtx>,
     AxumPath(submission_id): AxumPath<Uuid>,
 ) -> ApiResult<Json<AccountTraceWithdrawalResponse>> {
-    let not_found = || api_error(StatusCode::NOT_FOUND, "trace not found");
-
     let db = account_db(state.as_ref())?;
-    let record = db
-        .get_trace_submission(&ctx.tenant_id, submission_id)
-        .await
-        .map_err(internal_error)?;
-    // Ownership BEFORE any state change. The storage record is used directly
-    // rather than the local corpus-status projection, which drops `received`
-    // and would leave those traces permanently un-withdrawable.
-    let record = match record {
-        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
-        _ => return Err(not_found()),
-    };
+    let record = owned_account_trace_submission(&db, &ctx, submission_id).await?;
 
-    let withdrawal_failed = |error: &anyhow::Error| {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            %submission_id,
-            "Trace Commons trace withdrawal failed; failing closed"
-        );
-        api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
-    };
+    let withdrawal_failed =
+        |error: &anyhow::Error| account_trace_withdrawal_failed(submission_id, error);
+
+    // A withdrawal that reaches a pipeline run -- the submission's own, or
+    // one of another submission of its source session -- goes through the
+    // pipeline withdrawal, which also queues the index invalidation and ends
+    // the run's work. Every other withdrawal takes the path below, unchanged.
+    if let Some(pipeline) = state.pipeline_service.as_ref() {
+        let reaches = pipeline
+            .store()
+            .withdrawal_reaches_a_pipeline_run(
+                &ctx.tenant_id,
+                ctx.account_id.as_uuid(),
+                submission_id,
+            )
+            .await
+            .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+        if reaches {
+            let (response, _) =
+                pipeline_account_trace_withdrawal(&state, &ctx, &db, &record, pipeline).await?;
+            return Ok(Json(response));
+        }
+    }
 
     // Tier. An existing tombstone is authoritative: the reach recorded at the
     // first withdrawal is the honest answer, and recomputing it against
@@ -17620,15 +17631,10 @@ async fn account_trace_withdraw_handler(
     // Read before any state change, so a failed read leaves nothing withdrawn.
     // Recomputing on a retry gives the same answer: once the record is
     // revoked, no batch can pick its events up.
-    let credit_tenant = account_audit_tenant(&ctx);
-    let credit_events = read_credit_events_for_admin(state.as_ref(), &credit_tenant)
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
-    let settlement_batches =
-        read_credit_settlement_batches_for_admin(state.as_ref(), &credit_tenant)
+    let (credit_events, finalized_credit_event_ids) =
+        read_account_withdrawal_credit(state.as_ref(), &ctx)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
-    let finalized_credit_event_ids = finalized_settlement_credit_event_ids(&settlement_batches);
 
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
@@ -17663,10 +17669,90 @@ async fn account_trace_withdraw_handler(
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
     });
 
+    let response = finish_account_trace_withdrawal(
+        state.as_ref(),
+        &ctx,
+        &db,
+        &record,
+        tombstone,
+        &affected_ids,
+        credit_retained,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// The requested submission, when the account owns it. Ownership is checked
+/// BEFORE any state change, against the account's active principal set. The
+/// storage record is used directly rather than the local corpus-status
+/// projection, which drops `received` and would leave those traces
+/// permanently un-withdrawable. Not found and not owned are the same `404`.
+async fn owned_account_trace_submission(
+    db: &Arc<dyn Database>,
+    ctx: &AccountCtx,
+    submission_id: Uuid,
+) -> ApiResult<StorageTraceSubmissionRecord> {
+    let record = db
+        .get_trace_submission(&ctx.tenant_id, submission_id)
+        .await
+        .map_err(internal_error)?;
+    match record {
+        Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => Ok(record),
+        _ => Err(api_error(StatusCode::NOT_FOUND, "trace not found")),
+    }
+}
+
+/// The label-only `500` every account withdrawal failure returns, logged
+/// hash-only.
+fn account_trace_withdrawal_failed(
+    submission_id: Uuid,
+    error: &anyhow::Error,
+) -> (StatusCode, Json<ApiError>) {
+    tracing::warn!(
+        error_hash = %safe_display_error_hash(error),
+        %submission_id,
+        "Trace Commons trace withdrawal failed; failing closed"
+    );
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+}
+
+/// The account's credit events and the ids of the events a finalized batch
+/// carries: what `withdrawal_retains_all_credit` reads.
+async fn read_account_withdrawal_credit(
+    state: &AppState,
+    ctx: &AccountCtx,
+) -> anyhow::Result<(Vec<TraceCommonsCreditLedgerRecord>, BTreeSet<Uuid>)> {
+    let credit_tenant = account_audit_tenant(ctx);
+    let credit_events = read_credit_events_for_admin(state, &credit_tenant).await?;
+    let settlement_batches =
+        read_credit_settlement_batches_for_admin(state, &credit_tenant).await?;
+    Ok((
+        credit_events,
+        finalized_settlement_credit_event_ids(&settlement_batches),
+    ))
+}
+
+/// The part of an account withdrawal after its tombstones are durable, the
+/// same for the legacy and the pipeline withdrawal: record the withdrawal on
+/// the file side, evict and delete every withdrawn version's content, append
+/// one hash-only audit event per version, and build the response.
+async fn finish_account_trace_withdrawal(
+    state: &AppState,
+    ctx: &AccountCtx,
+    db: &Arc<dyn Database>,
+    record: &StorageTraceSubmissionRecord,
+    tombstone: StorageTraceWithdrawalRecord,
+    affected_ids: &[Uuid],
+    credit_retained: bool,
+) -> ApiResult<AccountTraceWithdrawalResponse> {
+    let submission_id = record.submission_id;
+    let withdrawal_failed =
+        |error: &anyhow::Error| account_trace_withdrawal_failed(submission_id, error);
+
     // The file side records the withdrawal too, before any content is deleted:
     // the file tombstone's redaction hash is read from the stored envelope.
     for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+        revoke_withdrawn_trace_file_records(state, db, &ctx.tenant_id, affected_id)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
     }
@@ -17674,15 +17760,10 @@ async fn account_trace_withdraw_handler(
     // Retained mappings make this list stable across retries. Complete the
     // external deletion for every content version before reporting success.
     for affected_id in affected_ids.iter().copied() {
-        evict_withdrawn_trace_from_derived_surfaces(
-            state.as_ref(),
-            &db,
-            &ctx.tenant_id,
-            affected_id,
-        )
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
-        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+        evict_withdrawn_trace_from_derived_surfaces(state, db, &ctx.tenant_id, affected_id)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+        delete_withdrawn_trace_objects(state, db, &ctx.tenant_id, affected_id)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
     }
@@ -17690,12 +17771,12 @@ async fn account_trace_withdraw_handler(
     // Hash-only audit, one event per withdrawn version. The reason is a fixed
     // label; the actor is the synthetic account-actor ref, never contributor
     // identity.
-    let audit_tenant = account_audit_tenant(&ctx);
+    let audit_tenant = account_audit_tenant(ctx);
     for affected_id in affected_ids.iter().copied() {
         let audit_event =
             TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
         if let Err(error) = append_audit_event_with_db_mirror(
-            state.as_ref(),
+            state,
             &audit_tenant,
             audit_event,
             StorageTraceAuditAction::Revoke,
@@ -17745,7 +17826,109 @@ async fn account_trace_withdraw_handler(
         }
         response.token_deletion_state = Some(state_label);
     }
-    Ok(Json(response))
+    Ok(response)
+}
+
+/// The pipeline withdrawal behind both account withdrawal routes, for a
+/// submission whose withdrawal reaches a pipeline run.
+///
+/// `PipelineService::withdraw_submission` writes every tombstone, withdraws
+/// the submission's source session and every submission mapped to it, and
+/// queues the pipeline follow-up (index invalidation, payload deletion), all
+/// in one transaction. This then does what `main`'s account withdrawal does
+/// after its tombstones (`finish_account_trace_withdrawal`), for every
+/// affected submission.
+///
+/// Credit is retained when no withdrawn version has credit that has not
+/// settled: `main`'s rule over the account's credit events
+/// (`withdrawal_retains_all_credit`), and no Trace Credit settlement leg the
+/// withdrawal forfeits (a leg Settle has not completed yet pays nothing
+/// once the submission is withdrawn).
+async fn pipeline_account_trace_withdrawal(
+    state: &AppState,
+    ctx: &AccountCtx,
+    db: &Arc<dyn Database>,
+    record: &StorageTraceSubmissionRecord,
+    pipeline: &PipelineService,
+) -> ApiResult<(AccountTraceWithdrawalResponse, PipelineWithdrawalOutcome)> {
+    let submission_id = record.submission_id;
+    let withdrawal_failed =
+        |error: &anyhow::Error| account_trace_withdrawal_failed(submission_id, error);
+    // Read before any state change, so a failed read leaves nothing withdrawn.
+    let (credit_events, finalized_credit_event_ids) = read_account_withdrawal_credit(state, ctx)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
+    let outcome = match pipeline
+        .withdraw_submission(
+            &ctx.tenant_id,
+            submission_id,
+            &record.auth_principal_ref,
+            Some(ctx.account_id.as_uuid()),
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::NotFound { .. })
+            ) =>
+        {
+            return Err(api_error(StatusCode::NOT_FOUND, "trace not found"));
+        }
+        Err(error) => return Err(withdrawal_failed(&error)),
+    };
+    let credit_retained = !outcome.trace_credit_forfeited
+        && outcome.affected_submission_ids.iter().all(|affected_id| {
+            withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+        });
+    let response = finish_account_trace_withdrawal(
+        state,
+        ctx,
+        db,
+        record,
+        outcome.withdrawal.clone(),
+        &outcome.affected_submission_ids,
+        credit_retained,
+    )
+    .await?;
+    Ok((response, outcome))
+}
+
+/// Response body for
+/// `POST /v1/contributors/me/pipeline-submissions/{submission_id}/withdraw`:
+/// the account withdrawal response, plus where the pipeline follow-up
+/// stands.
+#[derive(Debug, Serialize)]
+struct PipelineSubmissionWithdrawalResponse {
+    #[serde(flatten)]
+    withdrawal: AccountTraceWithdrawalResponse,
+    index_invalidation: PipelineWithdrawalFollowUpState,
+    revocation_propagation: PipelineWithdrawalFollowUpState,
+}
+
+/// `POST /v1/contributors/me/pipeline-submissions/{submission_id}/withdraw`:
+/// withdraws a pipeline submission. It authenticates and checks ownership
+/// exactly as `POST /v1/account/traces/{submission_id}/withdraw` does -- an
+/// account session only, never a device key, and the same `404` for a
+/// submission that is not found and one the account does not own -- and
+/// returns that route's response with the pipeline follow-up states.
+/// Without a pipeline runtime there is nothing to withdraw here: `404`.
+async fn pipeline_submission_withdraw_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    AxumPath(submission_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineSubmissionWithdrawalResponse>> {
+    let pipeline = require_pipeline_service(state.as_ref())?;
+    let db = account_db(state.as_ref())?;
+    let record = owned_account_trace_submission(&db, &ctx, submission_id).await?;
+    let (withdrawal, outcome) =
+        pipeline_account_trace_withdrawal(state.as_ref(), &ctx, &db, &record, pipeline).await?;
+    Ok(Json(PipelineSubmissionWithdrawalResponse {
+        withdrawal,
+        index_invalidation: outcome.index_invalidation,
+        revocation_propagation: outcome.revocation_propagation,
+    }))
 }
 
 /// Mint a single-use login link for the authenticated device's principal.

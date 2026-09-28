@@ -33,7 +33,10 @@ use trace_commons_protocol::trace_contribution::{
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
-use crate::db::{insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx};
+use crate::db::{
+    insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
+    source_submission_owned_by_account,
+};
 use crate::error::DatabaseError;
 use crate::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, TraceArtifactKind, TraceArtifactStore,
@@ -79,6 +82,8 @@ pub const PIPELINE_CREDIT_HELD_LABEL: &str = "credit_held";
 pub const PIPELINE_CREDIT_CAP_LABEL: &str = "credit_cap_exceeded";
 pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
+/// The reason code of an index invalidation a withdrawal queues.
+const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
 pub const PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL: &str = "bundle_store_unavailable";
 /// The `trace_object_refs.object_store` label a service records when its
 /// builder is not told the configured store's name
@@ -524,6 +529,27 @@ pub struct PipelineReviewClaim {
     pub reviewer_principal_ref: String,
     pub lease_token: Uuid,
     pub lease_expires_at: DateTime<Utc>,
+}
+
+/// Where one follow-up of a withdrawal stands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineWithdrawalFollowUpState {
+    NotRequired,
+    Pending,
+    Complete,
+    Failed,
+}
+
+/// What `PgPipelineStore::withdraw_submission` did.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineWithdrawalOutcome {
+    /// The requested submission's `trace_withdrawals` row.
+    pub withdrawal: crate::trace_corpus_storage::TraceWithdrawalRecord,
+    pub affected_submission_ids: Vec<Uuid>,
+    pub index_invalidation: PipelineWithdrawalFollowUpState,
+    pub revocation_propagation: PipelineWithdrawalFollowUpState,
+    pub trace_credit_forfeited: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2174,6 +2200,381 @@ impl PgPipelineStore {
         Ok(SubmissionGuard { operable })
     }
 
+    /// Withdraws a submission for its owner, with every side effect in one
+    /// transaction (port `ef97a459` lines 1083 to 1471, written in the shape
+    /// `main`'s account withdrawal has now).
+    ///
+    /// Source session (`main`'s #1021 binding): when `account_id` maps the
+    /// submission to one of that account's source sessions, the session is
+    /// marked withdrawn, so a new upload of it is refused, and every
+    /// submission mapped to the session is withdrawn with this one. Each is
+    /// first checked to belong to the account, the check `main`'s
+    /// `withdraw_trace_source_session` makes. Otherwise only the requested
+    /// submission is withdrawn.
+    ///
+    /// Lock order: the session row, then the `pipeline_runs` rows of every
+    /// affected submission (`FOR UPDATE`, by `run_id`), then the submission
+    /// rows (`FOR UPDATE`, by `submission_id`). Settle's index dispatch holds
+    /// a run row and then its submission row `FOR SHARE` for its whole write,
+    /// so a withdrawal waits for that write at the run row and never holds a
+    /// submission row the dispatch waits for.
+    ///
+    /// Every affected submission gets `main`'s rows: a `trace_withdrawals`
+    /// row (first writer wins, so a retry reports the first tier and time)
+    /// and the status `revoked` with `withdrawn_at`, `revoked_at` and
+    /// `purged_at` set. One with a pipeline run also gets the pipeline
+    /// follow-up (`withdraw_pipeline_content_on_tx`), and each of its runs:
+    ///
+    /// - an index write that is `pending` may be partly written, so it is
+    ///   cancelled, the run is excluded from the index, and an invalidation
+    ///   of the revision is queued; a write that is `complete`, `failed` or
+    ///   `cancelled` wrote or may have written entries, so an invalidation is
+    ///   queued (idempotent); `none` needs nothing;
+    /// - a run parked for review goes back to `pending`, due at once, so the
+    ///   runner ends it under `submission_inoperable`.
+    ///
+    /// Nothing here fails a run or changes a settlement row: the runner does
+    /// both under the run's lease, and Settle forfeits every leg that is not
+    /// complete on its next pass. No audit row is written here either: the
+    /// caller appends the event to the mirrored audit log, as `main`'s
+    /// withdrawal does.
+    ///
+    /// Not the owner (the requested submission's `auth_principal_ref` is not
+    /// `actor_principal_ref`), or no such submission: `NotFound`, and
+    /// nothing is written.
+    pub async fn withdraw_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+        account_id: Option<Uuid>,
+    ) -> Result<PipelineWithdrawalOutcome, DatabaseError> {
+        let not_found = || DatabaseError::NotFound {
+            entity: "trace_submission".to_string(),
+            id: submission_id.to_string(),
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // Ownership before any lock is taken; checked again under the lock.
+        let owner = tx
+            .query_opt(
+                "SELECT auth_principal_ref FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .map(|row| row.get::<_, String>(0));
+        if owner.as_deref() != Some(actor_principal_ref) {
+            return Err(not_found());
+        }
+
+        let session = match account_id {
+            Some(account_id) => tx
+                .query_opt(
+                    "SELECT session_digest FROM trace_submission_sessions
+                      WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
+                    &[&tenant_id, &account_id, &submission_id],
+                )
+                .await?
+                .map(|row| (account_id, row.get::<_, Vec<u8>>(0))),
+            None => None,
+        };
+        let (withdrawn_at, affected) = match &session {
+            Some((account_id, digest)) => {
+                let withdrawn_at: DateTime<Utc> = tx
+                    .query_one(
+                        "UPDATE trace_source_sessions
+                            SET withdrawn_at = COALESCE(withdrawn_at, NOW())
+                          WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+                          RETURNING withdrawn_at",
+                        &[&tenant_id, account_id, digest],
+                    )
+                    .await?
+                    .get(0);
+                let mapped = tx
+                    .query(
+                        "SELECT submission_id FROM trace_submission_sessions
+                          WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+                          ORDER BY submission_id",
+                        &[&tenant_id, account_id, digest],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| row.get::<_, Uuid>(0))
+                    .collect::<Vec<_>>();
+                for mapped_id in &mapped {
+                    if !source_submission_owned_by_account(&tx, tenant_id, *mapped_id, *account_id)
+                        .await?
+                    {
+                        return Err(DatabaseError::Query(
+                            "TraceSourceSessionConflict".to_string(),
+                        ));
+                    }
+                }
+                (withdrawn_at, mapped)
+            }
+            None => (
+                tx.query_one("SELECT NOW()", &[]).await?.get(0),
+                vec![submission_id],
+            ),
+        };
+
+        let runs = tx
+            .query(
+                "SELECT * FROM pipeline_runs
+                  WHERE tenant_id = $1 AND submission_id = ANY($2)
+                  ORDER BY run_id
+                  FOR UPDATE",
+                &[&tenant_id, &affected],
+            )
+            .await?
+            .iter()
+            .map(pipeline_run_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let submissions = tx
+            .query(
+                "SELECT submission_id, status, auth_principal_ref, trace_id, redaction_hash,
+                        canonical_summary_hash
+                   FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = ANY($2)
+                  ORDER BY submission_id
+                  FOR UPDATE",
+                &[&tenant_id, &affected],
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.get::<_, Uuid>("submission_id"), row))
+            .collect::<BTreeMap<_, _>>();
+        let owned = submissions
+            .get(&submission_id)
+            .is_some_and(|row| row.get::<_, String>("auth_principal_ref") == actor_principal_ref);
+        if !owned {
+            return Err(not_found());
+        }
+
+        let mut with_runs = Vec::new();
+        for affected_id in &affected {
+            let submission = submissions.get(affected_id);
+            // `main`'s tier rule (`withdraw_trace_source_session`): an
+            // export ever made -- invalidated or not, legacy or a delivered
+            // pipeline snapshot -- put copies out; otherwise an accepted
+            // submission, or one whose row is gone, was in the commons.
+            let prior_status = submission
+                .map(|row| row.get::<_, String>("status"))
+                .unwrap_or_else(|| "purged".to_string());
+            let exported: bool = tx
+                .query_one(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM trace_export_manifest_items
+                         WHERE tenant_id = $1 AND submission_id = $2
+                     ) OR EXISTS (
+                        SELECT 1
+                          FROM pipeline_export_snapshot_items item
+                          JOIN pipeline_export_snapshots snapshot
+                            ON snapshot.tenant_id = item.tenant_id
+                           AND snapshot.snapshot_id = item.snapshot_id
+                         WHERE item.tenant_id = $1 AND item.submission_id = $2
+                           AND snapshot.completed_at IS NOT NULL
+                     )",
+                    &[&tenant_id, affected_id],
+                )
+                .await?
+                .get(0);
+            let distribution_reach = if exported {
+                "commons_distributed"
+            } else if prior_status == "accepted" || submission.is_none() {
+                "commons_not_distributed"
+            } else {
+                "not_distributed"
+            };
+            tx.execute(
+                "INSERT INTO trace_withdrawals (
+                    tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+                 ) VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+                &[
+                    &tenant_id,
+                    affected_id,
+                    &withdrawn_at,
+                    &prior_status,
+                    &distribution_reach,
+                ],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE trace_submissions
+                    SET status = 'revoked',
+                        withdrawn_at = COALESCE(withdrawn_at, $3),
+                        revoked_at = COALESCE(revoked_at, $3),
+                        purged_at = COALESCE(purged_at, $3),
+                        updated_at = NOW()
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, affected_id, &withdrawn_at],
+            )
+            .await?;
+            if let Some(submission) = submission
+                && runs.iter().any(|run| run.submission_id == *affected_id)
+            {
+                withdraw_pipeline_content_on_tx(
+                    &tx,
+                    tenant_id,
+                    *affected_id,
+                    submission,
+                    actor_principal_ref,
+                )
+                .await?;
+                with_runs.push(*affected_id);
+            }
+        }
+
+        for run in &runs {
+            match run.index_write_state.as_str() {
+                "pending" => {
+                    tx.execute(
+                        "UPDATE pipeline_runs
+                            SET index_membership = 'excluded',
+                                index_write_state = 'cancelled',
+                                updated_at = NOW()
+                          WHERE tenant_id = $1 AND run_id = $2",
+                        &[&tenant_id, &run.run_id],
+                    )
+                    .await?;
+                    Self::enqueue_index_invalidation_on_tx(
+                        &tx,
+                        run,
+                        PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
+                    )
+                    .await?;
+                }
+                "complete" | "failed" | "cancelled" => {
+                    Self::enqueue_index_invalidation_on_tx(
+                        &tx,
+                        run,
+                        PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
+                    )
+                    .await?;
+                }
+                _ => {}
+            }
+            release_awaiting_review(&tx, tenant_id, run.run_id).await?;
+        }
+
+        let withdrawal_row = tx
+            .query_one(
+                "SELECT tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+                   FROM trace_withdrawals
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        let follow_up = tx
+            .query_one(
+                "SELECT
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items
+                      WHERE tenant_id = $1 AND source_submission_id = ANY($2)
+                        AND status IN ('pending', 'in_progress', 'failed')),
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items
+                      WHERE tenant_id = $1 AND source_submission_id = ANY($2)),
+                    (SELECT COALESCE(array_agg(DISTINCT index_invalidation_state), '{}')
+                       FROM pipeline_runs
+                      WHERE tenant_id = $1 AND submission_id = ANY($2)),
+                    EXISTS (
+                        SELECT 1
+                          FROM pipeline_run_settlements settlement
+                          JOIN pipeline_runs run
+                            ON run.tenant_id = settlement.tenant_id
+                           AND run.run_id = settlement.run_id
+                         WHERE settlement.tenant_id = $1 AND run.submission_id = ANY($2)
+                           AND settlement.instrument_id = $3
+                           AND (settlement.operation_state NOT IN ('complete', 'forfeited')
+                                OR (settlement.operation_state = 'forfeited'
+                                    AND settlement.last_error_label = $4))
+                    )",
+                &[
+                    &tenant_id,
+                    &with_runs,
+                    &InstrumentId::trace_credit().as_str(),
+                    &PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+                ],
+            )
+            .await?;
+        let unfinished_propagation: i64 = follow_up.get(0);
+        let queued_propagation: i64 = follow_up.get(1);
+        let invalidation_states: Vec<String> = follow_up.get(2);
+        // A leg Settle has not settled yet is forfeited on its next pass; a
+        // Trace Credit leg Settle already forfeited for this reason stays in
+        // the count, so a retry after that pass reports the same.
+        let trace_credit_forfeited: bool = follow_up.get(3);
+        let revocation_propagation = if unfinished_propagation > 0 {
+            PipelineWithdrawalFollowUpState::Pending
+        } else if queued_propagation > 0 {
+            PipelineWithdrawalFollowUpState::Complete
+        } else {
+            PipelineWithdrawalFollowUpState::NotRequired
+        };
+        let has_state = |state: &str| invalidation_states.iter().any(|value| value == state);
+        let index_invalidation = if has_state("failed") {
+            PipelineWithdrawalFollowUpState::Failed
+        } else if has_state("pending") {
+            PipelineWithdrawalFollowUpState::Pending
+        } else if has_state("complete") {
+            PipelineWithdrawalFollowUpState::Complete
+        } else {
+            PipelineWithdrawalFollowUpState::NotRequired
+        };
+        let withdrawal = crate::trace_corpus_storage::TraceWithdrawalRecord {
+            tenant_id: withdrawal_row.get("tenant_id"),
+            submission_id: withdrawal_row.get("submission_id"),
+            withdrawn_at: withdrawal_row.get("withdrawn_at"),
+            prior_status: withdrawal_row.get("prior_status"),
+            distribution_reach: withdrawal_row.get("distribution_reach"),
+        };
+        tx.commit().await?;
+        Ok(PipelineWithdrawalOutcome {
+            withdrawal,
+            affected_submission_ids: affected,
+            index_invalidation,
+            revocation_propagation,
+            trace_credit_forfeited,
+        })
+    }
+
+    /// Whether a withdrawal of `submission_id` by `account_id` reaches a
+    /// pipeline run: the submission itself has one, or a submission mapped
+    /// to the same source session of that account does. `main`'s account
+    /// withdrawal route uses the pipeline withdrawal exactly when this is
+    /// true.
+    pub async fn withdrawal_reaches_a_pipeline_run(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        submission_id: Uuid,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let reaches: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pipeline_runs run
+                     WHERE run.tenant_id = $1
+                       AND (run.submission_id = $3 OR run.submission_id IN (
+                            SELECT sibling.submission_id
+                              FROM trace_submission_sessions mapping
+                              JOIN trace_submission_sessions sibling
+                                ON sibling.tenant_id = mapping.tenant_id
+                               AND sibling.account_id = mapping.account_id
+                               AND sibling.session_digest = mapping.session_digest
+                             WHERE mapping.tenant_id = $1 AND mapping.account_id = $2
+                               AND mapping.submission_id = $3))
+                 )",
+                &[&tenant_id, &account_id, &submission_id],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(reaches)
+    }
+
     /// Commits the Settle outcome and completes the run (port 2287 to
     /// 2328), once every settlement operation this task handles (there are
     /// none yet -- Task 13 adds the instrument legs) has reached a terminal
@@ -3373,6 +3774,158 @@ async fn release_awaiting_review(
     Ok(())
 }
 
+/// The pipeline follow-up of a withdrawal, for one submission that has a
+/// pipeline run, on the withdrawal's transaction (which already holds the
+/// submission row): a tombstone; its object refs invalidated and each live
+/// one queued for payload deletion (`delete_object_payload`, done by the
+/// revocation-propagation worker); its derived records revoked; its vector
+/// entries, legacy export manifests and items, and pipeline export
+/// snapshots and items invalidated. Every write is idempotent.
+async fn withdraw_pipeline_content_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    submission: &Row,
+    actor_principal_ref: &str,
+) -> Result<(), DatabaseError> {
+    let trace_id: Uuid = submission.get("trace_id");
+    let redaction_hash: String = submission.get("redaction_hash");
+    let canonical_summary_hash: Option<String> = submission.get("canonical_summary_hash");
+    let object_rows = tx
+        .query(
+            "SELECT object_ref_id
+               FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND deleted_at IS NULL
+              ORDER BY object_ref_id",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+    let tombstone_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("pipeline-withdrawal:{tenant_id}:{submission_id}").as_bytes(),
+    );
+    tx.execute(
+        "INSERT INTO trace_tombstones (
+            tenant_id, tombstone_id, submission_id, trace_id, redaction_hash,
+            canonical_summary_hash, reason, effective_at, created_by_principal_ref
+         ) VALUES ($1,$2,$3,$4,$5,$6,'withdrawn',NOW(),$7)
+         ON CONFLICT (tenant_id, submission_id) DO NOTHING",
+        &[
+            &tenant_id,
+            &tombstone_id,
+            &submission_id,
+            &trace_id,
+            &redaction_hash,
+            &canonical_summary_hash,
+            &actor_principal_ref,
+        ],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_object_refs
+            SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2 AND invalidated_at IS NULL",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_derived_records
+            SET status = 'revoked', updated_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2 AND status <> 'revoked'",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_vector_entries
+            SET status = 'invalidated',
+                invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND status <> 'invalidated' AND deleted_at IS NULL",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_export_manifest_items
+            SET source_invalidated_at = COALESCE(source_invalidated_at, NOW()),
+                source_invalidation_reason = 'revoked', updated_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND source_invalidated_at IS NULL",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE trace_export_manifests
+            SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
+          WHERE tenant_id = $1 AND $2 = ANY(source_submission_ids)
+            AND invalidated_at IS NULL AND deleted_at IS NULL",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE pipeline_export_snapshot_items
+            SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                invalidation_reason = 'withdrawn'
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND invalidated_at IS NULL",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE pipeline_export_snapshots snapshot
+            SET state = 'invalidated',
+                invalidated_at = COALESCE(snapshot.invalidated_at, NOW())
+          WHERE snapshot.tenant_id = $1
+            AND snapshot.state <> 'invalidated'
+            AND EXISTS (
+                SELECT 1
+                  FROM pipeline_export_snapshot_items item
+                 WHERE item.tenant_id = snapshot.tenant_id
+                   AND item.snapshot_id = snapshot.snapshot_id
+                   AND item.submission_id = $2
+            )",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    let metadata_json = serde_json::json!({"source": "versioned_pipeline"});
+    for row in &object_rows {
+        let object_ref_id: Uuid = row.get("object_ref_id");
+        let idempotency_key = sha256_prefixed(
+            format!(
+                "pipeline-withdrawal-object-delete:v1:{tenant_id}:{submission_id}:{object_ref_id}"
+            )
+            .as_bytes(),
+        );
+        let propagation_item_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, idempotency_key.as_bytes());
+        let target_json = serde_json::json!({
+            "kind": "object_ref",
+            "object_ref_id": object_ref_id,
+        });
+        tx.execute(
+            "INSERT INTO trace_revocation_propagation_items (
+                tenant_id, propagation_item_id, source_submission_id, trace_id,
+                target_kind, target_json, action, status, idempotency_key, reason,
+                attempt_count, metadata_json
+             ) VALUES (
+                $1,$2,$3,$4,'object_ref',$5,'delete_object_payload','pending',$6,
+                'pipeline_withdrawal',0,$7
+             )
+             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+            &[
+                &tenant_id,
+                &propagation_item_id,
+                &submission_id,
+                &trace_id,
+                &target_json,
+                &idempotency_key,
+                &metadata_json,
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn stale_lease_error() -> DatabaseError {
     DatabaseError::Constraint("pipeline lease is stale".to_string())
 }
@@ -3963,6 +4516,19 @@ impl PipelineService {
     #[doc(hidden)]
     pub fn store(&self) -> &PgPipelineStore {
         &self.store
+    }
+
+    pub async fn withdraw_submission(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+        account_id: Option<Uuid>,
+    ) -> anyhow::Result<PipelineWithdrawalOutcome> {
+        Ok(self
+            .store
+            .withdraw_submission(tenant_id, submission_id, actor_principal_ref, account_id)
+            .await?)
     }
 
     /// Registers this service's default bundle for `tenant_id` and, if the
