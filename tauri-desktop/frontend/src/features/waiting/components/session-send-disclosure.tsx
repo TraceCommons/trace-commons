@@ -1,6 +1,7 @@
 import {
   useCertificateDetail,
   useRouteDisclosure,
+  useRouteDisclosureUnreadableCopy,
 } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { WaitingPreview } from "../types";
@@ -21,15 +22,13 @@ export function SessionSendDisclosure({
   const certificate = useCertificateDetail(
     preview.entry.holds_certificate === true ? preview.entry.entry_id : null,
   );
+  const unreadable = useRouteDisclosureUnreadableCopy();
   if (!disclosure.data) {
+    // The core's line when unreadable; nothing while still being read.
+    if (!disclosure.isError || !unreadable.data) return null;
     return (
-      <p
-        className={`m-0 text-[11px] ${disclosure.isError ? "text-destructive" : "text-muted-foreground"}`}
-        role={disclosure.isError ? "alert" : "status"}
-      >
-        {disclosure.isError
-          ? "Where this session goes could not be read."
-          : "Reading where this session goes…"}
+      <p className="m-0 text-[11px] text-destructive" role="alert">
+        {unreadable.data.session}
       </p>
     );
   }

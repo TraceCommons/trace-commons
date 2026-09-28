@@ -711,6 +711,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     for (name, handler_path) in [
         ("route_disclosure", "witness::route_disclosure"),
         ("certificate_detail", "witness::certificate_detail"),
+        (
+            "route_disclosure_unreadable_copy",
+            "witness::route_disclosure_unreadable_copy",
+        ),
     ] {
         assert!(
             build.contains(&format!("\"{name}\"")),
@@ -770,6 +774,32 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         )
         .contains("<SessionSendDisclosure preview={preview} />")
     );
+    // The section's title and its unreadable lines are the core's too
+    // (`consent_copy::disclosure_unreadable_copy`), never a sentence the
+    // shell writes -- including the eyebrow and the loading line.
+    let unreadable_copy = rust_function(&witness_commands, "fn route_disclosure_unreadable_copy");
+    assert!(unreadable_copy.contains("consent_copy::disclosure_unreadable_copy"));
+    assert!(route_body.contains("unreadable.data?.title"));
+    assert!(route_body.contains("unreadable.data.panel"));
+    assert!(session_block.contains("unreadable.data.session"));
+    {
+        use trace_commons_contributor::consent_copy as copy;
+        for sentence in [
+            copy::DISCLOSURE_TITLE,
+            copy::DISCLOSURE_UNREADABLE,
+            copy::DISCLOSURE_SESSION_UNREADABLE,
+            "WHERE SESSIONS GO",
+            "could not be read",
+            "Reading where",
+        ] {
+            for (name, source) in [("route", &route_body), ("session", &session_block)] {
+                assert!(
+                    !source.contains(sentence),
+                    "the Tauri {name} disclosure words itself: {sentence}"
+                );
+            }
+        }
+    }
     let consent_step = read(
         &root,
         &format!("{onboarding_dir}/components/onboarding-consent-step.tsx"),

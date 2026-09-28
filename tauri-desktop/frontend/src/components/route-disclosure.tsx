@@ -1,5 +1,8 @@
 import type { RouteDisclosure } from "../lib/tauri/route-disclosure";
-import { useRouteDisclosure } from "../lib/tauri/use-contributor-copy";
+import {
+  useRouteDisclosure,
+  useRouteDisclosureUnreadableCopy,
+} from "../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 
 // K11: the raw send, both enclaves, and where the witness came from. Every
@@ -55,30 +58,31 @@ export function RouteDisclosureBody({
 
 /**
  * A settings section that reads the disclosure itself. Unreadable is said as
- * such and never drawn as some other route.
+ * such and never drawn as some other route. The title and the unreadable
+ * line are the core's (`route_disclosure_unreadable_copy`); nothing is said
+ * while the disclosure is still being read.
  */
 export function RouteDisclosurePanel() {
   const core = useCoreStatus();
   const disclosure = useRouteDisclosure(core.scope, core.isSuccess);
+  const unreadable = useRouteDisclosureUnreadableCopy();
+  const title = disclosure.data?.copy.title ?? unreadable.data?.title;
   return (
     <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
-        WHERE SESSIONS GO
-      </span>
+      {title && (
+        <h2 className="m-0 mb-3 block font-mono text-[10px] font-extrabold uppercase leading-none tracking-[.16em] text-primary">
+          {title}
+        </h2>
+      )}
       {disclosure.data ? (
-        <>
-          <h2>{disclosure.data.copy.title}</h2>
-          <RouteDisclosureBody disclosure={disclosure.data} />
-        </>
+        <RouteDisclosureBody disclosure={disclosure.data} />
       ) : (
-        <p
-          className={`m-0 text-[12px] ${disclosure.isError ? "text-destructive" : "text-muted-foreground"}`}
-          role={disclosure.isError ? "alert" : "status"}
-        >
-          {disclosure.isError
-            ? "Where sessions go could not be read."
-            : "Reading where sessions go…"}
-        </p>
+        disclosure.isError &&
+        unreadable.data && (
+          <p className="m-0 text-[12px] text-destructive" role="alert">
+            {unreadable.data.panel}
+          </p>
+        )
       )}
     </section>
   );

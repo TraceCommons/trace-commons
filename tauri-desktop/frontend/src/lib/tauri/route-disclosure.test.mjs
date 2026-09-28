@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   parseCertificateDetail,
   parseRouteDisclosure,
+  parseRouteDisclosureUnreadable,
 } from "./route-disclosure.ts";
 
 // Stand-ins, not the core's sentences: the shell renders whichever blocks
@@ -160,4 +161,16 @@ test("a certificate detail keeps the claims and the core's labels", () => {
       },
     }),
   );
+});
+
+test("the unreadable lines carry the section title and refuse an empty line", () => {
+  const whole = { title: "TITLE", panel: "PANEL", session: "SESSION" };
+  assert.deepEqual(parseRouteDisclosureUnreadable(whole), whole);
+  for (const key of Object.keys(whole)) {
+    assert.throws(() => parseRouteDisclosureUnreadable({ ...whole, [key]: "" }));
+    const rest = { ...whole };
+    delete rest[key];
+    assert.throws(() => parseRouteDisclosureUnreadable(rest));
+  }
+  assert.throws(() => parseRouteDisclosureUnreadable(null));
 });
