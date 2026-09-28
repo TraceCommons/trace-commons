@@ -1486,28 +1486,29 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_credit_witness_provenance_class",
         include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
     ),
-    // V75 to V78 add the versioned pipeline's run queue, fenced leases,
-    // retained bundles, instrument operations, and receipt content. Every
-    // table forces RLS; there is no cross-tenant claim function.
+    // V90 and V91 are reserved for work in flight. V92 to V95 add the
+    // versioned pipeline's run queue, fenced leases, retained bundles,
+    // instrument operations, and receipt content. Every table forces RLS;
+    // there is no cross-tenant claim function.
     (
-        75,
+        92,
         "versioned_pipeline_runs",
-        include_str!("../../../../migrations/V75__versioned_pipeline_runs.sql"),
+        include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
     ),
     (
-        76,
+        93,
         "versioned_pipeline_durability",
-        include_str!("../../../../migrations/V76__versioned_pipeline_durability.sql"),
+        include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
     ),
     (
-        77,
+        94,
         "versioned_pipeline_settlement",
-        include_str!("../../../../migrations/V77__versioned_pipeline_settlement.sql"),
+        include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
     ),
     (
-        78,
+        95,
         "versioned_pipeline_receipt_content",
-        include_str!("../../../../migrations/V78__versioned_pipeline_receipt_content.sql"),
+        include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
     ),
 ];
 
@@ -6693,10 +6694,10 @@ mod tests {
         (54, 2),
         (55, 3),
         (56, 4),
-        (75, 4),
-        (76, 4),
-        (77, 4),
-        (78, 4),
+        (92, 4),
+        (93, 4),
+        (94, 4),
+        (95, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7467,10 +7468,10 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
-            include_str!("../../../../migrations/V75__versioned_pipeline_runs.sql"),
-            include_str!("../../../../migrations/V76__versioned_pipeline_durability.sql"),
-            include_str!("../../../../migrations/V77__versioned_pipeline_settlement.sql"),
-            include_str!("../../../../migrations/V78__versioned_pipeline_receipt_content.sql"),
+            include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7496,10 +7497,10 @@ mod tests {
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
         ];
         let force_rls_migrations = [
-            include_str!("../../../../migrations/V75__versioned_pipeline_runs.sql"),
-            include_str!("../../../../migrations/V76__versioned_pipeline_durability.sql"),
-            include_str!("../../../../migrations/V77__versioned_pipeline_settlement.sql"),
-            include_str!("../../../../migrations/V78__versioned_pipeline_receipt_content.sql"),
+            include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7573,13 +7574,13 @@ mod tests {
 
     #[test]
     fn versioned_pipeline_migration_shape_is_pinned() {
-        let runs = include_str!("../../../../migrations/V75__versioned_pipeline_runs.sql");
+        let runs = include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql");
         let durability =
-            include_str!("../../../../migrations/V76__versioned_pipeline_durability.sql");
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql");
         let settlement =
-            include_str!("../../../../migrations/V77__versioned_pipeline_settlement.sql");
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql");
         let content =
-            include_str!("../../../../migrations/V78__versioned_pipeline_receipt_content.sql");
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7587,7 +7588,7 @@ mod tests {
             "CREATE TRIGGER phase_outcomes_reject_delete",
             "admission_decision TEXT NOT NULL",
         ] {
-            assert!(runs.contains(required), "V75 is missing `{required}`");
+            assert!(runs.contains(required), "V92 is missing `{required}`");
         }
         for required in [
             "pipeline_runs_lease_shape",
@@ -7602,7 +7603,7 @@ mod tests {
             "ciphertext_sha256 TEXT NOT NULL",
             "ON pipeline_receipt_artifacts (tenant_id, run_id)\n    WHERE state = 'committed'",
         ] {
-            assert!(durability.contains(required), "V76 is missing `{required}`");
+            assert!(durability.contains(required), "V93 is missing `{required}`");
         }
         for forbidden in [
             "claim_pipeline_run",
@@ -7614,7 +7615,7 @@ mod tests {
         ] {
             assert!(
                 !durability.contains(forbidden),
-                "V76 must not contain `{forbidden}`"
+                "V93 must not contain `{forbidden}`"
             );
         }
         for required in [
@@ -7628,7 +7629,7 @@ mod tests {
             "settle_selection JSONB",
             "ALTER TABLE pipeline_run_settlements FORCE ROW LEVEL SECURITY;",
         ] {
-            assert!(settlement.contains(required), "V77 is missing `{required}`");
+            assert!(settlement.contains(required), "V94 is missing `{required}`");
         }
         for required in [
             "approved_object_ref_id UUID",
@@ -7637,7 +7638,7 @@ mod tests {
             "principal_ref_hash TEXT NOT NULL",
             "ALTER TABLE pipeline_admission_usage FORCE ROW LEVEL SECURITY;",
         ] {
-            assert!(content.contains(required), "V78 is missing `{required}`");
+            assert!(content.contains(required), "V95 is missing `{required}`");
         }
     }
 

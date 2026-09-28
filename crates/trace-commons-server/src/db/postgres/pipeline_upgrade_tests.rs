@@ -1,6 +1,6 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// INTEGRATION: upgrades a real V74 database and qualifies pipeline RLS.
+// INTEGRATION: upgrades a real V89 database and qualifies pipeline RLS.
 
 use tokio_postgres::Client;
 
@@ -56,7 +56,7 @@ fn isolated_upgrade_database_url() -> String {
     url
 }
 
-async fn apply_real_migrations_through_v74(client: &mut Client) {
+async fn apply_real_migrations_through_v89(client: &mut Client) {
     client
         .batch_execute(
             "CREATE TABLE _trace_commons_migrations (\
@@ -67,7 +67,7 @@ async fn apply_real_migrations_through_v74(client: &mut Client) {
         )
         .await
         .expect("create migration history table");
-    for (version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 74) {
+    for (version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 89) {
         apply_and_record_migration(client, *version, name, sql)
             .await
             .unwrap_or_else(|error| panic!("apply real V{version} ({name}): {error}"));
@@ -97,20 +97,20 @@ const PIPELINE_TABLES: [&str; 8] = [
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
-async fn pipeline_upgrade_from_v74_installs_forced_rls_storage() {
+async fn pipeline_upgrade_from_v89_installs_forced_rls_storage() {
     let url = isolated_upgrade_database_url();
     let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
         .expect("connect upgrade admin");
     tokio::spawn(async move { connection.await.expect("upgrade connection") });
-    apply_real_migrations_through_v74(&mut admin).await;
+    apply_real_migrations_through_v89(&mut admin).await;
     assert!(
         admin
             .query_one("SELECT to_regclass('public.pipeline_runs') IS NULL", &[])
             .await
             .unwrap()
             .get::<_, bool>(0),
-        "the V74 predecessor must not contain pipeline storage"
+        "the V89 predecessor must not contain pipeline storage"
     );
 
     let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
@@ -120,7 +120,7 @@ async fn pipeline_upgrade_from_v74_installs_forced_rls_storage() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, Some(78));
+    assert_eq!(version, Some(95));
 
     for table in PIPELINE_TABLES {
         assert!(

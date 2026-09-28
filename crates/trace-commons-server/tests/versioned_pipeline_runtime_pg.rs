@@ -493,7 +493,7 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
     assert_eq!(expired.attempt_count, attempt_count_before);
     assert!(expired.next_attempt_at > chrono::Utc::now());
 
-    // The run's max_attempts defaults to 5 (migration V76); loop more
+    // The run's max_attempts defaults to 5 (migration V93); loop more
     // times than that and confirm the run is never failed /
     // attempts_exhausted.
     for _ in 0..7 {
@@ -1029,7 +1029,7 @@ fn db_error_message(error: &tokio_postgres::Error) -> String {
 /// an owner connection rather than through `PgPipelineStore` -- proving a
 /// tampered row, not a tampering API `PgPipelineStore` would ever offer.
 /// `pipeline_bundle_packages` carries its own immutability trigger
-/// (`pipeline_bundle_packages_reject_update`, migration V76), so this drops
+/// (`pipeline_bundle_packages_reject_update`, migration V93), so this drops
 /// it and recreates it -- exactly as the migration defines it -- inside the
 /// same transaction that performs the `UPDATE`. Flips one hex digit of the
 /// first stored artifact so its bytes no longer hash to the key they are
@@ -7009,7 +7009,7 @@ async fn a_run_whose_dependency_is_not_held_waits_without_charging() {
 /// `FixedScorePolicy` (`versioned_pipeline_bundle.rs`) maps an embedder
 /// failure to `PolicyError::transient("embedder_unavailable")` when the
 /// bundle carries an index (P5). `FlakyEmbedder` fails its first 7 calls;
-/// the run's `max_attempts` defaults to 5 (migration V76), so 7 failures is
+/// the run's `max_attempts` defaults to 5 (migration V93), so 7 failures is
 /// more than the run's whole attempt budget, and the run still reaches Score.
 #[tokio::test]
 async fn transient_policy_errors_do_not_exhaust_the_trace() {

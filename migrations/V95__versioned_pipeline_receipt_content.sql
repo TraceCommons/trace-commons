@@ -13,7 +13,7 @@ ALTER TABLE pipeline_runs
     -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
     -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
     -- same check, deferrable. Deferred for the same reason as `pipeline_runs`'
-    -- other foreign key to this table, `source_object_ref_id` in V75:
+    -- other foreign key to this table, `source_object_ref_id` in V92:
     -- `trace_object_refs` also cascades straight from `trace_submissions`, a
     -- sibling of this row's own cascade through the same parent, so a
     -- submission delete can reach either branch first. The check runs at
