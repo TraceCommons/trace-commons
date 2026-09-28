@@ -13,6 +13,7 @@ import { usePreviewInspector } from "../hooks/use-preview-inspector";
 import type { WaitingPreview } from "../types";
 import { NativeReviewActions } from "./native-review-actions";
 import { RedactedTranscript } from "./redacted-transcript";
+import { SessionSendDisclosure } from "./session-send-disclosure";
 
 type InspectorTab = "transcript" | "search" | "turns";
 
@@ -69,6 +70,7 @@ export function PreviewInspector({
             {formatBytes(preview.raw_session_bytes)} on disk
           </span>
         </div>
+        <SessionSendDisclosure preview={preview} />
         {onReviewed && (
           <NativeReviewActions
             entryId={preview.entry.entry_id}
