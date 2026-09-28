@@ -402,9 +402,28 @@ async fn legacy_invite_link_and_coexistence_readiness() {
     assert!(!audit_text.contains(&individual), "{audit_text}");
     assert_eq!(audit["legacy_tenant_hash"], hash(&individual));
 
-    // Idempotent for the same account, from any device of the tenant: the
-    // original record comes back, byte for byte.
+    // Idempotent for the same account from the same device: the original
+    // record comes back, byte for byte.
     let again = linker
+        .link(
+            &near_a,
+            account_a,
+            &individual,
+            &individual_invite,
+            &individual_device,
+        )
+        .await
+        .expect("re-link by the same account and device");
+    assert_eq!(again.record, linked.record);
+    assert_eq!(again.server_signature, linked.server_signature);
+    assert_eq!(again.trust_version, 1);
+
+    // (V91) Another device of the same tenant, signed into the SAME account,
+    // gets an attestation of its own under the existing link: its statement,
+    // its signature, countersigned. It can verify it against its own key,
+    // which the original record -- signed by the first device -- never let
+    // it do.
+    let attested = linker
         .link(
             &near_a,
             account_a,
@@ -413,10 +432,76 @@ async fn legacy_invite_link_and_coexistence_readiness() {
             &second_device,
         )
         .await
-        .expect("re-link by the same account");
-    assert_eq!(again.record, linked.record);
-    assert_eq!(again.server_signature, linked.server_signature);
-    assert_eq!(again.trust_version, 1);
+        .expect("a second device of the linked tenant attests");
+    assert_eq!(attested.record.statement.device_key_id, second_device.id);
+    assert_eq!(attested.record.statement.legacy_tenant_id, individual);
+    assert_eq!(attested.record.statement.account_tenant_id, near_a);
+    assert_eq!(attested.record.statement.account_id, account_a);
+    assert_ne!(attested.record.link_id, linked.record.link_id);
+    assert_eq!(
+        attested.trust_version, 1,
+        "no new trust: the link carried it"
+    );
+    UnparsedPublicKey::new(&ED25519, second_device.key.public_key().as_ref())
+        .verify(
+            &legacy_invite_link_statement_bytes(&attested.record.statement),
+            &B64.decode(&attested.record.device_signature).unwrap(),
+        )
+        .expect("the attestation carries the second device's own signature");
+    UnparsedPublicKey::new(&ED25519, linker.signer.public_key_bytes())
+        .verify(
+            &legacy_invite_link_record_bytes(&attested.record),
+            &B64.decode(&attested.server_signature).unwrap(),
+        )
+        .expect("countersigned");
+    // Idempotent: the same device again gets its first attestation back.
+    let attested_again = linker
+        .link(
+            &near_a,
+            account_a,
+            &individual,
+            &individual_invite,
+            &second_device,
+        )
+        .await
+        .expect("a repeated attestation");
+    assert_eq!(attested_again.record, attested.record);
+    assert_eq!(attested_again.server_signature, attested.server_signature);
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_legacy_invite_link_devices WHERE device_key_id=$1",
+            &[&second_device.id],
+        )
+        .await,
+        1
+    );
+    let attest_audit: serde_json::Value = admin
+        .query_one(
+            "SELECT safe_metadata FROM trace_account_audit
+              WHERE tenant_id=$1 AND action='legacy_invite_device_attested'",
+            &[&near_a],
+        )
+        .await
+        .expect("one attestation audit row")
+        .get(0);
+    assert!(!attest_audit.to_string().contains(&individual));
+    assert_eq!(attest_audit["legacy_tenant_hash"], hash(&individual));
+    // A device outside the tenant's invite devices attests nothing.
+    let stranger = new_device();
+    assert_eq!(
+        linker
+            .link(
+                &near_a,
+                account_a,
+                &individual,
+                &individual_invite,
+                &stranger
+            )
+            .await
+            .expect_err("an unregistered device"),
+        LinkRefusal::DeviceNotEligible
+    );
     assert_eq!(
         count(
             &admin,
