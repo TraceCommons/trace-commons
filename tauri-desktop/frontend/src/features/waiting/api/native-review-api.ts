@@ -1,4 +1,5 @@
 import { invokeTauri } from "../../../lib/tauri/core-api";
+import { reviewRetryLine } from "../../../lib/tauri/witness-capacity";
 
 type RecordValue = Record<string, unknown>;
 
@@ -31,6 +32,8 @@ function witnessView(value: unknown) {
   return {
     state: string(item, "state"),
     message: string(item, "message"),
+    // Only for a busy witness: when the person may try again.
+    retryLine: reviewRetryLine(item),
   };
 }
 
@@ -84,6 +87,8 @@ export type WitnessReview =
       ready: false;
       state: string;
       message: string | null;
+      /** A busy witness's "try again after" line; null otherwise. */
+      retryLine: string | null;
       summary: null;
     };
 
@@ -140,6 +145,7 @@ export async function requestWitnessReview(
     ready: false,
     state: rendered?.state ?? "Unknown",
     message: rendered?.message ?? null,
+    retryLine: rendered?.retryLine ?? null,
     summary: null,
   };
 }

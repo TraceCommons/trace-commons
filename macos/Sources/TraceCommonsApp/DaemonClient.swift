@@ -25,6 +25,14 @@ final class DaemonClient {
         /// daemon older than this shell -- and the caller keeps its own
         /// fallback for that case.
         var viewMessage: String? = nil
+        /// The daemon's `view.state`, when it sent a view. `"Busy"` is a
+        /// review a person asked for that met a busy witness: nothing was
+        /// judged, and it may be tried again after `retryAt`.
+        var viewState: String? = nil
+        /// When a busy witness asked to be tried again, from `view.retry_at`.
+        var retryAt: Date? = nil
+        /// The label the daemon sent to show beside `retryAt`.
+        var retryLabel: String? = nil
         var description: String { "\(code): \(message)" }
     }
 
@@ -128,6 +136,36 @@ final class DaemonClient {
     /// would make every one of them handle a sentence they do not render.
     static func refusalSentence(from error: Error) -> String? {
         (error as? Failure)?.viewMessage
+    }
+
+    /// "<label>: <local time>" for a review that met a busy witness, or
+    /// `nil` for any other outcome, or a time or label the daemon did not
+    /// send -- never a guessed time.
+    static func busyRetryLine(
+        from error: Error,
+        format: (Date) -> String = {
+            DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short)
+        }
+    ) -> String? {
+        guard let failure = error as? Failure, failure.viewState == "Busy",
+              let at = failure.retryAt,
+              let label = failure.retryLabel, !label.isEmpty
+        else { return nil }
+        return "\(label): \(format(at))"
+    }
+
+    /// The daemon's review `view`, read into a `Failure`'s fields.
+    static func failure(code: String, message: String, view: [String: Any]?) -> Failure {
+        let sentence = view?["message"] as? String
+        let retryAt = (view?["retry_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+        return Failure(
+            code: code,
+            message: message,
+            viewMessage: sentence.flatMap { $0.isEmpty ? nil : $0 },
+            viewState: view?["state"] as? String,
+            retryAt: retryAt,
+            retryLabel: view?["retry_label"] as? String
+        )
     }
 
     func requestPreview(entryID: String) throws -> PreviewRequestResult {
@@ -926,11 +964,10 @@ final class DaemonClient {
         }
         if let error = object["error"] as? [String: Any] {
             let view = (object["result"] as? [String: Any])?["view"] as? [String: Any]
-            let sentence = view?["message"] as? String
-            throw Failure(
+            throw Self.failure(
                 code: error["code"] as? String ?? "unavailable",
                 message: error["message"] as? String ?? "unknown",
-                viewMessage: sentence.flatMap { $0.isEmpty ? nil : $0 }
+                view: view
             )
         }
         guard let result = object["result"] else {

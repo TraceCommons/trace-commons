@@ -14,13 +14,35 @@ struct InsightsView: View {
 
     @MainActor init(storeSelection: InsightsStoreSelection = .standard,
                     storeCopy: [String: String]? = TCInsights.copy()) {
-        self.storeSelection = storeSelection
-        self.storeCopy = storeCopy ?? [:]
         let router = InsightsServiceRouter(selection: storeSelection)
         let service: InsightsModel.Service = { request in try await router.call(request) }
-        _model = State(initialValue: InsightsModel(service: service))
-        _comparisonModel = State(initialValue: ComparisonTasksModel(service: service))
-        _specificationModel = State(initialValue: ComparisonSpecificationsModel(service: service))
+        self.init(storeSelection: storeSelection, storeCopy: storeCopy,
+                  model: InsightsModel(service: service),
+                  comparisonModel: ComparisonTasksModel(service: service),
+                  specificationModel: ComparisonSpecificationsModel(service: service))
+    }
+
+    /// The same view over models the caller built, so a caller that renders
+    /// it can wait for the models it shows to be populated rather than for a
+    /// timer. The models must be routed to `storeSelection`.
+    @MainActor init(storeSelection: InsightsStoreSelection,
+                    storeCopy: [String: String]?,
+                    model: InsightsModel,
+                    comparisonModel: ComparisonTasksModel,
+                    specificationModel: ComparisonSpecificationsModel) {
+        self.storeSelection = storeSelection
+        self.storeCopy = storeCopy ?? [:]
+        _model = State(initialValue: model)
+        _comparisonModel = State(initialValue: comparisonModel)
+        _specificationModel = State(initialValue: specificationModel)
+    }
+
+    /// The line naming a custom store, exactly as the view renders it; `nil`
+    /// for the standard store, which shows no location line.
+    static func storeLocationLine(_ selection: InsightsStoreSelection,
+                                  copy: [String: String]) -> String? {
+        guard case .custom(let path) = selection else { return nil }
+        return (copy["insights_store_title"] ?? "") + ": " + path
     }
 
     @ViewBuilder
@@ -38,8 +60,8 @@ struct InsightsView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if case .custom(let path) = storeSelection {
-                        Text((storeCopy["insights_store_title"] ?? "") + ": " + path)
+                    if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
+                        Text(location)
                             .font(.caption).textSelection(.enabled)
                     }
                     Text(model.text("intro"))

@@ -151,7 +151,11 @@ impl Fixture {
 
     fn reply(&self, id: u64, result: Result<Value, String>) {
         self.held.borrow_mut().remove(&id);
-        assert!(self.results.try_send((id, Outcome::Call(result))).is_ok());
+        assert!(
+            self.results
+                .try_send((id, Outcome::Call(result.map_err(Into::into))))
+                .is_ok()
+        );
     }
 
     fn answer(&self, index: usize, result: Result<Value, String>) {

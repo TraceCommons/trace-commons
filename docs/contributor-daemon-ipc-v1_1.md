@@ -1752,8 +1752,15 @@ with that `project_id` and `auto_upload`, nothing more: the same refusals
 same `armed-auto-upload` audit row, and arming under the terms now in
 force. Pressing it is the fresh consent R6 asks for, which the sentence
 beside it says. A refusal changes nothing and leaves the notice; a shell
-shows `rearm_failed`. The automatic grant's notice has no such button: no
-shell can give the grant yet, so it says what happened to projects instead.
+shows `rearm_failed`. The automatic grant's notice has no such button: it
+says what happened to projects instead. A shell that can give the grant
+(today only Tauri, through its Flow 1 screens) asks for the notice with
+`consent_copy::void_notice_for_wire_with_regrant`, which adds `regrant` and
+`regrant_action` on the grant's notice only. That button opens the grant
+screens again -- scope, path, both disclosures, the grant -- and gives
+nothing by itself; `grant_automatic` given there clears the notice. Shells
+that cannot give the grant keep `void_notice_for_wire`, which promises no
+re-grant.
 
 A notice also goes when the contributor acts on what it is about: setting
 that project's mode (`set_project_mode`, including re-arming it) clears the
@@ -3584,7 +3591,11 @@ The flow a shell drives:
    identifiers and digests only; the daemon refuses the whole list
    (`inference-connection-response-invalid`) if any offer is malformed, rather
    than showing a subset. The disclosure copy is the shell's own; the server's
-   description text is not passed through.
+   description text is not passed through. Shells take it from
+   `consent_copy::inference_connection_disclosure(disclosure_version)`, which
+   answers `None` for a version the build cannot describe; such an offer is
+   not offered. The Tauri onboarding's optional connect-inference step
+   (`consent_copy::inference_connection_copy`) is the first caller.
 2. The shell shows one offer and the disclosure its `disclosure_version`
    names, and on the contributor's choice calls `inference_connection_select`
    with **exactly** that offer's `offer_id`, `provider_id`, `revision`,

@@ -2467,7 +2467,8 @@ final class AppModel: ObservableObject {
             } catch {
                 return WitnessReviewOutcome(
                     succeeded: false,
-                    sentence: DaemonClient.refusalSentence(from: error)
+                    sentence: DaemonClient.refusalSentence(from: error),
+                    retryLine: DaemonClient.busyRetryLine(from: error)
                 )
             }
         }.value
@@ -2588,6 +2589,10 @@ final class AppModel: ObservableObject {
         /// The daemon's classified sentence, or `nil` when it sent none and
         /// the caller should keep its own fallback.
         let sentence: String?
+        /// Set only when the witness was busy: when the person may try the
+        /// review again. A busy witness judged nothing, so it is not a
+        /// refusal.
+        var retryLine: String? = nil
     }
 
     enum PreviewOutcome {
