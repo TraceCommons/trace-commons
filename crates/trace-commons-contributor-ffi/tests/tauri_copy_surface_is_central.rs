@@ -247,6 +247,16 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "acknowledge_grant_voids",
             "consent::acknowledge_grant_voids",
         ),
+        ("legacy_migration_copy", "consent::legacy_migration_copy"),
+        (
+            "legacy_migration_notice",
+            "consent::legacy_migration_notice",
+        ),
+        ("migrate_legacy_invite", "consent::migrate_legacy_invite"),
+        (
+            "acknowledge_legacy_invite_migration",
+            "consent::acknowledge_legacy_invite_migration",
+        ),
         ("arming_reworded_notice", "consent::arming_reworded_notice"),
         ("gate_held_notice", "consent::gate_held_notice"),
         (
@@ -969,4 +979,83 @@ fn tauri_never_says_private_inference_to_a_contributor() {
         offenders.is_empty(),
         "\"private inference\" is contributor-facing in: {offenders:?}"
     );
+}
+
+/// The legacy invite migration's words live in the contributor core and
+/// nowhere in the Tauri shell: the panel and the notice render only what the
+/// core's copy commands return, including the transport-failure line.
+#[test]
+fn legacy_migration_copy_is_central_and_the_shell_holds_no_literal() {
+    use trace_commons_contributor::consent_copy as copy;
+    let root = repo_root();
+    let panel = read(
+        &root,
+        "tauri-desktop/frontend/src/features/settings/components/legacy-migration-panel.tsx",
+    );
+    let notice = read(
+        &root,
+        "tauri-desktop/frontend/src/app/legacy-migration-notice.tsx",
+    );
+    let offer = copy::legacy_migration_offer();
+    let mut sentences = vec![
+        offer.title,
+        offer.body,
+        offer.action,
+        offer.working,
+        offer.invite_prompt,
+        offer.start_failed,
+        copy::LEGACY_MIGRATION_NOTICE_TITLE,
+        copy::LEGACY_MIGRATION_NOTICE_BODY,
+        copy::LEGACY_MIGRATION_NOTICE_ARMED_KEPT,
+        copy::LEGACY_MIGRATION_NOTICE_NOTHING_ARMED,
+        copy::LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE,
+    ];
+    for label in [
+        "legacy_migration_tenant_pooled",
+        "legacy_migration_admission_not_ready",
+        "legacy_migration_invite_needed",
+        "no-such-label",
+    ] {
+        sentences.push(copy::legacy_migration_refusal_line(label));
+    }
+    for sentence in sentences {
+        for (name, source) in [("panel", &panel), ("notice", &notice)] {
+            assert!(
+                !source.contains(sentence),
+                "the Tauri {name} holds core copy as a literal: {sentence}"
+            );
+        }
+    }
+    // Nor a sentence of its own: a literal "Nothing was changed" is the
+    // fallback this test exists to keep out.
+    for (name, source) in [("panel", &panel), ("notice", &notice)] {
+        assert!(
+            !source.contains("Nothing was changed"),
+            "the Tauri {name} words a failure itself"
+        );
+    }
+    for field in [
+        "copy.data.title",
+        "copy.data.body",
+        "copy.data.action",
+        "copy.data.working",
+        "copy.data.invite_prompt",
+        "copy.data.start_failed",
+        "answer.line",
+    ] {
+        assert!(panel.contains(field), "the panel does not render {field}");
+    }
+    assert!(panel.contains("getLegacyMigrationOffer"));
+    for field in [
+        "copy.data.title",
+        "copy.data.body",
+        "copy.data.folders",
+        "copy.data.acknowledge",
+    ] {
+        assert!(notice.contains(field), "the notice does not render {field}");
+    }
+    assert!(notice.contains("getLegacyMigrationNotice"));
+    let consent = read(&root, "tauri-desktop/src-tauri/src/commands/consent.rs");
+    let serve = rust_function(&consent, "fn legacy_migration_copy");
+    assert!(serve.contains("legacy_migration_offer"));
 }

@@ -1,5 +1,13 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  type LegacyMigrationNotice,
+  type LegacyMigrationOffer,
+  type LegacyMigrationResult,
+  parseLegacyMigrationNotice,
+  parseLegacyMigrationOffer,
+  parseLegacyMigrationResult,
+} from "./legacy-migration";
 import type { CoreStatus } from "./types";
 import { coreStatusSchema } from "./types";
 
@@ -65,6 +73,37 @@ export async function acknowledgeGrantVoids(ids: number[]): Promise<void> {
   await tauriInvoke("acknowledge_grant_voids", { ids });
 }
 
+/** Ask the core for the words of the move to a NEAR AI account. */
+export async function getLegacyMigrationOffer(): Promise<LegacyMigrationOffer> {
+  return parseLegacyMigrationOffer(await tauriInvoke("legacy_migration_copy"));
+}
+
+/** The core's notice for `status.legacy_invite_migration.notice`, or null. */
+export async function getLegacyMigrationNotice(
+  notice: Record<string, unknown>,
+): Promise<LegacyMigrationNotice | null> {
+  return parseLegacyMigrationNotice(
+    await tauriInvoke("legacy_migration_notice", { notice }),
+  );
+}
+
+/**
+ * The contributor chose to move this invite identity to their NEAR AI
+ * account. `invite` only after the core asked for it.
+ */
+export async function migrateLegacyInvite(
+  invite: string | null,
+): Promise<LegacyMigrationResult> {
+  return parseLegacyMigrationResult(
+    await tauriInvoke("migrate_legacy_invite", { invite }),
+  );
+}
+
+/** Record that the move notice was shown. */
+export async function acknowledgeLegacyInviteMigration(): Promise<void> {
+  await tauriInvoke("acknowledge_legacy_invite_migration");
+}
+
 export async function retryDaemonStartup(): Promise<void> {
   await invokeTauriVoid("retry_daemon_startup");
 }
@@ -111,11 +150,9 @@ export function invokeTauriBytes(
       throw new Error("Invalid raw upload header");
     }
   }
-  return invoke<unknown>(command, body, { headers }).catch(
-    (error: unknown) => {
-      throw normalizeInvokeError(error);
-    },
-  );
+  return invoke<unknown>(command, body, { headers }).catch((error: unknown) => {
+    throw normalizeInvokeError(error);
+  });
 }
 
 export async function invokeTauriVoid(

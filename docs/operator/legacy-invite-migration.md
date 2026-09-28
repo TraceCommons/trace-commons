@@ -8,8 +8,8 @@ procedure; the design is in the consent spec
 `migrations/V81__legacy_invite_link.sql`.
 
 The client half -- the daemon performing the migration, unreachable over IPC,
-ordered against the void sweep, re-baselining armed folders -- is a separate
-contributor PR and is not described here.
+ordered against the void sweep, re-baselining armed folders -- is described
+in `docs/contributor-daemon-ipc-v1_1.md`, "Moving a legacy invite identity".
 
 ## The rules
 
