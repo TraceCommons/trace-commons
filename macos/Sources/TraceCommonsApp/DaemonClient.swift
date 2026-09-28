@@ -628,14 +628,17 @@ final class DaemonClient {
         _ = try rawResult("acknowledge_near_ai_notice")
     }
 
-    /// Records that the void notices with these ids were shown -- see "Void
-    /// notices" in the contract. Only the ids actually drawn: there is no
-    /// "all", so a void raised after the shell drew is never cleared unseen.
-    /// Re-arms nothing.
+    /// Records that the notice after a legacy invite identity moved to a
+    /// NEAR AI account was shown. Callers call it only once that notice has
+    /// been drawn and the person pressed its button.
     func acknowledgeLegacyInviteMigration() throws {
         _ = try rawResult("acknowledge_legacy_invite_migration", params: [:])
     }
 
+    /// Records that the void notices with these ids were shown -- see "Void
+    /// notices" in the contract. Only the ids actually drawn: there is no
+    /// "all", so a void raised after the shell drew is never cleared unseen.
+    /// Re-arms nothing.
     func acknowledgeGrantVoids(ids: [UInt64]) throws {
         _ = try rawResult("acknowledge_grant_voids", params: ["ids": ids])
     }

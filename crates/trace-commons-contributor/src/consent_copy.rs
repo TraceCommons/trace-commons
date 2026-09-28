@@ -707,9 +707,10 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 //
 // Every constant in this section is DRAFT, NEEDS APPROVAL (copy for Zaki's
 // approval): written with the client half of the legacy invite migration so
-// that no shell writes its own. The Tauri client renders it; macOS, Windows
-// and GTK do not take it yet. The daemon reports the move under
-// `status.legacy_invite_migration` and refuses it with
+// that no shell writes its own. The Tauri client renders all of it; macOS,
+// Windows and GTK render only the notice after a move
+// (`legacy_migration_notice_for_wire`), not the offer. The daemon reports
+// the move under `status.legacy_invite_migration` and refuses it with
 // `legacy_migration_*` labels (`daemon::legacy_migration::LABELS`).
 
 /// **DRAFT, NEEDS APPROVAL.** Heading of the offer, shown only while
