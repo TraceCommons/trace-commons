@@ -289,6 +289,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
     "acknowledge_near_ai_notice",
     "approve",
@@ -469,6 +470,21 @@ pub struct WitnessCapacity {
     pub next_retry_at: Option<chrono::DateTime<Utc>>,
 }
 
+/// `status.automatic_contribution_held`: what the automatic-contribution gate
+/// held at the last full watcher pass. See [`DaemonShared::gate_held`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GateHeld {
+    /// Sessions in armed folders the gate is holding instead of approving.
+    pub held_sessions: usize,
+    /// The unmet requirements' reason labels, as `automatic_gate` names
+    /// them. Empty when nothing is held.
+    pub reasons: Vec<&'static str>,
+    /// Held sessions per project key. The key is a local path and never
+    /// crosses the socket; `status` names each project the way
+    /// `list_projects` does.
+    pub projects: std::collections::BTreeMap<String, usize>,
+}
+
 /// Everything the daemon's loops and its IPC server share.
 pub struct DaemonShared {
     pub store: ConfigStore,
@@ -533,6 +549,13 @@ pub struct DaemonShared {
     /// against by `watcher::report_gate` so the level is logged when either
     /// moves, not on every poll.
     pub(crate) gate_held_logged: Mutex<(usize, Vec<&'static str>)>,
+    /// What the automatic-contribution gate held at the last full pass, for
+    /// `status.automatic_contribution_held` and the health label
+    /// `automatic-contribution-held`. Written only by a full pass (see
+    /// `watcher::record_gate_held`), because a scoped pass cannot measure a
+    /// level. In memory only: a restarted daemon's first full pass measures
+    /// it again.
+    pub(crate) gate_held: Mutex<GateHeld>,
     /// What ingest last said about account admission, for the gate's R3.
     /// In memory only; see `account_admission`.
     pub(crate) account_admission: super::account_admission::AccountAdmissionState,
@@ -719,6 +742,7 @@ impl DaemonShared {
             private_inference_endpoint: Mutex::new(None),
             routing_had_rows: AtomicBool::new(false),
             gate_held_logged: Mutex::new((0, Vec::new())),
+            gate_held: Mutex::new(GateHeld::default()),
             account_admission: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
@@ -1457,6 +1481,10 @@ impl DaemonShared {
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
         let grant_voids = self.grant_voids_value();
+        // Before the queue lock: it takes the policy lock and then the
+        // queue lock, as `grant_voids_value` does.
+        let arming_rewordings = self.arming_rewordings_value();
+        let automatic_contribution_held = self.gate_held_value();
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
         let queue = self.queue.lock().expect("queue lock");
@@ -1513,6 +1541,83 @@ impl DaemonShared {
                 "waiting_sessions": witness_capacity.waiting_sessions,
                 "next_retry_at": witness_capacity.next_retry_at,
             },
+            // Additive. K5: armed folders whose arming words claimed a
+            // model scrubs their sessions, where the words in force no
+            // longer do. Each stays until a shell acknowledges it by id
+            // (`acknowledge_arming_rewordings`). An empty list, never
+            // absent, as `grant_voids` is.
+            "arming_rewordings": arming_rewordings,
+            // Additive. What the automatic-contribution gate held at the
+            // last full pass: the count, its reason labels, and each armed
+            // folder it held sessions in. Beside `health` for the reason
+            // `witness_capacity` is. Always present, zero when none. It
+            // releases on its own: nothing here is acknowledged.
+            "automatic_contribution_held": automatic_contribution_held,
+        })
+    }
+
+    /// The `arming_rewordings` list of [`Self::status_value`]. Each folder
+    /// is named as `list_projects` names it, never by its key. `was` and
+    /// `now` are the claims (`model_scrubbed`, `patterns_only`); a shell
+    /// turns an element into words with
+    /// `consent_copy::arming_reworded_notice_for_wire`, never by itself.
+    fn arming_rewordings_value(&self) -> serde_json::Value {
+        let policy = self.policy.lock().expect("policy lock");
+        if policy.arming_rewordings.is_empty() {
+            return serde_json::json!([]);
+        }
+        let queue = self.queue.lock().expect("queue lock");
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let notices: Vec<serde_json::Value> = policy
+            .arming_rewordings
+            .iter()
+            .map(|notice| {
+                let key = notice.project_key.as_str();
+                serde_json::json!({
+                    "id": notice.id,
+                    "reworded_at": notice.reworded_at,
+                    "project_id": project_id_for(key),
+                    "project_label": disambiguated_label(
+                        key,
+                        policy.projects.get(key).and_then(|e| e.display_path.as_deref()),
+                        &known,
+                    ),
+                    "was": notice.was,
+                    "now": notice.now,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(notices)
+    }
+
+    /// The `automatic_contribution_held` object of [`Self::status_value`].
+    fn gate_held_value(&self) -> serde_json::Value {
+        let held = self.gate_held.lock().expect("gate held lock").clone();
+        let projects: Vec<serde_json::Value> = if held.projects.is_empty() {
+            Vec::new()
+        } else {
+            let policy = self.policy.lock().expect("policy lock");
+            let queue = self.queue.lock().expect("queue lock");
+            let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+            held.projects
+                .iter()
+                .map(|(key, count)| {
+                    serde_json::json!({
+                        "project_id": project_id_for(key),
+                        "project_label": disambiguated_label(
+                            key,
+                            policy.projects.get(key.as_str()).and_then(|e| e.display_path.as_deref()),
+                            &known,
+                        ),
+                        "held_sessions": count,
+                    })
+                })
+                .collect()
+        };
+        serde_json::json!({
+            "held_sessions": held.held_sessions,
+            "reasons": held.reasons,
+            "projects": projects,
         })
     }
 
@@ -2201,6 +2306,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "set_project_mode" => handle_set_project_mode(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
         "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
+        "acknowledge_arming_rewordings" => handle_acknowledge_arming_rewordings(shared, req),
         "withdraw_automatic_grant" => handle_withdraw_automatic_grant(shared, req),
         "automatic_grant" => Response::ok(req.id, automatic_grant_value(shared)),
         "dismiss" => {
@@ -2830,6 +2936,62 @@ fn handle_acknowledge_grant_voids(shared: &DaemonShared, req: &Request) -> Respo
     Response::ok(req.id, serde_json::json!({ "acknowledged": acknowledged }))
 }
 
+// K5: record rewording notices as shown. The same shape as
+// `acknowledge_grant_voids`, for the same reasons: `ids` names exactly the
+// notices shown, there is no "all", and the audit goes first.
+fn handle_acknowledge_arming_rewordings(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(ids) = req
+        .params
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .and_then(|list| {
+            list.iter()
+                .map(serde_json::Value::as_u64)
+                .collect::<Option<Vec<u64>>>()
+        })
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "ids-required");
+    };
+    let outstanding = {
+        let policy = shared.policy.lock().expect("policy lock");
+        policy
+            .arming_rewordings
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .count()
+    };
+    if outstanding == 0 {
+        return Response::ok(req.id, serde_json::json!({ "acknowledged": 0 }));
+    }
+    if audit::append(
+        &shared.store,
+        &AuditEntry {
+            at: Utc::now(),
+            action: "arming-rewordings-acknowledged".to_string(),
+            project_label: None,
+            detail: Some(outstanding.to_string()),
+        },
+    )
+    .is_err()
+    {
+        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    }
+    let acknowledged = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let previous = policy.arming_rewordings.clone();
+        let acknowledged = policy.acknowledge_arming_rewordings(&ids);
+        if acknowledged > 0 && policy.save(&shared.store).is_err() {
+            policy.arming_rewordings = previous;
+            return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
+        }
+        acknowledged
+    };
+    if acknowledged > 0 {
+        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    Response::ok(req.id, serde_json::json!({ "acknowledged": acknowledged }))
+}
+
 // Withdraw the Flow 1 grant. Projects it armed keep their own entries.
 fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Response {
     let withdrawn = {
@@ -2887,6 +3049,13 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     let arming_terms = (mode == ProjectMode::AutoUpload)
         .then(|| super::grant_terms::GrantTerms::in_force(shared))
         .flatten();
+    // What the arming offer the contributor just accepted claims, recorded
+    // with the arming so a later rewording can be told (K5). Read before the
+    // policy lock, like the terms.
+    let arming_claim = (mode == ProjectMode::AutoUpload).then(|| {
+        let cfg = shared.store.load_config().ok().flatten();
+        super::arming_wording::project_arming_claim(super::automatic_gate::disclosure(cfg.as_ref()))
+    });
     let mut policy = shared.policy.lock().expect("policy lock");
     let (key, audit_label) = {
         let queue = shared.queue.lock().expect("queue lock");
@@ -2973,6 +3142,9 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
 
     if let Err(e) = policy.set_mode(&key, mode, Utc::now()) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    if let Some(claim) = arming_claim {
+        policy.record_arming_claim(&key, claim);
     }
     if let Some(terms) = arming_terms {
         policy.record_grant_terms(&key, terms);
@@ -7713,6 +7885,184 @@ mod tests {
         assert!(METHODS.contains(&"acknowledge_grant_voids"));
     }
 
+    /// K5 and the held-folder notice: a healthy daemon reports an empty
+    /// rewording list and nothing held, never a missing key.
+    #[test]
+    fn status_reports_no_rewordings_and_nothing_held() {
+        let s = enrolled_shared();
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(status["arming_rewordings"], serde_json::json!([]));
+        assert_eq!(
+            status["automatic_contribution_held"],
+            serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] })
+        );
+    }
+
+    /// Arm `key` over the socket, then play the arming-copy change: the
+    /// words in force for it now claim patterns only.
+    fn armed_then_reworded(key: &str) -> DaemonShared {
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        {
+            let mut policy = s.policy.lock().unwrap();
+            assert_eq!(
+                policy.arming_claim(key),
+                crate::daemon::arming_wording::ArmingClaim::ModelScrubbed,
+                "the arming offer said the sessions would be scrubbed"
+            );
+            let reworded = policy.sweep_arming_claims(
+                |_| crate::daemon::arming_wording::ArmingClaim::PatternsOnly,
+                Utc::now(),
+            );
+            assert_eq!(reworded.len(), 1);
+            policy.save(&s.store).unwrap();
+        }
+        s
+    }
+
+    /// The rewording crosses as `list_projects` names the folder, with the
+    /// two claims, and never the key, which is a local path.
+    #[test]
+    fn status_carries_a_rewording_without_its_path() {
+        let key = "/tmp/rewordedproj";
+        let s = armed_then_reworded(key);
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        let list = status["arming_rewordings"].as_array().expect("a list");
+        assert_eq!(list.len(), 1, "{list:?}");
+        let n = &list[0];
+        assert_eq!(n["project_id"], project_id_for(key));
+        assert_eq!(n["project_label"], "rewordedproj");
+        assert_eq!(n["was"], "model_scrubbed");
+        assert_eq!(n["now"], "patterns_only");
+        assert!(n["id"].is_u64());
+        let wire = serde_json::to_string(&status["arming_rewordings"]).unwrap();
+        assert!(!wire.contains("/tmp"), "no path crosses: {wire}");
+        // And it survives a restart: it is in the policy file.
+        let persisted = ProjectPolicy::load(&s.store).unwrap();
+        assert_eq!(persisted.arming_rewordings.len(), 1);
+    }
+
+    /// Acknowledging clears exactly the notices named, audits it first, and
+    /// tells every other shell. The folder stays armed.
+    #[test]
+    fn acknowledging_arming_rewordings_clears_audits_and_publishes() {
+        let key = "/tmp/ackreword";
+        let s = armed_then_reworded(key);
+        let id = s.policy.lock().unwrap().arming_rewordings[0].id;
+        let mut rx = s.events.subscribe();
+        let r = handle_request(
+            &s,
+            &req(
+                "acknowledge_arming_rewordings",
+                serde_json::json!({ "ids": [id + 1000] }),
+            ),
+        );
+        assert_eq!(r.result.unwrap()["acknowledged"], 0, "an id not shown");
+        assert_eq!(s.policy.lock().unwrap().arming_rewordings.len(), 1);
+
+        let r = handle_request(
+            &s,
+            &req(
+                "acknowledge_arming_rewordings",
+                serde_json::json!({ "ids": [id] }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["acknowledged"], 1);
+        assert!(s.policy.lock().unwrap().arming_rewordings.is_empty());
+        let persisted = ProjectPolicy::load(&s.store).unwrap();
+        assert!(persisted.arming_rewordings.is_empty(), "the clear is saved");
+        assert_eq!(
+            persisted.resolve(key),
+            ProjectMode::AutoUpload,
+            "acknowledging changes nothing about the folder"
+        );
+        let audit = audit::load(&s.store).unwrap();
+        let entry = audit
+            .iter()
+            .find(|e| e.action == "arming-rewordings-acknowledged")
+            .expect("the acknowledgement is audited");
+        assert_eq!(entry.detail.as_deref(), Some("1"));
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "other shells are told");
+    }
+
+    #[test]
+    fn acknowledging_arming_rewordings_requires_the_ids_shown() {
+        let s = armed_then_reworded("/tmp/ackrewordbad");
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({ "ids": "all" }),
+            serde_json::json!({ "ids": [-1] }),
+            serde_json::json!({ "all": true }),
+        ] {
+            let r = handle_request(&s, &req("acknowledge_arming_rewordings", params.clone()));
+            let err = r.error.unwrap_or_else(|| panic!("{params} accepted"));
+            assert_eq!(err.code, ERR_BAD_PARAMS, "{params}");
+        }
+        assert_eq!(s.policy.lock().unwrap().arming_rewordings.len(), 1);
+        assert!(METHODS.contains(&"acknowledge_arming_rewordings"));
+    }
+
+    /// Switching the folder to ask-first from the notice answers it.
+    #[test]
+    fn switching_a_reworded_folder_to_ask_first_answers_its_notice() {
+        let key = "/tmp/rewordask";
+        let s = armed_then_reworded(key);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_id": project_id_for(key), "mode": "notify_only" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(s.policy.lock().unwrap().arming_rewordings.is_empty());
+    }
+
+    /// The held object names each folder as `list_projects` does, with its
+    /// count and the gate's reason labels, and no path.
+    #[test]
+    fn status_carries_what_the_gate_holds_without_paths() {
+        let s = enrolled_shared();
+        let key = "/tmp/heldproj";
+        seed_entry_with_eligibility(&s, key, None);
+        *s.gate_held.lock().unwrap() = GateHeld {
+            held_sessions: 3,
+            reasons: vec![crate::daemon::automatic_gate::REASON_ADMISSION_PER_SESSION],
+            projects: [(key.to_string(), 3usize)].into_iter().collect(),
+        };
+        let status = handle_request(&s, &req("status", serde_json::json!({})))
+            .result
+            .unwrap();
+        let held = &status["automatic_contribution_held"];
+        assert_eq!(held["held_sessions"], 3);
+        assert_eq!(
+            held["reasons"],
+            serde_json::json!(["admission-evidence-is-per-session"])
+        );
+        assert_eq!(held["projects"][0]["project_id"], project_id_for(key));
+        assert_eq!(held["projects"][0]["project_label"], "heldproj");
+        assert_eq!(held["projects"][0]["held_sessions"], 3);
+        let wire = serde_json::to_string(held).unwrap();
+        assert!(!wire.contains("/tmp"), "no path crosses: {wire}");
+    }
+
     /// Arming over the socket and then widening voids: the comparison is
     /// against the terms recorded at arming. Were they not recorded, the
     /// next sweep would baseline the new destination as if it had been
@@ -11864,7 +12214,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 47, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 48, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
