@@ -42,7 +42,7 @@ public struct GrantVoidWire: Decodable, Equatable, Sendable {
 }
 
 /// A JSON value, kept whole so an element can go back to the core as it came.
-private enum JSONValue: Codable, Equatable {
+enum JSONValue: Codable, Equatable {
     case null
     case bool(Bool)
     case number(Double)
