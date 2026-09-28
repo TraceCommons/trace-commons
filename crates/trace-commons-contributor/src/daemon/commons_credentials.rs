@@ -138,7 +138,13 @@ fn binding(store: &ConfigStore, record: &Record) -> Result<String> {
 fn native(_store: &ConfigStore) -> Result<CredentialStore<Arc<dyn SecretBackend>>> {
     #[cfg(test)]
     let backend = test_backend(_store);
-    #[cfg(not(test))]
+    // Integration tests and the binaries they spawn: a file store in the
+    // test's own config dir, never the user's keychain.
+    #[cfg(all(not(test), feature = "test-credential-store"))]
+    let backend: Arc<dyn SecretBackend> = Arc::new(
+        super::test_credential_store::TestFileBackend::for_store(_store),
+    );
+    #[cfg(all(not(test), not(feature = "test-credential-store")))]
     let backend: Arc<dyn SecretBackend> =
         Arc::new(super::os_secret_store::OsSecretBackend::commons().map_err(|_| unavailable())?);
     Ok(CredentialStore::new(backend))

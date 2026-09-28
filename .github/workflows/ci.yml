@@ -61,6 +61,16 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      # Seconds, no build. The contributor crate's `test-credential-store`
+      # feature swaps the OS keychain for a plaintext file and must only ever
+      # be on under `cargo test`; this refuses any release/packaging workflow,
+      # build script or shipped manifest that could turn it on. The self-test
+      # seeds each violation and requires a refusal, so the check cannot rot
+      # into one that always passes.
+      - name: No shipped build enables the test credential store
+        run: |
+          scripts/ci/check-release-credential-store.sh check
+          scripts/ci/check-release-credential-store.sh self-test
 
   postgres-suites:
     name: database suites against a real PostgreSQL
