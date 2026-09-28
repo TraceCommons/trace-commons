@@ -126,6 +126,8 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
             "offer_decline": inference.offer_decline,
             "offer_asked_once": inference.offer_asked_once,
         },
+        "project_automatic_unavailable":
+            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
         "credential_cost": trace_commons_contributor::private_inference_copy::CREDENTIAL_COST,
         "credential_wallet_notice": trace_commons_contributor::private_inference_copy::CREDENTIAL_WALLET_NOTICE,
         "near_ai_enroll_title": inference.near_ai_enroll_title,
@@ -296,6 +298,15 @@ mod tests {
             let escaped = serde_json::to_string(sentence).unwrap();
             assert!(!wire.contains(escaped.trim_matches('"')));
         }
+    }
+
+    /// K6: an armed project's failure line reaches the shell from the core.
+    #[test]
+    fn the_shared_copy_carries_the_project_disclosure_failure_line() {
+        assert_eq!(
+            contributor_disclosure_copy()["project_automatic_unavailable"],
+            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE
+        );
     }
 
     #[test]

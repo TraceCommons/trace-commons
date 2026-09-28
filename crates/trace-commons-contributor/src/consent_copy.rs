@@ -489,6 +489,15 @@ pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted t
 /// daemon records the origin, this becomes two sentences and a branch.
 pub const AUTO_WITNESS_ORIGIN: &str = "This witness was set up either by the commons you joined, which published its address and keys and had them saved when you joined without asking you, or by someone entering it in Settings. This app keeps no record of which.";
 
+/// Shown under an armed project when its disclosure (K6,
+/// `automatic_gate::project_disclosure`) could not be read.
+///
+/// Approved by Zaki on #1075. It names no wording as a fallback: a shell
+/// that cannot read the core's answer shows neither scrub disclosure,
+/// rather than guessing one.
+pub const AUTO_PROJECT_DISCLOSURE_UNAVAILABLE: &str =
+    "What is removed from this project could not be loaded.";
+
 /// Why the scope picker blocks the grant (R7), and what declining means.
 ///
 /// **DRAFT, NEEDS APPROVAL.** R7: the picker has no default, and a

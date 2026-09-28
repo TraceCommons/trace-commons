@@ -532,6 +532,24 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "the project disclosure must not choose its wording (`{forbidden}`)"
         );
     }
+    // Its failure line is the core's too, served through the shared copy
+    // command; the component holds no sentence of its own.
+    assert!(project_disclosure.contains("project_automatic_unavailable"));
+    assert!(
+        !project_disclosure
+            .contains(trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE),
+        "the project disclosure's failure line must come from the core"
+    );
+    assert!(!project_disclosure.contains("could not be loaded"));
+    let native_flows_source = read(
+        &root,
+        "tauri-desktop/src-tauri/src/commands/native_flows.rs",
+    );
+    assert!(
+        native_flows_source.contains("consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE"),
+        "contributor_disclosure_copy must serve the core's failure line"
+    );
+    assert!(api.contains("\"project_automatic_unavailable\""));
     let native_flows = read(
         &root,
         "tauri-desktop/src-tauri/src/commands/native_flows.rs",
