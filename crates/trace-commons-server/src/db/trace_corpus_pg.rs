@@ -13,6 +13,7 @@ use crate::db::postgres::PgBackend;
 use crate::db::trace_corpus_common::{
     audit_action_for_status, enum_from_storage, enum_to_storage,
     validate_tenant_scoped_trace_object_ref, validate_trace_audit_append_chain,
+    validate_trace_audit_chain_resume,
 };
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::{
@@ -1494,6 +1495,18 @@ async fn append_trace_audit_event_in_transaction(
     tx: &Transaction<'_>,
     audit_event: &TraceAuditEventWrite,
 ) -> Result<(), DatabaseError> {
+    append_trace_audit_row_in_transaction(tx, audit_event, None).await
+}
+
+/// Inserts one audit row under the tenant's audit advisory lock. With
+/// `resumes_from_event_hash` the row resumes the chain across a legacy
+/// segment (`validate_trace_audit_chain_resume`); without it the ordinary
+/// stale-previous-hash check applies.
+async fn append_trace_audit_row_in_transaction(
+    tx: &Transaction<'_>,
+    audit_event: &TraceAuditEventWrite,
+    resumes_from_event_hash: Option<&str>,
+) -> Result<(), DatabaseError> {
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
         &[&audit_event.tenant_id],
@@ -1513,13 +1526,24 @@ async fn append_trace_audit_event_in_transaction(
         .await
         .map_err(DatabaseError::Postgres)?
         .map(|row| row.get("event_hash"));
-    validate_trace_audit_append_chain(
-        &audit_event.tenant_id,
-        audit_event.audit_event_id,
-        latest_event_hash.as_deref(),
-        audit_event.previous_event_hash.as_deref(),
-        audit_event.event_hash.is_some(),
-    )?;
+    match resumes_from_event_hash {
+        None => validate_trace_audit_append_chain(
+            &audit_event.tenant_id,
+            audit_event.audit_event_id,
+            latest_event_hash.as_deref(),
+            audit_event.previous_event_hash.as_deref(),
+            audit_event.event_hash.is_some(),
+        )?,
+        Some(resumes_from_event_hash) => validate_trace_audit_chain_resume(
+            &audit_event.tenant_id,
+            audit_event.audit_event_id,
+            latest_event_hash.as_deref(),
+            resumes_from_event_hash,
+            audit_event.decision_inputs_hash.as_deref(),
+            audit_event.previous_event_hash.as_deref(),
+            audit_event.event_hash.is_some(),
+        )?,
+    }
     let next_audit_sequence: i64 = tx
         .query_one(
             "SELECT COALESCE(MAX(audit_sequence), 0) + 1
@@ -4622,6 +4646,20 @@ impl TraceCorpusStore for PgBackend {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
         append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(())
+    }
+
+    async fn append_trace_audit_chain_resume_event(
+        &self,
+        audit_event: TraceAuditEventWrite,
+        resumes_from_event_hash: &str,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_trace_tenant(&audit_event.tenant_id).await?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, &audit_event.tenant_id).await?;
+        append_trace_audit_row_in_transaction(&tx, &audit_event, Some(resumes_from_event_hash))
+            .await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(())
     }
