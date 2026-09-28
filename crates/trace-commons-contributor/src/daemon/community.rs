@@ -237,6 +237,13 @@ fn map_entry(
     })
 }
 
+/// The roster route on the ingest ORIGIN. `ingest_url` carries the upload
+/// path, so appending to it would ask for `/v1/traces/v1/community/...`.
+fn leaderboard_url(ingest_url: &str) -> Result<reqwest::Url> {
+    crate::config::ingest_origin_url(ingest_url, LEADERBOARD_PATH)
+        .context("building the community roster URL")
+}
+
 /// Fetch the public roster and reduce it to `display_handle`'s standing.
 ///
 /// `Ok(None)` is the ordinary "no standing" answer and covers the server's
@@ -251,8 +258,8 @@ pub async fn fetch_standing(
     display_handle: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<CommunityStanding>> {
-    let url = format!("{}{LEADERBOARD_PATH}", ingest_url.trim_end_matches('/'));
-    let parsed = reqwest::Url::parse(&url).with_context(|| format!("parsing {url}"))?;
+    let parsed = leaderboard_url(ingest_url)?;
+    let url = parsed.to_string();
     crate::config::allowlist_for(allowed_hosts).check(&parsed)?;
 
     let http = reqwest::Client::builder()
@@ -285,6 +292,31 @@ mod tests {
     use super::*;
 
     use crate::daemon::test_support::at;
+
+    /// The roster lives at the ingest ORIGIN. `ingest_url` carries the upload
+    /// path (`/v1/traces`), and appending to it asked for
+    /// `/v1/traces/v1/community/leaderboard`, which does not exist.
+    #[test]
+    fn the_roster_is_fetched_from_the_ingest_origin_not_its_path() {
+        for ingest in [
+            "https://commons.example/v1/traces",
+            "https://commons.example/v1/traces/",
+            "https://commons.example/",
+            "https://commons.example",
+        ] {
+            assert_eq!(
+                leaderboard_url(ingest).unwrap().as_str(),
+                "https://commons.example/v1/community/leaderboard",
+                "ingest_url = {ingest}"
+            );
+        }
+        assert_eq!(
+            leaderboard_url("http://127.0.0.1:8443/v1/traces")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:8443/v1/community/leaderboard"
+        );
+    }
 
     /// A realistic body: exactly what the server pre-renders into
     /// `trace_leaderboard_snapshots.contents_jsonb` and serves verbatim.
