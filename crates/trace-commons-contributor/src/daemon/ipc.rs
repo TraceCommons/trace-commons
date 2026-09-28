@@ -291,6 +291,8 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "acknowledge_arming_rewordings",
     "acknowledge_grant_voids",
+    "acknowledge_legacy_invite_migration",
+    "legacy_invite_migrate",
     "acknowledge_near_ai_notice",
     "approve",
     "automatic_grant",
@@ -576,6 +578,13 @@ pub struct DaemonShared {
     /// config and `daemon-inference-connection.json` after their network
     /// calls. A `std` mutex: it is never held across an await.
     pub(crate) inference_connection_lock: Mutex<()>,
+    /// Held for the whole of every watcher pass, full or scoped, and by the
+    /// legacy invite migration's identity switch. So no pass reads the old
+    /// config and then sweeps grants the switch has already re-recorded, or
+    /// the reverse: the sweep sees the old identity with the old terms, or
+    /// the new identity with the new ones, never a mix. A `std` mutex, never
+    /// held across an await.
+    pub(crate) pass_lock: Mutex<()>,
     /// The credential-change count this daemon has already absorbed.
     ///
     /// See [`super::nearai_credential::ceremony::change_count`] for what the
@@ -707,6 +716,10 @@ impl DaemonShared {
         // was replaced underneath it, would otherwise leave redacted trace
         // content on disk with no entry that needs it.
         let _ = super::approved_envelope::sweep(&store, &queue.pinned_entry_ids());
+        // A legacy invite migration the daemon died in the middle of is
+        // finished or undone before the policy is read and before any pass,
+        // so nothing ever sees a half-switched identity.
+        super::legacy_migration::recover(&store)?;
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
         let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|_| {
@@ -756,6 +769,7 @@ impl DaemonShared {
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
             inference_connection_lock: Mutex::new(()),
+            pass_lock: Mutex::new(()),
             near_ai_credential_changes: std::sync::atomic::AtomicU64::new(0),
             private_inference_stop_confirmed: Arc::new(AtomicBool::new(false)),
             private_inference_changed: tokio::sync::Notify::new(),
@@ -1542,6 +1556,10 @@ impl DaemonShared {
                 "waiting_sessions": witness_capacity.waiting_sessions,
                 "next_retry_at": witness_capacity.next_retry_at,
             },
+            // Additive. Whether moving a legacy invite identity to a NEAR AI
+            // account can be offered, and the notice after it moved, until a
+            // shell acknowledges it. No identifiers. See `legacy_migration`.
+            "legacy_invite_migration": super::legacy_migration::status_value(&self.store, cfg.as_ref()),
             // Additive. K5: armed folders whose arming words claimed a
             // model scrubs their sessions, where the words in force no
             // longer do. Each stays until a shell acknowledges it by id
@@ -2163,6 +2181,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ),
     ("near_account_start", "near-signup-requires-async"),
     ("near_ai_account_enroll", "near-signup-requires-async"),
+    ("legacy_invite_migrate", "legacy-migration-requires-async"),
     ("near_account_capabilities", "near-signup-requires-async"),
     (
         "near_ai_credential_start",
@@ -2308,6 +2327,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "set_project_mode" => handle_set_project_mode(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
         "acknowledge_grant_voids" => handle_acknowledge_grant_voids(shared, req),
+        "acknowledge_legacy_invite_migration" => {
+            super::legacy_migration::handle_acknowledge(shared, req)
+        }
         "acknowledge_arming_rewordings" => handle_acknowledge_arming_rewordings(shared, req),
         "withdraw_automatic_grant" => handle_withdraw_automatic_grant(shared, req),
         "automatic_grant" => Response::ok(req.id, automatic_grant_value(shared)),
@@ -3547,6 +3569,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         ),
         "near_account_start" => super::account_onboarding::handle_start(shared, req).await,
         "near_ai_account_enroll" => super::nearai_onboarding::handle_enroll(shared, req).await,
+        "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
@@ -11905,7 +11928,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 32);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 33);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12334,8 +12357,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 49, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 40, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

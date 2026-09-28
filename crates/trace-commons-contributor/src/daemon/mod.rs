@@ -48,6 +48,7 @@ pub mod inference_connection;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
+pub(crate) mod legacy_migration;
 pub mod native_flow;
 pub mod nearai_credential;
 pub mod nearai_onboarding;

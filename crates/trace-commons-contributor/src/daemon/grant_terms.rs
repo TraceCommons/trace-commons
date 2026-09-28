@@ -100,6 +100,51 @@ pub struct GrantTerms {
     pub attested_bodies: bool,
 }
 
+/// The identity term alone: who the sessions are contributed as. The legacy
+/// invite migration re-records exactly this and nothing else (see
+/// `legacy_migration`), so it has a type of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityTerm {
+    pub tenant_id: String,
+    pub instance_id: String,
+    pub user_subject: String,
+    pub device_key_id: String,
+}
+
+impl IdentityTerm {
+    pub fn of_config(cfg: &ContributorConfig) -> Self {
+        Self {
+            tenant_id: cfg.tenant_id.clone(),
+            instance_id: cfg.instance_id.clone(),
+            user_subject: cfg.user_subject.clone(),
+            device_key_id: cfg.device_key_id.clone(),
+        }
+    }
+}
+
+impl GrantTerms {
+    /// The identity term of these terms.
+    pub fn identity(&self) -> IdentityTerm {
+        IdentityTerm {
+            tenant_id: self.tenant_id.clone(),
+            instance_id: self.instance_id.clone(),
+            user_subject: self.user_subject.clone(),
+            device_key_id: self.device_key_id.clone(),
+        }
+    }
+
+    /// These terms with the identity term replaced and everything else kept.
+    pub fn with_identity(&self, identity: &IdentityTerm) -> Self {
+        Self {
+            tenant_id: identity.tenant_id.clone(),
+            instance_id: identity.instance_id.clone(),
+            user_subject: identity.user_subject.clone(),
+            device_key_id: identity.device_key_id.clone(),
+            ..self.clone()
+        }
+    }
+}
+
 pub const VOID_DESTINATION: &str = "destination-changed";
 pub const VOID_IDENTITY: &str = "identity-changed";
 pub const VOID_SCOPES_WIDENED: &str = "scopes-widened";

@@ -167,6 +167,111 @@ impl IssuerClient {
     }
 }
 
+/// What the issuer said about this device's invite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InviteSubjectAnswer {
+    /// The device's own invite subject hash.
+    Hash(String),
+    /// An issuer older than the route (404 or 405): the caller asks the
+    /// contributor for the invite instead.
+    Unsupported,
+    /// A named refusal from the issuer, by its label.
+    Refused(String),
+}
+
+fn is_subject_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+impl IssuerClient {
+    /// Ask the issuer which invite this device was onboarded with. Signed by
+    /// the device key over the exact body, as a claim request is; see
+    /// `trace_commons_protocol::device_invite_subject`.
+    pub async fn device_invite_subject(
+        &self,
+        issuer_url: &str,
+        tenant_id: &str,
+        device: &crate::identity::DeviceIdentity,
+    ) -> Result<InviteSubjectAnswer> {
+        use trace_commons_protocol::device_invite_subject::{
+            DEVICE_INVITE_SUBJECT_PATH, DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION,
+            DeviceInviteSubjectRequest, DeviceInviteSubjectResponse,
+        };
+        let url = format!(
+            "{}{DEVICE_INVITE_SUBJECT_PATH}",
+            issuer_url.trim_end_matches('/')
+        );
+        let parsed = reqwest::Url::parse(&url).context("parsing the issuer URL")?;
+        self.allowlist.check(&parsed)?;
+        let body = serde_json::to_vec(&DeviceInviteSubjectRequest {
+            schema_version: DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION.to_string(),
+            tenant_id: tenant_id.to_string(),
+            device_key_id: device.device_key_id.clone(),
+            issued_at: Utc::now().timestamp(),
+        })
+        .context("serializing the invite subject request")?;
+        let signature = device.sign_b64(&body);
+        let response = self
+            .http
+            .post(parsed)
+            .header("content-type", "application/json")
+            .header(TRACE_DEVICE_KEY_ID_HEADER, &device.device_key_id)
+            .header(TRACE_DEVICE_SIGNATURE_HEADER, signature)
+            .body(body)
+            .send()
+            .await
+            .context("sending the invite subject request")?;
+        let status = response.status();
+        if matches!(
+            status,
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Ok(InviteSubjectAnswer::Unsupported);
+        }
+        if !status.is_success() {
+            return Ok(match response.json::<ErrorLabel>().await {
+                Ok(ErrorLabel { error }) => InviteSubjectAnswer::Refused(error),
+                Err(_) => InviteSubjectAnswer::Refused(status.as_u16().to_string()),
+            });
+        }
+        let answer: DeviceInviteSubjectResponse = response
+            .json()
+            .await
+            .context("parsing the invite subject response")?;
+        if !is_subject_hash(&answer.invite_subject_hash) {
+            anyhow::bail!("invite subject response malformed");
+        }
+        Ok(InviteSubjectAnswer::Hash(answer.invite_subject_hash))
+    }
+}
+
+/// This device's invite subject hash, for the legacy invite migration.
+/// `Ok(None)` when the issuer predates the route, so the caller asks the
+/// contributor for their invite. Refusals are fixed migration labels.
+pub async fn fetch_device_invite_subject(
+    cfg: &crate::config::ContributorConfig,
+    device: &crate::identity::DeviceIdentity,
+) -> Result<Option<String>> {
+    let client = IssuerClient::new(crate::config::allowlist_for(cfg.allowed_hosts.as_deref()))
+        .map_err(|_| anyhow!("legacy_migration_unavailable"))?;
+    match client
+        .device_invite_subject(&cfg.issuer_url, &cfg.tenant_id, device)
+        .await
+    {
+        Ok(InviteSubjectAnswer::Hash(hash)) => Ok(Some(hash)),
+        Ok(InviteSubjectAnswer::Unsupported) => Ok(None),
+        Ok(InviteSubjectAnswer::Refused(label)) => Err(anyhow!(match label.as_str() {
+            "device_key_not_registered" | "device_key_revoked" | "device_not_invite_onboarded" => {
+                "legacy_migration_device_not_eligible"
+            }
+            _ => "legacy_migration_unavailable",
+        })),
+        Err(_) => Err(anyhow!("legacy_migration_unavailable")),
+    }
+}
+
 /// Build an error from a non-2xx response, surfacing only the `{"error":
 /// <label>}` label (or the HTTP status if no label parses). Never echoes
 /// the raw response body.
