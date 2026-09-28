@@ -424,7 +424,7 @@ async fn maintenance_run(
             &value,
             &[
                 ("  audit event id", "audit_event_id"),
-                ("  purpose", "purpose"),
+                ("  purpose hash", "purpose_hash"),
                 ("  dry run", "dry_run"),
                 ("  revoked submissions", "revoked_submission_count"),
                 ("  expired submissions", "expired_submission_count"),

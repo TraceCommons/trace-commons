@@ -15,6 +15,7 @@ import { useDaemonQueryEvents } from "./hooks/use-daemon-query-events";
 import { useDesktopEvents } from "./hooks/use-desktop-events";
 import { LegacyMigrationNotice } from "./legacy-migration-notice";
 import { QuitConfirmation } from "./quit-confirmation";
+import { ArmingRewordingNotices, GateHeldNotice } from "./switch-on-notices";
 import { routeIdFromPath } from "./routes";
 
 export function AppShell() {
@@ -67,6 +68,10 @@ export function AppShell() {
           <LegacyMigrationNotice
             status={core.data?.daemon.legacy_invite_migration}
           />
+          <ArmingRewordingNotices
+            rewordings={core.data?.daemon.arming_rewordings}
+          />
+          <GateHeldNotice held={core.data?.daemon.automatic_contribution_held} />
           <AppRoutes
             requiresOnboarding={requiresOnboarding}
             core={core}

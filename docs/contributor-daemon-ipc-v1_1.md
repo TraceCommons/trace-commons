@@ -447,6 +447,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `status` | — | see below | |
 | `list_pending` | — | `pending[]` of queue entries | |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
+| `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
@@ -500,6 +501,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
 | `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
+| `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
@@ -541,12 +543,15 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
-  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null }
+  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
+  "arming_rewordings": [],
+  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] }
 }
 ```
 
-`grant_voids` is additive; see "Void notices" below. `witness_capacity` is
-additive; see its section below.
+`grant_voids` is additive; see "Void notices" below. `witness_capacity`,
+`arming_rewordings` and `automatic_contribution_held` are additive; see their
+sections below.
 
 `legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
 {"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
@@ -624,6 +629,61 @@ Counts and timestamps only. No entry id, hash, or path appears here.
 Approved entries are not listed by `list_pending`, which returns `pending`
 entries only, so this is the only place the condition is reported; there is
 no per-entry equivalent.
+
+#### `arming_rewordings`
+
+Additive. K5 of the connect-and-forget design: armed folders whose arming
+words claimed a model scrubs their sessions (the "will be scrubbed" arming
+offer, or the grant's model-scrub wording), where the words in force for them
+now claim only the fixed patterns. The folder stays armed; this notice is how
+the contributor is told what its arming now means. Always present; `[]` when
+there is nothing to show.
+
+```json
+[{ "id": 0, "reworded_at": "2026-09-27T01:00:00Z",
+   "project_id": "3f2a...", "project_label": "api",
+   "was": "model_scrubbed", "now": "patterns_only" }]
+```
+
+Each element is named the way `list_projects` names the project, never by its
+key. A notice is recorded once per narrowing, in the policy file with the
+claim it records, so it survives a restart; the watcher checks on every pass.
+It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
+(audited as `arming-rewordings-acknowledged`, no "all") or the contributor
+sets the project's mode, which answers it. A void takes it with it. The
+rewording itself is audited as `arming-reworded` with the project label.
+
+Today no rewording is recorded: every shell's arming offer says "will be
+scrubbed" whatever R1's disclosure is, so the words in force have not
+changed. It fires when the arming offer becomes disclosure-dependent
+(`arming_wording::project_arming_claim`), or when a folder's disclosure drops
+to patterns-only. The words are
+`consent_copy::arming_reworded_notice_for_wire` (`tc_arming_reworded_notice`);
+its `ask_first_action` button is `set_project_mode` with the element's
+`project_id` and `notify_only`.
+
+#### `automatic_contribution_held`
+
+Additive. What the automatic-contribution gate held at the last **full**
+watcher pass: sessions in armed folders it is holding instead of approving
+(for example, R3 before this commons admits the account), the unmet
+requirements' reason labels, and each folder, named as `list_projects` names
+it. Always present; zero, `[]` and `[]` when nothing is held, which is always
+the case while `automatic_gate::ENFORCED` is off.
+
+| field | meaning |
+| --- | --- |
+| `held_sessions` | sessions held, as `TickReport::gate_blocked` counts them |
+| `reasons` | `automatic_gate::REASON_*` labels; empty when nothing is held |
+| `projects[]` | `project_id`, `project_label`, `held_sessions` per armed folder |
+
+Set and cleared only by a full pass; a scoped pass sees only changed paths and
+leaves it as it was. In memory only: a restarted daemon's first full pass
+measures it again. The daemon also sets `automatic-contribution-held` in the
+health slot from the same pass, but a higher label can mask it, so render the
+condition from this object. It is never acknowledged: it releases on its own
+on the first full pass that finds the gate met. The words are
+`consent_copy::gate_held_notice_for_wire` (`tc_gate_held_notice`).
 
 #### `routing`
 
@@ -2632,9 +2692,81 @@ artifact is written and the pin recorded under one queue lock. An entry
 re-offered because its bytes moved loses the pin and therefore the claim --
 the certificate covered the old bytes.
 
-No current client calls this method. It defines the read-only projection a
-future witness-certificate review surface can use without exposing raw
-artifacts or inventing a control action.
+The Tauri client calls it from the redacted-view inspector, for an entry
+whose `holds_certificate` is true, to show the measurement and signer the
+witness was checked against at review (K11). The other shells do not call it
+yet.
+
+### `route_disclosure`
+
+K11 of the connect-and-forget consent design ("The disclosure"): the facts
+behind the disclosure screens. Read-only and local -- it reads the config,
+the daemon's settings and the daemon process's environment, and makes no
+network call. Answered by the daemon rather than read by a shell from the
+config file, because the daemon is the process that sends: the privacy filter
+`TRACE_PRIVACY_FILTER_BACKEND` attaches is the daemon's environment, and
+`ironwire_attested_bodies` is the daemon's setting.
+
+```json
+{
+  "route": "witness",
+  "witness": {
+    "state": "pinned",
+    "url": "https://witness.example",
+    "signing_address": "0x…",
+    "pinned_measurements": ["mrtd=…,rtmr0=…"],
+    "origin": "published_at_join"
+  },
+  "local_filter": null,
+  "receipts": { "endpoint_configured": true, "check_attestation": false },
+  "attested_bodies": false
+}
+```
+
+| `route` | Means |
+|---|---|
+| `witness` | a pinned witness: each session is sent unredacted to it, and it redacts inside its enclave |
+| `witness_refusing` | a witness is configured and refusing (nothing pinned, or a pin that does not parse): nothing is sent |
+| `local` | no witness: redaction runs on this machine and the unredacted session does not leave it |
+| `not_enrolled` | no enrollment: nothing is sent |
+| `settings_unreadable` | the config could not be read: nothing is sent |
+
+`witness` is present whenever a witness is configured, pinned or refusing, and
+`null` otherwise. `state` is the same `WitnessTrustState` the witness settings
+card shows; `pinned_measurements` are verbatim, in stored order.
+
+`witness.origin` says how the witness came to be configured:
+
+| `origin` | Written by |
+|---|---|
+| `published_at_join` | a NEAR AI or wallet join, from what the commons publishes, without asking |
+| `connected_inference` | `inference_connection_install`, on the contributor's confirmation |
+| `settings` | a shell's witness settings (Tauri, the C ABI's `tc_witness_configure`, GTK) |
+| `environment` | `TRACE_COMMONS_WITNESS_*` read at enrollment |
+| `not_recorded` | no record, or a record written for a different witness |
+
+The config records the origin beside the witness, keyed by a digest of the
+witness's URL, signing address and pins (`ContributorConfig::witness_origin`),
+so a witness changed later by something that does not record an origin reads
+as `not_recorded` rather than inheriting a stale answer. Configs written before
+the record existed read the same way. The record is not an input to
+`input_fingerprint`.
+
+`local_filter` is present only when `route` is `local`: `none`, `near_ai`,
+`self_hosted`, `sidecar`, or `invalid` (a setting the redactor refuses to
+build, so nothing is sent). It is the config's `pii_filter` when set, and
+otherwise the environment's backend.
+
+**What this does not report, because this client does not know it:** which
+privacy filter the witness itself calls (it is set in the configuration the
+witness's measurement covers, which this client never reads), that filter's
+attestation, and whether a receipt signer is one the witness pins. A shell
+says so rather than implying either way; `consent_copy::route_disclosure_copy`
+has the sentences.
+
+A shell renders the words `consent_copy::route_disclosure_copy` gives for these
+facts and branches on neither. A shape it cannot read -- an unknown `route` or
+`origin` from a newer daemon -- is refused, not rendered as the nearest value.
 
 ### The attested-inference record
 
@@ -3763,8 +3895,10 @@ listed highest first:
 6. `ingest-unreachable`
 7. `queue-full`
 8. `witness-saturated`
-9. `daily-cap-reached`
-10. `session-too-large`
+9. `automatic-contribution-held`
+10. `admission-limit-reached`
+11. `daily-cap-reached`
+12. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
