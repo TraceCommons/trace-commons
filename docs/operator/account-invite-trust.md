@@ -63,11 +63,13 @@ separate identity rule and is not decided here.
 Two separate identity changes remain required before activating trust-based
 admission or folder arming (the merge half of the second is covered above):
 
-- Legacy device invitees need a reviewed migration from
-  `device_keys.invite_subject_hash` to the authenticated NEAR account. It must
-  preserve a legitimate spent single-use invitation without spending it again,
-  establish an authenticated identity link, and coordinate client grant-identity
-  re-baselining. This PR does not invent that mapping or transfer authority.
+- Legacy device invitees: the server half is V81
+  ([legacy invite migration](./legacy-invite-migration.md)). A contributor
+  links their legacy invite tenant to their NEAR account with a statement
+  signed by the legacy device key; the link carries the tenant's invite onto
+  the account without spending a use, is countersigned by ingest, and is
+  refused for pooled tenants and revoked invites. Client grant-identity
+  re-baselining is still a separate contributor PR.
 - Account merge: trust, grants, and trust events are handled by V80 as
   described under "Account merge" above, with real PostgreSQL coverage of
   authorization, versions, revocation, and audit. The NEAR anchor and

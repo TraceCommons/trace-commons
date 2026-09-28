@@ -5,6 +5,7 @@ import {
   nextRetryLine,
   parseWitnessCapacity,
   parseWitnessCapacityNotice,
+  reviewRetryLine,
 } from "./witness-capacity.ts";
 
 test("the label is the daemon's spelling", () => {
@@ -87,4 +88,27 @@ test("the next try is the core's label and the time, or nothing", () => {
     next_retry_at: "soon",
   });
   assert.equal(nextRetryLine(notice, unreadable), null);
+});
+
+// A review a person asked for, met by a busy witness: its own outcome, with
+// the time to try again in local time -- never a refusal, never a guessed time.
+test("a busy review carries its try-again line; anything else carries none", () => {
+  const busy = {
+    state: "Busy",
+    message: "The review could not go ahead yet.",
+    retry_at: "2030-01-01T00:01:00Z",
+    retry_label: "Try again after",
+  };
+  assert.equal(
+    reviewRetryLine(busy, (date) => date.toISOString()),
+    "Try again after: 2030-01-01T00:01:00.000Z",
+  );
+  assert.equal(
+    reviewRetryLine({ ...busy, state: "Refused" }, (d) => d.toISOString()),
+    null,
+  );
+  assert.equal(reviewRetryLine({ ...busy, retry_at: "soon" }), null);
+  assert.equal(reviewRetryLine({ ...busy, retry_at: undefined }), null);
+  assert.equal(reviewRetryLine({ ...busy, retry_label: "" }), null);
+  assert.equal(reviewRetryLine(undefined), null);
 });
