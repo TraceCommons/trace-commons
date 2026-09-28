@@ -20,6 +20,52 @@ pub enum Row {
     Text(String),
     /// A label, then a machine value shown verbatim (monospace).
     Value(String, String),
+    /// One label, then each machine value under it -- the witness's pins,
+    /// which macOS lists under a single "Pinned measurements".
+    Values(String, Vec<String>),
+}
+
+/// One widget, as `ui::fill_disclosure_rows` draws it: what a contributor
+/// actually sees, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Drawn {
+    /// A small-caps label.
+    Eyebrow(String),
+    /// A wrapped sentence.
+    Body(String),
+    /// A machine value, verbatim, monospace and selectable.
+    Mono(String),
+}
+
+/// The widgets `rows` draw, in order. `ui::fill_disclosure_rows` makes one
+/// GTK widget per item and decides nothing else, so this is what is drawn.
+#[must_use]
+pub fn drawn(rows: &[Row]) -> Vec<Drawn> {
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Row::Heading(text) => out.push(Drawn::Eyebrow(text.clone())),
+            Row::Text(text) => out.push(Drawn::Body(text.clone())),
+            Row::Value(label, value) => {
+                out.push(Drawn::Eyebrow(label.clone()));
+                out.push(Drawn::Mono(value.clone()));
+            }
+            Row::Values(label, values) => {
+                out.push(Drawn::Eyebrow(label.clone()));
+                out.extend(values.iter().cloned().map(Drawn::Mono));
+            }
+        }
+    }
+    out
+}
+
+/// The Settings section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Panel {
+    /// The section title, or `None` when the disclosure is unreadable.
+    pub title: Option<String>,
+    /// The card's rows.
+    pub rows: Vec<Row>,
 }
 
 /// The Settings section: its title, and its rows.
@@ -29,12 +75,14 @@ pub enum Row {
 /// newer than this build -- is said as such and never drawn as some other
 /// route.
 #[must_use]
-pub fn panel(facts: Option<&serde_json::Value>) -> (String, Vec<Row>) {
+pub fn panel(facts: Option<&serde_json::Value>) -> Panel {
     let Some(payload) = facts.and_then(consent_copy::route_disclosure_for_wire) else {
-        return (
-            consent_copy::DISCLOSURE_TITLE.to_string(),
-            vec![Row::Text(consent_copy::DISCLOSURE_UNREADABLE.to_string())],
-        );
+        // No title: it would head a disclosure that is not there. macOS
+        // draws the unreadable line alone, too.
+        return Panel {
+            title: None,
+            rows: vec![Row::Text(consent_copy::DISCLOSURE_UNREADABLE.to_string())],
+        };
     };
     let copy = &payload["copy"];
     let facts = &payload["facts"];
@@ -51,20 +99,23 @@ pub fn panel(facts: Option<&serde_json::Value>) -> (String, Vec<Row>) {
             field("signing_label"),
             text(&facts["witness"]["signing_address"]),
         ));
-        for pin in facts["witness"]["pinned_measurements"]
+        let pins = facts["witness"]["pinned_measurements"]
             .as_array()
             .into_iter()
             .flatten()
-        {
-            rows.push(Row::Value(field("measurements_label"), text(pin)));
-        }
+            .map(text)
+            .collect();
+        rows.push(Row::Values(field("measurements_label"), pins));
         rows.push(Row::Text(field("check")));
         push_optional(&mut rows, &witness["classifier"]);
         rows.push(Row::Text(field("origin")));
     }
     push_optional(&mut rows, &copy["attested_bodies"]);
     push_optional(&mut rows, &copy["receipts"]);
-    (text(&copy["title"]), rows)
+    Panel {
+        title: Some(text(&copy["title"])),
+        rows,
+    }
 }
 
 /// One session's rows for the preview sheet: the size before redaction and
@@ -158,6 +209,85 @@ mod tests {
         })
     }
 
+    /// What the Settings section draws for the witness route, widget by
+    /// widget: the title over the card, and every pin under one
+    /// "Pinned measurements" label, as macOS lays it out.
+    #[test]
+    fn the_settings_section_draws_every_pin_under_one_label() {
+        use consent_copy as c;
+        let panel = panel(Some(&witness_facts()));
+        assert_eq!(panel.title.as_deref(), Some(c::DISCLOSURE_TITLE));
+        let eyebrow = |s: &str| Drawn::Eyebrow(s.into());
+        let body = |s: &str| Drawn::Body(s.into());
+        let mono = |s: &str| Drawn::Mono(s.into());
+        assert_eq!(
+            drawn(&panel.rows),
+            vec![
+                body(c::AUTO_RAW_SEND_BOTH_ENCLAVES),
+                eyebrow(c::DISCLOSURE_WITNESS_HEADING),
+                eyebrow(c::DISCLOSURE_WITNESS_ADDRESS_LABEL),
+                mono("https://witness.example"),
+                eyebrow(c::DISCLOSURE_WITNESS_SIGNING_LABEL),
+                mono("0xab"),
+                eyebrow(c::DISCLOSURE_WITNESS_MEASUREMENTS_LABEL),
+                mono("mrtd=aa"),
+                mono("mrtd=bb"),
+                body(c::DISCLOSURE_WITNESS_CHECK),
+                body(c::DISCLOSURE_WITNESS_CLASSIFIER),
+                body(c::DISCLOSURE_ORIGIN_CONNECTED_INFERENCE),
+                body(c::DISCLOSURE_ATTESTED_BODIES),
+                body(c::DISCLOSURE_RECEIPTS_CHECKED),
+            ]
+        );
+    }
+
+    /// An unreadable disclosure draws its one line and no section title
+    /// over it, as macOS does: the title would head a disclosure that is
+    /// not there.
+    #[test]
+    fn an_unreadable_disclosure_draws_no_title() {
+        let panel = panel(None);
+        assert_eq!(panel.title, None);
+        assert_eq!(
+            drawn(&panel.rows),
+            vec![Drawn::Body(consent_copy::DISCLOSURE_UNREADABLE.into())]
+        );
+    }
+
+    /// What the preview sheet draws for one witness-reviewed session.
+    #[test]
+    fn a_session_draws_its_sizes_route_and_certificate() {
+        use consent_copy as c;
+        let detail = serde_json::json!({
+            "state": "held", "verification": "verified_at_review",
+            "witness_measurement": "mrtd=aa", "signer": "0xab",
+        });
+        let labels = c::certificate_detail_copy();
+        let rows = session(Some(&witness_facts()), "1 KB", "4 KB", Some(&detail));
+        let eyebrow = |s: &str| Drawn::Eyebrow(s.into());
+        let body = |s: &str| Drawn::Body(s.into());
+        let mono = |s: &str| Drawn::Mono(s.into());
+        assert_eq!(
+            drawn(&rows),
+            vec![
+                eyebrow(c::DISCLOSURE_SESSION_HEADING),
+                eyebrow(c::DISCLOSURE_SESSION_BEFORE_LABEL),
+                mono("1 KB"),
+                body(c::DISCLOSURE_SESSION_BEFORE_WITNESS),
+                eyebrow(c::DISCLOSURE_SESSION_AFTER_LABEL),
+                mono("4 KB"),
+                body(c::DISCLOSURE_SESSION_AFTER),
+                body(c::AUTO_RAW_SEND_BOTH_ENCLAVES),
+                eyebrow(labels.heading),
+                eyebrow(labels.measurement_label),
+                mono("mrtd=aa"),
+                eyebrow(labels.signer_label),
+                mono("0xab"),
+                body(labels.verified_at_review),
+            ]
+        );
+    }
+
     fn texts(rows: &[Row]) -> Vec<&str> {
         rows.iter()
             .filter_map(|r| match r {
@@ -169,8 +299,8 @@ mod tests {
 
     #[test]
     fn the_witness_route_shows_the_witness_its_pins_and_origin_in_the_cores_words() {
-        let (title, rows) = panel(Some(&witness_facts()));
-        assert_eq!(title, consent_copy::DISCLOSURE_TITLE);
+        let Panel { title, rows } = panel(Some(&witness_facts()));
+        assert_eq!(title.as_deref(), Some(consent_copy::DISCLOSURE_TITLE));
         let lines = texts(&rows);
         assert_eq!(lines[0], consent_copy::AUTO_RAW_SEND_BOTH_ENCLAVES);
         assert!(lines.contains(&consent_copy::DISCLOSURE_WITNESS_CHECK));
@@ -178,11 +308,13 @@ mod tests {
         assert!(lines.contains(&consent_copy::DISCLOSURE_ORIGIN_CONNECTED_INFERENCE));
         assert!(lines.contains(&consent_copy::DISCLOSURE_ATTESTED_BODIES));
         assert!(lines.contains(&consent_copy::DISCLOSURE_RECEIPTS_CHECKED));
-        let pins: Vec<&Row> = rows
-            .iter()
-            .filter(|r| matches!(r, Row::Value(_, v) if v.starts_with("mrtd=")))
-            .collect();
-        assert_eq!(pins.len(), 2, "every pin, verbatim");
+        assert!(
+            rows.contains(&Row::Values(
+                consent_copy::DISCLOSURE_WITNESS_MEASUREMENTS_LABEL.into(),
+                vec!["mrtd=aa".into(), "mrtd=bb".into()]
+            )),
+            "every pin, verbatim, under one label"
+        );
         assert!(rows.contains(&Row::Value(
             consent_copy::DISCLOSURE_WITNESS_ADDRESS_LABEL.into(),
             "https://witness.example".into()
@@ -196,7 +328,7 @@ mod tests {
             "receipts": {"endpoint_configured": false, "check_attestation": false},
             "attested_bodies": false,
         });
-        let (_, rows) = panel(Some(&facts));
+        let rows = panel(Some(&facts)).rows;
         assert_eq!(
             texts(&rows),
             vec![
@@ -213,7 +345,7 @@ mod tests {
         let mut newer = witness_facts();
         newer["witness"]["origin"] = serde_json::json!("an_operator");
         for facts in [None, Some(&newer)] {
-            let (_, rows) = panel(facts);
+            let rows = panel(facts).rows;
             assert_eq!(
                 rows,
                 vec![Row::Text(consent_copy::DISCLOSURE_UNREADABLE.into())]

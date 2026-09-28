@@ -1622,25 +1622,22 @@ fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
     track
 }
 
-/// A heading and a paragraph, the shape most of this window is made of.
-///
-/// The heading is set as an eyebrow rather than as a bold sentence: these
-/// are field labels over values, not section titles, and setting them as
-/// titles made every list of facts read like a stack of headlines.
 /// Replace `parent`'s children with K11 disclosure rows. Machine values --
 /// addresses, keys, measurements -- are selectable and monospace, shown
 /// verbatim; every word is `crate::disclosure`'s, which is the core's.
+///
+/// One widget per `crate::disclosure::drawn` item and nothing else, so the
+/// tests on `drawn` are tests of what this puts on screen.
 pub fn fill_disclosure_rows(parent: &gtk::Box, rows: &[crate::disclosure::Row]) {
-    use crate::disclosure::Row;
+    use crate::disclosure::Drawn;
     while let Some(child) = parent.first_child() {
         parent.remove(&child);
     }
-    for row in rows {
-        match row {
-            Row::Heading(text) => parent.append(&style::eyebrow(text)),
-            Row::Text(text) => style::append_body(parent, text),
-            Row::Value(label, value) => {
-                parent.append(&style::eyebrow(label));
+    for item in crate::disclosure::drawn(rows) {
+        match item {
+            Drawn::Eyebrow(text) => parent.append(&style::eyebrow(&text)),
+            Drawn::Body(text) => style::append_body(parent, text),
+            Drawn::Mono(value) => {
                 let value = gtk::Label::builder()
                     .label(value)
                     .wrap(true)
@@ -1655,6 +1652,11 @@ pub fn fill_disclosure_rows(parent: &gtk::Box, rows: &[crate::disclosure::Row]) 
     }
 }
 
+/// A heading and a paragraph, the shape most of this window is made of.
+///
+/// The heading is set as an eyebrow rather than as a bold sentence: these
+/// are field labels over values, not section titles, and setting them as
+/// titles made every list of facts read like a stack of headlines.
 pub fn titled_paragraph(title: &str, body: &str) -> gtk::Box {
     let container = gtk::Box::new(gtk::Orientation::Vertical, style::space::XXS);
     container.append(&style::eyebrow(title));
