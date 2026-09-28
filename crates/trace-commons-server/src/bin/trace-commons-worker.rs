@@ -417,7 +417,7 @@ async fn worker_retention_maintenance(
             &value,
             &[
                 ("  audit event id", "audit_event_id"),
-                ("  purpose", "purpose"),
+                ("  purpose hash", "purpose_hash"),
                 ("  dry run", "dry_run"),
                 ("  records marked revoked", "records_marked_revoked"),
                 ("  records marked expired", "records_marked_expired"),
@@ -465,7 +465,7 @@ async fn worker_vector_index(
             &value,
             &[
                 ("  audit event id", "audit_event_id"),
-                ("  purpose", "purpose"),
+                ("  purpose hash", "purpose_hash"),
                 ("  dry run", "dry_run"),
                 ("  vectors indexed", "vector_entries_indexed"),
             ],
@@ -1446,7 +1446,7 @@ mod tests {
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "audit_event_id": "a-1",
-                "purpose": "reindex",
+                "purpose_hash": "sha256:5f7c9d1c",
                 "dry_run": true,
                 "vector_entries_indexed": 0,
             })))
