@@ -139,7 +139,15 @@ sum spending across versions sharing the same duration and bucket. A version bum
 inside that bucket does not refresh the allowance. Changing period mode/duration
 is a separate reviewed policy change, not an implicit lifetime reset. Lease liveness uses PostgreSQL time.
 
-Trust facts remain an unused storage seam; no production worker records them.
+Trust facts are recorded for the earned-trust shadow and are still read by no
+admission path. `POST /v1/admin/record-account-trust-facts?limit=N&dry_run=true`
+(admin bearer, fail-closed without a DB mirror) records missing facts for open
+accounts in anchored tenants and returns label-only counts; a re-run records
+nothing new. The login running it needs the NOLOGIN role
+`trace_account_trust_worker` (V85), which carries EXECUTE on three definer
+functions and no table privilege; do not grant it to
+`trace_account_admission_runtime`. See
+`docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
 The runtime can insert trust rows and can update only authority, version, and
 timestamp, including demotion after invite revocation. An inserted or updated
 authority field alone cannot grant invited admission: reserve and

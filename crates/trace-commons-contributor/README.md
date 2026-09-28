@@ -310,9 +310,14 @@ for the native API and remaining work.
      `<REDACTED_PRIVATE_KEY>`).
   2. **Cue-gated high-entropy catch-all.** Secret formats change faster
      than any fixed pattern list, so a second pass looks for opaque,
-     high-Shannon-entropy tokens (>=16 chars, >=3.2 bits/char) that sit
+     high-Shannon-entropy tokens (>=3.2 bits/char) that sit
      immediately after a secret-shaped cue word (`api_key:`, `Bearer `,
-     `password=`, `token:`, ...). This is deliberately *cue-gated*, not a
+     `password=`, `token:`, ...). The length floor is 8 characters, but
+     the entropy floor binds first: a token's entropy cannot exceed log2 of
+     the number of distinct characters in it, so it needs at least 10
+     distinct characters (log2(9) ~ 3.17, log2(10) ~ 3.32) whatever its
+     length. In effect the pass covers tokens of 10+ characters, and a
+     10-character token only when every character differs. This is deliberately *cue-gated*, not a
      blanket entropy scan: an ungated scan over real transcripts flags on
      the order of 100k+ tokens (message ids, base64 blobs, UUIDs, content
      hashes) for every real secret it catches, which makes plain entropy
@@ -338,7 +343,9 @@ for the native API and remaining work.
 
   **Known gap: opaque bearer tokens (narrowed by #193).** Production covers
   `Bearer ` values through the cue-gated entropy pass. After #193 the pass
-  redacts cued short opaque tokens (8–15 chars) and cued lowercase-hex ≥32
+  redacts cued short opaque tokens down to 10 chars (a 10-15 char token
+  only when it has at least 10 distinct characters; 8- and 9-char tokens
+  cannot reach 3.2 bits/char and always survive) and cued lowercase-hex ≥32
   (HMAC/AES-shaped material that the old content-hash allowlist spared).
   Two deliberate survivals remain: UUID-shaped tokens stay allowlisted even
   when cued (~105k structural IDs vs ~20 real secrets in the prototype

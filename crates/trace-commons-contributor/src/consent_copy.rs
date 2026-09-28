@@ -50,6 +50,23 @@
 //! status object; across the ABI it is `tc_witness_capacity_notice`. Here
 //! because it is the answer to "is anything going out without being
 //! checked", which is a consent question.
+//!
+//! # Switch-on notices
+//!
+//! The two notices the connect-and-forget design puts on the enforcement
+//! switch-on list ("When enforcement is switched on", item 5), and the words
+//! for the held-count health condition (item 2):
+//!
+//! - [`arming_reworded_notice_for_wire`] (`tc_arming_reworded_notice`), for
+//!   one element of `status.arming_rewordings`: a folder armed under the old
+//!   "will be scrubbed" wording whose wording is now patterns-only (K5).
+//! - [`gate_held_notice_for_wire`] (`tc_gate_held_notice`), for
+//!   `status.automatic_contribution_held`: armed folders whose sessions the
+//!   automatic-contribution gate is holding, why, and that they release on
+//!   their own.
+//!
+//! **DRAFT, NEEDS APPROVAL**, every sentence in both: the spec's Open list
+//! says the wording is open.
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -527,15 +544,11 @@ pub const AUTO_PATTERNS_ONLY_LIMIT: &str = "The patterns are reliable for the fo
 /// deterministic-pass output rather than the unredacted session.
 pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted to your witness, which redacts it inside an enclave. The witness can pass the text its fixed patterns leave to NEAR AI's privacy filter, which runs in a second enclave with a second operator, NEAR AI. The witness does not check that second enclave's attestation on each call, so NEAR AI's operator is trusted with that text.";
 
-/// Where the witness came from: the spec's second "further sentence".
-///
-/// **DRAFT, NEEDS APPROVAL.** Worded for what the client can know, which is
-/// less than the spec asks for. A NEAR AI or wallet join writes the witness
-/// the commons publishes, without asking; an inference connection the
-/// contributor chose writes one (K12); Settings can write one too; and the
-/// config records none of these, so this cannot say which happened. When the
-/// daemon records the origin, this becomes separate sentences and a branch.
-pub const AUTO_WITNESS_ORIGIN: &str = "This witness was set up by the commons you joined, which published its address and keys and had them saved when you joined without asking you; by an inference connection you chose; or by someone entering it in Settings. This screen cannot tell which.";
+// Where the witness came from -- the spec's second "further sentence" -- is
+// no longer one hedged constant here. The config now records the origin
+// (`ContributorConfig::witness_origin`), so it is one sentence per origin,
+// chosen by `witness_origin_line` from the daemon's `route_disclosure`
+// facts. See "The disclosure screens" below.
 
 /// Shown under an armed project when its disclosure (K6,
 /// `automatic_gate::project_disclosure`) could not be read.
@@ -593,7 +606,6 @@ pub struct AutomaticGrantCopy {
     pub path_automatic: &'static str,
     pub path_ask_first: &'static str,
     pub raw_send: &'static str,
-    pub witness_origin: &'static str,
 }
 
 /// The grant screens' words for what `automatic_gate::disclosure` answered.
@@ -629,7 +641,6 @@ pub fn automatic_grant_copy(
         path_automatic: AUTO_PATH_AUTOMATIC,
         path_ask_first: AUTO_PATH_ASK_FIRST,
         raw_send: AUTO_RAW_SEND_BOTH_ENCLAVES,
-        witness_origin: AUTO_WITNESS_ORIGIN,
     }
 }
 
@@ -688,6 +699,583 @@ pub fn witness_capacity_notice(waiting_sessions: u64) -> WitnessCapacityCopy {
 pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<WitnessCapacityCopy> {
     let waiting = value.get("waiting_sessions")?.as_u64()?;
     (waiting > 0).then(|| witness_capacity_notice(waiting))
+}
+
+// ---------------------------------------------------------------------------
+// Switch-on notices: the old-wording notice (K5) and the held-folder notice
+// ---------------------------------------------------------------------------
+//
+// DRAFT, NEEDS APPROVAL: every constant below. The spec's Open list
+// ("Telling the contributor: the copy and the shells") leaves the wording
+// open.
+
+/// Why a folder armed under the old wording is being told anything.
+///
+/// **DRAFT, NEEDS APPROVAL.** States the change and that the mode did not
+/// change -- "already-armed folders stay armed" -- before what the arming now
+/// means, which is the patterns-only disclosure word for word.
+pub const REWORDED_BODY: &str = "When you turned on automatic contributing here, we said its sessions would be scrubbed. That said more than this app can confirm, so this is what it means now. Nothing about the project has changed: it still contributes automatically.";
+
+/// The heading over the patterns-only sentences in a rewording notice.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const REWORDED_NOW_HEADING: &str = "What happens to its sessions";
+
+/// The button that switches a reworded folder to ask-first. A shell sends it
+/// as `set_project_mode` with the element's `project_id` and `notify_only`,
+/// which also answers the notice.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const ASK_ME_FIRST_ACTION: &str = "Ask me first";
+
+/// Shown when the daemon refuses that switch. The notice stays.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const ASK_ME_FIRST_FAILED: &str =
+    "It could not be switched, so it still contributes automatically. Nothing was changed.";
+
+/// The title of a rewording notice this build cannot place: no label.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const REWORDED_UNPLACED_TITLE: &str = "What automatic contributing now means";
+
+/// The title of a rewording notice.
+#[must_use]
+pub fn arming_reworded_title(project_label: Option<&str>) -> String {
+    match project_label {
+        Some(label) => format!("What automatic contributing from {label} now means"),
+        None => REWORDED_UNPLACED_TITLE.to_string(),
+    }
+}
+
+/// Everything a shell shows for one element of `status.arming_rewordings`.
+///
+/// The scope and limit are [`AUTO_PATTERNS_ONLY_SCOPE`] and
+/// [`AUTO_PATTERNS_ONLY_LIMIT`], word for word: the spec says a reworded
+/// folder "gets the same notice a newly automatic folder gets", and the
+/// patterns-only wording is that notice.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ArmingRewordedNoticeCopy {
+    pub title: String,
+    pub body: &'static str,
+    pub now_heading: &'static str,
+    pub scope: &'static str,
+    pub limit: &'static str,
+    pub no_review: &'static str,
+    pub acknowledge: &'static str,
+    /// Present exactly when the element names a `project_id` to act on.
+    pub ask_first_action: Option<&'static str>,
+    /// Present exactly when `ask_first_action` is.
+    pub ask_first_failed: Option<&'static str>,
+}
+
+/// The notice for one element of `status.arming_rewordings`, as it came off
+/// the wire. `None` only for a value that is not an object.
+///
+/// Every element is a narrowing to patterns-only today, the only rewording
+/// the daemon records (`arming_wording::ArmingClaim::narrowed_to`), so the
+/// words do not branch on `was` / `now`; a shell passes the object through
+/// and never reads them.
+#[must_use]
+pub fn arming_reworded_notice_for_wire(
+    value: &serde_json::Value,
+) -> Option<ArmingRewordedNoticeCopy> {
+    let object = value.as_object()?;
+    let label = object
+        .get("project_label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|l| !l.is_empty());
+    let has_id = object
+        .get("project_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.is_empty());
+    Some(ArmingRewordedNoticeCopy {
+        title: arming_reworded_title(label),
+        body: REWORDED_BODY,
+        now_heading: REWORDED_NOW_HEADING,
+        scope: AUTO_PATTERNS_ONLY_SCOPE,
+        limit: AUTO_PATTERNS_ONLY_LIMIT,
+        no_review: AUTO_NO_REVIEW,
+        acknowledge: VOID_ACKNOWLEDGE,
+        ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
+        ask_first_failed: has_id.then_some(ASK_ME_FIRST_FAILED),
+    })
+}
+
+/// The title of the held-folder notice.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const GATE_HELD_TITLE: &str = "Automatic contributing is on hold";
+
+/// That nothing is sent while held, that nothing is lost, and that it
+/// releases on its own.
+///
+/// **DRAFT, NEEDS APPROVAL.** "On their own" is what separates this hold from
+/// the indefinite one rev 6 rejected: it releases the first full pass that
+/// finds the requirement met.
+pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while they wait, and nothing has been lost. They go out on their own once this changes.";
+
+/// What the contributor can do meanwhile. Shown beside a folder's
+/// [`ASK_ME_FIRST_ACTION`].
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const GATE_HELD_ASK_FIRST: &str =
+    "To review a project's sessions yourself instead, switch it to Ask me first.";
+
+/// One of the gate's reason labels (`automatic_gate::REASON_*`), as a
+/// sentence. A label this build does not know still gets one.
+///
+/// **DRAFT, NEEDS APPROVAL.** The R3 sentence is the spec's: "this commons
+/// does not yet accept automatic contributions from their account".
+#[must_use]
+pub fn gate_held_reason_line(label: &str) -> &'static str {
+    use crate::daemon::automatic_gate::{
+        REASON_ACCOUNT_ALLOWANCE_SPENT, REASON_ADMISSION_PER_SESSION, REASON_NO_SCOPE,
+    };
+    match label {
+        REASON_ADMISSION_PER_SESSION => {
+            "This commons does not yet accept automatic contributions from your account."
+        }
+        REASON_ACCOUNT_ALLOWANCE_SPENT => {
+            "Your account has reached what this commons accepts from it for now."
+        }
+        REASON_NO_SCOPE => "You have not chosen how your traces may be used.",
+        _ => "Something automatic contributing needs is not in place yet.",
+    }
+}
+
+/// How many sessions are held, counted and agreeing in number.
+#[must_use]
+pub fn gate_held_count_line(held_sessions: u64) -> String {
+    match held_sessions {
+        0 => "Sessions from projects set to contribute automatically are waiting.".to_string(),
+        1 => "1 session from a project set to contribute automatically is waiting.".to_string(),
+        n => format!("{n} sessions from projects set to contribute automatically are waiting."),
+    }
+}
+
+/// One held folder's line.
+#[must_use]
+pub fn gate_held_project_line(project_label: &str, held_sessions: u64) -> String {
+    match held_sessions {
+        1 => format!("{project_label}: 1 session waiting"),
+        n => format!("{project_label}: {n} sessions waiting"),
+    }
+}
+
+/// One held folder in [`GateHeldNoticeCopy`].
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct GateHeldProjectCopy {
+    /// Passed through from the wire, for the ask-first button's
+    /// `set_project_mode`. Never shown.
+    pub project_id: Option<String>,
+    pub line: String,
+    /// Present exactly when `project_id` is.
+    pub ask_first_action: Option<&'static str>,
+    pub ask_first_failed: Option<&'static str>,
+}
+
+/// Everything a shell shows while the gate holds armed folders.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct GateHeldNoticeCopy {
+    pub title: &'static str,
+    pub body: String,
+    /// One sentence per reason label, deduplicated, never empty.
+    pub reasons: Vec<&'static str>,
+    pub release: &'static str,
+    pub ask_first: &'static str,
+    pub projects: Vec<GateHeldProjectCopy>,
+}
+
+/// The held-folder notice from `status.automatic_contribution_held`, passed
+/// through as the object the daemon sent. `None` when nothing is held, or
+/// for a value that is not that object: there is nothing to show, and it is
+/// never acknowledged -- it goes when the hold does.
+#[must_use]
+pub fn gate_held_notice_for_wire(value: &serde_json::Value) -> Option<GateHeldNoticeCopy> {
+    let held = value.get("held_sessions")?.as_u64()?;
+    if held == 0 {
+        return None;
+    }
+    let mut reasons: Vec<&'static str> = Vec::new();
+    for label in value
+        .get("reasons")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        let line = gate_held_reason_line(label);
+        if !reasons.contains(&line) {
+            reasons.push(line);
+        }
+    }
+    if reasons.is_empty() {
+        reasons.push(gate_held_reason_line(""));
+    }
+    let projects = value
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let label = p
+                .get("project_label")
+                .and_then(serde_json::Value::as_str)
+                .filter(|l| !l.is_empty())?;
+            let count = p
+                .get("held_sessions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let project_id = p
+                .get("project_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let action = project_id.is_some();
+            Some(GateHeldProjectCopy {
+                project_id,
+                line: gate_held_project_line(label, count),
+                ask_first_action: action.then_some(ASK_ME_FIRST_ACTION),
+                ask_first_failed: action.then_some(ASK_ME_FIRST_FAILED),
+            })
+        })
+        .collect();
+    Some(GateHeldNoticeCopy {
+        title: GATE_HELD_TITLE,
+        body: gate_held_count_line(held),
+        reasons,
+        release: GATE_HELD_RELEASE,
+        ask_first: GATE_HELD_ASK_FIRST,
+        projects,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The disclosure screens (K11): the raw send, both enclaves, where the
+// witness came from
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section is DRAFT, NEEDS APPROVAL, like the grant
+// screens' above. The facts come from the daemon's `route_disclosure`
+// (`crate::disclosure`); these are the words for them. Each sentence states
+// only what this client knows or does, and says so where it does not know:
+// the witness's classifier is fixed by configuration its measurement covers,
+// which this client never reads, and NEAR AI's attestation is checked by
+// nobody on the classifier hop.
+
+/// The disclosure panel's title.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_TITLE: &str = "Where your sessions go";
+
+/// The route line when a witness is configured and refusing.
+///
+/// **DRAFT, NEEDS APPROVAL.** True of every refusing state
+/// (`WitnessTrustState::is_refusing`): the submission path refuses before any
+/// network call.
+pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
+    "A witness is set up but this app cannot check it, so no session is sent until that is fixed.";
+
+/// The route line with no witness configured.
+///
+/// **DRAFT, NEEDS APPROVAL.** With no witness the redactor runs in this
+/// process (`envelope::build_redactor`), and only the redacted envelope is
+/// uploaded. What an attached filter receives is the next sentence's job.
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "No witness is set up. Sessions are redacted on this computer, and the unredacted session does not leave it.";
+
+/// The route line for a device that is not enrolled.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_ROUTE_NOT_ENROLLED: &str =
+    "This computer is not connected to a commons, so nothing is sent.";
+
+/// The route line when the configuration cannot be read.
+///
+/// **DRAFT, NEEDS APPROVAL.** A client that cannot read its settings sends
+/// nothing (`WitnessTrustState::SettingsUnreadable` is a refusal).
+pub const DISCLOSURE_ROUTE_SETTINGS_UNREADABLE: &str =
+    "This app could not read its settings, so nothing is sent.";
+
+/// Local route, no filter attached.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_LOCAL_FILTER_NONE: &str =
+    "No privacy filter is attached, so only the fixed patterns run.";
+
+/// Local route, NEAR AI's hosted privacy filter attached.
+///
+/// **DRAFT, NEEDS APPROVAL.** The client's NEAR AI adapter
+/// (`NearAiPrivacyFilterAdapter`) makes an ordinary HTTPS call and checks no
+/// attestation. The same trust statement `AUTO_RAW_SEND_BOTH_ENCLAVES` makes
+/// for the witness's hop, made here for this computer's own.
+pub const DISCLOSURE_LOCAL_FILTER_NEAR_AI: &str = "The text the fixed patterns leave is then sent from this computer to NEAR AI's privacy filter. This app does not check that service's attestation, so NEAR AI's operator is trusted with that text.";
+
+/// Local route, a privacy-filter endpoint named in the environment.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_LOCAL_FILTER_SELF_HOSTED: &str = "The text the fixed patterns leave is then sent from this computer to a privacy filter named in its environment settings. This app does not check who runs it.";
+
+/// Local route, a local sidecar program named in the environment.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_LOCAL_FILTER_SIDECAR: &str = "The text the fixed patterns leave is then passed to a program on this computer named in its environment settings.";
+
+/// Local route, a filter setting the redactor refuses to build.
+///
+/// **DRAFT, NEEDS APPROVAL.** `build_redactor_with` refuses an unknown
+/// `pii_filter`, and the protocol crate refuses a malformed environment
+/// backend; neither falls back to patterns only.
+pub const DISCLOSURE_LOCAL_FILTER_INVALID: &str = "The privacy filter setting cannot be used, so sessions are not redacted or sent until it is fixed.";
+
+/// The witness block's heading.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_WITNESS_HEADING: &str = "Your witness";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_WITNESS_ADDRESS_LABEL: &str = "Address";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_WITNESS_SIGNING_LABEL: &str = "Signing key";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_WITNESS_MEASUREMENTS_LABEL: &str = "Pinned measurements";
+
+/// What this client checks of the witness enclave, every time.
+///
+/// **DRAFT, NEEDS APPROVAL.** `witness::verify::verify_witness` is the only
+/// constructor of the `VerifiedWitness` the transport requires: a fresh
+/// nonce-bound quote whose measurement must match a pin and whose report
+/// data must name the pinned signing address.
+pub const DISCLOSURE_WITNESS_CHECK: &str = "Before a session is sent, this app asks the witness for a fresh attestation and sends nothing unless it matches a measurement pinned here and names this signing key.";
+
+/// The second enclave, from what this client can and cannot see.
+///
+/// **DRAFT, NEEDS APPROVAL.** The classifier backend and endpoint are set
+/// in the witness's measured compose file (`deploy/witness`), so they are
+/// covered by the measurement, but this client holds only the measurement
+/// value.
+pub const DISCLOSURE_WITNESS_CLASSIFIER: &str = "Which privacy filter the witness calls is fixed by the setup its measurement covers. This app checks the measurement, but it does not read that setup and never sees the filter's attestation.";
+
+/// Origin: published by the commons and saved at join (spec, point 2).
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN: &str = "The commons you joined published this witness, and it was saved when you joined, without asking you.";
+/// Origin: installed from a connected inference selection (#1019).
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_ORIGIN_CONNECTED_INFERENCE: &str = "You chose this witness when you connected inference, and confirmed installing it on this computer.";
+/// Origin: typed into Settings.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_ORIGIN_SETTINGS: &str =
+    "This witness was entered in Settings on this computer.";
+/// Origin: environment variables at enrollment.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_ORIGIN_ENVIRONMENT: &str =
+    "This witness came from this computer's environment settings when it was connected.";
+/// Origin unknown: no record, or a record for a different witness.
+///
+/// **DRAFT, NEEDS APPROVAL.** Replaces the grant screens' earlier
+/// `AUTO_WITNESS_ORIGIN`, which had to hedge between two sources because
+/// nothing was recorded. Now only a config written before the record
+/// existed, or a witness changed by something that does not write one,
+/// lands here, and the sentence names no source it cannot know.
+pub const DISCLOSURE_ORIGIN_NOT_RECORDED: &str = "This app has no record of how this witness was set up. It was set up before this app kept one, or changed since by something that does not.";
+
+/// Receipts off.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_RECEIPTS_OFF: &str =
+    "No receipt endpoint is set, so this app asks no inference provider for receipts.";
+
+/// Receipts on, `inference_receipt_check_attestation` on. Both receipt
+/// sentences open with the fetch, because the fetch is itself a disclosure
+/// (the spec's separate sentence: "each receipt fetch tells the provider
+/// that an exchange is being contributed").
+///
+/// **DRAFT, NEEDS APPROVAL.** Worded to the config field's own limit: it
+/// reads the report's self-description without verifying the quote.
+pub const DISCLOSURE_RECEIPTS_CHECKED: &str = "Before a session goes to your witness, this app may ask the inference provider for a signed receipt of the session's last model call. Asking tells the provider that the exchange is being contributed. This app also checks that the receipt was signed by the key NEAR AI's attestation report names, reading the report without verifying its quote.";
+
+/// Receipts on, the attestation check off.
+///
+/// **DRAFT, NEEDS APPROVAL.** Whether the witness pins receipt signers is
+/// its configuration, invisible to this client (IPC contract, "The
+/// attested-inference record").
+pub const DISCLOSURE_RECEIPTS_UNCHECKED: &str = "Before a session goes to your witness, this app may ask the inference provider for a signed receipt of the session's last model call. Asking tells the provider that the exchange is being contributed. This app does not compare the receipt's signer with NEAR AI's attestation report, and whether your witness does depends on its setup, which this app cannot see.";
+
+/// `ironwire_attested_bodies` on, witness route.
+///
+/// **DRAFT, NEEDS APPROVAL.** The bodies reach only a witness, never an
+/// envelope (`DaemonSettings::ironwire_attested_bodies`).
+pub const DISCLOSURE_ATTESTED_BODIES: &str = "When this app holds a verbatim copy of a session's last model call, your prompt and the reply, it sends that to your witness too. It is not part of what the commons receives.";
+
+/// The per-session block's heading and labels.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_HEADING: &str = "What leaves this computer";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_BEFORE_LABEL: &str = "Before redaction";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_AFTER_LABEL: &str = "After redaction";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_BEFORE_WITNESS: &str =
+    "Sent whole and unredacted to your witness, which redacts it in its enclave.";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_BEFORE_LOCAL: &str = "Stays on this computer.";
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_NOTHING_SENT: &str = "Nothing is sent.";
+/// What the commons receives. "When it is contributed", not "when you
+/// approve it": an armed project contributes without an approval.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const DISCLOSURE_SESSION_AFTER: &str = "What the commons receives when this session is contributed. This is what the redacted view shows.";
+
+/// The per-session sentences.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SessionSendCopy {
+    pub heading: &'static str,
+    pub before_label: &'static str,
+    pub before_line: &'static str,
+    pub after_label: &'static str,
+    pub after_line: &'static str,
+}
+
+/// The witness block.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct WitnessDisclosureCopy {
+    pub heading: &'static str,
+    pub address_label: &'static str,
+    pub signing_label: &'static str,
+    pub measurements_label: &'static str,
+    pub check: &'static str,
+    /// The second enclave. Present only on the witness route: a refusing
+    /// witness is sent nothing, so nothing reaches a classifier.
+    pub classifier: Option<&'static str>,
+    pub origin: &'static str,
+}
+
+/// Everything the disclosure panel says, for one set of facts.
+///
+/// THE BRANCH CROSSES, as with [`AutomaticGrantCopy`]: a block is present
+/// only when it is true of the route, so a shell renders what it is given
+/// and decides nothing.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct RouteDisclosureCopy {
+    pub title: &'static str,
+    pub route: &'static str,
+    pub witness: Option<WitnessDisclosureCopy>,
+    pub local_filter: Option<&'static str>,
+    pub receipts: Option<&'static str>,
+    pub attested_bodies: Option<&'static str>,
+    pub session: SessionSendCopy,
+}
+
+/// The origin sentence for a witness.
+#[must_use]
+pub fn witness_origin_line(origin: crate::config::WitnessOriginView) -> &'static str {
+    use crate::config::{WitnessOrigin, WitnessOriginView};
+    match origin {
+        WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin) => {
+            DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN
+        }
+        WitnessOriginView::Recorded(WitnessOrigin::ConnectedInference) => {
+            DISCLOSURE_ORIGIN_CONNECTED_INFERENCE
+        }
+        WitnessOriginView::Recorded(WitnessOrigin::Settings) => DISCLOSURE_ORIGIN_SETTINGS,
+        WitnessOriginView::Recorded(WitnessOrigin::Environment) => DISCLOSURE_ORIGIN_ENVIRONMENT,
+        WitnessOriginView::NotRecorded => DISCLOSURE_ORIGIN_NOT_RECORDED,
+    }
+}
+
+/// The local-route filter sentence.
+#[must_use]
+pub fn local_filter_line(filter: crate::disclosure::LocalFilter) -> &'static str {
+    use crate::disclosure::LocalFilter;
+    match filter {
+        LocalFilter::None => DISCLOSURE_LOCAL_FILTER_NONE,
+        LocalFilter::NearAi => DISCLOSURE_LOCAL_FILTER_NEAR_AI,
+        LocalFilter::SelfHosted => DISCLOSURE_LOCAL_FILTER_SELF_HOSTED,
+        LocalFilter::Sidecar => DISCLOSURE_LOCAL_FILTER_SIDECAR,
+        LocalFilter::Invalid => DISCLOSURE_LOCAL_FILTER_INVALID,
+    }
+}
+
+/// The disclosure panel's words for the daemon's `route_disclosure` facts.
+#[must_use]
+pub fn route_disclosure_copy(facts: &crate::disclosure::RouteDisclosure) -> RouteDisclosureCopy {
+    use crate::disclosure::Route;
+    let sends_to_witness = facts.route == Route::Witness;
+    let route = match facts.route {
+        Route::Witness => AUTO_RAW_SEND_BOTH_ENCLAVES,
+        Route::WitnessRefusing => DISCLOSURE_ROUTE_WITNESS_REFUSING,
+        Route::Local => DISCLOSURE_ROUTE_LOCAL,
+        Route::NotEnrolled => DISCLOSURE_ROUTE_NOT_ENROLLED,
+        Route::SettingsUnreadable => DISCLOSURE_ROUTE_SETTINGS_UNREADABLE,
+    };
+    let witness = facts.witness.as_ref().map(|w| WitnessDisclosureCopy {
+        heading: DISCLOSURE_WITNESS_HEADING,
+        address_label: DISCLOSURE_WITNESS_ADDRESS_LABEL,
+        signing_label: DISCLOSURE_WITNESS_SIGNING_LABEL,
+        measurements_label: DISCLOSURE_WITNESS_MEASUREMENTS_LABEL,
+        check: DISCLOSURE_WITNESS_CHECK,
+        classifier: sends_to_witness.then_some(DISCLOSURE_WITNESS_CLASSIFIER),
+        origin: witness_origin_line(w.origin),
+    });
+    let receipts = sends_to_witness.then_some(match facts.receipts {
+        r if !r.endpoint_configured => DISCLOSURE_RECEIPTS_OFF,
+        r if r.check_attestation => DISCLOSURE_RECEIPTS_CHECKED,
+        _ => DISCLOSURE_RECEIPTS_UNCHECKED,
+    });
+    let before_line = match facts.route {
+        Route::Witness => DISCLOSURE_SESSION_BEFORE_WITNESS,
+        Route::Local => DISCLOSURE_SESSION_BEFORE_LOCAL,
+        Route::WitnessRefusing | Route::NotEnrolled | Route::SettingsUnreadable => {
+            DISCLOSURE_SESSION_NOTHING_SENT
+        }
+    };
+    RouteDisclosureCopy {
+        title: DISCLOSURE_TITLE,
+        route,
+        witness,
+        local_filter: (facts.route == Route::Local)
+            .then(|| facts.local_filter.map(local_filter_line))
+            .flatten(),
+        receipts,
+        attested_bodies: (sends_to_witness && facts.attested_bodies)
+            .then_some(DISCLOSURE_ATTESTED_BODIES),
+        session: SessionSendCopy {
+            heading: DISCLOSURE_SESSION_HEADING,
+            before_label: DISCLOSURE_SESSION_BEFORE_LABEL,
+            before_line,
+            after_label: DISCLOSURE_SESSION_AFTER_LABEL,
+            after_line: DISCLOSURE_SESSION_AFTER,
+        },
+    }
+}
+
+/// The labels for `certificate_detail`, the per-session record of what the
+/// witness was checked against when it reviewed this session.
+///
+/// **DRAFT, NEEDS APPROVAL.** `verification` is always
+/// `verified_at_review` today: the claim is about that moment, not now.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct CertificateDetailCopy {
+    pub heading: &'static str,
+    pub measurement_label: &'static str,
+    pub signer_label: &'static str,
+    pub verified_at_review: &'static str,
+}
+
+/// **DRAFT, NEEDS APPROVAL.**
+#[must_use]
+pub fn certificate_detail_copy() -> CertificateDetailCopy {
+    CertificateDetailCopy {
+        heading: "Checked when your witness reviewed this session",
+        measurement_label: "Witness measurement",
+        signer_label: "Signed by",
+        verified_at_review: "This app checked the witness's attestation against your pins when the witness reviewed this session, and checked the certificate's signature against this signing key.",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +1466,293 @@ pub fn inference_connection_copy() -> InferenceConnectionCopy {
 mod tests {
     use super::*;
 
+    /// K5: the rewording notice says the folder is still armed and then
+    /// says exactly what a patterns-only folder is told, with no model-scrub
+    /// sentence anywhere.
+    #[test]
+    fn the_rewording_notice_is_the_patterns_only_disclosure() {
+        let wire = serde_json::json!({
+            "id": 3, "project_id": "p-1", "project_label": "api",
+            "was": "model_scrubbed", "now": "patterns_only",
+        });
+        let n = arming_reworded_notice_for_wire(&wire).expect("a notice");
+        assert_eq!(n.title, "What automatic contributing from api now means");
+        assert!(n.body.contains("still contributes automatically"));
+        assert_eq!(n.scope, AUTO_PATTERNS_ONLY_SCOPE);
+        assert_eq!(n.limit, AUTO_PATTERNS_ONLY_LIMIT);
+        assert_eq!(n.no_review, AUTO_NO_REVIEW);
+        assert_eq!(n.ask_first_action, Some(ASK_ME_FIRST_ACTION));
+        assert_eq!(n.ask_first_failed, Some(ASK_ME_FIRST_FAILED));
+        let json = serde_json::to_string(&n).unwrap();
+        assert!(!json.contains("when a model recognises it"));
+        assert!(!json.contains("The model is not reliable"));
+    }
+
+    /// No label: an unplaced title, not a shell-written one. No id: no
+    /// button. Not an object: nothing.
+    #[test]
+    fn a_rewording_the_shell_cannot_place_still_gets_words() {
+        let n = arming_reworded_notice_for_wire(&serde_json::json!({ "id": 1 })).unwrap();
+        assert_eq!(n.title, REWORDED_UNPLACED_TITLE);
+        assert!(n.ask_first_action.is_none() && n.ask_first_failed.is_none());
+        assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
+    }
+
+    /// The held notice: counted, a sentence per reason, the release line,
+    /// and a line and button per folder. Nothing held, nothing shown.
+    #[test]
+    fn the_held_notice_names_the_folders_and_says_it_releases() {
+        use crate::daemon::automatic_gate::{REASON_ADMISSION_PER_SESSION, REASON_NO_SCOPE};
+        let wire = serde_json::json!({
+            "held_sessions": 3,
+            "reasons": [REASON_ADMISSION_PER_SESSION, REASON_ADMISSION_PER_SESSION, REASON_NO_SCOPE],
+            "projects": [
+                { "project_id": "p-1", "project_label": "api", "held_sessions": 2 },
+                { "project_id": "p-2", "project_label": "web", "held_sessions": 1 },
+            ],
+        });
+        let n = gate_held_notice_for_wire(&wire).expect("a notice");
+        assert_eq!(n.title, GATE_HELD_TITLE);
+        assert_eq!(
+            n.body,
+            "3 sessions from projects set to contribute automatically are waiting."
+        );
+        assert_eq!(
+            n.reasons,
+            vec![
+                "This commons does not yet accept automatic contributions from your account.",
+                "You have not chosen how your traces may be used.",
+            ]
+        );
+        assert_eq!(n.release, GATE_HELD_RELEASE);
+        assert_eq!(n.projects.len(), 2);
+        assert_eq!(n.projects[0].line, "api: 2 sessions waiting");
+        assert_eq!(n.projects[1].line, "web: 1 session waiting");
+        assert_eq!(n.projects[0].project_id.as_deref(), Some("p-1"));
+        assert_eq!(n.projects[0].ask_first_action, Some(ASK_ME_FIRST_ACTION));
+
+        let one = gate_held_notice_for_wire(&serde_json::json!({
+            "held_sessions": 1, "reasons": ["some-future-reason"], "projects": [],
+        }))
+        .unwrap();
+        assert_eq!(
+            one.body,
+            "1 session from a project set to contribute automatically is waiting."
+        );
+        assert_eq!(
+            one.reasons,
+            vec!["Something automatic contributing needs is not in place yet."]
+        );
+
+        for nothing in [
+            serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] }),
+            serde_json::json!({}),
+            serde_json::json!("held"),
+        ] {
+            assert!(gate_held_notice_for_wire(&nothing).is_none(), "{nothing}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // K11: the route disclosure
+    // -----------------------------------------------------------------
+
+    fn facts(route: crate::disclosure::Route) -> crate::disclosure::RouteDisclosure {
+        use crate::config::{WitnessOrigin, WitnessOriginView};
+        use crate::disclosure::{LocalFilter, ReceiptFacts, Route, WitnessFacts};
+        use crate::witness::status::WitnessTrustState;
+        let witness = |state| WitnessFacts {
+            state,
+            url: "https://witness.invalid".into(),
+            signing_address: "0xab".into(),
+            pinned_measurements: vec!["mrtd=aa".into()],
+            origin: WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin),
+        };
+        crate::disclosure::RouteDisclosure {
+            route,
+            witness: match route {
+                Route::Witness => Some(witness(WitnessTrustState::Pinned)),
+                Route::WitnessRefusing => Some(witness(WitnessTrustState::RefusingUnpinned)),
+                _ => None,
+            },
+            local_filter: (route == Route::Local).then_some(LocalFilter::None),
+            receipts: ReceiptFacts {
+                endpoint_configured: false,
+                check_attestation: false,
+            },
+            attested_bodies: false,
+        }
+    }
+
+    /// THE BRANCH CROSSES: each route carries only the blocks that are true
+    /// of it, so a shell never holds the raw-send sentence for a session
+    /// that stays on this computer, or a local-filter sentence for one that
+    /// goes to a witness.
+    #[test]
+    fn each_route_carries_only_its_own_blocks() {
+        use crate::disclosure::Route;
+        let witness = route_disclosure_copy(&facts(Route::Witness));
+        assert_eq!(witness.route, AUTO_RAW_SEND_BOTH_ENCLAVES);
+        assert!(witness.local_filter.is_none());
+        let w = witness.witness.as_ref().expect("the witness block");
+        assert_eq!(w.classifier, Some(DISCLOSURE_WITNESS_CLASSIFIER));
+        assert!(witness.receipts.is_some());
+        assert_eq!(
+            witness.session.before_line,
+            DISCLOSURE_SESSION_BEFORE_WITNESS
+        );
+
+        let local = route_disclosure_copy(&facts(Route::Local));
+        assert_eq!(local.route, DISCLOSURE_ROUTE_LOCAL);
+        assert!(local.witness.is_none());
+        assert!(local.receipts.is_none());
+        assert!(local.attested_bodies.is_none());
+        assert_eq!(local.local_filter, Some(DISCLOSURE_LOCAL_FILTER_NONE));
+        assert_eq!(local.session.before_line, DISCLOSURE_SESSION_BEFORE_LOCAL);
+        assert!(
+            !serde_json::to_string(&local)
+                .unwrap()
+                .contains("unredacted to your witness")
+        );
+
+        let refusing = route_disclosure_copy(&facts(Route::WitnessRefusing));
+        assert_eq!(refusing.route, DISCLOSURE_ROUTE_WITNESS_REFUSING);
+        let w = refusing.witness.as_ref().expect("still shown");
+        assert_eq!(w.classifier, None, "nothing reaches a classifier");
+        assert!(refusing.receipts.is_none());
+        assert_eq!(
+            refusing.session.before_line,
+            DISCLOSURE_SESSION_NOTHING_SENT
+        );
+
+        for (route, line) in [
+            (Route::NotEnrolled, DISCLOSURE_ROUTE_NOT_ENROLLED),
+            (
+                Route::SettingsUnreadable,
+                DISCLOSURE_ROUTE_SETTINGS_UNREADABLE,
+            ),
+        ] {
+            let copy = route_disclosure_copy(&facts(route));
+            assert_eq!(copy.route, line);
+            assert!(copy.witness.is_none() && copy.local_filter.is_none());
+            assert_eq!(copy.session.before_line, DISCLOSURE_SESSION_NOTHING_SENT);
+        }
+    }
+
+    /// Every origin has its own sentence, and "not recorded" never names a
+    /// source it cannot know.
+    #[test]
+    fn each_witness_origin_has_its_own_sentence() {
+        use crate::config::{WitnessOrigin, WitnessOriginView};
+        let views = [
+            WitnessOriginView::Recorded(WitnessOrigin::PublishedAtJoin),
+            WitnessOriginView::Recorded(WitnessOrigin::ConnectedInference),
+            WitnessOriginView::Recorded(WitnessOrigin::Settings),
+            WitnessOriginView::Recorded(WitnessOrigin::Environment),
+            WitnessOriginView::NotRecorded,
+        ];
+        let lines: Vec<&str> = views.iter().map(|v| witness_origin_line(*v)).collect();
+        for (i, a) in lines.iter().enumerate() {
+            for b in &lines[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // The join case says the contributor was not asked (spec, point 2).
+        assert!(lines[0].contains("without asking you"));
+        assert!(lines[1].contains("connected inference"));
+        assert!(lines[4].contains("no record"));
+        for named in ["commons", "Settings", "connected"] {
+            assert!(!lines[4].contains(named), "{named}");
+        }
+    }
+
+    #[test]
+    fn each_local_filter_has_its_own_sentence() {
+        use crate::disclosure::LocalFilter;
+        let lines: Vec<&str> = [
+            LocalFilter::None,
+            LocalFilter::NearAi,
+            LocalFilter::SelfHosted,
+            LocalFilter::Sidecar,
+            LocalFilter::Invalid,
+        ]
+        .into_iter()
+        .map(local_filter_line)
+        .collect();
+        for (i, a) in lines.iter().enumerate() {
+            for b in &lines[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // The NEAR AI filter is a hop this app does not attest.
+        assert!(lines[1].contains("NEAR AI"));
+        assert!(lines[1].contains("does not check"));
+    }
+
+    /// Receipts: the fetch is a disclosure to the provider (spec, the
+    /// separate sentence), and the attestation check is described as the
+    /// consistency check it is, not as verification.
+    #[test]
+    fn the_receipt_sentences_follow_the_configuration() {
+        use crate::disclosure::{ReceiptFacts, Route};
+        let mut f = facts(Route::Witness);
+        let none = route_disclosure_copy(&f).receipts.unwrap();
+        assert_eq!(none, DISCLOSURE_RECEIPTS_OFF);
+        f.receipts = ReceiptFacts {
+            endpoint_configured: true,
+            check_attestation: false,
+        };
+        let unchecked = route_disclosure_copy(&f).receipts.unwrap();
+        assert!(unchecked.contains("tells the provider"));
+        assert!(unchecked.contains("does not compare"));
+        f.receipts.check_attestation = true;
+        let checked = route_disclosure_copy(&f).receipts.unwrap();
+        assert!(checked.contains("tells the provider"));
+        assert!(checked.contains("without verifying its quote"));
+    }
+
+    #[test]
+    fn attested_bodies_are_said_only_on_the_witness_route_when_on() {
+        use crate::disclosure::Route;
+        let mut f = facts(Route::Witness);
+        assert!(route_disclosure_copy(&f).attested_bodies.is_none());
+        f.attested_bodies = true;
+        assert_eq!(
+            route_disclosure_copy(&f).attested_bodies,
+            Some(DISCLOSURE_ATTESTED_BODIES)
+        );
+        let mut local = facts(Route::Local);
+        local.attested_bodies = true;
+        assert!(route_disclosure_copy(&local).attested_bodies.is_none());
+    }
+
+    /// No disclosure sentence uses the banned destination label, and none
+    /// is empty.
+    #[test]
+    fn the_disclosure_sentences_are_present_and_use_no_banned_label() {
+        use crate::disclosure::Route;
+        for route in [
+            Route::Witness,
+            Route::WitnessRefusing,
+            Route::Local,
+            Route::NotEnrolled,
+            Route::SettingsUnreadable,
+        ] {
+            let wire = serde_json::to_string(&route_disclosure_copy(&facts(route))).unwrap();
+            assert!(!wire.to_lowercase().contains("private inference"), "{wire}");
+            assert!(!wire.contains("\"\""), "{wire}");
+        }
+    }
+
+    #[test]
+    fn the_certificate_detail_copy_says_what_was_checked_and_when() {
+        let copy = certificate_detail_copy();
+        assert!(copy.verified_at_review.contains("when"));
+        assert!(!copy.heading.is_empty());
+        assert!(!copy.measurement_label.is_empty());
+        assert!(!copy.signer_label.is_empty());
+    }
+
     /// "Trust relaxes what may be sent, never what may be said": the
     /// patterns-only payload carries neither model-scrub sentence anywhere,
     /// and claims no model removed anything.
@@ -930,7 +1805,6 @@ mod tests {
             AUTO_PATTERNS_ONLY_SCOPE,
             AUTO_PATTERNS_ONLY_LIMIT,
             AUTO_RAW_SEND_BOTH_ENCLAVES,
-            AUTO_WITNESS_ORIGIN,
             AUTO_SCOPE_REQUIRED,
             AUTO_PATH_AUTOMATIC,
             AUTO_PATH_ASK_FIRST,
@@ -943,8 +1817,6 @@ mod tests {
         assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("unredacted"));
         assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("second enclave"));
         assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("second operator"));
-        // The origin sentence does not pretend to know which happened.
-        assert!(AUTO_WITNESS_ORIGIN.contains("cannot tell which"));
         // No default scope, and declining is not a floor-scope grant.
         assert!(AUTO_SCOPE_REQUIRED.contains("Nothing is selected for you"));
         // The exemption is for projects with sessions on disk at the grant,
@@ -1503,10 +2375,15 @@ mod tests {
         }
     }
 
-    /// The origin sentence names every route that writes a witness, now that
-    /// connecting inference is one.
+    /// Every route that writes a witness has its own origin sentence, now
+    /// that connecting inference is one. (This replaced a single hedged
+    /// `AUTO_WITNESS_ORIGIN` once the config began recording the origin.)
     #[test]
     fn the_witness_origin_names_connected_inference() {
-        assert!(AUTO_WITNESS_ORIGIN.contains("inference connection"));
+        use crate::config::{WitnessOrigin, WitnessOriginView};
+        let line = witness_origin_line(WitnessOriginView::Recorded(
+            WitnessOrigin::ConnectedInference,
+        ));
+        assert!(line.contains("connected inference"));
     }
 }

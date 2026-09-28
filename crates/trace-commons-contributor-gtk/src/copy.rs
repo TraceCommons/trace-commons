@@ -508,9 +508,12 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // beside a re-export is the word this shell would render while the other
 // two render the shared one.
 pub use trace_commons_contributor::consent_copy::{
-    AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, GATE_NOT_PINNED_HELP, GATE_READY_HELP,
-    GATE_STATEMENT, VoidNoticeCopy, gate_help, void_notice_for_wire, witness_capacity_notice,
+    AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, ArmingRewordedNoticeCopy,
+    GATE_NOT_PINNED_HELP, GATE_READY_HELP, GATE_STATEMENT, GateHeldNoticeCopy, VoidNoticeCopy,
+    arming_reworded_notice_for_wire, gate_held_notice_for_wire, gate_help, void_notice_for_wire,
+    witness_capacity_notice,
 };
+pub use trace_commons_contributor::daemon::health::LABEL_AUTOMATIC_CONTRIBUTION_HELD as GATE_HELD_LABEL;
 pub use trace_commons_contributor::daemon::health::LABEL_WITNESS_SATURATED as WITNESS_SATURATED_LABEL;
 // COPY-MIGRATED-END
 
@@ -1287,6 +1290,80 @@ pub fn health_sentence(label: &str) -> &'static str {
         // thing that holds for every blocking label rather than inventing a
         // mechanism name for it.
         _ => "Something is holding contributions up. Your queue is safe; nothing has been lost.",
+    }
+}
+
+/// "<label>: <local time>" for a witness review a person asked for that met
+/// a busy witness, read from the `result` the daemon sent beside the error.
+///
+/// `None` for any other outcome, and for a time this shell cannot read:
+/// never a guessed time. The label is the core review copy's
+/// `busy_retry_at`, the same words Tauri, macOS and Windows show; the time is
+/// the daemon's `view.retry_at`, rendered in local time as the daily-cap
+/// banner renders its reset.
+pub fn witness_busy_retry_line(result: Option<&serde_json::Value>) -> Option<String> {
+    let view = result?.get("view")?;
+    if view.get("state")?.as_str()? != "Busy" {
+        return None;
+    }
+    let at = chrono::DateTime::parse_from_rfc3339(view.get("retry_at")?.as_str()?).ok()?;
+    let label = trace_commons_contributor::witness_copy::witness_copy()
+        .review
+        .busy_retry_at;
+    Some(format!(
+        "{label}: {}",
+        at.with_timezone(&chrono::Local).format("%H:%M")
+    ))
+}
+
+#[cfg(test)]
+mod witness_busy_retry_tests {
+    use super::*;
+
+    fn local_hhmm(s: &str) -> String {
+        s.parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string()
+    }
+
+    fn busy(retry_at: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"view": {
+            "state": "Busy",
+            "message": "ignored here",
+            "retry_at": retry_at,
+            "retry_label": "ignored here too",
+        }})
+    }
+
+    #[test]
+    fn a_busy_witness_says_when_to_try_again_in_local_time() {
+        let label = trace_commons_contributor::witness_copy::witness_copy()
+            .review
+            .busy_retry_at;
+        assert_eq!(
+            witness_busy_retry_line(Some(&busy("2026-09-27T12:34:00Z".into()))),
+            Some(format!("{label}: {}", local_hhmm("2026-09-27T12:34:00Z")))
+        );
+    }
+
+    #[test]
+    fn no_time_is_guessed() {
+        for result in [
+            None,
+            Some(serde_json::json!({})),
+            Some(busy(serde_json::Value::Null)),
+            Some(busy("not a time".into())),
+            Some(busy(serde_json::json!(1_790_000_000))),
+            Some(serde_json::json!({"view": {
+                "state": "Refused",
+                "message": "no",
+                "retry_at": "2026-09-27T12:34:00Z",
+            }})),
+        ] {
+            assert_eq!(witness_busy_retry_line(result.as_ref()), None, "{result:?}");
+        }
     }
 }
 
