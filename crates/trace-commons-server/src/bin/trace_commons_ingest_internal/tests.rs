@@ -3851,6 +3851,7 @@ async fn insert_account_test_credit_event(
             actor_principal_ref: "review-token-a".to_string(),
             actor_role: "reviewer".to_string(),
             settlement_state: StorageTraceCreditSettlementState::Pending,
+            witness_provenance_class: None,
         })
         .await
         .expect("insert credit event");
@@ -5174,6 +5175,7 @@ fn file_backed_control_plane_appends_reject_cross_tenant_records_before_write() 
             actor_role: TokenRole::Reviewer,
             actor_principal_ref: "principal:reviewer".to_string(),
             created_at: now,
+            witness_provenance_class: None,
         },
     )
     .expect_err("credit ledger append must reject embedded tenant mismatch");
@@ -6637,6 +6639,7 @@ fn benchmark_candidate_structural_gate_requires_canonical_summary_hash() {
         duplicate_score: 0.1,
         submission_score: 0.9,
         consent_scopes: vec![ConsentScope::BenchmarkOnly],
+        witness_provenance_class: None,
     };
     assert!(benchmark_candidate_passes_structural_evaluation(&candidate));
 
@@ -8770,6 +8773,7 @@ async fn contributor_credit_read_rejects_mismatched_file_ledger_tenant() {
             actor_role: TokenRole::UtilityWorker,
             actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
             created_at: Utc::now(),
+            witness_provenance_class: None,
         },
         "corrupt trace credit ledger",
     )
@@ -40416,6 +40420,7 @@ async fn contributor_credit_summary_nets_revocation_reversal_against_settled_bal
             actor_role: TokenRole::RevocationWorker,
             actor_principal_ref: static_token_principal_ref("revocation-worker-token-a"),
             created_at: Utc::now(),
+            witness_provenance_class: None,
         },
     )
     .expect("reversal credit event writes");
@@ -40490,6 +40495,7 @@ async fn operational_summary_counts_revocation_reversal_credit_events() {
             actor_role: TokenRole::RevocationWorker,
             actor_principal_ref: static_token_principal_ref("revocation-worker-token-a"),
             created_at: Utc::now(),
+            witness_provenance_class: None,
         },
     )
     .expect("reversal credit event writes");
@@ -57142,6 +57148,7 @@ fn near_credit_reversal_outbox_uses_reverse_method_and_single_event_amount() {
         actor_role: "reviewer".to_string(),
         settlement_state: StorageTraceCreditSettlementState::Final,
         occurred_at: Utc::now(),
+        witness_provenance_class: None,
     };
     let reversal_outbox_id = Uuid::new_v4();
 
@@ -65675,6 +65682,7 @@ async fn ranking_credit_readiness_report_blocks_on_calibration_dataset_manifest_
         actor_role: TokenRole::UtilityWorker,
         actor_principal_ref: static_token_principal_ref("utility-worker-token-a"),
         created_at: Utc::now(),
+        witness_provenance_class: None,
     };
     append_credit_event(temp.path(), "tenant-a", &credit_event).expect("credit event writes");
 
@@ -90912,6 +90920,7 @@ fn settlement_cap_bounds_the_account_not_each_principal() {
             actor_role: TokenRole::Admin,
             actor_principal_ref: principal.to_string(),
             created_at: Utc::now(),
+            witness_provenance_class: None,
         }
     }
 
@@ -96184,7 +96193,7 @@ mod witness_receipt {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, "Bearer token-a".parse().unwrap());
         let tenant = authenticate_ctx(state, &headers).unwrap();
-        file_witness::current_claim(state, &tenant, submission_id).unwrap()
+        file_witness::current_claim(state, tenant.auth(), submission_id).unwrap()
     }
 
     #[tokio::test]
@@ -96583,6 +96592,386 @@ mod witness_receipt {
         );
     }
 
+    /// #1059: the file-store current-object claim is what every reporting
+    /// surface reads -- the reviewer trace list, the replay export and credit
+    /// events -- and each reports it as a label, never as a weight.
+    #[tokio::test]
+    async fn file_witness_provenance_labels_reviewer_list_export_and_credit() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessProvenanceClass as Class;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+
+        let gateway = holdable_envelope().await;
+        let gateway_body = serde_json::to_vec(&gateway).unwrap();
+        let (certificate, _) = certificate_v2_over(&gateway_body);
+        let mut json: serde_json::Value = serde_json::from_str(&certificate).unwrap();
+        json["inference_provenance"]["final_call"]["class"] =
+            serde_json::json!("gateway_final_call");
+        let (certificate, signature) = sign_certificate_json(json);
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                gateway_body,
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let legacy = holdable_envelope().await;
+        let legacy_body = serde_json::to_vec(&legacy).unwrap();
+        let (certificate, signature) = certificate_over(&legacy_body, "low");
+        assert_eq!(
+            post_through_the_real_router(
+                state.clone(),
+                legacy_body,
+                Some((&certificate, &signature))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let expected = [
+            (gateway.submission_id, Class::GatewayFinalCall),
+            (legacy.submission_id, Class::LegacyV1),
+        ];
+
+        let list = |state: Arc<AppState>| async move {
+            let Json(items) = list_traces_handler(
+                State(state),
+                auth_headers("review-token-a"),
+                Query(TraceListQuery {
+                    status: None,
+                    limit: Some(10),
+                    purpose: None,
+                    coverage_tag: None,
+                    tool: None,
+                    privacy_risk: None,
+                    consent_scope: None,
+                }),
+            )
+            .await
+            .expect("reviewer list reads");
+            items
+        };
+        let items = list(state.clone()).await;
+        for (submission_id, class) in expected {
+            let item = items
+                .iter()
+                .find(|item| item.submission_id == submission_id)
+                .expect("listed");
+            assert_eq!(item.witness_provenance_class, Some(class));
+        }
+        let listed = serde_json::to_value(&items).unwrap();
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["witness_provenance_class"] == "gateway_final_call"),
+            "the reviewer list carries the label on the wire"
+        );
+
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: None,
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export succeeds");
+        assert_eq!(export.item_count, 2);
+        for (submission_id, class) in expected {
+            let item = export
+                .items
+                .iter()
+                .find(|item| item.submission_id == submission_id)
+                .expect("exported");
+            assert_eq!(item.witness_provenance_class, Some(class));
+        }
+        let exported = serde_json::to_value(&export).unwrap();
+        for item in exported["items"].as_array().unwrap() {
+            let label = item["witness_provenance_class"].as_str().unwrap();
+            assert!(
+                ["gateway_final_call", "legacy_v1"].contains(&label),
+                "{label}"
+            );
+        }
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(gateway.submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.5,
+                reason: Some("reviewer bonus".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("credit event appends");
+        assert_eq!(
+            event.witness_provenance_class,
+            Some(Class::GatewayFinalCall)
+        );
+        assert_eq!(
+            event.credit_points_delta, 1.5,
+            "provenance never changes the amount"
+        );
+        let ledger = read_all_credit_events(temp.path(), "tenant-a").unwrap();
+        assert_eq!(
+            ledger
+                .iter()
+                .find(|stored| stored.event_id == event.event_id)
+                .expect("ledger holds the event")
+                .witness_provenance_class,
+            Some(Class::GatewayFinalCall),
+            "the label is durable in the file ledger"
+        );
+        // The label is for analysis. The contributor's own credit view is
+        // unchanged: it names no provenance.
+        let Json(own_events) = credit_events_handler(State(state.clone()), auth_headers("token-a"))
+            .await
+            .expect("contributor credit events read");
+        assert!(!own_events.is_empty());
+        assert!(
+            !serde_json::to_string(&own_events)
+                .unwrap()
+                .contains("witness_provenance_class")
+        );
+
+        // R4: once the current artifact no longer matches the certificate,
+        // no surface claims the class any more.
+        let record = read_submission_record(temp.path(), "tenant-a", gateway.submission_id)
+            .unwrap()
+            .unwrap();
+        let path = temp.path().join(&record.object_key);
+        let mut changed = std::fs::read(&path).unwrap();
+        changed.push(b' ');
+        std::fs::write(&path, changed).unwrap();
+        let items = list(state.clone()).await;
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.submission_id == gateway.submission_id)
+                .unwrap()
+                .witness_provenance_class,
+            Some(Class::Unattested)
+        );
+    }
+
+    /// #1059, database mode: the same surfaces read the V76 current-object
+    /// claim from PostgreSQL, and the credit ledger rows -- the accepted-credit
+    /// event written at submission and a later delayed event -- carry the label.
+    #[tokio::test]
+    async fn db_witness_provenance_labels_reviewer_list_export_and_credit_ledger() {
+        use trace_commons_server::trace_corpus_storage::{
+            TraceCreditEventType as StorageCreditEventType, TraceWitnessProvenanceClass as Class,
+        };
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = witnessed_state(temp.path().to_path_buf());
+        {
+            let state_mut = Arc::get_mut(&mut state).unwrap();
+            state_mut.db_mirror = Some(backend.clone() as Arc<dyn Database>);
+            state_mut.require_db_mirror_writes = true;
+        }
+        let envelope = holdable_envelope().await;
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let submission_id = envelope.submission_id;
+
+        let Json(items) = list_traces_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(TraceListQuery {
+                status: None,
+                limit: Some(10),
+                purpose: None,
+                coverage_tag: None,
+                tool: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("reviewer list reads");
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.submission_id == submission_id)
+                .expect("listed")
+                .witness_provenance_class,
+            Some(Class::ProviderTeeFinalCall)
+        );
+
+        let Json(export) = dataset_replay_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(DatasetExportQuery {
+                limit: Some(10),
+                purpose: None,
+                status: None,
+                privacy_risk: None,
+                consent_scope: None,
+            }),
+        )
+        .await
+        .expect("replay export succeeds");
+        assert_eq!(
+            export
+                .items
+                .iter()
+                .find(|item| item.submission_id == submission_id)
+                .expect("exported")
+                .witness_provenance_class,
+            Some(Class::ProviderTeeFinalCall)
+        );
+
+        let Json(event) = append_credit_event_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            AxumPath(submission_id),
+            Json(TraceCreditLedgerAppendRequest {
+                event_type: TraceCreditLedgerEventType::ReviewerBonus,
+                credit_points_delta: 1.5,
+                reason: Some("reviewer bonus".to_string()),
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("credit event appends");
+
+        // Submission holds credit at 0.0 until the gate scores, so the
+        // accepted-credit row is written by a mirror of an accepted, credited
+        // record -- here the backfill path, which shares that code.
+        let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .unwrap()
+            .unwrap();
+        record.credit_points_pending = 1.0;
+        let derived = read_derived_record(temp.path(), "tenant-a", submission_id)
+            .unwrap()
+            .unwrap();
+        let stored = read_envelope_by_record(&state, &record).unwrap();
+        let tenant = authenticate_ctx(&state, &auth_headers("token-a")).unwrap();
+        mirror_submission_to_db_with_options(
+            &state,
+            tenant.auth(),
+            &record,
+            &derived,
+            &stored,
+            None,
+            SubmissionMirrorKind::Backfill,
+        )
+        .await
+        .expect("accepted credit mirrors");
+
+        let ledger = backend.list_trace_credit_events("tenant-a").await.unwrap();
+        let accepted = ledger
+            .iter()
+            .find(|row| {
+                row.submission_id == submission_id
+                    && row.event_type == StorageCreditEventType::Accepted
+            })
+            .expect("accepted credit mirrored at submission");
+        assert_eq!(
+            accepted.witness_provenance_class,
+            Some(Class::ProviderTeeFinalCall)
+        );
+        let delayed = ledger
+            .iter()
+            .find(|row| row.credit_event_id == event.event_id)
+            .expect("delayed credit mirrored");
+        assert_eq!(
+            delayed.witness_provenance_class,
+            Some(Class::ProviderTeeFinalCall)
+        );
+        assert_eq!(delayed.points_delta, "1.5000");
+        cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    }
+
+    /// #1059: the derived datasets -- benchmark conversion and ranker
+    /// training candidates -- carry the same label per trace.
+    #[tokio::test]
+    async fn file_witness_provenance_labels_benchmark_and_ranker_exports() {
+        use trace_commons_server::trace_corpus_storage::TraceWitnessProvenanceClass as Class;
+        let temp = tempfile::tempdir().unwrap();
+        let state = witnessed_state(temp.path().to_path_buf());
+        let mut envelope = holdable_envelope().await;
+        envelope.consent.scopes = vec![ConsentScope::BenchmarkOnly, ConsentScope::RankingTraining];
+        envelope.trace_card.consent_scope = ConsentScope::BenchmarkOnly;
+        envelope.trace_card.allowed_uses = vec![
+            TraceAllowedUse::BenchmarkGeneration,
+            TraceAllowedUse::RankingModelTraining,
+        ];
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let (certificate, signature) = certificate_v2_over(&body);
+        assert_eq!(
+            post_through_the_real_router(state.clone(), body, Some((&certificate, &signature)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let Json(benchmark) = benchmark_convert_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Json(BenchmarkConversionRequest {
+                limit: Some(10),
+                purpose: Some("provenance_label".to_string()),
+                consent_scope: None,
+                status: None,
+                privacy_risk: None,
+                external_ref: None,
+            }),
+        )
+        .await
+        .expect("benchmark conversion succeeds");
+        assert_eq!(benchmark.item_count, 1);
+        assert_eq!(
+            benchmark.candidates[0].witness_provenance_class,
+            Some(Class::ProviderTeeFinalCall)
+        );
+
+        let Json(ranker) = ranker_training_candidates_handler(
+            State(state.clone()),
+            auth_headers("review-token-a"),
+            Query(RankerTrainingExportQuery {
+                limit: Some(10),
+                purpose: Some("provenance_label".to_string()),
+                status: None,
+                consent_scope: None,
+                privacy_risk: None,
+            }),
+        )
+        .await
+        .expect("ranker candidate export succeeds");
+        assert_eq!(ranker.item_count, 1);
+        assert_eq!(
+            ranker.candidates[0].witness_provenance_class,
+            Some(Class::ProviderTeeFinalCall)
+        );
+        assert_eq!(
+            serde_json::to_value(&ranker).unwrap()["candidates"][0]["witness_provenance_class"],
+            "provider_tee_final_call"
+        );
+    }
+
     #[tokio::test]
     async fn file_witness_legacy_records_and_tenant_isolation() {
         use trace_commons_server::trace_corpus_storage::TraceWitnessEvidenceCoverage as Coverage;
@@ -96601,7 +96990,7 @@ mod witness_receipt {
         headers.insert(AUTHORIZATION, "Bearer token-b".parse().unwrap());
         let other_tenant = authenticate_ctx(&state, &headers).unwrap();
         assert_eq!(
-            file_witness::current_claim(&state, &other_tenant, envelope.submission_id)
+            file_witness::current_claim(&state, other_tenant.auth(), envelope.submission_id)
                 .unwrap()
                 .coverage,
             Coverage::Missing
@@ -97986,6 +98375,7 @@ fn withdrawal_credit_event(
         actor_role: TokenRole::Reviewer,
         actor_principal_ref: "principal:reviewer".to_string(),
         created_at: Utc::now(),
+        witness_provenance_class: None,
     }
 }
 

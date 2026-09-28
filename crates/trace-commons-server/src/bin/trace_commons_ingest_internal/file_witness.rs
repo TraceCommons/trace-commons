@@ -277,13 +277,18 @@ pub(super) fn write_record(
     Ok(())
 }
 
-/// Future gate/credit/export seam; this slice does not activate a policy consumer.
-/// Auth-derived tenant and ownership, durable status/tombstones, and the actual
-/// current object are all read here. No arbitrary caller digest can qualify proof.
-#[allow(dead_code)]
+/// The file-store counterpart of the database's current-object read, and what
+/// the export, reviewer-list and credit labels read in file mode (#1059; see
+/// `witness_provenance_classes`). Auth-derived tenant, durable status and
+/// tombstones, and the actual current object are all read here. No arbitrary
+/// caller digest can qualify proof.
+///
+/// Tenant scoped, as the database read is; whether the caller may see this
+/// submission at all is the caller's decision, made before it asks. Every
+/// caller is a reviewer, export or credit path that has already admitted it.
 pub(super) fn current_claim(
     state: &AppState,
-    tenant: &TenantCtx,
+    tenant: &TenantAuth,
     id: Uuid,
 ) -> anyhow::Result<TraceWitnessEvidenceClaim> {
     use TraceWitnessEvidenceCoverage as Coverage;
@@ -296,17 +301,14 @@ pub(super) fn current_claim(
         state.db_mirror.is_none(),
         "file_witness_read_requires_file_only_store"
     );
-    let Some(record) = tenant.read_submission_record(&state.root, id)? else {
+    let Some(record) = read_submission_record(&state.root, &tenant.tenant_id, id)? else {
         return Ok(claim);
     };
-    if !tenant.can_access_submission(&record) {
-        return Ok(claim);
-    }
     let Some(evidence) = record.witness_evidence.as_ref() else {
         return Ok(claim);
     };
     claim.raw_body_sha256 = Some(evidence.raw_body_sha256.clone());
-    let tombstones = read_all_revocations(&state.root, tenant.tenant_id())?;
+    let tombstones = read_all_revocations(&state.root, &tenant.tenant_id)?;
     let current_object = read_current_object(state, &record)
         .ok()
         .filter(|(digest, _)| {

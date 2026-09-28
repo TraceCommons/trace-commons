@@ -1437,6 +1437,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_invite_link",
         include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
     ),
+    // V82-V88 are reserved for work in flight; V89 is additive and depends on
+    // none of them.
+    (
+        89,
+        "trace_credit_witness_provenance_class",
+        include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
+    ),
+    // V90 is reserved for work in flight; V91 depends only on V81.
     (
         91,
         "legacy_invite_link_devices",
