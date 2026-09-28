@@ -245,3 +245,30 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
     drop(client);
     let _ = connection.await;
 }
+
+/// Grants `login` membership in `main`'s `trace_account_admission_runtime`
+/// (V77), on top of whatever `provision_member_only_login` already gave it.
+///
+/// `main`'s own legacy session withdrawal reads `trace_account_admission_submissions`
+/// under that role, not under `trace_ingest_runtime` (V96 does not grant the
+/// table: owner ruling RB-11), and the pipeline withdrawal reaches the same
+/// table through `main`'s helper. A test harness whose runtime login
+/// exercises the pipeline withdrawal with a mapped source session needs this
+/// membership too; call it after `provision_member_only_login`, whose own
+/// exclusivity check runs before this grant lands.
+pub async fn grant_admission_runtime_membership(url: &str, login: &str) {
+    let (client, connection) = tokio_postgres::connect(url, NoTls)
+        .await
+        .expect("connect as the migration owner");
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+        .batch_execute(&format!(
+            "GRANT trace_account_admission_runtime TO {login};"
+        ))
+        .await
+        .expect("grant trace_account_admission_runtime to the runtime login");
+    drop(client);
+    let _ = connection.await;
+}

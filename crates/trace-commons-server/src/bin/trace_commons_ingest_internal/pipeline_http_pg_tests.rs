@@ -119,6 +119,16 @@ async fn pipeline_http_database_url() -> Option<String> {
                     PIPELINE_HTTP_RUNTIME_ROLE,
                 )
                 .await;
+                // legacy_withdrawal_route_uses_the_pipeline_for_a_session_with_a_run
+                // and pipeline_withdrawal_route_withdraws_through_the_account_session
+                // withdraw through a mapped source session: main's withdrawal
+                // path reads trace_account_admission_submissions, which only
+                // trace_account_admission_runtime may read (owner ruling RB-11).
+                pilot_runtime_login::grant_admission_runtime_membership(
+                    &pilot_url,
+                    PIPELINE_HTTP_RUNTIME_ROLE,
+                )
+                .await;
                 pilot_url
             })
             .await

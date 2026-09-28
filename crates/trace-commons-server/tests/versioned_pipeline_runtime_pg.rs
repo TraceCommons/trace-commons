@@ -64,7 +64,9 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineCreditStatus, PipelineProcessingStatus, PipelineProductStore,
 };
 
-use pilot_runtime_login::{migrate_like_the_pilot, provision_member_only_login};
+use pilot_runtime_login::{
+    grant_admission_runtime_membership, migrate_like_the_pilot, provision_member_only_login,
+};
 
 /// The login every test here connects as. Its only privilege source is
 /// membership in `trace_ingest_runtime`, the ingest runtime group V90 names.
@@ -86,6 +88,11 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
         .get_or_init(|| async {
             migrate_like_the_pilot(&url).await;
             provision_member_only_login(&url, RUNTIME_ROLE).await;
+            // withdrawal_of_either_session_submission_withdraws_the_session
+            // withdraws through a mapped source session: main's withdrawal
+            // path reads trace_account_admission_submissions, which only
+            // trace_account_admission_runtime may read (owner ruling RB-11).
+            grant_admission_runtime_membership(&url, RUNTIME_ROLE).await;
         })
         .await;
     let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");

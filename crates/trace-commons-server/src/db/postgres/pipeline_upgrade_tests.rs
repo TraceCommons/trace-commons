@@ -354,38 +354,6 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
          nothing to anyone else, and none of it WITH GRANT OPTION"
     );
 
-    // V96 also grants trace_ingest_runtime three columns of a `main` table,
-    // V77's trace_account_admission_submissions, for the ownership check a
-    // session withdrawal runs, and nothing else on that table.
-    let admission_submission_grants: Vec<(String, String, bool)> = admin
-        .query(
-            "SELECT att.attname::TEXT, a.privilege_type, a.is_grantable
-               FROM pg_attribute att, aclexplode(att.attacl) a
-              WHERE att.attrelid = 'public.trace_account_admission_submissions'::regclass
-                AND a.grantee = 'trace_ingest_runtime'::regrole
-             UNION ALL
-             SELECT '', a.privilege_type, a.is_grantable
-               FROM pg_class c, aclexplode(c.relacl) a
-              WHERE c.oid = 'public.trace_account_admission_submissions'::regclass
-                AND a.grantee = 'trace_ingest_runtime'::regrole
-              ORDER BY 1, 2",
-            &[],
-        )
-        .await
-        .expect("read trace_ingest_runtime's privileges on trace_account_admission_submissions")
-        .iter()
-        .map(|row| (row.get(0), row.get(1), row.get(2)))
-        .collect();
-    assert_eq!(
-        admission_submission_grants,
-        ["account_id", "submission_id", "tenant_id"]
-            .into_iter()
-            .map(|column| (column.to_string(), "SELECT".to_string(), false))
-            .collect::<Vec<_>>(),
-        "trace_ingest_runtime reads three columns of trace_account_admission_submissions, \
-         and nothing else on it"
-    );
-
     // Isolation as a role that cannot bypass RLS.
     admin
         .batch_execute(

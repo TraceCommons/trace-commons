@@ -171,14 +171,3 @@ GRANT UPDATE (reviewer_principal_ref, lease_token, lease_expires_at, claimed_at)
 -- leaves only with its run, through the foreign key's cascade, which runs
 -- as the table owner.
 GRANT SELECT, INSERT ON pipeline_review_assessments TO trace_ingest_runtime;
-
--- trace_account_admission_submissions (V77, a `main` table): withdrawing a
--- submission that is mapped to an account's source session first checks
--- that every submission of the session belongs to the account
--- (`source_submission_owned_by_account`, which `main`'s session withdrawal
--- runs too), and that check reads which account admitted a submission.
--- V77 grants this table to trace_account_admission_runtime only, and V90
--- does not grant it; the ingest runtime reads these three columns and
--- nothing else.
-GRANT SELECT (tenant_id, submission_id, account_id)
-    ON trace_account_admission_submissions TO trace_ingest_runtime;
