@@ -1108,6 +1108,27 @@ fn default_trace_upload_claim_issuer_timeout_ms() -> u64 {
     TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS
 }
 
+/// What this deployment is actually doing with credit.
+///
+/// Label-only: a settlement-mode label, a grading flag and one sentence. It
+/// carries no URL, account reference or transaction hash, so it is safe on any
+/// surface a device credential can reach. The server derives it in one place
+/// (`trace_commons_server::credit_numbers::credit_posture`); clients only read
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreditPosture {
+    /// The live value of `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`: `http`,
+    /// `dry_run`, or `disabled` (the fail-safe).
+    pub settlement: String,
+    /// Whether quality, duplicate penalty and the per-contributor cap are
+    /// authoritative. False while that pipeline is shadow-mode, which is what
+    /// lets a client say a figure may still be revised.
+    pub graded: bool,
+    /// The same sentence the submission receipt gives, so two surfaces cannot
+    /// describe one deployment differently.
+    pub explanation: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreditEstimate {
     pub submission_score: f32,
