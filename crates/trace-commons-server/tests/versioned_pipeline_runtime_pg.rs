@@ -3113,6 +3113,22 @@ async fn a_quarantined_receipt_waits_for_review_without_retrying() {
 /// parks in `awaiting_review` under `review_assessment_required` (Ruling
 /// T3-1): the fixture every Task 3 review test starts from.
 async fn quarantined_and_parked(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let created = quarantined_and_pending(service, tenant).await;
+    let parked = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs and parks the run awaiting a human assessment");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    parked
+}
+
+/// A Medium-risk envelope, receipted but never run through Review yet:
+/// `pending`, `next_phase = Review`, `admission_decision = quarantine`, no
+/// assessment. The precondition `quarantined_and_parked` starts from, and
+/// the shape Finding I1's worker-race tests need (a run a worker has not
+/// leased yet, so `claim_run` can still take it deterministically).
+async fn quarantined_and_pending(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
     let mut env = envelope(uuid::Uuid::new_v4()).await;
     env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
     let raw = serde_json::to_vec(&env).unwrap();
@@ -3125,13 +3141,9 @@ async fn quarantined_and_parked(service: &PipelineService, tenant: &str) -> Pipe
         panic!("receipt creates a run")
     };
     assert_eq!(created.admission_decision, "quarantine");
-    let parked = service
-        .process_run(tenant, created.run_id)
-        .await
-        .unwrap()
-        .expect("Review runs and parks the run awaiting a human assessment");
-    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
-    parked
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    created
 }
 
 /// A syntactically valid `reviewer_sha256:` principal ref (64 lowercase hex
@@ -3156,6 +3168,29 @@ async fn expire_review_claim(backend: &PgBackend, tenant_id: &str, run_id: uuid:
     .await
     .expect("expire the review claim");
     tx.commit().await.expect("commit review claim expiry");
+}
+
+/// Pushes a run's `next_attempt_at` an hour into the future, in a
+/// tenant-scoped transaction -- so a test can prove
+/// `record_review_assessment`'s release actually resets it to `NOW()`
+/// (Ruling T3-9(a)) rather than merely relying on it already being due from
+/// parking, which is what `awaiting_review` otherwise leaves it at
+/// (`mark_awaiting_review` never touches `next_attempt_at`).
+async fn set_next_attempt_at_in_the_future(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET next_attempt_at = NOW() + INTERVAL '1 hour'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id],
+    )
+    .await
+    .expect("push next_attempt_at into the future");
+    tx.commit().await.expect("commit next_attempt_at push");
 }
 
 /// Ruling T3-1 (parking) plus T3-2/T3-3 (claim, approve, resolve): the run
@@ -3228,6 +3263,12 @@ async fn quarantined_run_completes_after_an_approving_assessment() {
         .unwrap();
     assert_eq!(still_parked.state, PipelineRunState::AwaitingReview);
 
+    // Ruling T3-9(a): push `next_attempt_at` into the future first, so the
+    // assertion below proves `record_review_assessment` itself resets it to
+    // `NOW()` rather than merely inheriting a due timestamp
+    // `mark_awaiting_review` happened to leave behind.
+    set_next_attempt_at_in_the_future(&backend, &tenant, parked.run_id).await;
+
     let reason = ReasonCode::new("privacy_review_required").unwrap();
     let assessment = store
         .record_review_assessment(
@@ -3248,6 +3289,11 @@ async fn quarantined_run_completes_after_an_approving_assessment() {
         .unwrap();
     assert_eq!(released.state, PipelineRunState::Pending);
     assert_eq!(released.last_error_label, None);
+    assert!(
+        released.next_attempt_at <= chrono::Utc::now(),
+        "Ruling T3-9(a): the release must set next_attempt_at to now, even \
+         though it was just pushed into the future"
+    );
 
     let completed = service
         .process_run(&tenant, parked.run_id)
@@ -3569,6 +3615,218 @@ async fn parked_run_with_an_inoperable_submission_is_released() {
         released.state,
         PipelineRunState::Pending,
         "released so the runner can reach it, whatever it then does with it"
+    );
+}
+
+// Fix round 1, finding I1: without an eligibility predicate on the row a
+// reviewer's claim/assessment locks, a reviewer could claim or assess a run
+// a worker is actively processing, a run that already failed, or a run
+// that already has an assessment. The three tests below cover each gap
+// deterministically (no real concurrency needed: the store methods
+// themselves are orchestrated in the racy order by hand).
+
+/// The race the finding describes: a reviewer claims a run while it is
+/// still `pending`, then a worker leases it for its own Review attempt
+/// (allowed -- a review claim and a worker lease are different tables).
+/// Both a fresh claim attempt and the original reviewer's own assessment
+/// must now be refused while the worker holds the lease, so the worker's
+/// own attempt is the only thing that can resolve this pass -- the
+/// assessment can never land mid-attempt and be silently ignored (or worse,
+/// collide with `pipeline_review_assessments`'s `UNIQUE (tenant_id,
+/// run_id)` once the worker's own park re-attempt runs).
+#[tokio::test]
+async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-worker-race-{}", uuid::Uuid::new_v4());
+    let pending = quarantined_and_pending(&service, &tenant).await;
+    let store = service.store();
+
+    let reviewer = reviewer_principal_ref('1');
+    let claim = store
+        .claim_review(
+            &tenant,
+            pending.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("a pending, quarantined, unassessed run is claimable");
+
+    let leased = store
+        .claim_run(&tenant, pending.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("a worker can still lease the run under a live review claim");
+    assert_eq!(leased.state, PipelineRunState::Leased);
+
+    let other_reviewer = reviewer_principal_ref('2');
+    let blocked = store
+        .claim_review(
+            &tenant,
+            pending.run_id,
+            &other_reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        blocked.is_none(),
+        "a run a worker holds leased is not claimable"
+    );
+
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let error = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect_err("an assessment must be refused while a worker holds the lease");
+    assert!(
+        error
+            .to_string()
+            .contains("review claim is stale or inoperable"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "no assessment row while the worker holds the run"
+    );
+}
+
+/// `mark_failed` never clears `next_phase` (Finding I1), so a run that
+/// failed while at Review still reads `next_phase = Review` forever after.
+/// Without a state predicate, `claim_review` would accept it as if it were
+/// still waiting for a human.
+#[tokio::test]
+async fn claim_refuses_a_run_that_already_failed_at_review() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-failed-{}", uuid::Uuid::new_v4());
+    let pending = quarantined_and_pending(&service, &tenant).await;
+    let store = service.store();
+
+    let leased = store
+        .claim_run(&tenant, pending.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the pending run is claimable by a worker");
+    store
+        .mark_failed(&leased, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("fail the run under its own lease");
+    let failed = store
+        .get_run(&tenant, pending.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.next_phase,
+        Some(Phase::Review),
+        "mark_failed leaves next_phase untouched"
+    );
+
+    let reviewer = reviewer_principal_ref('3');
+    let claimed = store
+        .claim_review(
+            &tenant,
+            pending.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        claimed.is_none(),
+        "a run that already failed at Review is never claimable for review"
+    );
+}
+
+/// Without an assessment-exists predicate, a reviewer could re-claim a run
+/// that already has one (Finding I1), and a second assessment attempt would
+/// then hit `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id)`
+/// instead of refusing cleanly.
+#[tokio::test]
+async fn claim_refuses_a_run_that_already_has_an_assessment() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-reassess-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('4');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the parked run is claimable");
+    let reason = ReasonCode::new("reviewer_declined").unwrap();
+    store
+        .record_review_assessment(&claim, ReviewRecommendation::Reject, reason, Vec::new())
+        .await
+        .expect("the rejection records an assessment");
+
+    // Released to `pending` by the assessment (Ruling T3-3), but not yet
+    // reprocessed, so it still shows `next_phase = Review` -- exactly the
+    // shape a re-claim must refuse.
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert_eq!(released.next_phase, Some(Phase::Review));
+
+    let other_reviewer = reviewer_principal_ref('5');
+    let reclaimed = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &other_reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        reclaimed.is_none(),
+        "a run that already has an assessment is never claimable again"
     );
 }
 

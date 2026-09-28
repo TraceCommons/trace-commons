@@ -255,7 +255,7 @@ use trace_commons_server::trace_score_attestation::{
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
     PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineReviewClaim, PipelineService,
+    PipelineReviewClaim, PipelineRunState, PipelineService,
 };
 use uuid::Uuid;
 
@@ -40482,31 +40482,57 @@ async fn pipeline_review_claim_handler(
 }
 
 /// `claim_review` returning `Ok(None)` covers two cases a caller cannot tell
-/// apart from that value alone: the run does not exist, is not at Review, or
-/// is no longer quarantine-eligible (404); or another reviewer already
-/// holds a live claim on it (409). Reads the run back to tell them apart,
-/// the same shape `claim_review_lease_handler`'s own
-/// `review_lease_claim_conflict` uses for the legacy lease.
+/// apart from that value alone: the run is not currently eligible for a
+/// claim at all (does not exist, is not at Review, is not
+/// `pending`/`retry`/`awaiting_review` -- for example a worker holds it
+/// `leased`, or it already `failed` -- is not a quarantine, or already has
+/// an assessment) -- `404`; or the run is eligible but another reviewer
+/// already holds a live claim on it -- `409` (Ruling T3-9(b)). Reads the run
+/// (and, only once it passes every eligibility check, whether it has an
+/// assessment) back to tell the two apart, mirroring `claim_review`'s own
+/// `WHERE` clause exactly so this can never call an ineligible run
+/// "held by another reviewer". The same shape
+/// `claim_review_lease_handler`'s own `review_lease_claim_conflict` uses for
+/// the legacy lease.
 async fn pipeline_review_claim_conflict(
     pipeline_service: &PipelineService,
     tenant_id: &str,
     run_id: Uuid,
 ) -> ApiResult<Json<PipelineReviewClaimResponse>> {
+    let not_waiting = api_error(
+        StatusCode::NOT_FOUND,
+        "pipeline run is not waiting for review",
+    );
     let run = pipeline_service
         .store()
         .get_run(tenant_id, run_id)
         .await
         .map_err(internal_error)?;
-    match run {
-        Some(run) if run.next_phase == Some(Phase::Review) => Err(api_error(
-            StatusCode::CONFLICT,
-            "pipeline review claim is held by another reviewer",
-        )),
-        _ => Err(api_error(
-            StatusCode::NOT_FOUND,
-            "pipeline run is not waiting for review",
-        )),
+    let Some(run) = run else {
+        return Err(not_waiting);
+    };
+    let eligible = run.next_phase == Some(Phase::Review)
+        && matches!(
+            run.state,
+            PipelineRunState::Pending | PipelineRunState::Retry | PipelineRunState::AwaitingReview
+        )
+        && run.admission_decision == "quarantine";
+    if !eligible {
+        return Err(not_waiting);
     }
+    let assessed = pipeline_service
+        .store()
+        .load_review_assessment(tenant_id, run_id)
+        .await
+        .map_err(internal_error)?
+        .is_some();
+    if assessed {
+        return Err(not_waiting);
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "pipeline review claim is held by another reviewer",
+    ))
 }
 
 #[derive(Debug, Deserialize)]

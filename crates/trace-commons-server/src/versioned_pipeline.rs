@@ -1318,38 +1318,15 @@ impl PgPipelineStore {
         // touched.
         ensure_current_lease(&tx, run, lease_token).await?;
 
-        let submission_row = tx
-            .query_opt(
-                "SELECT status, revoked_at, purged_at, withdrawn_at, expires_at
-                   FROM trace_submissions
-                  WHERE tenant_id = $1 AND submission_id = $2
-                  FOR UPDATE",
-                &[&run.tenant_id, &run.submission_id],
-            )
-            .await?;
-        let operable = match &submission_row {
-            None => false,
-            Some(row) => {
-                let status: String = row.get("status");
-                let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-                let purged_at: Option<DateTime<Utc>> = row.get("purged_at");
-                let withdrawn_at: Option<DateTime<Utc>> = row.get("withdrawn_at");
-                let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
-                matches!(status.as_str(), "received" | "quarantined")
-                    && revoked_at.is_none()
-                    && purged_at.is_none()
-                    && withdrawn_at.is_none()
-                    && expires_at.is_none_or(|expires_at| expires_at > Utc::now())
-            }
-        };
-        let withdrawn = tx
-            .query_opt(
-                "SELECT 1 FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2",
-                &[&run.tenant_id, &run.submission_id],
-            )
-            .await?
-            .is_some();
-        if !operable || withdrawn {
+        // Fix round 1, finding I2 / Ruling T3-8: this re-check used to
+        // inline its own copy of the operability predicate; it now calls
+        // the same `review_submission_is_operable` helper `claim_review`
+        // and `record_review_assessment` use, so the predicate exists once.
+        // Behaviour is unchanged (`!operable || withdrawn`): the helper
+        // returns `Ok(false)` for exactly the same two conditions, just
+        // short-circuiting the `trace_withdrawals` lookup when the
+        // `trace_submissions` row alone already refuses.
+        if !review_submission_is_operable(&tx, &run.tenant_id, run.submission_id).await? {
             return Err(DatabaseError::Constraint(
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
             ));
@@ -1494,13 +1471,36 @@ impl PgPipelineStore {
     /// folded its own narrower `trace_withdrawals` check into the claiming
     /// `INSERT ... SELECT`; that check is now this broader one, done first.
     ///
+    /// Fix round 1, finding I1: the locking `SELECT` also requires `state IN
+    /// ('pending', 'retry', 'awaiting_review')`, `admission_decision =
+    /// 'quarantine'`, and no assessment already recorded. Without the state
+    /// predicate, a reviewer could claim a run a worker currently holds
+    /// `leased` (and then, worse, a run that has already failed -- `failed`
+    /// never clears `next_phase`); without the decision predicate, a
+    /// reviewer could claim an `Admit` run that is simply waiting its own
+    /// automatic Review turn; without the assessment predicate, a reviewer
+    /// could re-claim a run that already has one, and a later
+    /// `record_review_assessment` would then hit
+    /// `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id)` instead
+    /// of refusing cleanly. `FOR UPDATE` on this row also now does the
+    /// concurrency work: a worker's `claim_run` (its own `UPDATE ...
+    /// RETURNING *`) and this `SELECT` take the same row lock, so whichever
+    /// transaction commits first is the one the other sees -- a worker that
+    /// already claimed the run makes this `SELECT` see `state = 'leased'`
+    /// and refuse; a reviewer's claim or assessment that commits first
+    /// makes the worker's `claim_run` (which re-reads state in its own
+    /// `WHERE`) see the post-assessment row once it acquires the lock.
+    ///
     /// Beyond that, `Ok(None)` still covers two cases a caller cannot tell
-    /// apart from the return value alone: the run does not exist, is not at
-    /// Review, or (after the check above) is no longer quarantine-eligible;
-    /// or another reviewer already holds a live claim on it. Ingest's
-    /// `pipeline_review_claim_conflict` resolves the ambiguity by reading
-    /// the run back, the same shape `claim_review_lease_handler`'s
-    /// `review_lease_claim_conflict` uses for the legacy lease.
+    /// apart from the return value alone: the run is not currently eligible
+    /// (does not exist, is not at Review, is not `pending`/`retry`/
+    /// `awaiting_review`, is not a quarantine, or already has an
+    /// assessment); or another reviewer already holds a live claim on an
+    /// otherwise-eligible run. Ingest's `pipeline_review_claim_conflict`
+    /// resolves the ambiguity by reading the run back, the same shape
+    /// `claim_review_lease_handler`'s `review_lease_claim_conflict` uses for
+    /// the legacy lease (Ruling T3-9(b): the first case maps to 404, only
+    /// the second to 409).
     pub async fn claim_review(
         &self,
         tenant_id: &str,
@@ -1520,8 +1520,12 @@ impl PgPipelineStore {
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let run_row = tx
             .query_opt(
-                "SELECT state, submission_id FROM pipeline_runs
-                  WHERE tenant_id = $1 AND run_id = $2 AND next_phase = 'review'
+                "SELECT state, submission_id FROM pipeline_runs p
+                  WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.next_phase = 'review'
+                    AND p.state IN ('pending', 'retry', 'awaiting_review')
+                    AND p.admission_decision = 'quarantine'
+                    AND NOT EXISTS (SELECT 1 FROM pipeline_review_assessments a
+                                     WHERE a.tenant_id = p.tenant_id AND a.run_id = p.run_id)
                   FOR UPDATE",
                 &[&tenant_id, &run_id],
             )
@@ -1591,6 +1595,19 @@ impl PgPipelineStore {
     /// `submission_inoperable` rather than staying parked with a claim that
     /// can never be assessed.
     ///
+    /// Fix round 1, finding I1: the initial lookup also requires `p.state IN
+    /// ('pending', 'retry', 'awaiting_review')` and `p.admission_decision =
+    /// 'quarantine'` (not the assessment-exists check `claim_review` adds --
+    /// a claim already excludes an assessed run, so this is defense against
+    /// a stale claim object, not a first line of defense). Without the
+    /// state predicate, a worker that leased the run between the claim and
+    /// the assessment (or that failed it, which leaves `next_phase =
+    /// 'review'`) would never block this call, and the assessment could
+    /// land after -- or racing -- the worker's own Review attempt. `FOR
+    /// UPDATE OF ... p` makes this the same lock-and-recheck pattern
+    /// `claim_review` uses: a worker's `claim_run` and this lookup take the
+    /// same row lock, so the loser re-reads the winner's committed state.
+    ///
     /// An `Approve` recommendation still refuses
     /// (`quarantine reason is unresolved`) unless `resolved_quarantine_reasons`
     /// names the run's own `admission_reason`, or the run was quarantined
@@ -1623,6 +1640,8 @@ impl PgPipelineStore {
                    AND c.reviewer_principal_ref = $4
                    AND c.lease_expires_at > NOW()
                    AND p.next_phase = 'review'
+                   AND p.state IN ('pending', 'retry', 'awaiting_review')
+                   AND p.admission_decision = 'quarantine'
                  FOR UPDATE OF c, p",
                 &[
                     &claim.tenant_id,
@@ -1772,9 +1791,11 @@ impl PgPipelineStore {
     /// (brief Step 3). Ruling T3-2 adds `awaiting_review` to the states
     /// selected -- the port's `list_policy_interventions`-adjacent draft
     /// predates that state. Ruling T3-6 excludes a run whose submission is
-    /// no longer operable, the same predicate `commit_review` re-checks,
-    /// applied here as a join and an anti-join rather than a per-row lock
-    /// (this is a plain read, not a claim).
+    /// no longer operable, the same predicate `review_submission_is_operable`
+    /// checks (Ruling T3-8 names it as the one rule both this query and that
+    /// helper mirror), applied here as a join and an anti-join rather than a
+    /// per-row lock (this is a plain read, not a claim, so it must filter in
+    /// SQL rather than call the helper row by row).
     pub async fn list_review_queue(
         &self,
         tenant_id: &str,
@@ -3154,13 +3175,14 @@ async fn ensure_current_lease(
     Ok(())
 }
 
-/// The submission-operability predicate `commit_review` re-checks under its
-/// own transaction lock, factored out for `claim_review` and
-/// `record_review_assessment` (Ruling T3-6): neither pre-review status, nor
-/// revoked, purged, withdrawn, or expired, and no separate
-/// `trace_withdrawals` tombstone. Locks the submission row `FOR UPDATE`,
-/// after the run row a caller may already hold locked -- the same order
-/// `commit_review` documents (run row, then submission row).
+/// The one Review-phase submission-operability predicate: neither pre-review
+/// status, nor revoked, purged, withdrawn, or expired, and no separate
+/// `trace_withdrawals` tombstone. `commit_review` calls this directly
+/// (Ruling T3-8 -- it used to inline its own copy); `claim_review` and
+/// `record_review_assessment` call it too (Ruling T3-6). Locks the
+/// submission row `FOR UPDATE`, after the run row a caller may already hold
+/// locked -- the same order `commit_review` documents (run row, then
+/// submission row).
 async fn review_submission_is_operable(
     tx: &Transaction<'_>,
     tenant_id: &str,
