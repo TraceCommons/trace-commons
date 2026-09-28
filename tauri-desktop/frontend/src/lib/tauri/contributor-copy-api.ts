@@ -268,6 +268,19 @@ export async function getAutomaticGrantCopy(): Promise<AutomaticGrantCopy> {
   return parseAutomaticGrantCopy(await invokeTauri("automatic_contribution_copy"));
 }
 
+/**
+ * What an armed project is told about its sessions. The core chooses the
+ * scrub wording from that project's own certificates (K6); this parses the
+ * one shape it sends, and refuses anything else.
+ */
+export async function getProjectAutomaticCopy(
+  projectId: string,
+): Promise<AutomaticGrantCopy> {
+  return parseAutomaticGrantCopy(
+    await invokeTauri("project_automatic_contribution_copy", { projectId }),
+  );
+}
+
 export async function getContributorDisclosureCopy(): Promise<ContributorDisclosureCopy> {
   const value = record(
     await invokeTauri("contributor_disclosure_copy"),

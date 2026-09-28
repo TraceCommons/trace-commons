@@ -498,6 +498,12 @@ pub struct SubmitContext<'a> {
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
     last_receipt_shipped: ReceiptShipped,
+    /// The witness certificate the last submission was sent with, if any.
+    /// Reset at the start of each submission and set only once every check
+    /// before the send has passed, so after a `Submitted` it is exactly what
+    /// went out. The daemon reads it to record what redaction an unattended
+    /// session had (K6).
+    last_sent_witness: Option<WitnessedEnvelope>,
     /// Whether this context's witness requests are unattended background
     /// work. Set by the daemon's upload pass, never by a review a person
     /// asked for. See `HttpWitnessTransport::with_background_workload`.
@@ -573,6 +579,7 @@ impl<'a> SubmitContext<'a> {
             approved_token_bundle: None,
             hold_unless_low_risk: false,
             last_receipt_shipped: ReceiptShipped::NoCall,
+            last_sent_witness: None,
             background_witness: false,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
@@ -1176,6 +1183,19 @@ impl<'a> SubmitContext<'a> {
         self.last_receipt_shipped
     }
 
+    /// The witness certificate the last submission was sent with, and the
+    /// witness settings it must verify against. Meaningful immediately after
+    /// a submission returns `Submitted`; no certificate for a send without
+    /// one. See `automatic_gate::session_redaction`.
+    pub(crate) fn last_sent_witness(
+        &self,
+    ) -> (
+        Option<&WitnessedEnvelope>,
+        Option<&crate::config::WitnessSettings>,
+    ) {
+        (self.last_sent_witness.as_ref(), self.cfg.witness.as_ref())
+    }
+
     /// Declare every witness request this context makes as unattended
     /// background work, so a witness that reserves capacity for people
     /// waiting on a review can turn it away first. For the daemon's upload
@@ -1233,6 +1253,7 @@ impl<'a> SubmitContext<'a> {
         // read as this one's. Left at `NoCall` unless `witness_envelope` runs
         // and a call was carried.
         self.last_receipt_shipped = ReceiptShipped::NoCall;
+        self.last_sent_witness = None;
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let opts = self.opts;
@@ -1577,6 +1598,9 @@ impl<'a> SubmitContext<'a> {
         ) {
             return Ok(held);
         }
+        // Every check above has passed, so this is the certificate the send
+        // below carries, if it goes.
+        self.last_sent_witness = witnessed.clone();
 
         if let Some(bundle) = self.approved_token_bundle.take() {
             let journal =
@@ -5954,6 +5978,149 @@ mod tests {
         assert_eq!(
             capture.lock().unwrap().bodies,
             vec![witnessed.envelope_bytes.clone()]
+        );
+    }
+
+    /// K6, end to end through the upload pass: an armed project's arming
+    /// disclosure follows the certificate its unattended session was sent
+    /// with. A pinned review whose certificate names `policy` is approved on
+    /// the contributor's behalf (verdict `low`, so it is not held) and the
+    /// pass sends it; returns what the project is then told.
+    async fn disclosure_after_an_unattended_send(
+        policy: &str,
+        unattended: bool,
+    ) -> crate::daemon::automatic_gate::Disclosure {
+        use crate::daemon::queue::QueueState;
+        let (dir, store, cfg, capture, _) = r5_setup("low").await;
+        let mut envelope = baseline_envelope(&cfg).await;
+        let token = ClaimToken {
+            access_token: "review-only-not-stored".into(),
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            consent_scopes: cfg.consent_scopes.clone(),
+            allowed_uses: vec![
+                "debugging".into(),
+                "evaluation".into(),
+                "model_training".into(),
+                "aggregate_analytics".into(),
+            ],
+        };
+        stamp_granted_scopes(&mut envelope, &cfg, &token);
+        let (witnessed, signer) = crate::witness::transport::signed_fixture_with_policy(
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+            policy,
+        );
+        assert_eq!(
+            Some(signer.as_str()),
+            cfg.witness.as_ref().map(|w| w.signing_address.as_str()),
+            "the same test signer the witness is pinned to"
+        );
+
+        let (_, reference) = fixture_selection().remove(0);
+        let mut entry = r5_unattended_entry(&cfg, &reference);
+        entry.approved_unattended = unattended;
+        let artifact = crate::daemon::approved_envelope::WitnessReviewArtifact::new(
+            witnessed.clone(),
+            entry.session_hash.clone(),
+            entry.approved_inputs.clone().unwrap(),
+            None,
+            None,
+            None,
+        );
+        entry.previewed_envelope_digest = Some(artifact.digest().unwrap());
+        let id = entry.entry_id;
+
+        let shared =
+            std::sync::Arc::new(crate::daemon::ipc::DaemonShared::load(store.clone()).unwrap());
+        {
+            let mut s = shared.settings.lock().unwrap();
+            s.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("fixtures/claude-code"),
+            });
+            s.codex_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: dir.path().join("no-codex"),
+            });
+        }
+        shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_mode(
+                R5_PROJECT_KEY,
+                crate::daemon::policy::ProjectMode::AutoUpload,
+                Utc::now(),
+            )
+            .unwrap();
+        shared.queue.lock().unwrap().upsert(entry, 10).unwrap();
+        crate::daemon::approved_envelope::save_witnessed(&store, id, &artifact).unwrap();
+
+        crate::daemon::drain_approved_for_test(&shared, Utc::now())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shared.queue.lock().unwrap().get(id).unwrap().state,
+            QueueState::Uploaded,
+            "{policy}: the session was sent"
+        );
+        assert_eq!(
+            capture.lock().unwrap().bodies,
+            vec![witnessed.envelope_bytes]
+        );
+        let policy_now = shared.policy.lock().unwrap().clone();
+        // And it is what the project file says after a reload, not only in
+        // memory.
+        let reloaded = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
+        let disclosure =
+            crate::daemon::automatic_gate::project_disclosure(&policy_now, R5_PROJECT_KEY);
+        assert_eq!(
+            crate::daemon::automatic_gate::project_disclosure(&reloaded, R5_PROJECT_KEY),
+            disclosure,
+            "{policy}: saved"
+        );
+        disclosure
+    }
+
+    #[tokio::test]
+    async fn an_unattended_send_under_an_allowlisted_pipeline_earns_the_model_scrub_wording() {
+        use crate::daemon::automatic_gate::Disclosure;
+        for version in trace_commons_protocol::trace_contribution::FULL_REDACTION_PIPELINE_VERSIONS
+        {
+            assert_eq!(
+                disclosure_after_an_unattended_send(version, true).await,
+                Disclosure::ModelScrubbed,
+                "{version}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unattended_send_under_anything_else_keeps_the_deterministic_only_wording() {
+        use crate::daemon::automatic_gate::Disclosure;
+        for version in [
+            "ironclaw-deterministic-secret-path-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v1",
+            "full-pipeline",
+        ] {
+            assert_eq!(
+                disclosure_after_an_unattended_send(version, true).await,
+                Disclosure::PatternsOnly,
+                "{version}"
+            );
+        }
+    }
+
+    /// A session a person approved was seen before it went; the arming
+    /// disclosure is about the ones nobody sees, so it earns nothing.
+    #[tokio::test]
+    async fn a_person_approved_send_does_not_count_toward_the_arming_disclosure() {
+        assert_eq!(
+            disclosure_after_an_unattended_send(
+                "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+                false
+            )
+            .await,
+            crate::daemon::automatic_gate::Disclosure::PatternsOnly
         );
     }
 

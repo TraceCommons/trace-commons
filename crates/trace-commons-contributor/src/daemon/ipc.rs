@@ -337,6 +337,7 @@ pub const METHODS: &[&str] = &[
     "list_history",
     "list_pending",
     "list_projects",
+    "project_automatic_copy",
     "pause",
     "preview",
     "preview_body",
@@ -2111,6 +2112,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "certificate_detail" => handle_certificate_detail(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_projects" => handle_list_projects(shared, req),
+        "project_automatic_copy" => handle_project_automatic_copy(shared, req),
         // The one project worth offering to arm right now, or nothing.
         //
         // A read, with no side effect: asking does not consume the offer.
@@ -2605,6 +2607,23 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 counts(key),
             )
         })
+        .map(|mut row| {
+            // K6: an armed project says which arming disclosure its
+            // sessions have earned. Absent, not null, on every other row,
+            // as with the counts above: only an armed project has one.
+            let key = row["project_id"]
+                .as_str()
+                .and_then(|id| project_key_for_id(id, &known));
+            if let Some(key) = key.filter(|k| policy.resolve(k) == ProjectMode::AutoUpload) {
+                row["automatic_disclosure"] = serde_json::Value::from(
+                    match super::automatic_gate::project_disclosure(&policy, &key) {
+                        super::automatic_gate::Disclosure::ModelScrubbed => "model_scrubbed",
+                        super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
+                    },
+                );
+            }
+            row
+        })
         .chain(discovered.iter().map(|(key, shown)| {
             with_counts(
                 serde_json::json!({
@@ -2621,6 +2640,31 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         }))
         .collect();
     Response::ok(req.id, serde_json::json!({ "projects": projects }))
+}
+
+/// The arming disclosure for one project (K6, R1), as the grant screens'
+/// words: `consent_copy::automatic_grant_copy` for what
+/// `automatic_gate::project_disclosure` answers over the project's own
+/// sessions. The core chooses; a shell renders what it is sent.
+fn handle_project_automatic_copy(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "project_id-required");
+    };
+    // Lock order is policy before queue, as everywhere else.
+    let policy = shared.policy.lock().expect("policy lock");
+    let key = {
+        let queue = shared.queue.lock().expect("queue lock");
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        match project_key_for_id(id, &known) {
+            Some(key) => key,
+            None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED),
+        }
+    };
+    let disclosure = super::automatic_gate::project_disclosure(&policy, &key);
+    Response::ok(
+        req.id,
+        serde_json::json!(crate::consent_copy::automatic_grant_copy(disclosure)),
+    )
 }
 
 // Two ways to name a project, for two different callers.
@@ -8091,6 +8135,82 @@ mod tests {
         assert_eq!(rows[0]["mode"], serde_json::json!("ignore"));
     }
 
+    /// K6: an armed project's row says which arming disclosure its
+    /// sessions have earned, and the copy method answers with exactly that
+    /// wording. Deterministic-only until an unattended session with a
+    /// certified full pipeline has been sent; an ask-first row has no
+    /// automatic disclosure at all.
+    #[test]
+    fn an_armed_project_reports_the_disclosure_its_sessions_earned() {
+        use super::super::automatic_gate::SessionRedaction;
+        use crate::consent_copy::{AUTO_PATTERNS_ONLY_SCOPE, AUTO_SCRUB_SCOPE};
+        let s = enrolled_shared();
+        let armed = tmp_project("armed");
+        let asking = tmp_project("asking");
+        for (key, mode) in [(&armed, "auto_upload"), (&asking, "notify_only")] {
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_key": key, "mode": mode}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+        }
+        let row = |key: &str| {
+            projects_of(&s)
+                .into_iter()
+                .find(|r| r["project_id"] == serde_json::json!(project_id_for(key)))
+                .unwrap()
+        };
+        let copy = |key: &str| {
+            handle_request(
+                &s,
+                &req(
+                    "project_automatic_copy",
+                    serde_json::json!({"project_id": project_id_for(key)}),
+                ),
+            )
+            .result
+            .expect("answered")
+        };
+
+        assert_eq!(row(&armed)["automatic_disclosure"], "patterns_only");
+        assert!(row(&asking).get("automatic_disclosure").is_none());
+        assert_eq!(
+            copy(&armed)["patterns_only"]["scope"],
+            AUTO_PATTERNS_ONLY_SCOPE
+        );
+        assert!(copy(&armed)["model_scrubbed"].is_null());
+
+        s.policy
+            .lock()
+            .unwrap()
+            .record_automatic_redaction(&armed, SessionRedaction::CertifiedFullPipeline);
+        assert_eq!(row(&armed)["automatic_disclosure"], "model_scrubbed");
+        assert_eq!(copy(&armed)["model_scrubbed"]["scope"], AUTO_SCRUB_SCOPE);
+        assert!(copy(&armed)["patterns_only"].is_null());
+
+        s.policy
+            .lock()
+            .unwrap()
+            .record_automatic_redaction(&armed, SessionRedaction::NotCertified);
+        assert_eq!(row(&armed)["automatic_disclosure"], "patterns_only");
+        assert_eq!(copy(&armed)["disclosure"], "patterns_only");
+
+        // An ask-first project is told the deterministic-only wording if a
+        // shell asks, never the model-scrub one; an unknown id is refused.
+        assert_eq!(copy(&asking)["disclosure"], "patterns_only");
+        let unknown = handle_request(
+            &s,
+            &req(
+                "project_automatic_copy",
+                serde_json::json!({"project_id": "p_unknown"}),
+            ),
+        );
+        assert_eq!(unknown.error.unwrap().code, ERR_BAD_PARAMS);
+    }
+
     #[test]
     fn list_projects_marks_only_the_unresolvable_bucket() {
         // The flag exists so a shell never has to re-derive `project_id_for`
@@ -11664,7 +11784,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 46, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 47, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 39, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

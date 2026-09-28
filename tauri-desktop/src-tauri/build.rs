@@ -54,6 +54,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "grant_automatic",
     "withdraw_automatic_grant",
     "automatic_contribution_copy",
+    "project_automatic_contribution_copy",
     "set_private_inference",
     "set_inference_evidence",
     "set_token_contribution",

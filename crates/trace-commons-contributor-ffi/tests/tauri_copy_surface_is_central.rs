@@ -496,6 +496,10 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "automatic_contribution_copy",
             "native_flows::automatic_contribution_copy",
         ),
+        (
+            "project_automatic_contribution_copy",
+            "native_flows::project_automatic_contribution_copy",
+        ),
         ("automatic_grant", "consent::automatic_grant"),
         ("grant_automatic", "consent::grant_automatic"),
         (
@@ -513,6 +517,33 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         );
     }
     assert!(api.contains("invokeTauri(\"automatic_contribution_copy\""));
+    // K6: an armed project's disclosure is chosen by the core over that
+    // project's own sessions; the settings row renders it and never chooses.
+    assert!(api.contains("invokeTauri(\"project_automatic_contribution_copy\""));
+    let project_disclosure = read(
+        &root,
+        "tauri-desktop/frontend/src/features/settings/components/project-automatic-disclosure.tsx",
+    );
+    assert!(project_disclosure.contains("useProjectAutomaticCopy"));
+    assert!(project_disclosure.contains("scrubDisclosureLines(copy)"));
+    for forbidden in ["model_scrubbed", "patterns_only", "auto_scrub"] {
+        assert!(
+            !project_disclosure.contains(forbidden),
+            "the project disclosure must not choose its wording (`{forbidden}`)"
+        );
+    }
+    let native_flows = read(
+        &root,
+        "tauri-desktop/src-tauri/src/commands/native_flows.rs",
+    );
+    let project_wrapper = rust_function(&native_flows, "fn project_automatic_contribution_copy");
+    assert!(project_wrapper.contains("call_result_or_view"));
+    for field in ["auto_scrub", "AUTO_SCRUB", "Disclosure::"] {
+        assert!(
+            !project_wrapper.contains(field),
+            "the Tauri wrapper forwards the core's choice and never makes one (`{field}`)"
+        );
+    }
     let grant_copy = read(
         &root,
         "tauri-desktop/frontend/src/lib/tauri/automatic-grant-copy.ts",

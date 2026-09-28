@@ -169,6 +169,28 @@ fn automatic_contribution_value(
     json!(trace_commons_contributor::consent_copy::automatic_grant_copy(disclosure))
 }
 
+/// What an armed project is told about its sessions (K6).
+///
+/// The same words as the grant screens, but the choice between them is made
+/// by the contributor core over that project's own sessions:
+/// `automatic_gate::project_disclosure`, which earns the model-scrub wording
+/// only when every session the project has sent unattended since it was
+/// armed carried a certificate naming an allowlisted full pipeline. This
+/// wrapper forwards the core's answer and never chooses.
+#[tauri::command]
+pub(crate) async fn project_automatic_contribution_copy(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Value, String> {
+    let project_id = required(&project_id, "project-id-required")?;
+    call_result_or_view(
+        shared_state(&state)?,
+        "project_automatic_copy",
+        json!({ "project_id": project_id }),
+    )
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn near_ai_account_enroll(
     state: State<'_, AppState>,

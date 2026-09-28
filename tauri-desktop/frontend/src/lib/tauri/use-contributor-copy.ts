@@ -6,6 +6,7 @@ import {
   getEligibilityCopy,
   getEligibilityGroupCopy,
   getGrantVoidNotice,
+  getProjectAutomaticCopy,
   getProjectIgnoreCopy,
   getQuitConfirmationCopy,
   getRedactionSummary,
@@ -21,6 +22,8 @@ const copyKeys = {
   disclosure: ["contributor-copy", "disclosure"] as const,
   automaticGrant: (account: string) =>
     ["account", account, "contributor-copy", "automatic-grant"] as const,
+  projectAutomatic: (projectId: string, disclosure: string) =>
+    ["contributor-copy", "project-automatic", projectId, disclosure] as const,
   witnessReview: ["contributor-copy", "witness-review"] as const,
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
@@ -62,6 +65,23 @@ export function useAutomaticGrantCopy(account: string, enabled: boolean) {
     queryKey: copyKeys.automaticGrant(account),
     queryFn: getAutomaticGrantCopy,
     enabled,
+    staleTime: 0,
+  });
+}
+
+/**
+ * An armed project's disclosure. Keyed by the disclosure the project row
+ * last reported, so the words are re-read as soon as the core's answer for
+ * that project changes, never cached across it.
+ */
+export function useProjectAutomaticCopy(
+  projectId: string,
+  disclosure: string | undefined,
+) {
+  return useQuery({
+    queryKey: copyKeys.projectAutomatic(projectId, disclosure ?? ""),
+    queryFn: () => getProjectAutomaticCopy(projectId),
+    enabled: disclosure !== undefined,
     staleTime: 0,
   });
 }
