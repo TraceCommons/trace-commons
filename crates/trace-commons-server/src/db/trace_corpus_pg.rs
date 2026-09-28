@@ -53,7 +53,7 @@ use crate::trace_corpus_storage::{
     TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
     TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWithdrawalRecord,
     TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim, TraceWitnessEvidenceCoverage,
-    TraceWorkerKind,
+    TraceWitnessProvenanceClass, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -512,6 +512,15 @@ fn row_to_credit_event(row: &Row) -> Result<TraceCreditEventRecord, DatabaseErro
             "TraceCreditSettlementState",
         )?,
         occurred_at: row.get("occurred_at"),
+        witness_provenance_class: row
+            .get::<_, Option<String>>("witness_provenance_class")
+            .as_deref()
+            .map(|label| {
+                TraceWitnessProvenanceClass::from_storage(label).ok_or_else(|| {
+                    DatabaseError::Query("TraceWitnessProvenanceClass unknown label".into())
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -2066,6 +2075,56 @@ impl TraceCorpusStore for PgBackend {
         Ok(claim)
     }
 
+    async fn list_current_verified_witness_evidence(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<BTreeMap<Uuid, TraceWitnessEvidenceClaim>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The same statement as the single read above, positions 0-8
+        // unchanged so `witness_claim_from_row` reads both, with the
+        // submission id appended at 9.
+        let rows = tx
+            .query(
+                "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
+                    e.certificate_version, e.inference_class, e.raw_body_sha256,
+                    e.artifact_sha256,
+                    current_object.content_sha256 AS current_object_sha256,
+                    s.submission_id
+             FROM trace_submissions s
+             LEFT JOIN trace_witness_certificate_evidence e
+               ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
+             LEFT JOIN LATERAL (
+                 SELECT content_sha256 FROM trace_object_refs o
+                 WHERE o.tenant_id = s.tenant_id AND o.submission_id = s.submission_id
+                   AND o.artifact_kind = 'submitted_envelope'
+                   AND o.invalidated_at IS NULL AND o.deleted_at IS NULL
+                 ORDER BY o.updated_at DESC, o.created_at DESC LIMIT 1
+             ) current_object ON true
+             WHERE s.tenant_id = $1 AND s.submission_id = ANY($2)",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let mut claims = BTreeMap::new();
+        for row in rows {
+            let submission_id: Uuid = row.get(9);
+            let selected_digest = row
+                .get::<_, Option<String>>(8)
+                .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_string));
+            claims.insert(
+                submission_id,
+                witness_claim_from_row(Some(row), selected_digest.as_deref()),
+            );
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(claims)
+    }
+
     async fn witness_retry_identity_matches(
         &self,
         tenant_id: &str,
@@ -2445,7 +2504,7 @@ impl TraceCorpusStore for PgBackend {
                 "SELECT
                     tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
                     event_type, points_delta, reason, external_ref, actor_principal_ref,
-                    actor_role, settlement_state, occurred_at
+                    actor_role, settlement_state, occurred_at, witness_provenance_class
                  FROM trace_credit_ledger
                  WHERE tenant_id = $1
                  ORDER BY occurred_at ASC",
@@ -4665,8 +4724,8 @@ impl TraceCorpusStore for PgBackend {
             "INSERT INTO trace_credit_ledger (
                     tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
                     event_type, points_delta, reason, external_ref, actor_principal_ref,
-                    actor_role, settlement_state
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    actor_role, settlement_state, witness_provenance_class
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             &[
                 &credit_event.tenant_id,
                 &credit_event.credit_event_id,
@@ -4680,6 +4739,9 @@ impl TraceCorpusStore for PgBackend {
                 &credit_event.actor_principal_ref,
                 &credit_event.actor_role,
                 &settlement_state,
+                &credit_event
+                    .witness_provenance_class
+                    .map(TraceWitnessProvenanceClass::as_str),
             ],
         )
         .await

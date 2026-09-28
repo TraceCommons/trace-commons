@@ -79,6 +79,7 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
         consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
     }
 }
@@ -170,6 +171,7 @@ pub(crate) async fn enroll_core(
     let client = IssuerClient::new(allowlist).context("building issuer client")?;
     let response = client.enroll(&grant.issuer_url, &req).await?;
 
+    let env_witness = crate::config::witness_settings_from_env();
     let cfg = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
         issuer_url: grant.issuer_url.clone(),
@@ -188,12 +190,13 @@ pub(crate) async fn enroll_core(
         // Enrollment never turns the witness on. It is opt-in, from config or
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
-        witness: crate::config::witness_settings_from_env(),
+        witness: env_witness.clone(),
         // Same rule, same reason: the receipt endpoint is opt-in from the
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
         consent_scopes_chosen: false,
+        witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -2176,6 +2179,7 @@ mod tests {
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2322,6 +2326,7 @@ mod tests {
         ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2814,6 +2819,7 @@ async fn enroll_with_invite_core(
         IssuerClient::new(allowlist_for(allowed_hosts)).context("building issuer client")?;
     let response = client.onboard(&parsed.issuer_url, &req).await?;
 
+    let env_witness = crate::config::witness_settings_from_env();
     let cfg = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
         issuer_url: parsed.issuer_url.clone(),
@@ -2837,12 +2843,13 @@ async fn enroll_with_invite_core(
         // Enrollment never turns the witness on. It is opt-in, from config or
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
-        witness: crate::config::witness_settings_from_env(),
+        witness: env_witness.clone(),
         // Same rule, same reason: the receipt endpoint is opt-in from the
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
         consent_scopes_chosen: false,
+        witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };

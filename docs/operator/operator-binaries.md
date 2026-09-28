@@ -135,6 +135,25 @@ retention with mirror reconciliation or audit-chain verification; use the
 worker entry point for scheduled retention sweeps from a service account
 that should not hold admin scope.
 
+### `purpose` comes back as `purpose_hash`
+
+Worker and maintenance routes accept an optional free-text `purpose` and,
+like the drills (see [drills.md](drills.md)), return it only as
+`purpose_hash`: `sha256:` of the trimmed text, or of the route's default
+label when none is given. It is the same hash the route writes to its audit
+row, so a response can be matched to its evidence. The text itself does not
+appear in the response. This covers `/v1/admin/maintenance`,
+`/v1/workers/retention-maintenance`, `/v1/workers/vector-index`,
+`/v1/workers/revocation-propagation`, and the NEAR credit and benchmark
+registry outbox `submit`/`confirm` workers. `maintenance-run`,
+`worker-retention-maintenance` and `worker-vector-index` print it as
+`purpose hash`; with `--json`, read `.purpose_hash`, not `.purpose`.
+
+The export routes are the exception: the replay-export manifest, the ranker
+training exports and the benchmark conversion artifact still record
+`purpose` verbatim as export provenance, because that value is persisted in
+the artifact and in the export job and grant rows.
+
 ### Tenant rotation: policy + access grants
 
 ```bash
