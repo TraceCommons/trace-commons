@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
@@ -70,5 +72,29 @@ public sealed class LegacyMigrationNoticeTests
 
         Assert.Null(LegacyMigrationNotices.Notice(Status("{\"notice\":{}}"), _ => null));
         Assert.Null(LegacyMigrationNotices.Notice(Status("{\"notice\":{}}"), _ => "not json"));
+    }
+
+    /// <summary>
+    /// Through the real ABI: a move that kept folders and one that kept
+    /// nothing each get the Rust's words, with different folder sentences,
+    /// and the exported field set is exactly what this shell decodes.
+    /// </summary>
+    [Fact]
+    public void TheLiveAbiWordsBothOutcomesAndExportsExactlyTheConsumedFields()
+    {
+        LegacyMigrationNotice kept = Assert.IsType<LegacyMigrationNotice>(LegacyMigrationNotices.Notice(
+            Status("{\"offered\":false,\"notice\":{\"folders_kept\":2,\"automatic_grant_kept\":false}}")));
+        LegacyMigrationNotice none = Assert.IsType<LegacyMigrationNotice>(LegacyMigrationNotices.Notice(
+            Status("{\"offered\":false,\"notice\":{\"folders_kept\":0,\"automatic_grant_kept\":false}}")));
+        Assert.Contains("NEAR AI", kept.Title, StringComparison.Ordinal);
+        Assert.Equal(kept.Title, none.Title);
+        // The folder sentence is chosen by the Rust, not by this shell.
+        Assert.NotEqual(kept.Folders, none.Folders);
+
+        string json = NativeMethods.TakeOwnedString(
+            NativeMethods.tc_legacy_migration_notice("{\"folders_kept\":1,\"automatic_grant_kept\":true}"))
+            ?? throw new InvalidOperationException("tc_legacy_migration_notice returned NULL");
+        var keys = JsonDocument.Parse(json).RootElement.EnumerateObject().Select(p => p.Name).OrderBy(k => k);
+        Assert.Equal(LegacyMigrationNotice.ConsumedFields.OrderBy(k => k), keys);
     }
 }
