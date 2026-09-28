@@ -1448,6 +1448,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_fact_recorder",
         include_str!("../../../../migrations/V85__account_trust_fact_recorder.sql"),
     ),
+    // V82-V88 are reserved for work in flight; V89 is additive and depends on
+    // none of them.
+    (
+        89,
+        "trace_credit_witness_provenance_class",
+        include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
+    ),
 ];
 
 #[async_trait]

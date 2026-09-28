@@ -119,6 +119,76 @@ gate_version_hash because the embedder model id is encoded in it.
 A future PR (`bin/trace-commons-vector-replay`) will automate this. For now,
 the procedure is manual — see [`backup-restore.md`](backup-restore.md).
 
+## Repairing a required-mirror lockout
+
+With `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES` on, every audit append writes
+the DB row first and the file line (`tenants/<key>/audit/events.jsonl`)
+second, with the same precomputed `previous_event_hash` / `event_hash`. If
+the DB commit succeeds and the file append then fails (disk full, a
+permissions change, a crash between the two), the DB is one event ahead of
+the file. Every later append for that tenant chains from the file's head,
+which the DB refuses as stale, so the tenant's audited writes fail with a
+500 until it is repaired. This fails closed; nothing forks.
+
+Symptoms: one tenant's submissions, reviews or maintenance start failing
+while other tenants are healthy, with `Trace Commons DB dual-write audit
+mirror failed` warnings (hash-only) in the log.
+
+The repair re-appends the missing file lines from the DB rows. Each such row
+holds its file event verbatim as `canonical_event_json`, so the line is
+restored byte-for-byte, not reconstructed. It runs under the admin token for
+the affected tenant:
+
+```bash
+# 1. Dry run (the default): reports the gap, writes nothing.
+curl -sS -X POST "$INGEST/v1/admin/audit-chain-repair" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"purpose": "INC-1234 file append failed after DB commit"}'
+
+# 2. Repair.
+curl -sS -X POST "$INGEST/v1/admin/audit-chain-repair" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"dry_run": false, "purpose": "INC-1234 file append failed after DB commit"}'
+```
+
+The response is hash-only: `divergence` (`clean` or `db_ahead_of_file`),
+`file_events_restorable`, `file_events_restored`, the restored audit event
+ids, `purpose_hash`, and `repair_audit_event_id`. A non-dry run records its
+own `audit_chain_repair` event (counts and the purpose's hash only) after
+the chain is whole again. Running it twice is safe: the second run reports
+`clean` and restores nothing.
+
+It only restores a DB-ahead tail it can verify. It holds the tenant's append
+lock, finds the file's head among the DB's hashed rows, and requires every
+row after it to carry its payload, chain from the row before, and reproduce
+its own hash. Anything else returns `409` with a label and writes nothing:
+
+| Label | Meaning | Next step |
+|---|---|---|
+| `file_head_not_in_db` | The file has an event the DB lacks: the file is ahead, or the two forked. Not the lockout this repairs. | Run `/v1/admin/audit-chain-drill` and the DB reconciliation drill; treat an unexplained fork as a P0 chain drift. |
+| `db_row_missing_canonical_payload` | A hashed row without its payload. The mirror always writes one with the chain fields, so this is anomalous. | Escalate; do not hand-edit either log. |
+| `db_row_chain_mismatch`, `db_row_hash_mismatch`, `db_row_payload_mismatch`, `db_row_payload_not_canonical`, `db_row_payload_unreadable` | The DB row does not reproduce its own chain fields. | Treat as tampering or corruption: P0, do not edit either log. |
+| `db_row_already_in_file` | The row's event id is already in the file, out of order. | Escalate; do not hand-edit the file. |
+
+Fix the cause of the failed append (free the disk, restore the file's
+permissions) before running the repair, or the restored lines and the next
+append will fail the same way.
+
+### One writer per tenant
+
+The append lock that orders a tenant's audit chain is in-process. Run one
+`trace-commons-ingest` process per file root. A second process on the same
+root (an overlapping restart, or a second replica on shared storage) does not
+fork the chain in required-mirror mode -- the DB refuses the loser's stale
+`previous_event_hash` before its file line is written -- but its append
+fails rather than waiting. Without required-mirror mode the file is written
+first, and two processes can both pass the file's check-then-append, so a
+second writer there can fork the file chain. Stop the old process before the
+new one serves traffic. Replicas with separate file roots each hold a
+different file chain against one DB chain, which the mirror cannot
+reconcile; horizontal scaling is out of scope for the pilot
+([`architecture.md`](architecture.md)).
+
 ## Reading hash-only fields
 
 Every "ref hash" or "action ref hash" in audit rows is sha256-prefixed.
