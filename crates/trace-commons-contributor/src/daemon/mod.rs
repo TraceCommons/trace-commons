@@ -24,6 +24,7 @@ pub mod account_admission;
 pub mod account_onboarding;
 pub mod admission_setup;
 pub mod approved_envelope;
+pub mod arming_wording;
 pub mod attached;
 pub mod attestation_mark;
 pub mod audit;
@@ -47,6 +48,7 @@ pub mod inference_connection;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
+pub(crate) mod legacy_migration;
 pub mod native_flow;
 pub mod nearai_credential;
 pub mod nearai_onboarding;
@@ -953,6 +955,7 @@ async fn drain_approved(
             uploader::UploadDecision::Uploaded {
                 submission_id,
                 receipt,
+                unattended_redaction,
             } => {
                 // The submission shipped; now make the attestation mark tell
                 // the truth about the receipt that did or did not come with
@@ -981,9 +984,15 @@ async fn drain_approved(
                 // A failed save is not worth failing an upload that already
                 // succeeded: the worst outcome is that an offer arrives one
                 // contribution later than it might have.
+                //
+                // The same save records what redaction an unattended session
+                // had, which decides the armed project's disclosure (K6).
                 if newly_uploaded {
                     let mut policy = shared.policy.lock().expect("policy lock");
                     policy.record_contribution(&entry.project_key);
+                    if let Some(redaction) = unattended_redaction {
+                        policy.record_automatic_redaction(&entry.project_key, redaction);
+                    }
                     let _ = policy.save(&shared.store);
                 }
             }
@@ -1826,6 +1835,7 @@ mod tests {
                 .save_config(&crate::config::ContributorConfig {
                     inference_receipt_endpoint: None,
                     consent_scopes_chosen: false,
+                    witness_origin: None,
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                     issuer_url: issuer,
@@ -2899,6 +2909,7 @@ mod tests {
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "http://127.0.0.1:9".to_string(),

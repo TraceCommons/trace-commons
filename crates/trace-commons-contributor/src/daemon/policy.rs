@@ -109,6 +109,29 @@ pub struct ProjectEntry {
     /// policy file still loads.
     #[serde(default)]
     pub armed_under: Option<super::grant_terms::GrantTerms>,
+    /// What redaction each session sent from this project on the
+    /// contributor's behalf had, since it was last armed (R1, K6). Decides
+    /// which arming disclosure the project gets: see
+    /// `automatic_gate::project_disclosure`.
+    ///
+    /// Reset with the rest of the entry on every mode change, so it covers
+    /// one arming only. Counts, never session identities: the policy file
+    /// is not a history. `#[serde(default)]` so an older policy file loads,
+    /// as "nothing recorded", which earns only the deterministic-only
+    /// wording.
+    #[serde(default)]
+    pub automatic_redaction: AutomaticRedactionTally,
+}
+
+/// How many unattended sessions from one armed project had a certified full
+/// redaction pipeline, and how many did not. See
+/// [`ProjectEntry::automatic_redaction`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomaticRedactionTally {
+    #[serde(default)]
+    pub certified_full_pipeline: u32,
+    #[serde(default)]
+    pub not_certified: u32,
 }
 
 /// How many times a project must have contributed before the app offers to
@@ -179,6 +202,33 @@ pub struct GrantVoidNotice {
     pub reasons: Vec<String>,
 }
 
+/// K5: an armed folder whose arming words claimed more than the words it
+/// would be shown now, not yet shown to the contributor.
+///
+/// The connect-and-forget design ("The prior decision") requires that a
+/// folder armed under the old "will be scrubbed" copy, whose wording becomes
+/// deterministic-only, is told what its arming now means: changing the words
+/// under an armed folder must never happen silently. The folder stays armed;
+/// this notice is the only thing that changes. See `arming_wording`.
+///
+/// Kept in the policy file, like [`GrantVoidNotice`], so a rewording during a
+/// pass no shell was watching is shown at the next launch. It stays until a
+/// shell reports it shown (`acknowledge_arming_rewordings`) or the
+/// contributor sets that project's mode, which answers it. `project_key` is
+/// the policy's own key and never crosses the socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArmingRewordNotice {
+    /// Unique within this policy file and never reused, for the reason
+    /// [`GrantVoidNotice::id`] is.
+    pub id: u64,
+    pub reworded_at: DateTime<Utc>,
+    pub project_key: String,
+    /// What the words the folder was armed under claimed.
+    pub was: super::arming_wording::ArmingClaim,
+    /// What the words in force for it claim now.
+    pub now: super::arming_wording::ArmingClaim,
+}
+
 /// A project the app should offer to arm, and the evidence for offering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArmingSuggestion {
@@ -231,6 +281,20 @@ pub struct ProjectPolicy {
     /// acknowledgement naming an old id cannot clear a newer notice.
     #[serde(default)]
     pub next_grant_void_id: u64,
+    /// What the words each armed project was armed under claimed, recorded
+    /// at arming. A project armed before this existed has no entry and is
+    /// read through `arming_wording::legacy_claim`. Kept beside the entries
+    /// rather than in [`ProjectEntry`] so an older file still loads, and
+    /// cleared whenever the project's mode is set. See `arming_wording`.
+    #[serde(default)]
+    pub arming_claims: BTreeMap<String, super::arming_wording::ArmingClaim>,
+    /// Rewordings not yet shown to the contributor. See
+    /// [`ArmingRewordNotice`].
+    #[serde(default)]
+    pub arming_rewordings: Vec<ArmingRewordNotice>,
+    /// The id the next [`ArmingRewordNotice`] gets. Never reused.
+    #[serde(default)]
+    pub next_arming_reword_id: u64,
 }
 
 /// The Flow 1 grant: "contribute automatically from projects discovered from
@@ -284,6 +348,9 @@ impl ProjectPolicy {
             armed_by_grant: BTreeSet::new(),
             grant_voids: Vec::new(),
             next_grant_void_id: 0,
+            arming_claims: BTreeMap::new(),
+            arming_rewordings: Vec::new(),
+            next_arming_reword_id: 0,
         }
     }
 
@@ -391,6 +458,35 @@ impl ProjectPolicy {
         *self.contributed.entry(project_key.to_string()).or_insert(0) += 1;
     }
 
+    /// Record what one session sent from `project_key` on the contributor's
+    /// behalf had for redaction (K6).
+    ///
+    /// Only while the project is armed: a session approved unattended in a
+    /// project that has since left automatic says nothing about the next
+    /// arming, which starts from nothing.
+    pub fn record_automatic_redaction(
+        &mut self,
+        project_key: &str,
+        redaction: super::automatic_gate::SessionRedaction,
+    ) {
+        use super::automatic_gate::SessionRedaction;
+        let Some(entry) = self.projects.get_mut(project_key) else {
+            return;
+        };
+        if entry.mode != ProjectMode::AutoUpload {
+            return;
+        }
+        let tally = &mut entry.automatic_redaction;
+        match redaction {
+            SessionRedaction::CertifiedFullPipeline => {
+                tally.certified_full_pipeline = tally.certified_full_pipeline.saturating_add(1);
+            }
+            SessionRedaction::NotCertified => {
+                tally.not_certified = tally.not_certified.saturating_add(1);
+            }
+        }
+    }
+
     /// Record a "Not now" against one project.
     pub fn decline_arming(&mut self, project_key: &str, now: DateTime<Utc>) {
         self.arming_declined_at.insert(project_key.to_string(), now);
@@ -474,6 +570,24 @@ impl ProjectPolicy {
                     if existing.mode != ProjectMode::AutoUpload {
                         existing.armed_under = None;
                     }
+                    // Both halves' sessions are now this project's, so both
+                    // records count: one uncertified session in either keeps
+                    // the merged project off the model-scrub wording. A merge
+                    // that left it ask-first starts the next arming clean.
+                    existing.automatic_redaction = if existing.mode == ProjectMode::AutoUpload {
+                        AutomaticRedactionTally {
+                            certified_full_pipeline: existing
+                                .automatic_redaction
+                                .certified_full_pipeline
+                                .saturating_add(entry.automatic_redaction.certified_full_pipeline),
+                            not_certified: existing
+                                .automatic_redaction
+                                .not_certified
+                                .saturating_add(entry.automatic_redaction.not_certified),
+                        }
+                    } else {
+                        AutomaticRedactionTally::default()
+                    };
                 })
                 .or_insert(ProjectEntry {
                     mode: entry.mode,
@@ -481,6 +595,7 @@ impl ProjectPolicy {
                     label,
                     display_path: shown,
                     armed_under: entry.armed_under,
+                    automatic_redaction: entry.automatic_redaction,
                 });
         }
         self.projects = projects;
@@ -596,6 +711,7 @@ impl ProjectPolicy {
                     if !reasons.is_empty() {
                         entry.mode = ProjectMode::NotifyOnly;
                         entry.armed_under = None;
+                        entry.automatic_redaction = AutomaticRedactionTally::default();
                         voided_keys.push((key.clone(), reasons.clone()));
                         sweep.voided.push(VoidedGrant {
                             project_label: entry.label.clone(),
@@ -615,12 +731,101 @@ impl ProjectPolicy {
         // Recorded with the void, in the same save, so a void is never
         // written without the notice that tells the contributor about it.
         for (key, reasons) in voided_keys {
+            // No longer armed, so neither what it was armed under nor a
+            // notice about what that now means applies; the void says what
+            // happened instead.
+            self.arming_claims.remove(&key);
+            self.arming_rewordings.retain(|n| n.project_key != key);
             self.push_grant_void(Some(key), &reasons, now);
         }
         if let Some(reasons) = sweep.automatic_grant_voided.clone() {
             self.push_grant_void(None, &reasons, now);
         }
         sweep
+    }
+
+    /// Record what the words `project_key` was just armed under claim. Only
+    /// for an armed project; returns whether it was recorded.
+    pub fn record_arming_claim(
+        &mut self,
+        project_key: &str,
+        claim: super::arming_wording::ArmingClaim,
+    ) -> bool {
+        match self.projects.get(project_key) {
+            Some(entry) if entry.mode == ProjectMode::AutoUpload => {
+                self.arming_claims.insert(project_key.to_string(), claim);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What the words `project_key` was armed under claimed: as recorded, or
+    /// for a project armed before claims were recorded, what its arming
+    /// screen said then.
+    pub fn arming_claim(&self, project_key: &str) -> super::arming_wording::ArmingClaim {
+        self.arming_claims
+            .get(project_key)
+            .copied()
+            .unwrap_or_else(|| {
+                super::arming_wording::legacy_claim(self.armed_by_grant.contains(project_key))
+            })
+    }
+
+    /// K5: leave a notice for every armed project whose words in force
+    /// (`current`, per project key) no longer claim what it was armed under.
+    ///
+    /// The project stays armed. Its recorded claim moves to the one in force
+    /// in the same save as the notice, so a rewording is announced exactly
+    /// once and a later narrowing is announced again. Only a narrowing is
+    /// announced (`ArmingClaim::narrowed_to`); a widening is not recorded,
+    /// so what the contributor was told stays the baseline. Returns the
+    /// labels of the projects reworded, for the audit.
+    pub fn sweep_arming_claims(
+        &mut self,
+        current: impl Fn(&str) -> super::arming_wording::ArmingClaim,
+        now: DateTime<Utc>,
+    ) -> Vec<String> {
+        let mut reworded: Vec<(
+            String,
+            String,
+            super::arming_wording::ArmingClaim,
+            super::arming_wording::ArmingClaim,
+        )> = Vec::new();
+        for (key, entry) in &self.projects {
+            if entry.mode != ProjectMode::AutoUpload || key == UNKNOWN_PROJECT_KEY {
+                continue;
+            }
+            let was = self.arming_claim(key);
+            let in_force = current(key);
+            if was.narrowed_to(in_force) {
+                reworded.push((key.clone(), entry.label.clone(), was, in_force));
+            }
+        }
+        let mut labels = Vec::with_capacity(reworded.len());
+        for (key, label, was, in_force) in reworded {
+            self.arming_claims.insert(key.clone(), in_force);
+            self.arming_rewordings.retain(|n| n.project_key != key);
+            let id = self.next_arming_reword_id;
+            self.next_arming_reword_id = id.saturating_add(1);
+            self.arming_rewordings.push(ArmingRewordNotice {
+                id,
+                reworded_at: now,
+                project_key: key,
+                was,
+                now: in_force,
+            });
+            labels.push(label);
+        }
+        labels
+    }
+
+    /// Drop the rewording notices a shell reports it has shown. Returns how
+    /// many went; an id that is not outstanding is ignored.
+    pub fn acknowledge_arming_rewordings(&mut self, ids: &[u64]) -> usize {
+        let before = self.arming_rewordings.len();
+        self.arming_rewordings.retain(|n| !ids.contains(&n.id));
+        before - self.arming_rewordings.len()
     }
 
     /// Record a notice, replacing any still outstanding for the same grant:
@@ -694,6 +899,13 @@ impl ProjectPolicy {
         // And it answers any notice that this project's grant had stopped.
         self.grant_voids
             .retain(|n| n.project_key.as_deref() != Some(project_key));
+        // A mode set here is also a fresh decision about the words: what
+        // was claimed before is no longer what it was armed under, and a
+        // notice that it was reworded is answered. An arming records its
+        // claim afterwards (`record_arming_claim`).
+        self.arming_claims.remove(project_key);
+        self.arming_rewordings
+            .retain(|n| n.project_key != project_key);
         let shown = display_path_for_key(project_key);
         self.projects.insert(
             project_key.to_string(),
@@ -705,6 +917,8 @@ impl ProjectPolicy {
                 // A fresh entry on every mode change: leaving automatic
                 // clears the terms, and re-arming records new ones.
                 armed_under: None,
+                // And the redaction record: it covers one arming only.
+                automatic_redaction: AutomaticRedactionTally::default(),
             },
         );
         Ok(())
@@ -1056,6 +1270,7 @@ mod tests {
                 label: "unknown".into(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -1460,6 +1675,75 @@ mod tests {
         assert!(!p.arms_by_default("/w/new", "/s/new.jsonl", SRC));
     }
 
+    /// K6: a void (R6) returns the project to ask-first and clears what its
+    /// sessions had for redaction, so a later arming starts from nothing and
+    /// cannot inherit the model-scrub wording.
+    #[test]
+    fn a_voided_grant_clears_the_projects_redaction_record() {
+        use super::super::automatic_gate::SessionRedaction;
+        let mut p = armed_and_granted("https://ingest.invalid");
+        p.record_automatic_redaction("/w/api", SessionRedaction::CertifiedFullPipeline);
+        assert_eq!(
+            p.projects["/w/api"]
+                .automatic_redaction
+                .certified_full_pipeline,
+            1
+        );
+        let sweep = p.sweep_grants(
+            &grant_terms_with("https://elsewhere.invalid"),
+            t("2026-09-25T04:00:00Z"),
+        );
+        assert_eq!(sweep.voided.len(), 1);
+        assert_eq!(
+            p.projects["/w/api"].automatic_redaction,
+            AutomaticRedactionTally::default()
+        );
+    }
+
+    /// K6: normalization that merges two armed entries keeps both records,
+    /// so an uncertified session in either half is not forgotten.
+    #[test]
+    fn a_merge_keeps_both_halves_redaction_records() {
+        use super::super::automatic_gate::SessionRedaction;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut p = ProjectPolicy::new();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+        for key in [&root, &sub] {
+            p.projects.insert(
+                key.to_string_lossy().to_string(),
+                ProjectEntry {
+                    mode: ProjectMode::AutoUpload,
+                    added_at: now(),
+                    label: "repo".into(),
+                    display_path: None,
+                    armed_under: None,
+                    automatic_redaction: AutomaticRedactionTally::default(),
+                },
+            );
+        }
+        p.record_automatic_redaction(&root.to_string_lossy(), SessionRedaction::NotCertified);
+        p.record_automatic_redaction(
+            &sub.to_string_lossy(),
+            SessionRedaction::CertifiedFullPipeline,
+        );
+        p.rekey();
+        assert_eq!(p.projects.len(), 1, "the two entries merge");
+        let merged = p.projects.values().next().unwrap().automatic_redaction;
+        assert_eq!(
+            merged,
+            AutomaticRedactionTally {
+                certified_full_pipeline: 1,
+                not_certified: 1,
+            },
+            "the uncertified session survives the merge"
+        );
+    }
+
     /// A policy with `/w/api` armed under `ingest`'s terms and the Flow 1
     /// grant given under the same terms.
     fn armed_and_granted(ingest: &str) -> ProjectPolicy {
@@ -1592,6 +1876,161 @@ mod tests {
         let p: ProjectPolicy = serde_json::from_value(value).unwrap();
         assert!(p.grant_voids.is_empty());
         assert_eq!(p.next_grant_void_id, 0);
+    }
+
+    use super::super::arming_wording::ArmingClaim;
+
+    fn armed_by_hand(keys: &[&str]) -> ProjectPolicy {
+        let mut p = ProjectPolicy::new();
+        for key in keys {
+            p.set_mode(key, ProjectMode::AutoUpload, t("2026-09-27T00:00:00Z"))
+                .unwrap();
+        }
+        p
+    }
+
+    /// K5: a folder armed under the old "will be scrubbed" wording, whose
+    /// wording in force is patterns-only, gets a notice and stays armed.
+    #[test]
+    fn a_folder_armed_under_the_scrub_wording_is_told_when_it_is_reworded() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        let at = t("2026-09-27T01:00:00Z");
+
+        let unchanged = p.sweep_arming_claims(|_| ArmingClaim::ModelScrubbed, at);
+        assert!(unchanged.is_empty());
+        assert!(
+            p.arming_rewordings.is_empty(),
+            "nothing reworded, nothing to say"
+        );
+
+        let reworded = p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
+        assert_eq!(reworded, vec!["api".to_string()]);
+        assert_eq!(p.arming_rewordings.len(), 1, "{:?}", p.arming_rewordings);
+        let n = &p.arming_rewordings[0];
+        assert_eq!(n.project_key, "/w/api");
+        assert_eq!(n.was, ArmingClaim::ModelScrubbed);
+        assert_eq!(n.now, ArmingClaim::PatternsOnly);
+        assert_eq!(n.reworded_at, at);
+        assert_eq!(p.resolve("/w/api"), ProjectMode::AutoUpload, "still armed");
+    }
+
+    /// Announced once: the next pass under the same wording adds nothing,
+    /// and an acknowledged notice does not come back.
+    #[test]
+    fn a_rewording_is_announced_once() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        let at = t("2026-09-27T01:00:00Z");
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
+        assert_eq!(p.arming_rewordings.len(), 1);
+        let id = p.arming_rewordings[0].id;
+        assert!(
+            p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at)
+                .is_empty()
+        );
+        assert_eq!(p.arming_rewordings.len(), 1);
+        assert_eq!(p.acknowledge_arming_rewordings(&[id, 42]), 1);
+        assert!(
+            p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at)
+                .is_empty()
+        );
+        assert!(p.arming_rewordings.is_empty());
+    }
+
+    /// Only a narrowing is owed a notice. A folder the grant armed was shown
+    /// the patterns-only wording, so it has nothing to be told; one armed
+    /// by hand and recorded as patterns-only neither.
+    #[test]
+    fn a_folder_told_patterns_only_is_not_reworded() {
+        let mut p = granted_with_disk(&[], &[]);
+        let now = t("2026-09-27T00:00:00Z");
+        p.arm_by_grant("/w/new", now, grant_terms_with("https://ingest.invalid"))
+            .unwrap();
+        p.set_mode("/w/hand", ProjectMode::AutoUpload, now).unwrap();
+        assert!(p.record_arming_claim("/w/hand", ArmingClaim::PatternsOnly));
+        assert!(
+            p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now)
+                .is_empty()
+        );
+        assert!(p.arming_rewordings.is_empty());
+        // And a widening is not a notice either.
+        assert!(
+            p.sweep_arming_claims(|_| ArmingClaim::ModelScrubbed, now)
+                .is_empty()
+        );
+    }
+
+    /// Ask-first and ignored folders were never told their sessions would
+    /// be sent, so there is nothing to reword.
+    #[test]
+    fn only_armed_folders_are_reworded() {
+        let mut p = ProjectPolicy::new();
+        let now = t("2026-09-27T00:00:00Z");
+        p.set_mode("/w/ask", ProjectMode::NotifyOnly, now).unwrap();
+        p.set_mode("/w/never", ProjectMode::Ignore, now).unwrap();
+        assert!(
+            p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now)
+                .is_empty()
+        );
+        assert!(!p.record_arming_claim("/w/ask", ArmingClaim::ModelScrubbed));
+    }
+
+    /// Setting the project's mode answers its notice, whether it is armed
+    /// again (under words recorded afresh) or switched to ask-first.
+    #[test]
+    fn setting_the_mode_answers_a_rewording() {
+        let mut p = armed_by_hand(&["/w/api", "/w/web"]);
+        let now = t("2026-09-27T01:00:00Z");
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
+        assert_eq!(p.arming_rewordings.len(), 2);
+        p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
+        assert_eq!(p.arming_rewordings.len(), 1);
+        assert_eq!(p.arming_rewordings[0].project_key, "/w/web");
+        p.set_mode("/w/web", ProjectMode::AutoUpload, now).unwrap();
+        assert!(p.arming_rewordings.is_empty());
+    }
+
+    /// A void returns the folder to ask-first and says so; a rewording
+    /// notice saying it is still armed would then be false.
+    #[test]
+    fn a_void_takes_the_rewording_notice_with_it() {
+        let mut p = armed_and_granted("https://ingest.invalid");
+        let now = t("2026-09-27T01:00:00Z");
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
+        assert_eq!(p.arming_rewordings.len(), 1);
+        p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
+        assert!(p.arming_rewordings.is_empty());
+        assert!(!p.arming_claims.contains_key("/w/api"));
+    }
+
+    /// Ids are never reused across notices.
+    #[test]
+    fn a_later_rewording_never_reuses_an_acknowledged_id() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        let now = t("2026-09-27T01:00:00Z");
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
+        assert_eq!(p.arming_rewordings.len(), 1);
+        let first = p.arming_rewordings[0].id;
+        p.acknowledge_arming_rewordings(&[first]);
+        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
+        p.record_arming_claim("/w/api", ArmingClaim::ModelScrubbed);
+        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
+        assert_eq!(p.arming_rewordings.len(), 1);
+        assert_ne!(p.arming_rewordings[0].id, first);
+    }
+
+    /// A policy file written before rewordings existed loads with none,
+    /// and its armed folders read as armed under the scrub wording.
+    #[test]
+    fn a_policy_file_without_arming_claims_loads_as_the_old_wording() {
+        let p = armed_by_hand(&["/w/api"]);
+        let mut value = serde_json::to_value(&p).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("arming_claims");
+        object.remove("arming_rewordings");
+        object.remove("next_arming_reword_id");
+        let p: ProjectPolicy = serde_json::from_value(value).unwrap();
+        assert!(p.arming_rewordings.is_empty());
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::ModelScrubbed);
     }
 
     fn armed_policy() -> ProjectPolicy {
@@ -1759,6 +2198,7 @@ mod tests {
                 label: "repo".to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         p.projects.insert(
@@ -1769,6 +2209,7 @@ mod tests {
                 label: "inner".to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
 
@@ -1841,6 +2282,7 @@ mod tests {
                 label: "sub".to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         p.save(&store).unwrap();
@@ -1862,6 +2304,7 @@ mod tests {
                 label: UNKNOWN_PROJECT_KEY.to_string(),
                 display_path: None,
                 armed_under: None,
+                automatic_redaction: Default::default(),
             },
         );
         p.rekey();
