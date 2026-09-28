@@ -236,7 +236,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
-    TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
+    TraceWithdrawalRecord as StorageTraceWithdrawalRecord, TraceWitnessProvenanceClass,
     TraceWorkerKind as StorageTraceWorkerKind, WITNESS_ADMITTED_STATUS_REASON,
     safe_residual_risk_basis_labels, safe_status_reason_label,
 };
@@ -15249,7 +15249,13 @@ async fn credit_events_handler(
     )
     .await
     .map_err(internal_error)?;
-    Ok(Json(credit_view.credit_events))
+    // The provenance label is recorded for analysis, not shown to the
+    // contributor: this view is unchanged by #1059.
+    let mut credit_events = credit_view.credit_events;
+    for event in &mut credit_events {
+        event.witness_provenance_class = None;
+    }
+    Ok(Json(credit_events))
 }
 
 async fn submission_status_handler(
@@ -20548,7 +20554,7 @@ async fn list_traces_handler(
             .await
             .map_err(internal_error)?;
 
-    let items: Vec<_> = records
+    let mut items: Vec<_> = records
         .into_iter()
         .rev()
         .filter(|record| query.status == Some(TraceCorpusStatus::Revoked) || !record.is_revoked())
@@ -20574,6 +20580,15 @@ async fn list_traces_handler(
         .take(limit)
         .map(|record| TraceCommonsTraceListItem::from_record(record, &derived_by_submission))
         .collect();
+    label_witness_provenance(
+        state.as_ref(),
+        tenant.auth(),
+        items
+            .iter_mut()
+            .map(|item| (item.submission_id, &mut item.witness_provenance_class)),
+    )
+    .await
+    .map_err(internal_error)?;
     append_control_plane_read_audit(state.as_ref(), tenant.auth(), "trace_list", items.len())
         .await
         .map_err(internal_error)?;
@@ -24090,6 +24105,12 @@ async fn append_credit_event_handler(
         actor_role: tenant.role,
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
+        witness_provenance_class: credit_witness_provenance_class(
+            state.as_ref(),
+            &tenant,
+            submission_id,
+        )
+        .await,
     };
     if state.require_db_mirror_writes {
         let mirror_result = mirror_credit_event_to_db(&state, &event).await;
@@ -39161,6 +39182,12 @@ async fn append_automatic_utility_credit_events_once_with_counts(
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
+            witness_provenance_class: credit_witness_provenance_class(
+                state,
+                tenant,
+                source.submission_id,
+            )
+            .await,
         };
         append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
         let mirror_result = mirror_credit_event_to_db(state, &event).await;
@@ -40139,6 +40166,23 @@ async fn run_dataset_replay_export_job(
             &body_read.envelope,
             body_read.object_ref_id,
         ));
+    }
+    if let Err(error) = label_witness_provenance(
+        state,
+        tenant,
+        items
+            .iter_mut()
+            .map(|item| (item.submission_id, &mut item.witness_provenance_class)),
+    )
+    .await
+    {
+        return fail_export_job_with_internal_error(
+            state,
+            &job,
+            "replay export job failure",
+            error,
+        )
+        .await;
     }
     let source_submission_ids = items
         .iter()
@@ -49989,6 +50033,23 @@ async fn run_benchmark_conversion_job(
     }
     let mut candidates = dedupe_benchmark_candidates_by_summary_hash(candidates);
     candidates.truncate(limit);
+    fail_export_job_on_error(
+        state,
+        &job,
+        "benchmark export job failure",
+        label_witness_provenance(
+            state,
+            tenant,
+            candidates.iter_mut().map(|candidate| {
+                (
+                    candidate.submission_id,
+                    &mut candidate.witness_provenance_class,
+                )
+            }),
+        )
+        .await,
+    )
+    .await?;
     let conversion_id = Uuid::new_v4();
     let source_submission_ids = candidates
         .iter()
@@ -55111,6 +55172,17 @@ async fn collect_ranker_training_candidates(
             .then_with(|| left.received_at.cmp(&right.received_at))
     });
     candidates.truncate(limit);
+    label_witness_provenance(
+        state,
+        tenant,
+        candidates.iter_mut().map(|candidate| {
+            (
+                candidate.submission_id,
+                &mut candidate.witness_provenance_class,
+            )
+        }),
+    )
+    .await?;
     Ok(candidates)
 }
 
@@ -58741,6 +58813,7 @@ fn trace_commons_credit_event_from_storage(
         actor_role: TokenRole::parse(&event.actor_role)?,
         actor_principal_ref: event.actor_principal_ref,
         created_at: event.occurred_at,
+        witness_provenance_class: event.witness_provenance_class,
     }))
 }
 
@@ -59837,6 +59910,22 @@ async fn mirror_submission_to_db_with_options(
     .context("failed to mirror trace derived metadata")?;
 
     if record.status == TraceCorpusStatus::Accepted && record.credit_points_pending > 0.0 {
+        // Read after the evidence and the object ref above are written, so the
+        // current-object claim covers this submission's own artifact. A label
+        // only: `points_delta` below is the same with or without it.
+        let witness_provenance_class = match db
+            .get_current_verified_witness_evidence(&record.tenant_id, record.submission_id)
+            .await
+        {
+            Ok(claim) => Some(TraceWitnessProvenanceClass::from_claim(&claim)),
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&anyhow::Error::from(error)),
+                    "Trace Commons accepted credit witness provenance label unavailable"
+                );
+                None
+            }
+        };
         db.append_trace_credit_event(StorageTraceCreditEventWrite {
             credit_event_id: deterministic_trace_uuid("accepted-credit", record),
             tenant_id: record.tenant_id.clone(),
@@ -59850,6 +59939,7 @@ async fn mirror_submission_to_db_with_options(
             actor_principal_ref: record.auth_principal_ref.clone(),
             actor_role: "system".to_string(),
             settlement_state: StorageTraceCreditSettlementState::Pending,
+            witness_provenance_class,
         })
         .await
         .context("failed to mirror trace credit event")?;
@@ -60876,6 +60966,10 @@ async fn reverse_credit_settlement_for_revocation_propagation(
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
+            // A reversal describes the event it reverses, so it carries that
+            // event's label. The revoked trace now reads as unattested, which
+            // says nothing about the credit being taken back.
+            witness_provenance_class: source_event.witness_provenance_class,
         };
         let file_credit_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
             .into_iter()
@@ -62291,6 +62385,89 @@ fn process_evaluation_derived_id(
     )
 }
 
+/// Verified witness provenance labels for submissions of the auth-derived
+/// tenant (#1059), from the current-object read of whichever store holds the
+/// evidence: PostgreSQL when a database is configured (V76), otherwise the
+/// private file store.
+///
+/// Labels only. Exports, the reviewer trace list and credit events report
+/// them; nothing that gates, scores or prices a trace reads them (#1061,
+/// earned-trust decision 5). A submission the tenant does not hold has no
+/// entry.
+async fn witness_provenance_classes(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+) -> anyhow::Result<BTreeMap<Uuid, TraceWitnessProvenanceClass>> {
+    if let Some(db) = state.db_mirror.as_ref() {
+        let claims = db
+            .list_current_verified_witness_evidence(&tenant.tenant_id, submission_ids)
+            .await
+            .context("witness provenance read failed")?;
+        return Ok(claims
+            .iter()
+            .map(|(id, claim)| (*id, TraceWitnessProvenanceClass::from_claim(claim)))
+            .collect());
+    }
+    submission_ids
+        .iter()
+        .map(|id| {
+            let claim = file_witness::current_claim(state, tenant, *id)?;
+            Ok((*id, TraceWitnessProvenanceClass::from_claim(&claim)))
+        })
+        .collect()
+}
+
+/// Fill the provenance label of each `(submission, slot)` pair with one read.
+/// A submission the tenant does not hold is labelled `Unattested`: nothing
+/// supports a claim for it.
+async fn label_witness_provenance<'a>(
+    state: &AppState,
+    tenant: &TenantAuth,
+    slots: impl Iterator<Item = (Uuid, &'a mut Option<TraceWitnessProvenanceClass>)>,
+) -> anyhow::Result<()> {
+    let slots = slots.collect::<Vec<_>>();
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let ids = slots.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let classes = witness_provenance_classes(state, tenant, &ids).await?;
+    for (id, slot) in slots {
+        *slot = Some(
+            classes
+                .get(&id)
+                .copied()
+                .unwrap_or(TraceWitnessProvenanceClass::Unattested),
+        );
+    }
+    Ok(())
+}
+
+/// The label a credit event records. A credit is never refused or delayed for
+/// want of a label, so a failed read records nothing (`None`, "not recorded")
+/// and logs only a hash of the error.
+async fn credit_witness_provenance_class(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> Option<TraceWitnessProvenanceClass> {
+    match witness_provenance_classes(state, tenant, &[submission_id]).await {
+        Ok(classes) => Some(
+            classes
+                .get(&submission_id)
+                .copied()
+                .unwrap_or(TraceWitnessProvenanceClass::Unattested),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                "Trace Commons credit event witness provenance label unavailable"
+            );
+            None
+        }
+    }
+}
+
 async fn mirror_credit_event_to_db(
     state: &AppState,
     event: &TraceCommonsCreditLedgerRecord,
@@ -62327,6 +62504,7 @@ async fn mirror_credit_event_to_db_with_settlement_state(
         actor_principal_ref: event.actor_principal_ref.clone(),
         actor_role: event.actor_role.storage_name().to_string(),
         settlement_state,
+        witness_provenance_class: event.witness_provenance_class,
     })
     .await
     .context("failed to mirror trace credit ledger event")
@@ -71581,6 +71759,12 @@ struct TraceCommonsCreditLedgerRecord {
     actor_role: TokenRole,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
+    /// Witness provenance of the credited trace when the event was written: a
+    /// label for later analysis that never changes `credit_points_delta`
+    /// (#1059). `None` means not recorded (older events, or the read failed).
+    /// Stripped from the contributor's own credit-events view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71609,6 +71793,10 @@ struct TraceCommonsTraceListItem {
     duplicate_score: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     novelty_score: Option<f32>,
+    /// Verified witness provenance label (#1059). Filled only by the reviewer
+    /// trace list; the account views that share this item leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 impl TraceCommonsTraceListItem {
@@ -71641,6 +71829,7 @@ impl TraceCommonsTraceListItem {
                 .unwrap_or_default(),
             duplicate_score: derived.map(|record| record.duplicate_score),
             novelty_score: derived.map(|record| record.novelty_score),
+            witness_provenance_class: None,
         }
     }
 }
@@ -72350,6 +72539,11 @@ struct TraceReplayDatasetItem {
     canonical_summary: Option<String>,
     coverage_tags: Vec<String>,
     submission_score: f32,
+    /// Verified witness provenance label (#1059), hash-free and label-only.
+    /// Always present on an export; absent only on items rebuilt internally
+    /// for a manifest backfill, which are never served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
     #[serde(skip)]
     source_status_at_export: TraceCorpusStatus,
     #[serde(skip)]
@@ -72385,6 +72579,7 @@ impl TraceReplayDatasetItem {
                 .map(|record| record.coverage_tags.clone())
                 .unwrap_or_default(),
             submission_score: record.submission_score,
+            witness_provenance_class: None,
             source_status_at_export: record.status,
             source_hash_at_export,
             object_ref_id,
@@ -72765,6 +72960,11 @@ struct TraceBenchmarkCandidate {
     duplicate_score: f32,
     submission_score: f32,
     consent_scopes: Vec<ConsentScope>,
+    /// Verified witness provenance label (#1059). Additive within
+    /// `benchmark_conversion.v1`: artifacts written before it read back as
+    /// `None` and serialize without the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 impl TraceBenchmarkCandidate {
@@ -72791,6 +72991,7 @@ impl TraceBenchmarkCandidate {
             duplicate_score: derived.duplicate_score,
             submission_score: submission.submission_score,
             consent_scopes: submission.consent_scopes.clone(),
+            witness_provenance_class: None,
         }
     }
 }
@@ -73028,6 +73229,10 @@ struct TraceRankerTrainingCandidate {
     novelty_score: f32,
     duplicate_score: f32,
     received_at: DateTime<Utc>,
+    /// Verified witness provenance label (#1059), also carried by each side of
+    /// a training pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 impl TraceRankerTrainingCandidate {
@@ -73062,6 +73267,7 @@ impl TraceRankerTrainingCandidate {
             novelty_score: derived.novelty_score,
             duplicate_score: derived.duplicate_score,
             received_at: submission.received_at,
+            witness_provenance_class: None,
         }
     }
 }
