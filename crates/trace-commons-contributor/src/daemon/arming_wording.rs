@@ -29,8 +29,14 @@
 //! spec's Open list, and K13), the change is made in [`project_arming_claim`]
 //! together with the shells' copy, and every folder armed under the old
 //! wording whose disclosure is patterns-only gets its notice on the next
-//! pass. The same happens without any copy change when K6's per-folder
-//! disclosure drops a folder from model-scrubbed to patterns-only.
+//! pass.
+//!
+//! It also happens without any copy change, per folder, from the folder's
+//! own record ([`claim_in_force`], over K6's `project_disclosure`): a folder
+//! armed under "will be scrubbed" that has sent a session on the
+//! contributor's behalf without a certified full pipeline is told, once. The
+//! record is kept by the upload pass, so the notice follows on the next
+//! watcher pass.
 //!
 //! Nothing here reads certificates or the pipeline-version allowlist: that is
 //! `automatic_gate`'s, and this module only consumes its [`Disclosure`].
@@ -95,6 +101,42 @@ pub fn project_arming_claim(disclosure: Disclosure) -> ArmingClaim {
     }
     let _ = disclosure;
     ArmingClaim::ModelScrubbed
+}
+
+/// The claim in force for one armed folder, from its own disclosure (K6's
+/// `automatic_gate::project_disclosure`), for the K5 sweep.
+///
+/// A folder armed under "will be scrubbed" is told its arming now means
+/// patterns-only exactly when its own record contradicts that wording: it has
+/// sent at least one session on the contributor's behalf since it was armed,
+/// and not every such session had a certified full pipeline. A folder whose
+/// every automatic send was certified keeps the scrub claim, and so does one
+/// that has sent nothing yet, which is judged by the arming offer's words
+/// alone ([`project_arming_claim`]). Arming again resets the record, so a
+/// re-armed folder is judged afresh.
+pub fn claim_in_force(policy: &super::policy::ProjectPolicy, project_key: &str) -> ArmingClaim {
+    match super::automatic_gate::project_disclosure(policy, project_key) {
+        Disclosure::ModelScrubbed => ArmingClaim::ModelScrubbed,
+        // Evidence: at least one session went out on the contributor's
+        // behalf since arming, and not every one had a certified full
+        // pipeline (`project_disclosure` answers `ModelScrubbed` otherwise).
+        // "Will be scrubbed" was not true of that session.
+        Disclosure::PatternsOnly if sent_automatically(policy, project_key) => {
+            ArmingClaim::PatternsOnly
+        }
+        // Nothing sent since arming: no evidence either way, so the words in
+        // force are whatever the arming offer says for this disclosure.
+        disclosure @ Disclosure::PatternsOnly => project_arming_claim(disclosure),
+    }
+}
+
+/// Whether any session has gone out from this armed folder on the
+/// contributor's behalf since it was last armed: K6's tally, read as a count.
+fn sent_automatically(policy: &super::policy::ProjectPolicy, project_key: &str) -> bool {
+    policy.projects.get(project_key).is_some_and(|entry| {
+        let tally = entry.automatic_redaction;
+        tally.certified_full_pipeline > 0 || tally.not_certified > 0
+    })
 }
 
 /// What the Flow 1 grant screen says, for this disclosure:
@@ -163,6 +205,83 @@ mod tests {
         assert!(!PatternsOnly.narrowed_to(ModelScrubbed));
         assert!(!ModelScrubbed.narrowed_to(ModelScrubbed));
         assert!(!PatternsOnly.narrowed_to(PatternsOnly));
+    }
+
+    fn armed(key: &str) -> super::super::policy::ProjectPolicy {
+        let mut p = super::super::policy::ProjectPolicy::new();
+        p.set_mode(
+            key,
+            super::super::policy::ProjectMode::AutoUpload,
+            "2026-09-27T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        p
+    }
+
+    fn sweep(p: &mut super::super::policy::ProjectPolicy) -> Vec<String> {
+        let keys: Vec<String> = p.projects.keys().cloned().collect();
+        let claims: std::collections::BTreeMap<String, ArmingClaim> = keys
+            .iter()
+            .map(|k| (k.clone(), claim_in_force(p, k)))
+            .collect();
+        p.sweep_arming_claims(
+            |k| claims.get(k).copied().unwrap_or(ArmingClaim::ModelScrubbed),
+            "2026-09-27T01:00:00Z".parse().unwrap(),
+        )
+    }
+
+    /// K5 on the folder's own disclosure: one uncertified automatic send
+    /// under "will be scrubbed" gets exactly one notice.
+    #[test]
+    fn an_uncertified_automatic_send_rewords_the_folder_once() {
+        use super::super::automatic_gate::SessionRedaction;
+        let mut p = armed("/w/api");
+        assert!(
+            sweep(&mut p).is_empty(),
+            "nothing sent, nothing contradicted"
+        );
+        p.record_automatic_redaction("/w/api", SessionRedaction::CertifiedFullPipeline);
+        p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
+        assert_eq!(sweep(&mut p), vec!["api".to_string()]);
+        p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
+        assert!(sweep(&mut p).is_empty(), "told once");
+        assert_eq!(p.arming_rewordings.len(), 1);
+    }
+
+    #[test]
+    fn a_folder_whose_every_automatic_send_was_certified_is_not_reworded() {
+        use super::super::automatic_gate::SessionRedaction;
+        let mut p = armed("/w/api");
+        for _ in 0..3 {
+            p.record_automatic_redaction("/w/api", SessionRedaction::CertifiedFullPipeline);
+        }
+        assert_eq!(claim_in_force(&p, "/w/api"), ArmingClaim::ModelScrubbed);
+        assert!(sweep(&mut p).is_empty());
+        assert!(p.arming_rewordings.is_empty());
+    }
+
+    /// Re-arming answers the notice and starts the record again: nothing is
+    /// said until a new uncertified send, and then it is said once more.
+    #[test]
+    fn a_rearm_resets_the_rewording() {
+        use super::super::automatic_gate::SessionRedaction;
+        let mut p = armed("/w/api");
+        p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
+        assert_eq!(sweep(&mut p).len(), 1);
+
+        p.set_mode(
+            "/w/api",
+            super::super::policy::ProjectMode::AutoUpload,
+            "2026-09-27T02:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+        assert!(p.record_arming_claim("/w/api", ArmingClaim::ModelScrubbed));
+        assert!(p.arming_rewordings.is_empty(), "re-arming answers it");
+        assert!(sweep(&mut p).is_empty(), "the record starts from nothing");
+
+        p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
+        assert_eq!(sweep(&mut p).len(), 1);
+        assert_eq!(p.arming_rewordings.len(), 1);
     }
 
     #[test]
