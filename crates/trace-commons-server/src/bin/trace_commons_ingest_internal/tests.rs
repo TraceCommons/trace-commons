@@ -35744,11 +35744,56 @@ async fn audit_drills_accept_the_legacy_prefix_of_a_deployment_upgraded_across_t
         reconciliation.blocking_gaps
     );
     assert_eq!(reconciliation.db_audit_legacy_prefix_row_count, 3);
-    // Not asserting `ready`: the recent-sample reader parity check compares
-    // chain fields too, and still differs while a legacy row is among the
-    // latest 16. That gap predates the cutover and is not this rule's.
+    // Fewer than 16 post-cutover events, so the legacy rows are still in the
+    // recent-sample reader parity window: they are compared without the
+    // chain fields they never had, and everything else still matches.
+    assert!(reconciliation.ready, "{:?}", reconciliation.blocking_gaps);
 
-    // A real break after the first hashed row still fails both drills.
+    // Any other field of a legacy row is still compared.
+    let tamper_legacy_principal = |principal: String| {
+        let backend = backend.clone();
+        let audit_event_id = legacy_rows[2].audit_event_id;
+        async move {
+            let mut client = backend
+                .raw_pool_for_tests_and_diagnostics()
+                .get()
+                .await
+                .expect("owner connection");
+            let tx = client.transaction().await.expect("tamper transaction");
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&"tenant-a"],
+            )
+            .await
+            .expect("set tamper tenant context");
+            let updated = tx
+                .execute(
+                    "UPDATE trace_audit_events SET actor_principal_ref = $3
+                      WHERE tenant_id = $1 AND audit_event_id = $2",
+                    &[&"tenant-a", &audit_event_id, &principal],
+                )
+                .await
+                .expect("owner edits a legacy row");
+            assert_eq!(updated, 1);
+            tx.commit().await.expect("tamper commits");
+        }
+    };
+    tamper_legacy_principal("someone-else".to_string()).await;
+    let (_, reconciliation) = run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(
+        reconciliation
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap == "audit_reader_sample_parity=failed"),
+        "{:?}",
+        reconciliation.blocking_gaps
+    );
+    tamper_legacy_principal(legacy_rows[2].actor_principal_ref.clone()).await;
+    let (_, reconciliation) = run_audit_chain_and_reconciliation_drills(&state, false).await;
+    assert!(reconciliation.ready, "{:?}", reconciliation.blocking_gaps);
+
+    // A real break after the first hashed row still fails both drills, and a
+    // hashed row's chain fields are still part of reader parity.
     {
         let mut client = backend
             .raw_pool_for_tests_and_diagnostics()
@@ -35796,6 +35841,14 @@ async fn audit_drills_accept_the_legacy_prefix_of_a_deployment_upgraded_across_t
             .blocking_gaps
             .iter()
             .any(|gap| gap == "db_audit_hash_chain_failures=1"),
+        "{:?}",
+        reconciliation.blocking_gaps
+    );
+    assert!(
+        reconciliation
+            .blocking_gaps
+            .iter()
+            .any(|gap| gap == "audit_reader_sample_parity=failed"),
         "{:?}",
         reconciliation.blocking_gaps
     );

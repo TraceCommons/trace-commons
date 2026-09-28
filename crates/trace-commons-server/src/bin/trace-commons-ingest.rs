@@ -70739,7 +70739,7 @@ async fn reconcile_db_mirror(
         &tenant.tenant_id,
         TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
     )?;
-    let file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
+    let mut file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
     let mut audit_reader_sample_failures = Vec::new();
     let audit_reader_sample_parity_ok = match db
         .list_recent_trace_audit_events(
@@ -70750,8 +70750,15 @@ async fn reconcile_db_mirror(
     {
         Ok(db_sample) => {
             let db_sample_row_count = db_sample.len();
-            let (db_audit_sample_projection, db_projection_error_hashes) =
+            let legacy_event_ids = db_sample
+                .iter()
+                .filter(|row| row.event_hash.is_none())
+                .map(|row| row.audit_event_id)
+                .collect::<BTreeSet<_>>();
+            let (mut db_audit_sample_projection, db_projection_error_hashes) =
                 storage_audit_event_reader_projection(&tenant.tenant_id, db_sample);
+            clear_legacy_audit_chain_fields(&mut file_audit_sample_projection, &legacy_event_ids);
+            clear_legacy_audit_chain_fields(&mut db_audit_sample_projection, &legacy_event_ids);
             if !db_projection_error_hashes.is_empty() {
                 audit_reader_sample_failures.push(format!(
                     "file_sample={} db_sample={} db_projection_error_hashes={}",
@@ -74535,6 +74542,22 @@ fn export_manifest_reader_projection(
             )
         })
         .collect()
+}
+
+/// Clears the chain fields of the sampled events whose DB row has none: rows
+/// a build from before #1043 mirrored, which never carried them. Every other
+/// field of those events is still compared, and a hashed row is compared
+/// whole, chain fields included.
+fn clear_legacy_audit_chain_fields(
+    projections: &mut [TraceReaderAuditEventProjection],
+    legacy_event_ids: &BTreeSet<Uuid>,
+) {
+    for projection in projections {
+        if legacy_event_ids.contains(&projection.event_id) {
+            projection.previous_event_hash = None;
+            projection.event_hash = None;
+        }
+    }
 }
 
 fn audit_event_reader_projection(
