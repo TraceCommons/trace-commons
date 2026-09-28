@@ -3184,6 +3184,79 @@ pub extern "C" fn tc_certificate_detail_copy() -> *mut c_char {
     })
 }
 
+/// Parse `arg` as JSON and hand it to `build`, returning its answer as an
+/// owned JSON string, or NULL for a NULL, non-UTF-8 or unparseable argument
+/// and whenever `build` answers `None`.
+///
+/// # Safety
+/// `arg`, if non-null, must point to a valid, NUL-terminated C string.
+unsafe fn notice_from_wire(
+    arg: *const c_char,
+    build: impl FnOnce(&serde_json::Value) -> Option<serde_json::Value>,
+) -> *mut c_char {
+    if arg.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Ok(text) = (unsafe { borrow_str(arg) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return std::ptr::null_mut();
+    };
+    let Some(notice) = build(&value) else {
+        return std::ptr::null_mut();
+    };
+    let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+    to_owned_cstring(&json)
+}
+
+/// The notice for one armed folder whose arming wording no longer claims a
+/// model scrubs its sessions (K5), from one element of `status`'s
+/// `arming_rewordings` list, passed as the JSON object the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `ArmingRewordedNoticeCopy`'s
+/// fields; free it with [`tc_string_free`]. NULL only for a NULL, non-UTF-8
+/// or unparseable argument, one that is not a JSON object, and on a caught
+/// panic.
+///
+/// # Safety
+/// `rewording_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_arming_reworded_notice(rewording_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(unsafe {
+            notice_from_wire(rewording_json, |v| {
+                trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(v)
+                    .and_then(|n| serde_json::to_value(n).ok())
+            })
+        })
+    })
+}
+
+/// The notice for armed folders the automatic-contribution gate is holding,
+/// from `status`'s `automatic_contribution_held` object, passed as the JSON
+/// the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `GateHeldNoticeCopy`'s
+/// fields; free it with [`tc_string_free`]. NULL when nothing is held, for a
+/// NULL, non-UTF-8 or unparseable argument, and on a caught panic: a shell
+/// shows nothing then, and never writes its own sentence.
+///
+/// # Safety
+/// `held_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_gate_held_notice(held_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(unsafe {
+            notice_from_wire(held_json, |v| {
+                trace_commons_contributor::consent_copy::gate_held_notice_for_wire(v)
+                    .and_then(|n| serde_json::to_value(n).ok())
+            })
+        })
+    })
+}
+
 /// The sentence for one `private_inference_state` label.
 ///
 /// `state` is the `state` field of `get_settings`/`status`'s

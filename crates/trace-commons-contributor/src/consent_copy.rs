@@ -50,6 +50,23 @@
 //! status object; across the ABI it is `tc_witness_capacity_notice`. Here
 //! because it is the answer to "is anything going out without being
 //! checked", which is a consent question.
+//!
+//! # Switch-on notices
+//!
+//! The two notices the connect-and-forget design puts on the enforcement
+//! switch-on list ("When enforcement is switched on", item 5), and the words
+//! for the held-count health condition (item 2):
+//!
+//! - [`arming_reworded_notice_for_wire`] (`tc_arming_reworded_notice`), for
+//!   one element of `status.arming_rewordings`: a folder armed under the old
+//!   "will be scrubbed" wording whose wording is now patterns-only (K5).
+//! - [`gate_held_notice_for_wire`] (`tc_gate_held_notice`), for
+//!   `status.automatic_contribution_held`: armed folders whose sessions the
+//!   automatic-contribution gate is holding, why, and that they release on
+//!   their own.
+//!
+//! **DRAFT, NEEDS APPROVAL**, every sentence in both: the spec's Open list
+//! says the wording is open.
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -533,6 +550,15 @@ pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted t
 // chosen by `witness_origin_line` from the daemon's `route_disclosure`
 // facts. See "The disclosure screens" below.
 
+/// Shown under an armed project when its disclosure (K6,
+/// `automatic_gate::project_disclosure`) could not be read.
+///
+/// Approved by Zaki on #1075. It names no wording as a fallback: a shell
+/// that cannot read the core's answer shows neither scrub disclosure,
+/// rather than guessing one.
+pub const AUTO_PROJECT_DISCLOSURE_UNAVAILABLE: &str =
+    "What is removed from this project could not be loaded.";
+
 /// Why the scope picker blocks the grant (R7), and what declining means.
 ///
 /// **DRAFT, NEEDS APPROVAL.** R7: the picker has no default, and a
@@ -673,6 +699,416 @@ pub fn witness_capacity_notice(waiting_sessions: u64) -> WitnessCapacityCopy {
 pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<WitnessCapacityCopy> {
     let waiting = value.get("waiting_sessions")?.as_u64()?;
     (waiting > 0).then(|| witness_capacity_notice(waiting))
+}
+
+// ---------------------------------------------------------------------------
+// Moving a legacy invite identity to a NEAR AI account
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section is DRAFT, NEEDS APPROVAL (copy for Zaki's
+// approval): written with the client half of the legacy invite migration so
+// that no shell writes its own. The Tauri client renders it; macOS, Windows
+// and GTK do not take it yet. The daemon reports the move under
+// `status.legacy_invite_migration` and refuses it with
+// `legacy_migration_*` labels (`daemon::legacy_migration::LABELS`).
+
+/// **DRAFT, NEEDS APPROVAL.** Heading of the offer, shown only while
+/// `status.legacy_invite_migration.offered` is true.
+pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
+
+/// **DRAFT, NEEDS APPROVAL.** The offer. Says it is optional and that
+/// declining changes nothing, because coexistence is the default.
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+
+/// **DRAFT, NEEDS APPROVAL.** The button that starts the move.
+pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move to my NEAR AI account";
+
+/// **DRAFT, NEEDS APPROVAL.** Shown while the move runs.
+pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
+
+/// **DRAFT, NEEDS APPROVAL.** Asked only when neither the device nor the
+/// commons can say which invite it joined with
+/// (`legacy_migration_invite_needed`).
+pub const LEGACY_MIGRATION_INVITE_PROMPT: &str = "Paste the invite link you joined with. It is used only to show which invite is yours, and it is not stored.";
+
+/// **DRAFT, NEEDS APPROVAL.** The notice's heading: the one sentence the
+/// consent spec requires every shell to show after the move.
+pub const LEGACY_MIGRATION_NOTICE_TITLE: &str =
+    "Your contributions now go under your NEAR AI account";
+
+/// **DRAFT, NEEDS APPROVAL.**
+pub const LEGACY_MIGRATION_NOTICE_BODY: &str = "From now on, what you contribute is credited to your NEAR AI account instead of your invite. What you contributed before stays recorded under your invite.";
+
+/// **DRAFT, NEEDS APPROVAL.** When at least one folder, or the automatic
+/// grant, was carried over.
+pub const LEGACY_MIGRATION_NOTICE_ARMED_KEPT: &str = "Folders you set to contribute automatically still do. You were not asked again because only the account they go under changed.";
+
+/// **DRAFT, NEEDS APPROVAL.** When nothing was armed.
+pub const LEGACY_MIGRATION_NOTICE_NOTHING_ARMED: &str =
+    "You had no folders contributing automatically, so nothing else changed.";
+
+/// **DRAFT, NEEDS APPROVAL.**
+pub const LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE: &str = "Got it";
+
+/// Shown when the shell could not reach the core to start the move at all
+/// (a transport failure, not a refusal): nothing ran, so nothing changed.
+pub const LEGACY_MIGRATION_START_FAILED: &str =
+    "The move could not be started. Nothing was changed.";
+
+/// The notice after a move, as a shell renders it.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct LegacyMigrationNoticeCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub folders: &'static str,
+    pub acknowledge: &'static str,
+}
+
+/// The notice for `status.legacy_invite_migration.notice`, or `None` when
+/// there is nothing to show (`null`, or not an object).
+#[must_use]
+pub fn legacy_migration_notice_for_wire(
+    notice: &serde_json::Value,
+) -> Option<LegacyMigrationNoticeCopy> {
+    let object = notice.as_object()?;
+    let folders = object
+        .get("folders_kept")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let grant = object
+        .get("automatic_grant_kept")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(LegacyMigrationNoticeCopy {
+        title: LEGACY_MIGRATION_NOTICE_TITLE,
+        body: LEGACY_MIGRATION_NOTICE_BODY,
+        folders: if folders > 0 || grant {
+            LEGACY_MIGRATION_NOTICE_ARMED_KEPT
+        } else {
+            LEGACY_MIGRATION_NOTICE_NOTHING_ARMED
+        },
+        acknowledge: LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE,
+    })
+}
+
+/// **DRAFT, NEEDS APPROVAL.** What a refused move says, by the daemon's
+/// label. Every refusal leaves the invite identity exactly as it was, and
+/// the pooled one says so plainly because it is the common case (a shared
+/// event code).
+#[must_use]
+pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
+    match label {
+        "legacy_migration_tenant_pooled" => {
+            "This invite was shared by many people, so it can't be moved to one account. It keeps working exactly as it does now."
+        }
+        "legacy_migration_admission_not_ready" => {
+            "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
+        }
+        "legacy_migration_no_near_ai_session" => {
+            "Sign in to NEAR AI first, then try again. Your invite keeps working."
+        }
+        "legacy_migration_invite_needed" => {
+            "We couldn't tell which invite you joined with. Paste your invite link to continue."
+        }
+        "legacy_migration_invite_other_commons" => "That invite is for a different commons.",
+        "legacy_migration_invite_invalid" => "That doesn't look like an invite link or code.",
+        "legacy_migration_tenant_claimed" => {
+            "This invite has already been moved to a different account. Nothing changed here."
+        }
+        "legacy_migration_invite_revoked" => {
+            "This invite was revoked, so it can't be moved. Nothing changed here."
+        }
+        "legacy_migration_device_not_eligible" => {
+            "This device can't be moved to an account. It keeps working as it does now."
+        }
+        "legacy_migration_link_not_enabled" => {
+            "This commons doesn't offer moving an invite to an account yet. Your invite keeps working."
+        }
+        "legacy_migration_verification_failed" => {
+            "The commons's answer didn't check out, so nothing was changed."
+        }
+        "legacy_migration_identity_changed" => {
+            "You signed out or changed accounts while this was running, so nothing was moved."
+        }
+        "legacy_migration_commons_changed" => {
+            "This commons's settings changed since you joined, so nothing was moved. Try again later."
+        }
+        "legacy_migration_already_migrated" => "You've already moved to your NEAR AI account.",
+        _ => "Nothing was changed. Your invite keeps working; try again later.",
+    }
+}
+
+/// The offer's words, in one object, for a shell to render.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct LegacyMigrationOfferCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub action: &'static str,
+    pub working: &'static str,
+    pub invite_prompt: &'static str,
+    pub start_failed: &'static str,
+}
+
+#[must_use]
+pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
+    LegacyMigrationOfferCopy {
+        title: LEGACY_MIGRATION_OFFER_TITLE,
+        body: LEGACY_MIGRATION_OFFER_BODY,
+        action: LEGACY_MIGRATION_OFFER_ACTION,
+        working: LEGACY_MIGRATION_WORKING,
+        invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
+        start_failed: LEGACY_MIGRATION_START_FAILED,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Switch-on notices: the old-wording notice (K5) and the held-folder notice
+// ---------------------------------------------------------------------------
+//
+// DRAFT, NEEDS APPROVAL: every constant below. The spec's Open list
+// ("Telling the contributor: the copy and the shells") leaves the wording
+// open.
+
+/// Why a folder armed under the old wording is being told anything.
+///
+/// **DRAFT, NEEDS APPROVAL.** States the change and that the mode did not
+/// change -- "already-armed folders stay armed" -- before what the arming now
+/// means, which is the patterns-only disclosure word for word.
+pub const REWORDED_BODY: &str = "When you turned on automatic contributing here, we said its sessions would be scrubbed. That said more than this app can confirm, so this is what it means now. Nothing about the project has changed: it still contributes automatically.";
+
+/// The heading over the patterns-only sentences in a rewording notice.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const REWORDED_NOW_HEADING: &str = "What happens to its sessions";
+
+/// The button that switches a reworded folder to ask-first. A shell sends it
+/// as `set_project_mode` with the element's `project_id` and `notify_only`,
+/// which also answers the notice.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const ASK_ME_FIRST_ACTION: &str = "Ask me first";
+
+/// Shown when the daemon refuses that switch. The notice stays.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const ASK_ME_FIRST_FAILED: &str =
+    "It could not be switched, so it still contributes automatically. Nothing was changed.";
+
+/// The title of a rewording notice this build cannot place: no label.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const REWORDED_UNPLACED_TITLE: &str = "What automatic contributing now means";
+
+/// The title of a rewording notice.
+#[must_use]
+pub fn arming_reworded_title(project_label: Option<&str>) -> String {
+    match project_label {
+        Some(label) => format!("What automatic contributing from {label} now means"),
+        None => REWORDED_UNPLACED_TITLE.to_string(),
+    }
+}
+
+/// Everything a shell shows for one element of `status.arming_rewordings`.
+///
+/// The scope and limit are [`AUTO_PATTERNS_ONLY_SCOPE`] and
+/// [`AUTO_PATTERNS_ONLY_LIMIT`], word for word: the spec says a reworded
+/// folder "gets the same notice a newly automatic folder gets", and the
+/// patterns-only wording is that notice.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ArmingRewordedNoticeCopy {
+    pub title: String,
+    pub body: &'static str,
+    pub now_heading: &'static str,
+    pub scope: &'static str,
+    pub limit: &'static str,
+    pub no_review: &'static str,
+    pub acknowledge: &'static str,
+    /// Present exactly when the element names a `project_id` to act on.
+    pub ask_first_action: Option<&'static str>,
+    /// Present exactly when `ask_first_action` is.
+    pub ask_first_failed: Option<&'static str>,
+}
+
+/// The notice for one element of `status.arming_rewordings`, as it came off
+/// the wire. `None` only for a value that is not an object.
+///
+/// Every element is a narrowing to patterns-only today, the only rewording
+/// the daemon records (`arming_wording::ArmingClaim::narrowed_to`), so the
+/// words do not branch on `was` / `now`; a shell passes the object through
+/// and never reads them.
+#[must_use]
+pub fn arming_reworded_notice_for_wire(
+    value: &serde_json::Value,
+) -> Option<ArmingRewordedNoticeCopy> {
+    let object = value.as_object()?;
+    let label = object
+        .get("project_label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|l| !l.is_empty());
+    let has_id = object
+        .get("project_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.is_empty());
+    Some(ArmingRewordedNoticeCopy {
+        title: arming_reworded_title(label),
+        body: REWORDED_BODY,
+        now_heading: REWORDED_NOW_HEADING,
+        scope: AUTO_PATTERNS_ONLY_SCOPE,
+        limit: AUTO_PATTERNS_ONLY_LIMIT,
+        no_review: AUTO_NO_REVIEW,
+        acknowledge: VOID_ACKNOWLEDGE,
+        ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
+        ask_first_failed: has_id.then_some(ASK_ME_FIRST_FAILED),
+    })
+}
+
+/// The title of the held-folder notice.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const GATE_HELD_TITLE: &str = "Automatic contributing is on hold";
+
+/// That nothing is sent while held, that nothing is lost, and that it
+/// releases on its own.
+///
+/// **DRAFT, NEEDS APPROVAL.** "On their own" is what separates this hold from
+/// the indefinite one rev 6 rejected: it releases the first full pass that
+/// finds the requirement met.
+pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while they wait, and nothing has been lost. They go out on their own once this changes.";
+
+/// What the contributor can do meanwhile. Shown beside a folder's
+/// [`ASK_ME_FIRST_ACTION`].
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const GATE_HELD_ASK_FIRST: &str =
+    "To review a project's sessions yourself instead, switch it to Ask me first.";
+
+/// One of the gate's reason labels (`automatic_gate::REASON_*`), as a
+/// sentence. A label this build does not know still gets one.
+///
+/// **DRAFT, NEEDS APPROVAL.** The R3 sentence is the spec's: "this commons
+/// does not yet accept automatic contributions from their account".
+#[must_use]
+pub fn gate_held_reason_line(label: &str) -> &'static str {
+    use crate::daemon::automatic_gate::{
+        REASON_ACCOUNT_ALLOWANCE_SPENT, REASON_ADMISSION_PER_SESSION, REASON_NO_SCOPE,
+    };
+    match label {
+        REASON_ADMISSION_PER_SESSION => {
+            "This commons does not yet accept automatic contributions from your account."
+        }
+        REASON_ACCOUNT_ALLOWANCE_SPENT => {
+            "Your account has reached what this commons accepts from it for now."
+        }
+        REASON_NO_SCOPE => "You have not chosen how your traces may be used.",
+        _ => "Something automatic contributing needs is not in place yet.",
+    }
+}
+
+/// How many sessions are held, counted and agreeing in number.
+#[must_use]
+pub fn gate_held_count_line(held_sessions: u64) -> String {
+    match held_sessions {
+        0 => "Sessions from projects set to contribute automatically are waiting.".to_string(),
+        1 => "1 session from a project set to contribute automatically is waiting.".to_string(),
+        n => format!("{n} sessions from projects set to contribute automatically are waiting."),
+    }
+}
+
+/// One held folder's line.
+#[must_use]
+pub fn gate_held_project_line(project_label: &str, held_sessions: u64) -> String {
+    match held_sessions {
+        1 => format!("{project_label}: 1 session waiting"),
+        n => format!("{project_label}: {n} sessions waiting"),
+    }
+}
+
+/// One held folder in [`GateHeldNoticeCopy`].
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct GateHeldProjectCopy {
+    /// Passed through from the wire, for the ask-first button's
+    /// `set_project_mode`. Never shown.
+    pub project_id: Option<String>,
+    pub line: String,
+    /// Present exactly when `project_id` is.
+    pub ask_first_action: Option<&'static str>,
+    pub ask_first_failed: Option<&'static str>,
+}
+
+/// Everything a shell shows while the gate holds armed folders.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct GateHeldNoticeCopy {
+    pub title: &'static str,
+    pub body: String,
+    /// One sentence per reason label, deduplicated, never empty.
+    pub reasons: Vec<&'static str>,
+    pub release: &'static str,
+    pub ask_first: &'static str,
+    pub projects: Vec<GateHeldProjectCopy>,
+}
+
+/// The held-folder notice from `status.automatic_contribution_held`, passed
+/// through as the object the daemon sent. `None` when nothing is held, or
+/// for a value that is not that object: there is nothing to show, and it is
+/// never acknowledged -- it goes when the hold does.
+#[must_use]
+pub fn gate_held_notice_for_wire(value: &serde_json::Value) -> Option<GateHeldNoticeCopy> {
+    let held = value.get("held_sessions")?.as_u64()?;
+    if held == 0 {
+        return None;
+    }
+    let mut reasons: Vec<&'static str> = Vec::new();
+    for label in value
+        .get("reasons")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        let line = gate_held_reason_line(label);
+        if !reasons.contains(&line) {
+            reasons.push(line);
+        }
+    }
+    if reasons.is_empty() {
+        reasons.push(gate_held_reason_line(""));
+    }
+    let projects = value
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let label = p
+                .get("project_label")
+                .and_then(serde_json::Value::as_str)
+                .filter(|l| !l.is_empty())?;
+            let count = p
+                .get("held_sessions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let project_id = p
+                .get("project_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string);
+            let action = project_id.is_some();
+            Some(GateHeldProjectCopy {
+                project_id,
+                line: gate_held_project_line(label, count),
+                ask_first_action: action.then_some(ASK_ME_FIRST_ACTION),
+                ask_first_failed: action.then_some(ASK_ME_FIRST_FAILED),
+            })
+        })
+        .collect();
+    Some(GateHeldNoticeCopy {
+        title: GATE_HELD_TITLE,
+        body: gate_held_count_line(held),
+        reasons,
+        release: GATE_HELD_RELEASE,
+        ask_first: GATE_HELD_ASK_FIRST,
+        projects,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -997,11 +1433,11 @@ pub fn route_disclosure_for_wire(value: &serde_json::Value) -> Option<serde_json
 /// this build cannot word. Said rather than left blank, so a missing panel is
 /// never mistaken for nothing to disclose.
 ///
-/// **DRAFT, NEEDS APPROVAL.**
+/// Approved by Zaki with #1102.
 pub const DISCLOSURE_UNREADABLE: &str = "Where sessions go could not be read.";
 /// The same, on a single session's review.
 ///
-/// **DRAFT, NEEDS APPROVAL.**
+/// Approved by Zaki with #1102.
 pub const DISCLOSURE_SESSION_UNREADABLE: &str = "Where this session goes could not be read.";
 
 /// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], for a
@@ -1232,6 +1668,93 @@ pub fn inference_connection_copy() -> InferenceConnectionCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// K5: the rewording notice says the folder is still armed and then
+    /// says exactly what a patterns-only folder is told, with no model-scrub
+    /// sentence anywhere.
+    #[test]
+    fn the_rewording_notice_is_the_patterns_only_disclosure() {
+        let wire = serde_json::json!({
+            "id": 3, "project_id": "p-1", "project_label": "api",
+            "was": "model_scrubbed", "now": "patterns_only",
+        });
+        let n = arming_reworded_notice_for_wire(&wire).expect("a notice");
+        assert_eq!(n.title, "What automatic contributing from api now means");
+        assert!(n.body.contains("still contributes automatically"));
+        assert_eq!(n.scope, AUTO_PATTERNS_ONLY_SCOPE);
+        assert_eq!(n.limit, AUTO_PATTERNS_ONLY_LIMIT);
+        assert_eq!(n.no_review, AUTO_NO_REVIEW);
+        assert_eq!(n.ask_first_action, Some(ASK_ME_FIRST_ACTION));
+        assert_eq!(n.ask_first_failed, Some(ASK_ME_FIRST_FAILED));
+        let json = serde_json::to_string(&n).unwrap();
+        assert!(!json.contains("when a model recognises it"));
+        assert!(!json.contains("The model is not reliable"));
+    }
+
+    /// No label: an unplaced title, not a shell-written one. No id: no
+    /// button. Not an object: nothing.
+    #[test]
+    fn a_rewording_the_shell_cannot_place_still_gets_words() {
+        let n = arming_reworded_notice_for_wire(&serde_json::json!({ "id": 1 })).unwrap();
+        assert_eq!(n.title, REWORDED_UNPLACED_TITLE);
+        assert!(n.ask_first_action.is_none() && n.ask_first_failed.is_none());
+        assert!(arming_reworded_notice_for_wire(&serde_json::json!("x")).is_none());
+    }
+
+    /// The held notice: counted, a sentence per reason, the release line,
+    /// and a line and button per folder. Nothing held, nothing shown.
+    #[test]
+    fn the_held_notice_names_the_folders_and_says_it_releases() {
+        use crate::daemon::automatic_gate::{REASON_ADMISSION_PER_SESSION, REASON_NO_SCOPE};
+        let wire = serde_json::json!({
+            "held_sessions": 3,
+            "reasons": [REASON_ADMISSION_PER_SESSION, REASON_ADMISSION_PER_SESSION, REASON_NO_SCOPE],
+            "projects": [
+                { "project_id": "p-1", "project_label": "api", "held_sessions": 2 },
+                { "project_id": "p-2", "project_label": "web", "held_sessions": 1 },
+            ],
+        });
+        let n = gate_held_notice_for_wire(&wire).expect("a notice");
+        assert_eq!(n.title, GATE_HELD_TITLE);
+        assert_eq!(
+            n.body,
+            "3 sessions from projects set to contribute automatically are waiting."
+        );
+        assert_eq!(
+            n.reasons,
+            vec![
+                "This commons does not yet accept automatic contributions from your account.",
+                "You have not chosen how your traces may be used.",
+            ]
+        );
+        assert_eq!(n.release, GATE_HELD_RELEASE);
+        assert_eq!(n.projects.len(), 2);
+        assert_eq!(n.projects[0].line, "api: 2 sessions waiting");
+        assert_eq!(n.projects[1].line, "web: 1 session waiting");
+        assert_eq!(n.projects[0].project_id.as_deref(), Some("p-1"));
+        assert_eq!(n.projects[0].ask_first_action, Some(ASK_ME_FIRST_ACTION));
+
+        let one = gate_held_notice_for_wire(&serde_json::json!({
+            "held_sessions": 1, "reasons": ["some-future-reason"], "projects": [],
+        }))
+        .unwrap();
+        assert_eq!(
+            one.body,
+            "1 session from a project set to contribute automatically is waiting."
+        );
+        assert_eq!(
+            one.reasons,
+            vec!["Something automatic contributing needs is not in place yet."]
+        );
+
+        for nothing in [
+            serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] }),
+            serde_json::json!({}),
+            serde_json::json!("held"),
+        ] {
+            assert!(gate_held_notice_for_wire(&nothing).is_none(), "{nothing}");
+        }
+    }
 
     // -----------------------------------------------------------------
     // K11: the route disclosure
@@ -1978,6 +2501,56 @@ mod tests {
         ] {
             assert_eq!(witness_capacity_notice_for_wire(&value), None, "{value}");
         }
+    }
+
+    /// Every refusal the daemon can send has its own sentence, except the
+    /// two generic ones, and each says what happened to the invite.
+    #[test]
+    fn every_migration_refusal_is_worded() {
+        let generic = legacy_migration_refusal_line("no-such-label");
+        for label in crate::daemon::legacy_migration::LABELS {
+            let line = legacy_migration_refusal_line(label);
+            if matches!(
+                *label,
+                "legacy_migration_unavailable"
+                    | "legacy_migration_not_enrolled"
+                    | "legacy_migration_not_applicable"
+                    | "legacy_migration_device_key_missing"
+                    | "legacy_migration_pending"
+                    | "legacy_migration_account_unavailable"
+                    | "legacy_migration_link_refused"
+            ) {
+                continue;
+            }
+            assert_ne!(line, generic, "{label} has no sentence of its own");
+        }
+        assert!(
+            legacy_migration_refusal_line("legacy_migration_tenant_pooled")
+                .contains("keeps working"),
+            "a pooled invite is told it keeps working"
+        );
+    }
+
+    #[test]
+    fn the_migration_notice_says_whether_armed_folders_were_kept() {
+        let kept = legacy_migration_notice_for_wire(
+            &serde_json::json!({"folders_kept": 2, "automatic_grant_kept": false}),
+        )
+        .unwrap();
+        assert_eq!(kept.title, LEGACY_MIGRATION_NOTICE_TITLE);
+        assert!(kept.title.contains("NEAR AI account"));
+        assert_eq!(kept.folders, LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        let grant_only = legacy_migration_notice_for_wire(
+            &serde_json::json!({"folders_kept": 0, "automatic_grant_kept": true}),
+        )
+        .unwrap();
+        assert_eq!(grant_only.folders, LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        let none = legacy_migration_notice_for_wire(
+            &serde_json::json!({"folders_kept": 0, "automatic_grant_kept": false}),
+        )
+        .unwrap();
+        assert_eq!(none.folders, LEGACY_MIGRATION_NOTICE_NOTHING_ARMED);
+        assert!(legacy_migration_notice_for_wire(&serde_json::Value::Null).is_none());
     }
 
     /// K10: a shell that can give the Flow 1 grant (Tauri) gets the grant

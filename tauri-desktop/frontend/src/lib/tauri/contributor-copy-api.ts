@@ -3,6 +3,12 @@ import {
   parseAutomaticGrantCopy,
 } from "./automatic-grant-copy";
 import { invokeTauri } from "./core-api";
+import {
+  type ArmingRewordedNotice,
+  type GateHeldNotice,
+  parseArmingRewordedNotice,
+  parseGateHeldNotice,
+} from "./switch-on-notices";
 
 export type { AutomaticGrantCopy } from "./automatic-grant-copy";
 import {
@@ -155,6 +161,8 @@ export type ContributorDisclosureCopy = {
   };
   credential_cost: string;
   credential_wallet_notice: string;
+  /** Under an armed project whose disclosure could not be read (K6). */
+  project_automatic_unavailable: string;
   near_ai_enroll: {
     title: string;
     what: string;
@@ -284,6 +292,19 @@ export async function getAutomaticGrantCopy(): Promise<AutomaticGrantCopy> {
   return parseAutomaticGrantCopy(await invokeTauri("automatic_contribution_copy"));
 }
 
+/**
+ * What an armed project is told about its sessions. The core chooses the
+ * scrub wording from that project's own certificates (K6); this parses the
+ * one shape it sends, and refuses anything else.
+ */
+export async function getProjectAutomaticCopy(
+  projectId: string,
+): Promise<AutomaticGrantCopy> {
+  return parseAutomaticGrantCopy(
+    await invokeTauri("project_automatic_contribution_copy", { projectId }),
+  );
+}
+
 export async function getContributorDisclosureCopy(): Promise<ContributorDisclosureCopy> {
   const value = record(
     await invokeTauri("contributor_disclosure_copy"),
@@ -338,6 +359,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       offer_asked_once: string(privateInference, "offer_asked_once"),
     },
     credential_cost: string(value, "credential_cost"),
+    project_automatic_unavailable: string(value, "project_automatic_unavailable"),
     credential_wallet_notice: string(value, "credential_wallet_notice"),
     near_ai_enroll: {
       title: string(value, "near_ai_enroll_title"),
@@ -618,6 +640,26 @@ export async function getWitnessCapacityNotice(
   return parseWitnessCapacityNotice(
     await invokeTauri("witness_capacity_notice", { capacity: wire }),
   );
+}
+
+/** The core's notice for one `status.arming_rewordings` element, passed through. */
+export async function getArmingRewordedNotice(
+  wire: Record<string, unknown>,
+): Promise<ArmingRewordedNotice> {
+  return parseArmingRewordedNotice(
+    await invokeTauri("arming_reworded_notice", { rewording: wire }),
+  );
+}
+
+/**
+ * The core's notice for armed folders the gate holds, from
+ * `status.automatic_contribution_held` passed through. Only asked while
+ * something is held, so the core answering `null` is refused.
+ */
+export async function getGateHeldNotice(
+  wire: Record<string, unknown>,
+): Promise<GateHeldNotice> {
+  return parseGateHeldNotice(await invokeTauri("gate_held_notice", { held: wire }));
 }
 
 /**

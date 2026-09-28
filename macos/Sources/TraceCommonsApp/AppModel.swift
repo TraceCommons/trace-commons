@@ -890,7 +890,21 @@ final class AppModel: ObservableObject {
         // Likewise the witness banner, with the count -- only when it is
         // actually going to be drawn.
         if label == "witness-saturated" && witnessCapacityHealth != nil { return nil }
+        // And the held-folder notice, which names the folders and says why --
+        // again only when it is going to be drawn.
+        if label == GateHeld.label && gateHeldNotice != nil { return nil }
         return HealthCopy.forLabel(label)
+    }
+
+    /// The notice for armed folders the automatic-contribution gate is
+    /// holding, in the Rust's words, when there are any. Independent of
+    /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
+    /// is held or the notice cannot be read; the label, if it holds the
+    /// slot, then falls back to `forLabel`'s on-hold line.
+    var gateHeldNotice: GateHeldNotice? {
+        guard status.gateHeld.held else { return nil }
+        return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)
+            .flatMap(GateHeldNotice.decode(fromJSON:))
     }
 
     /// The banner for approved sessions held on a busy privacy witness, when
@@ -1531,6 +1545,42 @@ final class AppModel: ObservableObject {
         ) { _ in
             self.refreshStatus()
             self.refreshAudit()
+        }
+    }
+
+    /// Records that one rewording notice was shown (K5), then re-reads
+    /// status so the daemon's own list decides what stays.
+    func acknowledgeArmingRewording(id: UInt64) {
+        perform(
+            "acknowledge_arming_rewordings",
+            work: { try $0.acknowledgeArmingRewordings(ids: [id]) }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// Projects whose "Ask me first" the daemon refused, by project id, so
+    /// the notice can show the Rust's refusal line. Cleared on a retry.
+    @Published private(set) var askFirstRefused: Set<String> = []
+
+    /// "Ask me first" on a rewording or held-folder notice. The same call as
+    /// Settings -- `set_project_mode` with the project's id and
+    /// `notify_only` -- which also answers a rewording notice. A refusal
+    /// changes nothing; the notice stays and says so.
+    func askFirst(projectID: String) {
+        guard let client else { return }
+        askFirstRefused.remove(projectID)
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.setProjectMode(projectID: projectID, mode: .ask) }
+            await MainActor.run {
+                if case .failure = outcome {
+                    self.askFirstRefused.insert(projectID)
+                }
+                self.refreshStatus()
+                self.refreshProjects()
+                self.refreshAudit()
+            }
         }
     }
 

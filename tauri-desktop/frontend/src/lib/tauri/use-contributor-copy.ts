@@ -1,13 +1,16 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
   getArmingOfferCopy,
+  getArmingRewordedNotice,
   getAutomaticGrantCopy,
   getCertificateDetail,
   getContributorDisclosureCopy,
   getEligibilityCopy,
   getEligibilityGroupCopy,
+  getGateHeldNotice,
   getGrantVoidNotice,
   getInferenceConnectionCopy,
+  getProjectAutomaticCopy,
   getProjectIgnoreCopy,
   getQuitConfirmationCopy,
   getRedactionSummary,
@@ -33,10 +36,15 @@ const copyKeys = {
   disclosure: ["contributor-copy", "disclosure"] as const,
   automaticGrant: (account: string) =>
     ["account", account, "contributor-copy", "automatic-grant"] as const,
+  projectAutomatic: (projectId: string, disclosure: string) =>
+    ["contributor-copy", "project-automatic", projectId, disclosure] as const,
   witnessReview: ["contributor-copy", "witness-review"] as const,
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
   grantVoid: (id: number) => ["contributor-copy", "grant-void", id] as const,
+  armingRewording: (id: number) =>
+    ["contributor-copy", "arming-rewording", id] as const,
+  gateHeld: (wire: string) => ["contributor-copy", "gate-held", wire] as const,
   inferenceConnection: ["contributor-copy", "inference-connection"] as const,
   witnessCapacity: (waiting: number) =>
     ["contributor-copy", "witness-capacity", waiting] as const,
@@ -79,6 +87,23 @@ export function useAutomaticGrantCopy(account: string, enabled: boolean) {
   });
 }
 
+/**
+ * An armed project's disclosure. Keyed by the disclosure the project row
+ * last reported, so the words are re-read as soon as the core's answer for
+ * that project changes, never cached across it.
+ */
+export function useProjectAutomaticCopy(
+  projectId: string,
+  disclosure: string | undefined,
+) {
+  return useQuery({
+    queryKey: copyKeys.projectAutomatic(projectId, disclosure ?? ""),
+    queryFn: () => getProjectAutomaticCopy(projectId),
+    enabled: disclosure !== undefined,
+    staleTime: 0,
+  });
+}
+
 export function useArmingOfferCopy(projectLabel: string, count: number) {
   return useQuery({
     queryKey: copyKeys.armingOffer(projectLabel, count),
@@ -102,6 +127,30 @@ export function useGrantVoidNotice(id: number, wire: Record<string, unknown>) {
   return useQuery({
     queryKey: copyKeys.grantVoid(id),
     queryFn: () => getGrantVoidNotice(wire),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/** The notice for one rewording. Keyed by its id, which is never reused. */
+export function useArmingRewordedNotice(
+  id: number,
+  wire: Record<string, unknown>,
+) {
+  return useQuery({
+    queryKey: copyKeys.armingRewording(id),
+    queryFn: () => getArmingRewordedNotice(wire),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The notice for armed folders the gate holds. Keyed by the whole object:
+ * the count, the reasons and the folders all change its words.
+ */
+export function useGateHeldNotice(wire: Record<string, unknown>) {
+  return useQuery({
+    queryKey: copyKeys.gateHeld(JSON.stringify(wire)),
+    queryFn: () => getGateHeldNotice(wire),
     staleTime: Number.POSITIVE_INFINITY,
   });
 }

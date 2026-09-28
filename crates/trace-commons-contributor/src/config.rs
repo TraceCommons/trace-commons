@@ -48,6 +48,23 @@ pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
 /// installation wrote into the config. Belongs to this enrollment, so it is
 /// swept by `wipe()` with the config it describes.
 pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
+/// The reference to the second device key a legacy invite migration stages
+/// for the NEAR AI identity it is moving to (`daemon::legacy_migration`).
+/// Swept by `wipe()`: a logout mid-migration ends the migration.
+pub const STAGED_DEVICE_KEY_FILE: &str = "device.staged.pk8";
+/// The in-progress record of a legacy invite identity switch: what to put
+/// back if it does not finish. Holds credential references and the old
+/// config, never a secret. Swept by `wipe()`.
+pub const IDENTITY_SWITCH_JOURNAL_FILE: &str = "identity-switch.json";
+/// The countersigned legacy invite link record and the migration notice
+/// (`daemon::legacy_migration`). Belongs to this enrollment; swept by
+/// `wipe()`.
+pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
+/// The subject hash of the invite this device was enrolled with, saved at
+/// invite enrollment so a later move to a NEAR AI account can name it
+/// without asking the issuer or the contributor. A hash, never the code.
+/// Swept by `wipe()`.
+pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -529,6 +546,39 @@ pub fn allowlist_for(allowed_hosts: Option<&str>) -> HostAllowlist {
     }
 }
 
+/// Resolve a root-relative `path` (which may carry a query) against the
+/// ORIGIN of `ingest_url`: its scheme, host and port, and nothing else.
+///
+/// `ingest_url` is the upload endpoint, and a configured one carries a path
+/// (`https://host/v1/traces`). Every other ingest route -- the account login
+/// page, the community roster -- is an absolute path on the same origin, so
+/// appending to the configured string produces `/v1/traces/account/login`,
+/// which 404s. The operator client already does this with `set_path`; this is
+/// the same rule for the few URLs built outside it.
+///
+/// Refuses anything that is not a plain root-relative path, and checks that
+/// the result is still on the ingest origin: `//host`, a WHATWG `/\host`, or a
+/// full URL would otherwise let the joined path name another host.
+pub fn ingest_origin_url(ingest_url: &str, path: &str) -> Result<reqwest::Url> {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains('#') {
+        anyhow::bail!("ingest_path_not_root_relative");
+    }
+    let mut origin = reqwest::Url::parse(ingest_url).context("ingest_url_invalid")?;
+    if origin.cannot_be_a_base() || origin.host_str().is_none() {
+        anyhow::bail!("ingest_url_invalid");
+    }
+    origin.set_path("/");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    let _ = origin.set_username("");
+    let _ = origin.set_password(None);
+    let joined = origin.join(path).context("ingest_path_not_root_relative")?;
+    if joined.origin() != origin.origin() {
+        anyhow::bail!("ingest_path_not_root_relative");
+    }
+    Ok(joined)
+}
+
 /// Shape check for a wallet tenant id: the `near-` namespace plus 64 lowercase
 /// hex characters.
 ///
@@ -926,9 +976,7 @@ impl ConfigStore {
     /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
         use crate::daemon::commons_credentials::{self, Kind};
-        commons_credentials::clear_with(self, &[Kind::Device, Kind::Account], || {
-            self.wipe_files()
-        })?;
+        commons_credentials::clear_with(self, &Kind::ALL, || self.wipe_files())?;
         // The local state is gone even if the native service is locked. Keep
         // its cleanup journal for retry rather than restoring either secret.
         let _ = commons_credentials::cleanup(self);
@@ -961,6 +1009,10 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -981,6 +1033,10 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1231,6 +1287,35 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// Only scheme, host and port survive from `ingest_url`: not its path,
+    /// query, fragment, or any userinfo someone put in the configured string.
+    #[test]
+    fn ingest_origin_url_keeps_only_the_origin_of_the_ingest_url() {
+        for ingest in [
+            "https://commons.example/v1/traces",
+            "https://commons.example/v1/traces/",
+            "https://commons.example/v1/traces?x=1#frag",
+            "https://user:secret@commons.example/v1/traces",
+            "https://commons.example",
+        ] {
+            assert_eq!(
+                ingest_origin_url(ingest, "/v1/community/leaderboard")
+                    .unwrap()
+                    .as_str(),
+                "https://commons.example/v1/community/leaderboard",
+                "ingest_url = {ingest}"
+            );
+        }
+        assert_eq!(
+            ingest_origin_url("https://commons.example:8443/v1/traces", "/a?b=c")
+                .unwrap()
+                .as_str(),
+            "https://commons.example:8443/a?b=c"
+        );
+        assert!(ingest_origin_url("not a url", "/a").is_err());
+        assert!(ingest_origin_url("https://commons.example", "/a#frag").is_err());
+    }
 
     #[cfg(windows)]
     #[test]

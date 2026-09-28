@@ -1018,12 +1018,159 @@ impl App {
             self.void_notices.remove(&child);
         }
         let notices = status.grant_void_notices();
+        // The switch-on notices share the column: a folder whose arming was
+        // reworded (K5), and armed folders the gate is holding.
+        let rewordings = status.arming_rewording_notices();
+        let held = status.gate_held_notice();
         if let Some(column) = self.void_notices.parent() {
-            column.set_visible(!notices.is_empty());
+            column.set_visible(!notices.is_empty() || !rewordings.is_empty() || held.is_some());
         }
         for card in notices {
             self.void_notices.append(&self.grant_void_card(&card));
         }
+        for card in rewordings {
+            self.void_notices.append(&self.arming_rewording_card(&card));
+        }
+        if let Some(held) = held {
+            self.void_notices.append(&self.gate_held_card(&held));
+        }
+    }
+
+    /// A card in the notices column: the attention glyph, a column of text,
+    /// and a column of buttons.
+    fn notice_card() -> (gtk::Box, gtk::Box, gtk::Box) {
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        let glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        glyph.add_css_class("tc-attention");
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&glyph);
+        card.append(&column);
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        (card, column, buttons)
+    }
+
+    fn notice_text(value: &str, class: &str) -> gtk::Label {
+        let label = gtk::Label::builder()
+            .label(value)
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        label.add_css_class(class);
+        label
+    }
+
+    /// "Ask me first": Settings' call, unchanged -- `set_project_mode` with
+    /// this project's id and `notify_only`. It also answers a rewording
+    /// notice. A refusal changes nothing; the core's refusal line says so.
+    fn ask_first_button(
+        self: &Rc<Self>,
+        project_id: String,
+        action: &str,
+        failed: &'static str,
+    ) -> gtk::Button {
+        let button = gtk::Button::with_label(action);
+        button.add_css_class("tc-quiet");
+        let app = Rc::clone(self);
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            app.call(
+                "set_project_mode",
+                serde_json::json!({ "project_id": project_id, "mode": "notify_only" }),
+                move |app, result| {
+                    if result.is_err() {
+                        app.toast(failed);
+                    }
+                    app.refresh();
+                },
+            );
+        });
+        button
+    }
+
+    /// One rewording notice (K5), in the core's words.
+    fn arming_rewording_card(
+        self: &Rc<Self>,
+        card_data: &crate::model::ArmingRewordingCard,
+    ) -> gtk::Box {
+        let notice = &card_data.notice;
+        let (card, column, buttons) = Self::notice_card();
+        column.append(&Self::notice_text(&notice.title, "tc-card-title"));
+        column.append(&Self::notice_text(notice.body, "tc-body"));
+        column.append(&Self::notice_text(notice.now_heading, "tc-card-title"));
+        for line in [notice.scope, notice.limit, notice.no_review] {
+            column.append(&Self::notice_text(line, "tc-body"));
+        }
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.ask_first_project_id.clone(),
+            notice.ask_first_action,
+            notice.ask_first_failed,
+        ) {
+            buttons.append(&self.ask_first_button(project_id, action, failed));
+        }
+        // Records that this notice was shown, and nothing else. Only the id
+        // on this card, so a rewording raised after this window drew is never
+        // cleared unseen.
+        if let Some(id) = card_data.id {
+            let button = gtk::Button::with_label(notice.acknowledge);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "acknowledge_arming_rewordings",
+                    serde_json::json!({ "ids": [id] }),
+                    |app, _result| app.refresh(),
+                );
+            });
+            buttons.append(&button);
+        }
+        card
+    }
+
+    /// Armed folders the gate is holding, in the core's words. No dismiss:
+    /// it goes when the hold does.
+    fn gate_held_card(self: &Rc<Self>, notice: &crate::copy::GateHeldNoticeCopy) -> gtk::Box {
+        let (card, column, _buttons) = Self::notice_card();
+        column.append(&Self::notice_text(notice.title, "tc-card-title"));
+        column.append(&Self::notice_text(&notice.body, "tc-body"));
+        for reason in &notice.reasons {
+            column.append(&Self::notice_text(&format!("\u{2022} {reason}"), "tc-body"));
+        }
+        column.append(&Self::notice_text(notice.release, "tc-body"));
+        if !notice.projects.is_empty() {
+            column.append(&Self::notice_text(notice.ask_first, "tc-body"));
+        }
+        for project in &notice.projects {
+            let row = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(style::space::S)
+                .build();
+            row.append(&Self::notice_text(&project.line, "tc-body"));
+            if let (Some(project_id), Some(action), Some(failed)) = (
+                project.project_id.clone(),
+                project.ask_first_action,
+                project.ask_first_failed,
+            ) {
+                row.append(&self.ask_first_button(project_id, action, failed));
+            }
+            column.append(&row);
+        }
+        card
     }
 
     fn grant_void_card(self: &Rc<Self>, card_data: &crate::model::GrantVoidCard) -> gtk::Box {
