@@ -473,6 +473,25 @@ Datasets, benchmarks, rankers (export and worker routes):
 - read-only ranker exports: `GET /v1/ranker/training-candidates`,
   `GET /v1/ranker/training-pairs`
 
+**Witness provenance label (#1059).** Replay dataset items, benchmark
+conversion candidates, and ranker training candidates (and so both sides of a
+training pair) carry `witness_provenance_class`, one of:
+
+| Value | Meaning |
+|-------|---------|
+| `provider_tee_final_call` | A verified v2 certificate with a provider-TEE receipt for the last declared call covers the trace's current accepted artifact. |
+| `gateway_final_call` | The same, with a gateway receipt. |
+| `legacy_v1` | A v1 certificate, which makes no provenance statement. |
+| `unattested` | Everything else: no certificate, an explicit unattested v2 statement, an inactive or revoked submission, or a current artifact the certificate no longer covers (including every review-approved trace; see "Final-call inference provenance"). |
+
+The field is additive, and no schema string changed: not
+`trace_export_job_request.v1` (which governs request filters, none of which
+changed) and not `benchmark_conversion.v1`. **Readers must tolerate its
+absence.** Benchmark artifacts written before #1059 do not have it, and a
+reader must treat a missing field as "not recorded", never as a class. The
+label is a label only: in v1 it earns no account trust and weights no gate,
+score or credit amount (#1061, earned-trust decision 5).
+
 Credit, settlement, NEAR:
 
 - `POST /v1/workers/utility-credit`, `POST /v1/workers/utility-attestations`
@@ -1343,4 +1362,20 @@ verify the selected object's bytes before use. Exact signed-source retries may
 rebind the derived object digest without changing original certificate or body
 evidence. Missing evidence, v1, inactive or revoked submissions, and
 object-digest mismatches do not expose an attested class. File-only ingestion
-has no durable inference-provenance read and makes no such claim.
+reads the same claim from private submission metadata through
+`file_witness::current_claim`, under the same rules.
+
+The claim is surfaced, never weighted (#1059): exports, the reviewer trace
+list (`GET /v1/traces`), and credit events (`trace_credit_ledger`
+`witness_provenance_class`, V89) carry it as a label, and nothing that gates,
+scores or prices a trace reads it. The contributor's own credit-events view
+omits it.
+
+**Review-approved traces read `unattested`.** Approval stores a new reviewed
+artifact under a new object key. The original certificate covers the bytes
+the contributor submitted, not that reviewed artifact, so the current-object
+claim is an artifact mismatch and the label is `unattested`, even when the
+submission arrived with a verified provider-TEE or gateway certificate. This
+is deliberate (R4: claim provenance only where the certificate supports it).
+The certificate is kept as history, and is not re-bound to the reviewed
+artifact.
