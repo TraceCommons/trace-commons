@@ -1568,6 +1568,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "passkey_ceiling_counts_closed",
         include_str!("../../../../migrations/V102__passkey_ceiling_counts_closed.sql"),
     ),
+    // V103 is claimed by a pull request in flight (#1121). V104 replaces
+    // V91's function body and depends only on V81 and V91.
+    (
+        104,
+        "legacy_invite_link_device_guards",
+        include_str!("../../../../migrations/V104__legacy_invite_link_device_guards.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
