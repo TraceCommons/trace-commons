@@ -1719,6 +1719,10 @@ struct AppState {
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
+    /// A candidate earned-trust growth policy for the shadow evaluator. Never
+    /// read by admission; see `account_trust_growth_routes`.
+    account_trust_shadow_policy:
+        Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3939,6 +3943,8 @@ impl AppState {
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let account_trust_shadow_policy =
+            account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
         if account_admission.is_some() {
             let db = db_mirror
                 .as_ref()
@@ -4282,6 +4288,7 @@ impl AppState {
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
             account_admission,
+            account_trust_shadow_policy,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -8103,6 +8110,18 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/record-account-trust-facts",
             post(account_trust_growth_routes::record_account_trust_facts_handler),
+        )
+        .route(
+            "/v1/admin/evaluate-account-trust",
+            post(account_trust_growth_routes::evaluate_account_trust_handler),
+        )
+        .route(
+            "/v1/admin/account-trust/explain",
+            get(account_trust_growth_routes::explain_account_trust_handler),
+        )
+        .route(
+            "/v1/admin/account-trust-drill",
+            post(account_trust_growth_routes::account_trust_drill_handler),
         )
         .route(
             "/v1/admin/scores-by-submission",

@@ -6156,6 +6156,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
+        account_trust_shadow_policy: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -27378,6 +27379,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
+        account_trust_shadow_policy: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -27692,7 +27694,18 @@ async fn account_trust_worker_routes_require_admin_and_a_db_mirror() {
     use axum::body::Body;
     use tower::ServiceExt;
 
-    for uri in ["/v1/admin/record-account-trust-facts?limit=5"] {
+    let good_ref = format!("sha256:{}", "a".repeat(64));
+    let explain = format!("/v1/admin/account-trust/explain?account_ref={good_ref}");
+    for (method, uri, body) in [
+        ("POST", "/v1/admin/record-account-trust-facts?limit=5", None),
+        ("POST", "/v1/admin/evaluate-account-trust?limit=5", None),
+        ("GET", explain.as_str(), None),
+        (
+            "POST",
+            "/v1/admin/account-trust-drill",
+            Some(serde_json::json!({"purpose": "earned trust drill"})),
+        ),
+    ] {
         for (token, expected) in [
             ("Bearer token-a", StatusCode::FORBIDDEN),
             ("Bearer review-token-a", StatusCode::FORBIDDEN),
@@ -27701,20 +27714,361 @@ async fn account_trust_worker_routes_require_admin_and_a_db_mirror() {
         ] {
             let temp = tempfile::tempdir().expect("temp dir");
             let state = test_state(temp.path().to_path_buf());
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(AUTHORIZATION, token);
+            let body = match &body {
+                Some(json) => {
+                    request = request.header(CONTENT_TYPE, "application/json");
+                    Body::from(json.to_string())
+                }
+                None => Body::empty(),
+            };
             let response = app(state)
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri(uri)
-                        .header(AUTHORIZATION, token)
-                        .body(Body::empty())
-                        .expect("request builds"),
-                )
+                .oneshot(request.body(body).expect("request builds"))
                 .await
                 .expect("route responds");
             assert_eq!(response.status(), expected, "{uri} with {token}");
         }
     }
+}
+
+/// Shadow only: the evaluator refuses any mode but `shadow`, and explain
+/// takes only a hash-shaped account ref. Both are refused before any
+/// database is touched.
+#[tokio::test]
+async fn account_trust_evaluator_is_shadow_only_and_explain_takes_a_hash() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, uri, expected) in [
+        (
+            "POST",
+            "/v1/admin/evaluate-account-trust?mode=applied".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            "/v1/admin/evaluate-account-trust?as_of=not-a-time".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "GET",
+            "/v1/admin/account-trust/explain?account_ref=near-abc".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "GET",
+            format!(
+                "/v1/admin/account-trust/explain?account_ref=sha256:{}",
+                "A".repeat(64)
+            ),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header(AUTHORIZATION, "Bearer admin-token-a")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("route responds");
+        assert_eq!(response.status(), expected, "{uri}");
+    }
+}
+
+/// The earned-trust shadow worker, end to end over HTTP against PostgreSQL:
+/// record facts, evaluate, explain by hash-only ref, and a drill that records
+/// `account_trust_explain` evidence. Self-skips without a database.
+#[tokio::test]
+async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let admin = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("admin connection");
+    let tenant = format!("near-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let owner = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let account = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",
+            &[&tenant, &account, &owner],
+        )
+        .await
+        .unwrap();
+    for day in [0_i64, 8] {
+        let at = Utc::now() - chrono::Duration::days(30 - day);
+        let submission = Uuid::new_v4();
+        let trace = Uuid::new_v4();
+        admin
+            .execute(
+                "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+                    schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+                    redaction_pipeline_version,redaction_hash,received_at)
+                 VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5,$6)",
+                &[&tenant, &submission, &trace, &owner, &"a".repeat(64), &at],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,
+                    credit_account_ref,event_type,points_delta,reason,actor_principal_ref,
+                    actor_role,settlement_state,occurred_at)
+                 VALUES($1,$2,$3,$4,'fixture','accepted','0','fixture',$5,'system','pending',$6)",
+                &[&tenant, &Uuid::new_v4(), &submission, &trace, &owner, &at],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,
+                    gate_policy_version,gate_version_hash,perplexity_micros,tail_fraction_micros,
+                    perplexity_passed,novelty_score_micros,nearest_neighbor_hash,novelty_passed,
+                    embedding_evidence_hash,attestation_chain_hash,decided_at,dedup_cluster_id,
+                    dedup_signal_version)
+                 VALUES($1,$2,$3,'gate-v1',$4,1,1,TRUE,1,$4,TRUE,$4,$4,$5,$6,'events.v2+simhash.v2')",
+                &[&tenant, &Uuid::new_v4(), &submission, &"a".repeat(64), &at, &Uuid::new_v4()],
+            )
+            .await
+            .unwrap();
+    }
+
+    // A policy version unique to this run, so the drill checks only its rows.
+    let version = format!("e2e-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let policy = serde_json::json!({
+        "version": version,
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "lifetime"},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 90 * 86400,
+            "weekly_cap": 5,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 200,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 2, "active_weeks": 2, "age_seconds": 0, "multiplier": 2}
+            ]
+        }
+    })
+    .to_string();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .account_trust_shadow_policy = Some(Arc::new(
+        trace_commons_server::account_trust_rule::parse_shadow_growth_policy(
+            &policy,
+            &[version.as_str()],
+        )
+        .expect("policy"),
+    ));
+    let call = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
+        let state = state.clone();
+        async move {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(AUTHORIZATION, "Bearer admin-token-a");
+            let body = match body {
+                Some(json) => {
+                    request = request.header(CONTENT_TYPE, "application/json");
+                    Body::from(json.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = app(state)
+                .oneshot(request.body(body).expect("request"))
+                .await
+                .expect("response");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+
+    let (status, recorded) = call(
+        "POST",
+        "/v1/admin/record-account-trust-facts?limit=10000".into(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    assert!(
+        recorded["recorded_by_outcome"]["accepted"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 2
+    );
+
+    let (status, evaluated) = call(
+        "POST",
+        "/v1/admin/evaluate-account-trust?limit=10000".into(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{evaluated}");
+    assert_eq!(evaluated["mode"], "shadow");
+    assert!(evaluated["tier_distribution"]["1"].as_u64().unwrap_or(0) >= 1);
+    for body in [&recorded, &evaluated] {
+        let text = body.to_string();
+        assert!(!text.contains(&tenant) && !text.contains(&account.to_string()));
+    }
+
+    let trust = backend
+        .list_account_trust_worker_accounts(None, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.tenant_id() == tenant && a.account_id() == account)
+        .expect("enumerated");
+    let account_ref = trace_commons_server::account_trust_growth::account_trust_ref(&trust);
+    let (status, explained) = call(
+        "GET",
+        format!("/v1/admin/account-trust/explain?account_ref={account_ref}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{explained}");
+    assert_eq!(explained["reproduced"], true);
+    assert_eq!(explained["stored"]["tier"], 1);
+    assert_eq!(explained["stored"]["effective_allowance"], 200);
+    assert!(!explained.to_string().contains(&account.to_string()));
+    let (status, _) = call(
+        "GET",
+        format!(
+            "/v1/admin/account-trust/explain?account_ref=sha256:{}",
+            "0".repeat(64)
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, drill) = call(
+        "POST",
+        "/v1/admin/account-trust-drill".into(),
+        Some(serde_json::json!({"purpose": "earned trust e2e", "record_evidence": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{drill}");
+    assert_eq!(drill["passed"], true, "{drill}");
+    assert_eq!(drill["summary"]["not_reproduced"], 0);
+    assert_eq!(
+        drill["recorded_evidence"]["check_name"],
+        "account_trust_explain"
+    );
+    assert_eq!(drill["recorded_evidence"]["status"], "passed");
+
+    // Admission is untouched: the tier appears nowhere it could be applied.
+    let reservations: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_account_admission_submissions WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(reservations, 0);
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[test]
+fn account_trust_shadow_policy_is_optional_but_never_silently_malformed() {
+    let policy = serde_json::json!({
+        "version": "shadow-v1",
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "lifetime"},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 2419200,
+            "weekly_cap": 5,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 200,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [{"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1}]
+        }
+    })
+    .to_string();
+    let read = |json: Option<&str>, version: Option<&str>| {
+        let json = json.map(str::to_string);
+        let version = version.map(str::to_string);
+        account_trust_growth_routes::shadow_policy_from_values(|key| match key {
+            "TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON" => {
+                json.clone().ok_or(std::env::VarError::NotPresent)
+            }
+            "TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION" => {
+                version.clone().ok_or(std::env::VarError::NotPresent)
+            }
+            _ => Err(std::env::VarError::NotPresent),
+        })
+    };
+    assert!(read(None, None).unwrap().is_none(), "absent is off");
+    let parsed = read(Some(&policy), Some("shadow-v1")).unwrap().unwrap();
+    assert_eq!(parsed.version(), "shadow-v1");
+    assert!(read(Some(&policy), None).is_err(), "no reviewed version");
+    assert!(read(Some(&policy), Some("other-v1")).is_err());
+    assert!(read(Some("{"), Some("shadow-v1")).is_err());
+    assert!(
+        read(None, Some("shadow-v1")).is_err(),
+        "a version with no policy is a half-configured control"
+    );
+    // The production admission policy parser never accepts it.
+    assert!(
+        trace_commons_server::account_trust::parse_bounded_policy(&policy, &["shadow-v1"]).is_err()
+    );
 }
 
 #[tokio::test]
