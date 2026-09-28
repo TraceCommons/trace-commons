@@ -58,6 +58,9 @@ struct RouteDisclosureSection: View {
             case .loading:
                 ProgressView().controlSize(.small)
             case .unreadable:
+                if let title = model.routeDisclosureUnreadableCopy?.title {
+                    TCSectionHeader(title: title)
+                }
                 RouteDisclosureUnreadableLine(line: model.routeDisclosureUnreadableCopy?.panel)
             }
         }
