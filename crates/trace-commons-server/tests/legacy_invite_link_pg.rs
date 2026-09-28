@@ -1414,7 +1414,13 @@ async fn the_attestation_function_holds_every_refusal_on_its_own() {
 
     // --- tenant_pooled and invite_revoked, each on a tenant of its own that
     // A linked before the operator acted.
-    for (case, expected) in [("pooled", "tenant_pooled"), ("revoked", "invite_revoked")] {
+    // Each of the three revocations the link function honours is checked.
+    for (case, expected) in [
+        ("pooled", "tenant_pooled"),
+        ("invite_revoked", "invite_revoked"),
+        ("registry_revoked", "invite_revoked"),
+        ("grant_revoked", "invite_revoked"),
+    ] {
         let t = format!("tenant-v92-{case}-{}", Uuid::new_v4().simple());
         let invite = hash(&format!("invite:{t}"));
         let d1 = new_device();
@@ -1425,17 +1431,50 @@ async fn the_attestation_function_holds_every_refusal_on_its_own() {
             .link(&near_a, account_a, &t, &invite, &d1)
             .await
             .expect("links");
-        let sql = if case == "pooled" {
-            "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
-             VALUES ($1, 'shared')"
-        } else {
-            "UPDATE onboarding_invites SET revoked_at = now() WHERE tenant_id=$1"
-        };
-        exec(&admin, sql, &[&t]).await;
+        match case {
+            "pooled" => {
+                exec(
+                    &admin,
+                    "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+                     VALUES ($1, 'shared')",
+                    &[&t],
+                )
+                .await
+            }
+            "invite_revoked" => {
+                exec(
+                    &admin,
+                    "UPDATE onboarding_invites SET revoked_at = now() WHERE tenant_id=$1",
+                    &[&t],
+                )
+                .await
+            }
+            "registry_revoked" => {
+                exec(
+                    &admin,
+                    "INSERT INTO onboarding_invite_grants
+                        (invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
+                         policy_version, max_uses, consumed_uses, issuance_source, revoked_at)
+                     VALUES ($1, 'pilot', 'fixed', $2, 'v1', 3, 1, 'test', now())",
+                    &[&invite, &t],
+                )
+                .await
+            }
+            _ => {
+                exec(
+                    &admin,
+                    "UPDATE trace_account_invite_grants SET revoked_at = now()
+                      WHERE tenant_id=$1 AND account_id=$2 AND invite_subject_hash=$3",
+                    &[&near_a, &account_a, &invite],
+                )
+                .await
+            }
+        }
         let call = Call::new(rt, &near_a, account_a, &t, &invite, &d2).await;
         assert_eq!(
             direct(rt, &call, &call, None).await,
-            outcomes(expected, expected)
+            outcomes(expected, expected),
+            "{case}"
         );
     }
 
