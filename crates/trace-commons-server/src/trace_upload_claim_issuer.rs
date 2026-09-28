@@ -534,6 +534,22 @@ impl TraceUploadClaimIssuerConfig {
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(DEFAULT_INVITE_LOOKUP_RATE_PER_MIN),
+            invite_lookup_client_ip_header: crate::invite_lookup::parse_client_ip_header(
+                std::env::var("TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER")
+                    .ok()
+                    .as_deref(),
+            )?,
+            invite_lookup_per_client_rate_per_min: std::env::var(
+                "TRACE_COMMONS_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN",
+            )
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN),
+            invite_lookup_client_limiter: Arc::new(
+                crate::invite_lookup::LookupClientRateLimiter::new(
+                    crate::invite_lookup::MAX_TRACKED_LOOKUP_CLIENTS,
+                ),
+            ),
             invite_admin_backend: self.invite_admin_backend.clone(),
             invite_admin_registry: self.invite_admin_registry.clone(),
             invite_registry_authoritative: self.invite_registry_authoritative,
@@ -688,11 +704,19 @@ struct TraceUploadClaimIssuerState {
     instance_replay_cache: Arc<crate::instance_enroll_guard::ReplayCache>,
     instance_rate_limiter: Arc<crate::instance_enroll_guard::InstanceRateLimiter>,
     instance_enroll_default_rate_per_min: u32,
-    /// Lookups per minute across ALL callers of `POST /v1/invite/lookup`. The
-    /// issuer does not see client addresses, so this is one shared bucket
-    /// (the same limiter as enroll, under its own key). It caps how fast the
-    /// route can be used to guess invite codes.
+    /// Lookups per minute across ALL callers of `POST /v1/invite/lookup`: one
+    /// shared bucket (the same limiter as enroll, under its own key). It caps
+    /// how fast the route can be used to guess invite codes, and it stays the
+    /// outer cap when per-client keying below is on.
     invite_lookup_rate_per_min: u32,
+    /// Header the operator's trusted proxy writes the caller's address into
+    /// (`TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER`). `None`, the default,
+    /// means no header is trusted and only the shared bucket applies: the
+    /// issuer does not see client addresses itself.
+    invite_lookup_client_ip_header: Option<axum::http::HeaderName>,
+    /// Lookups per minute per client when the header above is configured.
+    invite_lookup_per_client_rate_per_min: u32,
+    invite_lookup_client_limiter: Arc<crate::invite_lookup::LookupClientRateLimiter>,
     invite_admin_backend: Option<Arc<PgBackend>>,
     invite_admin_registry: Option<Arc<DbInviteRegistry>>,
     invite_registry_authoritative: bool,
@@ -1597,6 +1621,10 @@ async fn onboard_handler(
 /// Default cap on invite lookups per minute, all callers together.
 const DEFAULT_INVITE_LOOKUP_RATE_PER_MIN: u32 = 30;
 
+/// Default cap on invite lookups per minute from one client, applied only when
+/// the operator names a trusted client-address header.
+const DEFAULT_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN: u32 = 10;
+
 /// Key of the shared lookup bucket in the issuer's rate limiter.
 const INVITE_LOOKUP_RATE_KEY: &str = "invite-lookup";
 
@@ -1606,9 +1634,10 @@ const INVITE_LOOKUP_RATE_KEY: &str = "invite-lookup";
 /// the log line carries only the invite's subject hash.
 async fn invite_lookup_handler(
     State(state): State<Arc<TraceUploadClaimIssuerState>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<InviteLookupResponse>, IssuerError> {
-    let result = state.invite_lookup(&body).await;
+    let result = state.invite_lookup(&headers, &body).await;
     match &result {
         Ok((subject_hash, response)) => tracing::info!(
             invite_subject_hash = subject_hash.as_deref().unwrap_or("none"),
@@ -1626,19 +1655,34 @@ impl TraceUploadClaimIssuerState {
     /// well-formed) beside the answer, for the caller's hash-only log line.
     async fn invite_lookup(
         &self,
+        headers: &HeaderMap,
         body: &Bytes,
     ) -> Result<(Option<String>, InviteLookupResponse), IssuerError> {
         // Throttle before any parsing or database work: an unthrottled
         // lookup is a free oracle for guessing bearer codes.
+        let rate_limited = || IssuerError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "invite_lookup_rate_limited",
+        };
+        let now = std::time::Instant::now();
+        // Per client first, so a caller already over its own budget is
+        // refused without spending the shared budget everyone else needs.
+        if let Some(header) = &self.invite_lookup_client_ip_header {
+            let client = crate::invite_lookup::lookup_client_key(headers, header);
+            if !self.invite_lookup_client_limiter.try_acquire(
+                &client,
+                self.invite_lookup_per_client_rate_per_min,
+                now,
+            ) {
+                return Err(rate_limited());
+            }
+        }
         if !self.instance_rate_limiter.try_acquire(
             INVITE_LOOKUP_RATE_KEY,
             self.invite_lookup_rate_per_min,
-            std::time::Instant::now(),
+            now,
         ) {
-            return Err(IssuerError {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                message: "invite_lookup_rate_limited",
-            });
+            return Err(rate_limited());
         }
         let request: InviteLookupRequest = serde_json::from_slice(body)
             .map_err(|_| IssuerError::bad_request("invalid invite lookup request"))?;
@@ -1654,10 +1698,19 @@ impl TraceUploadClaimIssuerState {
         }
         // Fail closed: without the invite database there is nothing to
         // answer from, and the file allowlist carries no issuer or range.
-        let backend = self.invite_admin_backend.as_ref().ok_or(IssuerError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "invite_registry_not_configured",
-        })?;
+        // The database must also be what `/v1/onboard` redeems against. When
+        // it is not authoritative, onboarding reads the file allowlist, so a
+        // row here says nothing about whether the invite would work: a
+        // database-only invite would read as valid and then be refused, and
+        // a revocation recorded here would not stop a redemption.
+        let backend = self
+            .invite_admin_backend
+            .as_ref()
+            .filter(|_| self.invite_registry_authoritative)
+            .ok_or(IssuerError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "invite_registry_not_configured",
+            })?;
         let subject_hash = hash_invite_code(invite_code);
         let peek = backend
             .peek_invite_grant(&subject_hash)
@@ -4513,6 +4566,9 @@ mod tests {
                 instance_rate_limiter: Arc::clone(&self.instance_rate_limiter),
                 instance_enroll_default_rate_per_min: self.instance_enroll_default_rate_per_min,
                 invite_lookup_rate_per_min: self.invite_lookup_rate_per_min,
+                invite_lookup_client_ip_header: self.invite_lookup_client_ip_header.clone(),
+                invite_lookup_per_client_rate_per_min: self.invite_lookup_per_client_rate_per_min,
+                invite_lookup_client_limiter: Arc::clone(&self.invite_lookup_client_limiter),
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
@@ -6839,7 +6895,7 @@ mod tests {
 
     /// `POST /v1/invite/lookup` without a database: routing, throttling,
     /// fail-closed behaviour and secret-free logging. The database-backed
-    /// behaviour (labels, no use spent) is `tests/invite_lookup_pg.rs`.
+    /// behaviour (labels, no use spent) is `tests/trace_invite_registry_pg.rs`.
     mod invite_lookup {
         use super::*;
         use std::io::Write;
@@ -6850,12 +6906,21 @@ mod tests {
 
         const CODE: &str = "ABCDEFGHJKLMNPQR";
 
-        #[derive(Clone, Default)]
-        struct LogSink(Arc<Mutex<Vec<u8>>>);
+        std::thread_local! {
+            static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+                const { std::cell::RefCell::new(None) };
+        }
 
-        impl Write for LogSink {
+        /// Writes into this thread's capture buffer, if one is open.
+        struct ThreadCapture;
+
+        impl Write for ThreadCapture {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
+                CAPTURE.with(|capture| {
+                    if let Some(sink) = capture.borrow().as_ref() {
+                        sink.lock().unwrap().extend_from_slice(buf);
+                    }
+                });
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -6863,11 +6928,39 @@ mod tests {
             }
         }
 
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-            type Writer = LogSink;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
+        /// Capture every event emitted on this thread while `f` runs.
+        ///
+        /// A process-global subscriber, not a scoped one. With a single
+        /// scoped dispatcher, tracing-core resolves a callsite's first
+        /// registration against whichever thread registers it, so a parallel
+        /// test that first hit the handler's `info!` after a scoped
+        /// subscriber went in cached it as disabled for every thread, and
+        /// this test failed every run under `cargo test --lib invite_lookup`.
+        /// A global subscriber gives every thread the same answer; its
+        /// filter admits only threads with a capture open. The filter must
+        /// be dynamic: a plain `filter_fn` caches its first answer per
+        /// callsite, so whichever thread registered the handler's `info!`
+        /// would decide for all of them again.
+        fn capture_logs(f: impl FnOnce()) -> String {
+            use tracing_subscriber::Layer;
+            use tracing_subscriber::layer::SubscriberExt;
+            static INSTALL: std::sync::Once = std::sync::Once::new();
+            INSTALL.call_once(|| {
+                let layer = tracing_subscriber::fmt::layer()
+                    .with_writer(|| ThreadCapture)
+                    .with_ansi(false)
+                    .with_filter(tracing_subscriber::filter::dynamic_filter_fn(|_, _| {
+                        CAPTURE.with(|capture| capture.borrow().is_some())
+                    }));
+                tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                    .expect("no other global subscriber in the lib tests");
+            });
+            let sink = Arc::new(Mutex::new(Vec::new()));
+            CAPTURE.with(|capture| *capture.borrow_mut() = Some(sink.clone()));
+            f();
+            CAPTURE.with(|capture| *capture.borrow_mut() = None);
+            let bytes = sink.lock().unwrap().clone();
+            String::from_utf8(bytes).unwrap()
         }
 
         fn request_body(code: &str) -> String {
@@ -6879,10 +6972,22 @@ mod tests {
         }
 
         fn state_with_rate(rate: u32) -> Arc<TraceUploadClaimIssuerState> {
+            state_with_client_header(rate, None, 0)
+        }
+
+        /// `client_header` is the trusted header name, or `None` for the
+        /// default (no header trusted).
+        fn state_with_client_header(
+            global: u32,
+            client_header: Option<&'static str>,
+            per_client: u32,
+        ) -> Arc<TraceUploadClaimIssuerState> {
             let mut state = test_config().build_state().expect("state builds");
-            Arc::get_mut(&mut state)
-                .expect("state is unshared")
-                .invite_lookup_rate_per_min = rate;
+            let inner = Arc::get_mut(&mut state).expect("state is unshared");
+            inner.invite_lookup_rate_per_min = global;
+            inner.invite_lookup_client_ip_header =
+                client_header.map(axum::http::HeaderName::from_static);
+            inner.invite_lookup_per_client_rate_per_min = per_client;
             state
         }
 
@@ -6890,16 +6995,26 @@ mod tests {
             state: Arc<TraceUploadClaimIssuerState>,
             body: String,
         ) -> (StatusCode, serde_json::Value) {
+            post_from(state, body, None).await
+        }
+
+        /// POST as a caller whose proxy wrote `forwarded_for` into
+        /// `X-Forwarded-For` (or wrote nothing).
+        async fn post_from(
+            state: Arc<TraceUploadClaimIssuerState>,
+            body: String,
+            forwarded_for: Option<&str>,
+        ) -> (StatusCode, serde_json::Value) {
             let router = router_from_state(state, StdDuration::from_secs(5), 64 * 1024);
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(INVITE_LOOKUP_PATH)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(value) = forwarded_for {
+                request = request.header("x-forwarded-for", value);
+            }
             let response = router
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri(INVITE_LOOKUP_PATH)
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(body))
-                        .expect("request builds"),
-                )
+                .oneshot(request.body(Body::from(body)).expect("request builds"))
                 .await
                 .expect("request completes");
             let status = response.status();
@@ -6954,6 +7069,74 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn no_client_header_is_trusted_unless_configured() {
+            // Default: one shared bucket. A caller cannot buy a fresh budget
+            // by sending a different X-Forwarded-For.
+            let state = state_with_client_header(2, None, 100);
+            for ip in ["203.0.113.1", "203.0.113.2"] {
+                let (status, _) = post_from(state.clone(), request_body("short"), Some(ip)).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, _) = post_from(state, request_body("short"), Some("203.0.113.3")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn a_configured_client_header_gives_each_client_its_own_budget() {
+            let state = state_with_client_header(100, Some("x-forwarded-for"), 2);
+            for _ in 0..2 {
+                let (status, _) =
+                    post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, body) =
+                post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body, json!({"error": "invite_lookup_rate_limited"}));
+            // A client-written prefix does not escape: the proxy's own hop is
+            // the rightmost one.
+            let (status, _) = post_from(
+                state.clone(),
+                request_body("short"),
+                Some("198.51.100.9, 203.0.113.1"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            // Another client is unaffected by the first one's exhaustion.
+            let (status, _) =
+                post_from(state.clone(), request_body("short"), Some("203.0.113.2")).await;
+            assert_eq!(status, StatusCode::OK);
+            // Callers the proxy did not attribute share one bucket.
+            for _ in 0..2 {
+                let (status, _) = post_from(state.clone(), request_body("short"), None).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, _) = post_from(state, request_body("short"), None).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn the_shared_budget_still_caps_all_clients_together() {
+            let state = state_with_client_header(3, Some("x-forwarded-for"), 1);
+            // One client over its own budget does not spend the shared one.
+            let (status, _) =
+                post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+            assert_eq!(status, StatusCode::OK);
+            for _ in 0..5 {
+                let (status, _) =
+                    post_from(state.clone(), request_body("short"), Some("203.0.113.1")).await;
+                assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            }
+            for ip in ["203.0.113.2", "203.0.113.3"] {
+                let (status, _) = post_from(state.clone(), request_body("short"), Some(ip)).await;
+                assert_eq!(status, StatusCode::OK, "{ip}");
+            }
+            // Three fresh clients have now used the shared three.
+            let (status, _) = post_from(state, request_body("short"), Some("203.0.113.4")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
         async fn a_zero_budget_refuses_every_lookup() {
             let (status, _) = post(state_with_rate(0), request_body("short")).await;
             assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -6961,19 +7144,11 @@ mod tests {
 
         #[test]
         fn the_code_never_reaches_a_log_line() {
-            let sink = LogSink::default();
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(sink.clone())
-                .with_max_level(tracing::Level::TRACE)
-                .finish();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            tracing::subscriber::with_default(subscriber, || {
-                // Callsites cached as disabled by a parallel test would
-                // otherwise ignore this scoped subscriber.
-                tracing::callsite::rebuild_interest_cache();
+            let logged = capture_logs(|| {
                 runtime.block_on(async {
                     let state = state_with_rate(30);
                     post(state.clone(), request_body(CODE)).await;
@@ -6981,7 +7156,6 @@ mod tests {
                     post(state, "garbage-SECRETBODY".to_string()).await;
                 });
             });
-            let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
             assert!(logged.contains("invite lookup"), "no log emitted: {logged}");
             for secret in [CODE, "short-but-secret", "SECRETBODY"] {
                 assert!(

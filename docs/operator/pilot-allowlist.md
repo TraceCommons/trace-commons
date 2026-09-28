@@ -449,6 +449,70 @@ but get refused at the allowlist check with
 `PilotAllowlistInviteCodeMissing` (400). That's the easiest failure to
 diagnose — clear refusal class, exactly the right thing to grep for.
 
+## Invite lookup (`POST /v1/invite/lookup`)
+
+The Join screen asks the issuer whether a code is usable, and who issued it
+and what it pays, before the contributor commits. The lookup spends no use,
+mints nothing, and writes nothing. The code travels in the JSON body, never
+the URL, and the issuer logs only the invite's subject hash.
+
+It answers only when the invite registry is authoritative
+(`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE=true` with the registry
+database configured). Otherwise it returns 503
+`invite_registry_not_configured`. That includes a configured registry
+that is not authoritative: in that mode `/v1/onboard` redeems from the file
+allowlist, so an answer read from the database could call an invite valid
+that onboarding then refuses, or report a revocation onboarding ignores.
+
+The answer is `valid` plus, when you set them on the invite
+(`issuer_display_name`, `credit_range_min`, `credit_range_max` on
+`POST /v1/admin/invites`), the public name and the credit range. A refusal
+carries one label: `malformed`, `not_found`, `revoked`, `expired` or
+`exhausted`. `issued_by_label`, `note_label`, `policy_label`, `max_uses` and
+the use count are never returned. Unlike `/v1/onboard`, which says
+`InviteNotValid` for every refusal, the lookup does tell a holder that their
+code was revoked or expired. Only someone holding the code learns that.
+
+### Rate limits
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TRACE_COMMONS_INVITE_LOOKUP_RATE_PER_MIN` | `30` | Lookups per minute across all callers. Always applies. `0` refuses every lookup. |
+| `TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER` | unset | Header your reverse proxy writes the caller's address into. Unset means no header is trusted. A value that is not a header name refuses startup. |
+| `TRACE_COMMONS_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN` | `10` | Lookups per minute per client. Applies only when the header above is set. |
+
+The issuer does not see client addresses itself. With the header unset,
+every caller shares the one bucket, so a single caller making lookups in a
+loop uses up the budget for everyone (429 `invite_lookup_rate_limited`)
+until it stops. Codes are 16 characters from a 36-symbol alphabet, so the
+shared cap is not what keeps them from being guessed. It keeps one caller
+from locking out everyone else.
+
+To key by client, set the header only when both of these hold:
+
+1. The issuer is reachable only through your proxy. The pilot's
+   `issuer.env.template` binds it to `127.0.0.1:3917`.
+2. The proxy overwrites or appends that header on every request. The
+   pilot `Caddyfile.template` sets `header_up X-Forwarded-For
+   {remote_host}` on the issuer site, which replaces whatever the client
+   sent with the address Caddy saw. Behind Cloudflare with the origin locked
+   to Cloudflare, `CF-Connecting-IP` is the equivalent.
+
+If either does not hold, a caller can write any address it likes into the
+header and get a fresh budget per request. Leave it unset in that case.
+
+When it is set, the issuer reads the rightmost value of the last header
+line, which is the one the nearest proxy wrote. IPv6 addresses are keyed by
+their /64. A request with no header, or with a value that is not an IP
+address, shares one `unattributed` bucket. A client is checked against its
+own budget before the shared one, so a client over its own limit does not
+spend the shared budget. The shared budget still caps all clients together,
+so raise `TRACE_COMMONS_INVITE_LOOKUP_RATE_PER_MIN` when you turn per-client
+keying on: at the default 30, three clients at the default per-client 10
+use it all. The issuer tracks at most 16,384 clients. Once that many are
+in-window, new clients share one overflow bucket until older ones refill.
+All of this state is per process and resets on restart.
+
 ## Known limitations
 
 - File source only. The `near:<account>:<view>` source is reserved in

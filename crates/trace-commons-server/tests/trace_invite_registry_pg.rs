@@ -1118,12 +1118,21 @@ mod lookup_route {
     const SECRET_ISSUED_BY: &str = "issued-by-never-shown";
     const SECRET_NOTE: &str = "note-never-shown";
 
-    #[derive(Clone, Default)]
-    struct LogSink(Arc<Mutex<Vec<u8>>>);
+    std::thread_local! {
+        static CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<u8>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
-    impl std::io::Write for LogSink {
+    /// Writes into this thread's capture buffer, if one is open.
+    struct ThreadCapture;
+
+    impl std::io::Write for ThreadCapture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            CAPTURE.with(|capture| {
+                if let Some(sink) = capture.borrow().as_ref() {
+                    sink.lock().unwrap().extend_from_slice(buf);
+                }
+            });
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1131,11 +1140,35 @@ mod lookup_route {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-        type Writer = LogSink;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
+    /// Start capturing events emitted on this thread (a `#[tokio::test]`
+    /// runs on one). A process-global subscriber with a dynamic filter, not a
+    /// scoped one: a scoped subscriber loses events whenever a parallel test
+    /// is the first to register the handler's callsite, because tracing-core
+    /// then caches that thread's answer ("disabled") for every thread. See
+    /// `capture_logs` in the issuer's unit tests.
+    fn open_log_capture() -> Arc<Mutex<Vec<u8>>> {
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(|| ThreadCapture)
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::dynamic_filter_fn(|_, _| {
+                    CAPTURE.with(|capture| capture.borrow().is_some())
+                }));
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("no other global subscriber in this test binary");
+        });
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        CAPTURE.with(|capture| *capture.borrow_mut() = Some(sink.clone()));
+        sink
+    }
+
+    fn close_log_capture(sink: Arc<Mutex<Vec<u8>>>) -> String {
+        CAPTURE.with(|capture| *capture.borrow_mut() = None);
+        let bytes = sink.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
     }
 
     /// A 16-character code in the invite alphabet, distinct per call.
@@ -1164,6 +1197,10 @@ mod lookup_route {
     }
 
     async fn router_for(backend: Arc<PgBackend>) -> axum::Router {
+        router_with(backend, true).await
+    }
+
+    async fn router_with(backend: Arc<PgBackend>, authoritative: bool) -> axum::Router {
         let issuer_keys = generate_upload_claim_keypair().unwrap();
         let workload_keys = generate_upload_claim_keypair().unwrap();
         let registry = Arc::new(
@@ -1202,7 +1239,7 @@ mod lookup_route {
             admin_bind: None,
             invite_admin_backend: Some(backend),
             invite_admin_registry: Some(registry),
-            invite_registry_authoritative: true,
+            invite_registry_authoritative: authoritative,
         })
         .expect("router")
     }
@@ -1265,16 +1302,7 @@ mod lookup_route {
         let router = router_for(backend.clone()).await;
         let before = stored_uses(&backend, &hash).await;
 
-        let sink = LogSink::default();
-        let _guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(sink.clone())
-                .with_max_level(tracing::Level::TRACE)
-                .finish(),
-        );
-        // A callsite another test thread cached as disabled would otherwise
-        // ignore this scoped subscriber.
-        tracing::callsite::rebuild_interest_cache();
+        let sink = open_log_capture();
         for _ in 0..7 {
             let (status, body, text) = lookup(&router, &code).await;
             assert_eq!(status, StatusCode::OK, "{text}");
@@ -1295,6 +1323,7 @@ mod lookup_route {
                 assert!(!text.contains(secret), "{secret} leaked: {text}");
             }
         }
+        let logged = close_log_capture(sink);
 
         // max_uses is 3 and we looked up 7 times: the stored count, and the
         // whole row's updated_at, are exactly as seeded.
@@ -1302,7 +1331,6 @@ mod lookup_route {
         assert_eq!(before.0, 0);
 
         // The log names the invite by subject hash and never by code.
-        let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
         assert!(logged.contains(&hash), "hash missing from log: {logged}");
         assert!(!logged.contains(&code), "code reached the log: {logged}");
 
@@ -1432,5 +1460,175 @@ mod lookup_route {
         );
 
         cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    /// Onboarding redeems from the file allowlist unless the registry is
+    /// authoritative, so in that mode the database is not what decides. A
+    /// lookup answered from it could call an invite valid that onboarding
+    /// then refuses (or the reverse), so it must fail closed instead.
+    #[tokio::test]
+    async fn lookup_fails_closed_when_the_registry_is_not_the_redemption_authority() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let code = unique_code();
+        backend
+            .insert_invite_grant(write_for(&code, &policy_label))
+            .await
+            .unwrap();
+
+        let router = router_with(backend.clone(), false).await;
+        let (status, body, text) = lookup(&router, &code).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "invite_registry_not_configured"})
+        );
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    fn with_login(url: &str, login: &str) -> String {
+        let mut parsed = reqwest::Url::parse(url).expect("parse test database URL");
+        parsed.set_username(login).expect("set test login");
+        parsed.set_password(None).expect("clear test password");
+        parsed.into()
+    }
+
+    /// A backend whose invite-registry pool logs in as `login`, the way the
+    /// issuer's pool logs in as an operator-provisioned member of
+    /// `trace_invite_registry` in production. The trace pool keeps the
+    /// fixture URL; the lookup never touches it.
+    async fn backend_with_registry_login(config: &DatabaseConfig, login: &str) -> Arc<PgBackend> {
+        use secrecy::ExposeSecret;
+        let mut config = config.clone();
+        config.invite_registry_url = Some(SecretString::from(with_login(
+            config.url.expose_secret(),
+            login,
+        )));
+        Arc::new(
+            PgBackend::new(&config)
+                .await
+                .expect("registry-login backend"),
+        )
+    }
+
+    /// The other lookup tests run the registry pool as the fixture user,
+    /// which is a superuser locally and bypasses RLS: they would pass even if
+    /// the production role could not read the row. This one runs the route
+    /// through a NOSUPERUSER NOBYPASSRLS login that is a member of
+    /// `trace_invite_registry`, as production provisions it, and pairs it
+    /// with a control login that has the table grant but not the role, which
+    /// must see nothing. Were RLS bypassed on this path the control would
+    /// find the invite and the test would fail.
+    #[tokio::test]
+    async fn lookup_works_through_the_non_superuser_registry_login() {
+        use secrecy::ExposeSecret;
+        const REGISTRY_LOGIN: &str = "tc_z1_invite_registry_login";
+        const OUTSIDER_LOGIN: &str = "tc_z1_invite_outsider_login";
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let admin = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        admin.run_migrations().await.expect("migrations");
+        {
+            let client = admin.trace_pool_for_test().get().await.unwrap();
+            client
+                .batch_execute(&format!(
+                    "DO $$ BEGIN
+                         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{REGISTRY_LOGIN}')
+                         THEN CREATE ROLE {REGISTRY_LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+                         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{OUTSIDER_LOGIN}')
+                         THEN CREATE ROLE {OUTSIDER_LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+                     END $$;
+                     GRANT trace_invite_registry TO {REGISTRY_LOGIN};
+                     GRANT USAGE ON SCHEMA public TO {OUTSIDER_LOGIN};
+                     GRANT SELECT ON onboarding_invite_grants TO {OUTSIDER_LOGIN};"
+                ))
+                .await
+                .expect("provision the registry and control logins");
+        }
+
+        // Prove the logins are what they claim before trusting any answer.
+        for login in [REGISTRY_LOGIN, OUTSIDER_LOGIN] {
+            let (client, connection) = tokio_postgres::connect(
+                &with_login(config.url.expose_secret(), login),
+                tokio_postgres::NoTls,
+            )
+            .await
+            .expect("connect as test login");
+            tokio::spawn(connection);
+            let row = client
+                .query_one(
+                    "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+                    &[],
+                )
+                .await
+                .unwrap();
+            let (superuser, bypass): (bool, bool) = (row.get(0), row.get(1));
+            assert!(!superuser && !bypass, "{login} must be subject to RLS");
+        }
+
+        let registry = backend_with_registry_login(&config, REGISTRY_LOGIN).await;
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let live = unique_code();
+        let revoked = unique_code();
+        // Seed through the registry login too: its V42 policy is what
+        // authorizes the admin write as well as the lookup read.
+        for code in [&live, &revoked] {
+            assert_eq!(
+                registry
+                    .insert_invite_grant(write_for(code, &policy_label))
+                    .await
+                    .expect("the registry login can create invites"),
+                InviteGrantInsertOutcome::Inserted
+            );
+        }
+        assert!(
+            registry
+                .revoke_invite_grant(&hash_invite_code(&revoked))
+                .await
+                .unwrap()
+        );
+        let before = stored_uses(&admin, &hash_invite_code(&live)).await;
+
+        let router = router_for(registry.clone()).await;
+        let (status, body, text) = lookup(&router, &live).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "valid": true,
+                "issuer_display_name": "Trace Commons Pilot",
+                "credit_range": {"min": 2, "max": 6, "unit": "points_per_accepted_trace"},
+            })
+        );
+        for (code, label) in [(revoked.clone(), "revoked"), (unique_code(), "not_found")] {
+            let (status, body, text) = lookup(&router, &code).await;
+            assert_eq!(status, StatusCode::OK, "{text}");
+            assert_eq!(
+                body,
+                serde_json::json!({"valid": false, "reason_label": label})
+            );
+        }
+        assert_eq!(stored_uses(&admin, &hash_invite_code(&live)).await, before);
+
+        // Control: same table grant, no registry role, so RLS hides the row
+        // and the live invite reads as not_found.
+        let outsider = backend_with_registry_login(&config, OUTSIDER_LOGIN).await;
+        let (status, body, text) = lookup(&router_for(outsider).await, &live).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({"valid": false, "reason_label": "not_found"}),
+            "a login outside trace_invite_registry must not see the invite"
+        );
+
+        cleanup_test_invites(&admin, &policy_label).await;
     }
 }
