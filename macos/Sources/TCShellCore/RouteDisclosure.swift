@@ -144,6 +144,17 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
     }
 }
 
+/// Where a disclosure surface is. Three states, not an optional: "not read
+/// yet" and "could not be read" must never look like a panel with nothing to
+/// disclose.
+public enum RouteDisclosureState: Equatable, Sendable {
+    /// No answer yet: before the first read.
+    case loading
+    case shown(RouteDisclosure)
+    /// No daemon to ask, the ask failed, or the answer did not decode.
+    case unreadable
+}
+
 /// What a disclosure surface says when the daemon's answer could not be
 /// read (`tc_route_disclosure_unreadable_copy`). Said rather than left
 /// blank, so a missing panel is not mistaken for nothing to disclose.
