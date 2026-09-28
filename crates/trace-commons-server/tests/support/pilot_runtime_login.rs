@@ -172,7 +172,15 @@ pub async fn provision_member_only_login(url: &str, login: &str) {
                  END IF;
              END $$;
              ALTER ROLE {login} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-             {membership}"
+             {membership}
+             -- Roles are server-wide, so a prior run's grant of
+             -- trace_account_admission_runtime (V77) survives a database
+             -- drop; revoke it here before the exclusivity check below.
+             DO $$ BEGIN
+                 IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_account_admission_runtime') THEN
+                     REVOKE trace_account_admission_runtime FROM {login};
+                 END IF;
+             END $$;"
         ))
         .await
         .expect("provision the runtime login");
