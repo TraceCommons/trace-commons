@@ -94,10 +94,75 @@ impl PgBackend {
                 ],
             )
             .await?;
+        let outcome: String = row.get(0);
+        // V91: the same account, from another of the tenant's devices. The
+        // link function answered with the first device's record, which this
+        // device cannot verify; record and return its own attestation
+        // instead, in the same transaction that spent its challenge.
+        if outcome == "already_linked"
+            && row.get::<_, Option<String>>(2).as_deref() != Some(statement.device_key_id.as_str())
+        {
+            let attested = tx
+                .query_one(
+                    "SELECT outcome, attestation_id, device_key_id, invite_subject_hash, nonce,
+                            issued_at, device_signature, attested_at, server_kid, server_signature
+                       FROM trace_attest_legacy_invite_device($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                    &[
+                        &statement.account_tenant_id,
+                        &statement.account_id,
+                        &statement.legacy_tenant_id,
+                        &statement.device_key_id,
+                        &attempt.device_public_key,
+                        &statement.invite_subject_hash,
+                        &statement.nonce,
+                        &statement.issued_at,
+                        &record.link_id,
+                        &record.linked_at,
+                        &record.device_signature,
+                        &record.server_kid,
+                        &attempt.server_signature,
+                    ],
+                )
+                .await?;
+            tx.commit().await?;
+            let attested_outcome: String = attested.get(0);
+            let refusal = match attested_outcome.as_str() {
+                "attested" | "already_attested" => None,
+                "challenge_invalid" => Some(LinkRefusal::ChallengeInvalid),
+                "account_ineligible" => Some(LinkRefusal::AccountIneligible),
+                "device_not_eligible" => Some(LinkRefusal::DeviceNotEligible),
+                "tenant_claimed" => Some(LinkRefusal::TenantClaimed),
+                _ => Some(LinkRefusal::Unavailable),
+            };
+            if let Some(refusal) = refusal {
+                return Ok(LinkDbOutcome::Refused(refusal));
+            }
+            let Some(trust_version) = row.get::<_, Option<i64>>(10) else {
+                return Ok(LinkDbOutcome::Refused(LinkRefusal::Unavailable));
+            };
+            return Ok(LinkDbOutcome::Linked {
+                record: Box::new(LegacyInviteLinkRecord {
+                    link_id: attested.get(1),
+                    statement: LegacyInviteLinkStatement {
+                        legacy_tenant_id: statement.legacy_tenant_id.clone(),
+                        device_key_id: attested.get(2),
+                        invite_subject_hash: attested.get(3),
+                        account_tenant_id: statement.account_tenant_id.clone(),
+                        account_id: statement.account_id,
+                        nonce: attested.get(4),
+                        issued_at: attested.get(5),
+                    },
+                    device_signature: attested.get(6),
+                    linked_at: attested.get(7),
+                    server_kid: attested.get(8),
+                }),
+                server_signature: attested.get(9),
+                trust_version,
+            });
+        }
         // Refusals commit too: a spent challenge stays spent, and a conflicting
         // claim stays recorded for the operator.
         tx.commit().await?;
-        let outcome: String = row.get(0);
         let refusal = match outcome.as_str() {
             "linked" | "already_linked" => None,
             "challenge_invalid" => Some(LinkRefusal::ChallengeInvalid),
