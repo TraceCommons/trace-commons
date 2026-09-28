@@ -611,8 +611,22 @@ implements them:
   `Unavailable`, the effect may or may not have happened, and a later
   attempt for the same operation reuses the same request; after `Conflict`
   or `Rejected`, no effect happened and the runner never retries. The
-  idempotency contract: the same result for a repeated `operation_ref_hash`,
-  no repeated effect.
+  idempotency contract: the same receipt for a repeated `operation_ref_hash`,
+  no repeated effect. `SettlementRequest::new` refuses a malformed reference,
+  a zero amount, and a Trace Credit amount above the ledger's range. `settle`
+  returns a `SettlementReceipt`: the precomputed result reference, which must
+  match the request, and an optional `external_receipt_hash`, a SHA-256
+  reference over the external system's receipt (a NEP-141 transfer's
+  transaction), which exists only after the call. The leg records both,
+  hash-only. The derivation is part of the adapter's identity: a new
+  derivation is a new adapter. A NEAR adapter uses the derivation the NEAR
+  credit outbox already audits as `near_transaction_hash_hash`,
+  `sha256_prefixed` over the normalized base58 transaction hash, so one
+  transaction has one reference across a leg, an outbox line and an audit
+  row. That hash is unkeyed: it keeps the raw value out of rows and logs, but
+  a reader with the chain can still link a leg to its transaction. A keyed
+  derivation would be a separate decision. One external receipt answers one
+  leg until an adapter that batches legs into one transaction exists.
 
 Every phase input carries the tenant's `TenantStorageRef`, the derived key that
 ingest uses for every index and storage write. A policy queries an index with
@@ -673,6 +687,10 @@ pipeline_run_settlements
   CHECK (instrument_id <> 'trace_credit'
          OR atomic_units <= 9223372036854775807)
   operation_ref_hash, result_ref_hash nullable
+  external_receipt_hash nullable
+  CHECK (external_receipt_hash IS NULL
+         OR (operation_state = 'complete'
+             AND external_receipt_hash ~ '^sha256:[0-9a-f]{64}$'))
   operation_state: pending | leased | retry | held | complete | forfeited | failed
   lease_token, lease_expires_at
   attempt_count, max_attempts, next_attempt_at
@@ -680,6 +698,8 @@ pipeline_run_settlements
   created_at, updated_at
   primary key (tenant_id, run_id, instrument_id)
   unique (tenant_id, operation_ref_hash)
+  unique (tenant_id, external_receipt_hash)
+    where external_receipt_hash is not null
 
 phase_outcomes
   tenant_id, outcome_id, run_id, trace_id
@@ -698,7 +718,8 @@ table: one row for each positive award of a committed Score outcome, created
 in the Score transaction. It records that instrument operation's progress,
 lease, and retry state, independently of every other instrument, so a
 `storage_rebate` operation recovers without the Trace Credit path. A row ends
-`complete` with its result reference, or `forfeited` when withdrawal commits
+`complete` with its result reference and, when the adapter's effect has an
+external record, its external receipt hash, or `forfeited` when withdrawal commits
 first; both count as complete for the Settle outcome.
 
 `atomic_units` is `NUMERIC(39,0)`. Its 39 digits hold every `u128` value.
