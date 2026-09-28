@@ -706,7 +706,7 @@ pub fn witness_copy() -> WitnessCopy {
             failed_too_large: "This session is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
             failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
             failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this session's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
-            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other sessions. Nothing was sent and nothing has been approved. Try again in a minute or two.",
+            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other sessions. Nothing was sent and nothing has been approved. It will be free again soon.",
             busy_retry_at: "Try again after",
             immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
@@ -1054,6 +1054,24 @@ mod tests {
             before,
             "two refusals share wording, so they are one sentence wearing two names"
         );
+    }
+
+    /// The busy sentence sits above "Try again after <time>" where the daemon
+    /// gave a time, and stands alone where a shell has none (GTK). So it
+    /// names no retry interval of its own -- "in a minute or two" contradicted
+    /// the time beneath it -- and ends on a statement that reads whole either
+    /// way.
+    #[test]
+    fn the_busy_sentence_reads_alone_and_above_a_retry_time() {
+        let review = witness_copy().review;
+        assert!(
+            review.failed_busy.ends_with("It will be free again soon."),
+            "{}",
+            review.failed_busy
+        );
+        assert!(!review.failed_busy.contains("minute"));
+        assert!(!review.failed_busy.contains(review.busy_retry_at));
+        assert_eq!(review.busy_retry_at, "Try again after");
     }
 
     /// Every refusal this client can raise has a sentence, and no two share
