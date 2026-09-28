@@ -86,6 +86,43 @@ pub(crate) fn witness_capacity_notice(capacity: serde_json::Value) -> serde_json
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// The notice for one element of `status.arming_rewordings`: a folder armed
+/// under the old "will be scrubbed" wording, told what its arming now means.
+/// The words come from the contributor core. `null` only for a value that is
+/// not an element at all.
+#[tauri::command]
+pub(crate) fn arming_reworded_notice(rewording: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(&rewording)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The notice for armed folders the automatic-contribution gate is holding,
+/// from `status.automatic_contribution_held` passed through: the words, the
+/// count and each folder's line, all from the contributor core. `null` when
+/// nothing is held.
+#[tauri::command]
+pub(crate) fn gate_held_notice(held: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::gate_held_notice_for_wire(&held)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Record that the rewording notices with these ids were shown. Changes
+/// nothing about the folders.
+#[tauri::command]
+pub(crate) async fn acknowledge_arming_rewordings(
+    state: State<'_, AppState>,
+    ids: Vec<u64>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "acknowledge_arming_rewordings",
+        serde_json::json!({ "ids": ids }),
+    )
+    .await
+}
+
 /// Record that the notices with these ids were shown. Acknowledging re-arms
 /// nothing.
 #[tauri::command]
@@ -185,7 +222,41 @@ pub(crate) async fn withdraw_automatic_grant(
 
 #[cfg(test)]
 mod tests {
-    use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
+    use super::{
+        arming_reworded_notice, gate_held_notice, grant_precondition, grant_void_notice,
+        scrubber_pattern_names,
+    };
+
+    #[test]
+    fn the_switch_on_notices_are_the_contributor_cores_copy() {
+        use trace_commons_contributor::consent_copy as copy;
+        let rewording = serde_json::json!({
+            "id": 1, "project_id": "p", "project_label": "api",
+            "was": "model_scrubbed", "now": "patterns_only",
+        });
+        assert_eq!(
+            arming_reworded_notice(rewording.clone()),
+            serde_json::to_value(copy::arming_reworded_notice_for_wire(&rewording).unwrap())
+                .unwrap()
+        );
+        assert!(arming_reworded_notice(serde_json::json!("api")).is_null());
+
+        let held = serde_json::json!({
+            "held_sessions": 2,
+            "reasons": ["admission-evidence-is-per-session"],
+            "projects": [{ "project_id": "p", "project_label": "api", "held_sessions": 2 }],
+        });
+        assert_eq!(
+            gate_held_notice(held.clone()),
+            serde_json::to_value(copy::gate_held_notice_for_wire(&held).unwrap()).unwrap()
+        );
+        assert!(
+            gate_held_notice(serde_json::json!({
+                "held_sessions": 0, "reasons": [], "projects": [],
+            }))
+            .is_null()
+        );
+    }
 
     fn config(
         scopes: &[&str],
