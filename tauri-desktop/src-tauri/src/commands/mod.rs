@@ -2,6 +2,7 @@ pub(crate) mod compute;
 pub(crate) mod consent;
 pub(crate) mod daemon;
 pub(crate) mod history;
+pub(crate) mod inference_connection;
 pub(crate) mod insights;
 pub(crate) mod mission_drafts;
 pub(crate) mod native_flows;
@@ -70,6 +71,12 @@ pub(crate) fn handler<R: tauri::Runtime>()
         consent::automatic_grant,
         consent::grant_automatic,
         consent::withdraw_automatic_grant,
+        inference_connection::inference_connection_copy,
+        inference_connection::inference_connection_offers,
+        inference_connection::inference_connection_current,
+        inference_connection::inference_connection_select,
+        inference_connection::inference_connection_install,
+        inference_connection::inference_connection_disconnect,
         privacy::set_private_inference,
         privacy::set_inference_evidence,
         privacy::set_token_contribution,

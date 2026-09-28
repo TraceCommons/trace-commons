@@ -8,6 +8,7 @@ import {
   getEligibilityGroupCopy,
   getGateHeldNotice,
   getGrantVoidNotice,
+  getInferenceConnectionCopy,
   getProjectIgnoreCopy,
   getQuitConfirmationCopy,
   getRedactionSummary,
@@ -30,6 +31,7 @@ const copyKeys = {
   armingRewording: (id: number) =>
     ["contributor-copy", "arming-rewording", id] as const,
   gateHeld: (wire: string) => ["contributor-copy", "gate-held", wire] as const,
+  inferenceConnection: ["contributor-copy", "inference-connection"] as const,
   witnessCapacity: (waiting: number) =>
     ["contributor-copy", "witness-capacity", waiting] as const,
   eligibility: (label: string, reason: string | null) =>
@@ -81,6 +83,15 @@ export function useArmingOfferCopy(projectLabel: string, count: number) {
 }
 
 /** The notice for one void. Keyed by its id, which is never reused. */
+/** The connect-inference step's sentences (K12). */
+export function useInferenceConnectionCopy() {
+  return useQuery({
+    queryKey: copyKeys.inferenceConnection,
+    queryFn: getInferenceConnectionCopy,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useGrantVoidNotice(id: number, wire: Record<string, unknown>) {
   return useQuery({
     queryKey: copyKeys.grantVoid(id),

@@ -516,22 +516,25 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     });
     client.batch_execute("REVOKE EXECUTE ON FUNCTION trace_transition_admission(TEXT,UUID,UUID,TEXT) FROM admission_ingest_runtime").await.unwrap();
     // Account role now supplies all identity/admission privileges, including V59 transition.
-    let unlinked_response = post(
-        {
-            let mut cutover = invited_state.clone();
-            Arc::make_mut(&mut cutover).account_admission = state.account_admission.clone();
-            cutover
-        },
-        "/v1/traces",
-        window_body.clone(),
-        HeaderMap::new(),
+    // Coexistence (V81, decision A of 2026-09-27): account admission governs
+    // only `near-`/`nearai-`. A legacy invite identity keeps contributing
+    // exactly as before the switch, on the path it always used.
+    let mut coexisting = sample_envelope().await;
+    make_metadata_only_low_risk(&mut coexisting);
+    require_ok(
+        post(
+            {
+                let mut cutover = invited_state.clone();
+                Arc::make_mut(&mut cutover).account_admission = state.account_admission.clone();
+                cutover
+            },
+            "/v1/traces",
+            serde_json::to_vec(&coexisting).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
     )
     .await;
-    assert_eq!(unlinked_response.status(), StatusCode::FORBIDDEN);
-    let unlinked_body = axum::body::to_bytes(unlinked_response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&unlinked_body).contains("account_identity_unlinked"));
     let unauthenticated_status = app(state.clone())
         .oneshot(
             axum::http::Request::builder()

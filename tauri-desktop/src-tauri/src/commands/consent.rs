@@ -65,9 +65,13 @@ pub(crate) async fn acknowledge_near_ai_notice(
 /// choice between the project and the automatic-grant wording, both from the
 /// contributor core, which also words an element it cannot place. `null`
 /// only for a value that is not an element at all.
+///
+/// This shell can give the Flow 1 grant, through its grant screens, so it
+/// asks for the notice with the re-grant: the grant's notice then also
+/// carries `regrant` and `regrant_action`, which open those screens.
 #[tauri::command]
 pub(crate) fn grant_void_notice(void: serde_json::Value) -> serde_json::Value {
-    trace_commons_contributor::consent_copy::void_notice_for_wire(&void)
+    trace_commons_contributor::consent_copy::void_notice_for_wire_with_regrant(&void)
         .and_then(|copy| serde_json::to_value(copy).ok())
         .unwrap_or(serde_json::Value::Null)
 }
@@ -310,10 +314,38 @@ mod tests {
             "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T00:00:00Z",
         });
         let expected = serde_json::to_value(
-            trace_commons_contributor::consent_copy::void_notice_for_wire(&wire).unwrap(),
+            trace_commons_contributor::consent_copy::void_notice_for_wire_with_regrant(&wire)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(grant_void_notice(wire), expected);
+    }
+
+    /// K10: this shell can give the Flow 1 grant, so the grant's notice
+    /// carries the core's re-grant sentence and button, and a project's
+    /// does not.
+    #[test]
+    fn the_grant_notice_offers_the_regrant_here() {
+        let grant = serde_json::json!({
+            "id": 2, "kind": "automatic_grant", "project_id": null, "project_label": null,
+            "reasons": ["witness-changed"], "voided_at": "2026-09-26T00:00:00Z",
+        });
+        let notice = grant_void_notice(grant);
+        assert_eq!(
+            notice["regrant"],
+            trace_commons_contributor::consent_copy::VOID_GRANT_REGRANT
+        );
+        assert_eq!(
+            notice["regrant_action"],
+            trace_commons_contributor::consent_copy::VOID_GRANT_REGRANT_ACTION
+        );
+        assert!(notice["rearm_action"].is_null());
+        let project = grant_void_notice(serde_json::json!({
+            "id": 1, "kind": "project", "project_id": "p", "project_label": "api",
+            "reasons": ["witness-changed"],
+        }));
+        assert!(project["regrant"].is_null());
+        assert!(project["regrant_action"].is_null());
     }
 
     #[test]
