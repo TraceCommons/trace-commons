@@ -67,6 +67,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
+pub mod second_look;
 pub mod settings;
 pub mod skill_loop;
 pub mod state;
@@ -77,6 +78,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]

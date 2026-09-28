@@ -1668,9 +1668,177 @@ pub fn inference_connection_copy() -> InferenceConnectionCopy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// "Leaves this Mac" (Flow 2 review sheet, #1118 K3)
+//
+// The sheet in the design says, under "Leaves this Mac", "19 KB · 12 turns ·
+// tool, project label, timing, outcome. Never the path." That is a claim
+// about what the envelope carries, made at the instant of consent, so it is
+// derived here from the envelope itself rather than written by each shell --
+// and derived, it does NOT say "project label": the envelope has carried no
+// project name, in the clear or hashed, since #207 (see
+// `envelope::build_raw_contribution_with_id`). What it does carry in the
+// folder's place is a one-way fingerprint of the working directory
+// (`cwd_hash`), and a list that left that out would understate what leaves.
+//
+// Every sentence in this section is DRAFT, NEEDS APPROVAL.
+
+/// Wire labels for [`leaves_this_mac_fields`], in the order they are listed.
+/// Closed: each has exactly one phrase in [`leaves_this_mac_phrase`].
+pub const LEAVES_TOOL: &str = "tool";
+pub const LEAVES_TOOL_VERSION: &str = "tool-version";
+pub const LEAVES_MODEL: &str = "model";
+pub const LEAVES_TIMING: &str = "timing";
+pub const LEAVES_OUTCOME: &str = "outcome";
+pub const LEAVES_CORRECTION: &str = "correction";
+pub const LEAVES_USES: &str = "uses";
+pub const LEAVES_CONTRIBUTOR_ID: &str = "contributor-id";
+pub const LEAVES_FOLDER_FINGERPRINT: &str = "folder-fingerprint";
+
+/// Every label [`leaves_this_mac_fields`] can return, in list order.
+pub const LEAVES_FIELDS: &[&str] = &[
+    LEAVES_TOOL,
+    LEAVES_TOOL_VERSION,
+    LEAVES_MODEL,
+    LEAVES_TIMING,
+    LEAVES_OUTCOME,
+    LEAVES_CORRECTION,
+    LEAVES_USES,
+    LEAVES_CONTRIBUTOR_ID,
+    LEAVES_FOLDER_FINGERPRINT,
+];
+
+/// **DRAFT, NEEDS APPROVAL.** Closes the "Leaves this Mac" line. States
+/// what is absent, which is the half a contributor is actually asking about.
+pub const LEAVES_NEVER: &str = "Never the path or the folder name.";
+
+/// The envelope metadata that leaves this machine with the conversation,
+/// as fixed labels from [`LEAVES_FIELDS`], read off the envelope that would
+/// be sent.
+///
+/// Only what the envelope actually holds is listed: `model` only when the
+/// transcript named one, `tool-version` only when it is known,
+/// `correction` only when the contributor wrote one, `contributor-id` only
+/// when the envelope carries the pseudonymous id, `folder-fingerprint` only
+/// when a working directory was hashed. The conversation itself is not a
+/// field here; the line counts it in turns.
+pub fn leaves_this_mac_fields(
+    envelope: &trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+) -> Vec<&'static str> {
+    let flags = &envelope.ironclaw.feature_flags;
+    let known = |key: &str| {
+        flags
+            .get(key)
+            .is_some_and(|v| !v.is_empty() && v != "unknown")
+    };
+    let mut fields = Vec::new();
+    if known("agent") || envelope.source_session.is_some() {
+        fields.push(LEAVES_TOOL);
+    }
+    if known("agent_version") || envelope.ironclaw.version != "unknown" {
+        fields.push(LEAVES_TOOL_VERSION);
+    }
+    if envelope.ironclaw.model_name.is_some() {
+        fields.push(LEAVES_MODEL);
+    }
+    // `created_at` and every event's timestamp: always present.
+    fields.push(LEAVES_TIMING);
+    // `outcome` is a required block; an unanswered verdict still travels
+    // as `unknown`.
+    fields.push(LEAVES_OUTCOME);
+    if envelope.outcome.human_correction.is_some() {
+        fields.push(LEAVES_CORRECTION);
+    }
+    // The consent scopes and allowed uses: a required block.
+    fields.push(LEAVES_USES);
+    if envelope.contributor.pseudonymous_contributor_id.is_some() {
+        fields.push(LEAVES_CONTRIBUTOR_ID);
+    }
+    if known("cwd_hash") {
+        fields.push(LEAVES_FOLDER_FINGERPRINT);
+    }
+    fields
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The phrase for one [`LEAVES_FIELDS`] label,
+/// or `None` for a label this build does not know.
+pub fn leaves_this_mac_phrase(label: &str) -> Option<&'static str> {
+    Some(match label {
+        LEAVES_TOOL => "tool",
+        LEAVES_TOOL_VERSION => "tool version",
+        LEAVES_MODEL => "model",
+        LEAVES_TIMING => "timing",
+        LEAVES_OUTCOME => "outcome",
+        LEAVES_CORRECTION => "your correction",
+        LEAVES_USES => "the uses you allowed",
+        LEAVES_CONTRIBUTOR_ID => "a pseudonymous contributor id",
+        LEAVES_FOLDER_FINGERPRINT => "a one-way fingerprint of the folder",
+        _ => return None,
+    })
+}
+
+/// A byte count as the sheet prints it: `812 bytes`, `19 KB`, `1.5 MB`.
+pub fn leaves_this_mac_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", (bytes + KB / 2) / KB)
+    } else if bytes == 1 {
+        "1 byte".to_string()
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The whole "Leaves this Mac" line, for
+/// example `19 KB · 12 turns · tool, model, timing, outcome. Never the path
+/// or the folder name.`
+///
+/// `would_send_bytes` is the envelope's size (`preview`'s figure, the one
+/// that governs consent), `turn_count` is `preview_turns`' count, and
+/// `fields` is [`leaves_this_mac_fields`]. An unknown label is skipped
+/// rather than printed raw.
+pub fn leaves_this_mac_line(would_send_bytes: usize, turn_count: usize, fields: &[&str]) -> String {
+    let turns = if turn_count == 1 {
+        "1 turn".to_string()
+    } else {
+        format!("{turn_count} turns")
+    };
+    let phrases: Vec<&str> = fields
+        .iter()
+        .filter_map(|f| leaves_this_mac_phrase(f))
+        .collect();
+    format!(
+        "{} \u{00b7} {turns} \u{00b7} {}. {LEAVES_NEVER}",
+        leaves_this_mac_size(would_send_bytes),
+        phrases.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_leaves_this_mac_line_is_assembled_from_labels() {
+        let line = leaves_this_mac_line(
+            19 * 1024,
+            12,
+            &[LEAVES_TOOL, LEAVES_TIMING, LEAVES_OUTCOME, "not-a-field"],
+        );
+        assert_eq!(
+            line,
+            "19 KB \u{00b7} 12 turns \u{00b7} tool, timing, outcome. Never the path or the folder name."
+        );
+        assert_eq!(leaves_this_mac_size(812), "812 bytes");
+        assert_eq!(leaves_this_mac_size(3 * 1024 * 1024 / 2), "1.5 MB");
+        assert!(leaves_this_mac_line(10, 1, &[]).contains("1 turn \u{00b7}"));
+        for label in LEAVES_FIELDS {
+            assert!(leaves_this_mac_phrase(label).is_some(), "{label}");
+        }
+    }
 
     /// K5: the rewording notice says the folder is still armed and then
     /// says exactly what a patterns-only folder is told, with no model-scrub

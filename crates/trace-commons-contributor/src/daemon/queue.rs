@@ -403,9 +403,41 @@ pub struct QueueEntry {
     pub attestation: Option<String>,
     #[serde(default)]
     pub attestation_reason: Option<String>,
+    /// How many marks the latest preview of this entry made, or `None` when
+    /// no preview has run for it yet.
+    ///
+    /// **`None` is "not yet scrubbed", never zero.** A session nobody has
+    /// scrubbed and a session the scrubber read and found nothing in are
+    /// different facts, and only the second one is "nothing matched" --
+    /// see `second_look::Scrub`. Recorded by every preview path (the card,
+    /// the scheduled card and the pinning build) through
+    /// `Queue::record_scrub`, for a `Pending` entry only; the latest preview
+    /// wins, so under an LLM-backed privacy filter, which does not reproduce
+    /// its own output, the count describes the most recent build rather than
+    /// a fixed property of the session.
+    ///
+    /// A count, never content: no label, value or offset rides along.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; such an entry reads as not yet
+    /// scrubbed, which is true of it until it is previewed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub_marks: Option<u32>,
 }
 
 impl QueueEntry {
+    /// Whether the scrubber has run on this entry, and how many marks it
+    /// made. See `second_look::Scrub`.
+    pub fn scrub(&self) -> super::second_look::Scrub {
+        super::second_look::Scrub::from_marks(self.scrub_marks)
+    }
+
+    /// [`super::second_look::second_look_reasons`] for this entry: the
+    /// recorded scrub and the discovery-time trim.
+    pub fn second_look_reasons(&self) -> Vec<&'static str> {
+        super::second_look::second_look_reasons(self.scrub(), self.subagents_dropped)
+    }
+
     /// Whether this entry is waiting on a person and must not be approved on
     /// anyone's behalf. See [`REASONS_NEEDING_A_PERSON`].
     pub fn held_for_review(&self) -> bool {
@@ -1282,6 +1314,24 @@ impl Queue {
         // being pinned, and a local preview (no record) pinned over an
         // earlier witnessed one must not keep the earlier answer.
         e.attested_inference = attested_inference;
+        true
+    }
+
+    /// Record the mark count a preview of `entry_id` just made. Returns
+    /// whether anything changed, so a caller saves the queue only when it
+    /// has to.
+    ///
+    /// `Pending` only, like `record_previewed_envelope`: an entry already
+    /// approved is bound to the artifact it was approved as, and a later
+    /// card build (which pins nothing) must not relabel it.
+    pub fn record_scrub(&mut self, entry_id: Uuid, marks: u32) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending || e.scrub_marks == Some(marks) {
+            return false;
+        }
+        e.scrub_marks = Some(marks);
         true
     }
 

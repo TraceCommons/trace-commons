@@ -36,3 +36,78 @@ pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
     }
     format!("{head} ({})", sites.join(", "))
 }
+
+// ---------------------------------------------------------------------------
+// Flow 2 states (#1118 K3): the scrub state, "worth a second look", and the
+// per-line unsure hints. Worded from the design's review-sheet mock.
+//
+// Every sentence in this section is DRAFT, NEEDS APPROVAL.
+
+/// **DRAFT, NEEDS APPROVAL.** The heading over a session with a
+/// `second_look` reason.
+pub const SECOND_LOOK_HEADING: &str = "Worth a second look";
+
+/// **DRAFT, NEEDS APPROVAL.** A session no preview has scrubbed yet. Not
+/// "0 marks": nobody has counted.
+pub const NOT_YET_SCRUBBED: &str = "Not yet scrubbed";
+
+/// **DRAFT, NEEDS APPROVAL.** The row's scrub state: `Scrubbed · 7 marks`,
+/// `Scrubbed · 1 mark`, or [`NOT_YET_SCRUBBED`] for `None` (the absent
+/// `marks` key). `None` is never rendered as zero.
+pub fn scrub_state_line(marks: Option<u32>) -> String {
+    match marks {
+        None => NOT_YET_SCRUBBED.to_string(),
+        Some(1) => "Scrubbed \u{00b7} 1 mark".to_string(),
+        Some(n) => format!("Scrubbed \u{00b7} {n} marks"),
+    }
+}
+
+/// **DRAFT, NEEDS APPROVAL.** Why one `second_look` reason waits, or `None`
+/// for a label this build does not know.
+pub fn second_look_line(reason: &str) -> Option<&'static str> {
+    match reason {
+        crate::daemon::second_look::REASON_NOTHING_MATCHED => {
+            Some("0 marks. No detector matched; that is why this one waits.")
+        }
+        crate::daemon::second_look::REASON_TRIMMED_TO_FIT => Some(
+            "Trimmed to fit the upload limit, so part of this session is not in what would be sent. That is why this one waits.",
+        ),
+        _ => None,
+    }
+}
+
+/// **DRAFT, NEEDS APPROVAL.** The hint under an unsure span, or `None` for a
+/// label this build does not know.
+pub fn unsure_hint_line(label: &str) -> Option<&'static str> {
+    match label {
+        crate::daemon::unsure_spans::LABEL_LOOKS_LIKE_EMAIL => {
+            Some("Looks like an email. Not matched. Your call.")
+        }
+        crate::daemon::unsure_spans::LABEL_LOOKS_LIKE_PHONE => {
+            Some("Looks like a phone number. Not matched. Your call.")
+        }
+        crate::daemon::unsure_spans::LABEL_LOOKS_LIKE_KEY => {
+            Some("Looks like a key. Not matched. Your call.")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_flow2_label_has_words_and_unscrubbed_is_not_zero() {
+        for reason in crate::daemon::second_look::SECOND_LOOK_REASONS {
+            assert!(second_look_line(reason).is_some(), "{reason}");
+        }
+        for label in crate::daemon::unsure_spans::UNSURE_LABELS {
+            assert!(unsure_hint_line(label).is_some(), "{label}");
+        }
+        assert_eq!(scrub_state_line(Some(7)), "Scrubbed \u{00b7} 7 marks");
+        assert_eq!(scrub_state_line(Some(1)), "Scrubbed \u{00b7} 1 mark");
+        assert_eq!(scrub_state_line(None), NOT_YET_SCRUBBED);
+        assert_ne!(scrub_state_line(None), scrub_state_line(Some(0)));
+    }
+}

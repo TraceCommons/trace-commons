@@ -646,6 +646,9 @@ impl PreviewJobRunner for DaemonPreviewRunner {
             .await
             {
                 Ok(summary) => {
+                    // The entry now has a mark count, so `list_pending` can
+                    // stop calling it not yet scrubbed.
+                    super::ipc::record_scrub(&shared, job.entry_id, &summary.redactions);
                     PreviewOutcome::Ready(Arc::new(super::ipc::preview_card_value(&summary)))
                 }
                 Err(_) => PreviewOutcome::Failed {

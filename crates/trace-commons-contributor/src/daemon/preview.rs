@@ -2577,6 +2577,58 @@ mod tests {
         assert!(turns_of(&envelope).unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn an_email_left_in_a_real_body_is_hinted_at_its_exact_offsets() {
+        // A real envelope, with one email the scrubber did not take (what an
+        // LLM-only filter that missed it would leave) beside one it did.
+        let mut envelope = envelope_with_tool_events().await;
+        envelope.events[0].redacted_content =
+            Some("key from ops@acme.io, not <PRIVATE_EMAIL_1>".into());
+        let body = body_of(&envelope).unwrap();
+        let spans = super::super::unsure_spans::unsure_spans_in(&body).unwrap();
+        assert_eq!(spans.len(), 1, "only the survivor: {spans:?}");
+        assert_eq!(
+            spans[0].label,
+            super::super::unsure_spans::LABEL_LOOKS_LIKE_EMAIL
+        );
+        assert_eq!(spans[0].byte_offset, body.find("ops@acme.io").unwrap());
+        assert_eq!(
+            &body[spans[0].byte_offset..spans[0].byte_offset + spans[0].byte_len],
+            "ops@acme.io"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaves_this_mac_lists_what_the_envelope_carries_and_never_the_folder() {
+        use crate::consent_copy::*;
+        let (_d, src, r) = fixture_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (_summary, _body, envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        let fields = leaves_this_mac_fields(&envelope);
+        for expected in [
+            LEAVES_TOOL,
+            LEAVES_TOOL_VERSION,
+            LEAVES_TIMING,
+            LEAVES_OUTCOME,
+            LEAVES_USES,
+            LEAVES_CONTRIBUTOR_ID,
+            LEAVES_FOLDER_FINGERPRINT,
+        ] {
+            assert!(fields.contains(&expected), "{expected}: {fields:?}");
+        }
+        // The fixture names no model and carries no correction, so neither
+        // is claimed.
+        assert!(!fields.contains(&LEAVES_MODEL), "{fields:?}");
+        assert!(!fields.contains(&LEAVES_CORRECTION), "{fields:?}");
+        // "Never the path or the folder name" is a claim about these bytes.
+        let wire = serde_json::to_string(&envelope).unwrap();
+        assert!(!wire.contains("/Users/testuser"), "the path left");
+        assert!(!wire.contains("myproj"), "the folder name left");
+    }
+
     #[test]
     fn the_span_scan_refuses_a_document_it_was_not_written_for() {
         // Fail-closed: an index that is not certainly exact is worse than
