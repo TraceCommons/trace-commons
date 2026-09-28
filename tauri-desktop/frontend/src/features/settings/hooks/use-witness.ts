@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { routeDisclosureKey } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { settingsKeys } from "../api/query-keys";
 import {
@@ -39,6 +40,9 @@ export function useWitness() {
           queryKey: settingsKeys.snapshot(core.scope),
         }),
         queryClient.invalidateQueries({ queryKey: coreKeys.status }),
+        queryClient.invalidateQueries({
+          queryKey: routeDisclosureKey(core.scope),
+        }),
       ]);
     },
   });

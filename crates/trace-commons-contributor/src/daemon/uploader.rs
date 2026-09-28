@@ -1108,6 +1108,7 @@ mod tests {
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1180,6 +1181,7 @@ mod tests {
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1247,6 +1249,7 @@ mod tests {
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1305,6 +1308,7 @@ mod tests {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1821,6 +1825,7 @@ mod tests {
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -1887,6 +1892,7 @@ mod tests {
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
