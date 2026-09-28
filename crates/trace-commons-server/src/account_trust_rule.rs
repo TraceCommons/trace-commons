@@ -437,10 +437,174 @@ fn facts_digest(facts: &[&EvaluationFact]) -> String {
     format!("sha256:{}", hex::encode(hash.finalize()))
 }
 
+/// The head of a stored evaluation, as a reader of
+/// `trace_account_trust_evaluations` sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredEvaluationHead<'a> {
+    pub growth_policy_version: &'a str,
+    pub mode: &'a str,
+    pub as_of: DateTime<Utc>,
+    pub tier: u32,
+}
+
+/// The tier admission may apply, per the spec's rule 2 ("How admission reads
+/// trust") and the 2026-09-27 decisions: a missing evaluation, one computed
+/// under a different policy version, a `shadow` one, a stale one (older than
+/// `evaluation_max_age_seconds`), one dated in the future, or one naming a
+/// tier the table does not have, all mean tier 0. Every failure falls to the
+/// base allowance, never above it.
+///
+/// Not called by admission in this build: the production policy parser
+/// refuses every growth rule, so admission never holds a [`GrowthPolicy`].
+/// This is the reading the switch-on change wires in.
+pub fn admission_tier(
+    policy: &GrowthPolicy,
+    stored: Option<StoredEvaluationHead<'_>>,
+    now: DateTime<Utc>,
+) -> u32 {
+    applicable_tier(policy, stored, now, "applied")
+}
+
+/// The shadow counterpart of [`admission_tier`]: the same freshness and
+/// version rules, reading a `shadow` row. Used only to count refusals the
+/// candidate policy would have admitted; it never decides one.
+pub fn shadow_tier(
+    policy: &GrowthPolicy,
+    stored: Option<StoredEvaluationHead<'_>>,
+    now: DateTime<Utc>,
+) -> u32 {
+    applicable_tier(policy, stored, now, "shadow")
+}
+
+fn applicable_tier(
+    policy: &GrowthPolicy,
+    stored: Option<StoredEvaluationHead<'_>>,
+    now: DateTime<Utc>,
+    mode: &str,
+) -> u32 {
+    let Some(stored) = stored else {
+        return 0;
+    };
+    let age = now - stored.as_of;
+    if stored.growth_policy_version != policy.version()
+        || stored.mode != mode
+        || age < chrono::Duration::zero()
+        || age > chrono::Duration::seconds(policy.evaluation_max_age_seconds)
+        || stored.tier as usize >= policy.tiers.len()
+    {
+        return 0;
+    }
+    stored.tier
+}
+
+/// Whether a reservation refused as `account_limit_reached`, with
+/// `period_spend` already spent, would have fitted under the candidate
+/// policy's allowance at the account's shadow tier. A calibration count for
+/// the switch-on decision, never an admission decision.
+pub fn shadow_would_admit(
+    policy: &GrowthPolicy,
+    stored: Option<StoredEvaluationHead<'_>>,
+    period_spend: i64,
+    now: DateTime<Utc>,
+) -> bool {
+    let tier = shadow_tier(policy, stored, now);
+    tier > 0
+        && period_spend
+            .checked_add(policy.base.processing_cost_bound())
+            .is_some_and(|next| next <= policy.effective_allowance(tier))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
+
+    #[test]
+    fn admission_reads_only_a_fresh_applied_evaluation_of_its_own_version() {
+        let policy = policy();
+        let now = t(10);
+        let head = |version: &'static str, mode: &'static str, age: i64, tier: u32| {
+            Some(StoredEvaluationHead {
+                growth_policy_version: version,
+                mode,
+                as_of: now - Duration::seconds(age),
+                tier,
+            })
+        };
+        assert_eq!(admission_tier(&policy, None, now), 0, "missing");
+        assert_eq!(
+            admission_tier(&policy, head("growth-test-v1", "applied", 60, 2), now),
+            2
+        );
+        assert_eq!(
+            admission_tier(&policy, head("growth-test-v0", "applied", 60, 2), now),
+            0,
+            "wrong version"
+        );
+        assert_eq!(
+            admission_tier(&policy, head("growth-test-v1", "shadow", 60, 2), now),
+            0,
+            "a shadow row never raises an allowance"
+        );
+        assert_eq!(
+            admission_tier(
+                &policy,
+                head("growth-test-v1", "applied", 2 * DAY + 1, 2),
+                now
+            ),
+            0,
+            "stale"
+        );
+        assert_eq!(
+            admission_tier(&policy, head("growth-test-v1", "applied", 2 * DAY, 2), now),
+            2,
+            "exactly at the max age is still fresh"
+        );
+        assert_eq!(
+            admission_tier(&policy, head("growth-test-v1", "applied", -1, 2), now),
+            0,
+            "dated in the future"
+        );
+        assert_eq!(
+            admission_tier(&policy, head("growth-test-v1", "applied", 60, 3), now),
+            0,
+            "a tier the table does not have"
+        );
+    }
+
+    #[test]
+    fn a_shadow_refusal_is_counted_only_when_the_candidate_would_admit() {
+        let policy = policy();
+        let now = t(10);
+        let shadow = |tier: u32| {
+            Some(StoredEvaluationHead {
+                growth_policy_version: "growth-test-v1",
+                mode: "shadow",
+                as_of: now - Duration::seconds(60),
+                tier,
+            })
+        };
+        // Base 100, cost bound 10; tier 1 allows 200, tier 2 the 400 ceiling.
+        assert!(shadow_would_admit(&policy, shadow(1), 95, now));
+        assert!(shadow_would_admit(&policy, shadow(1), 190, now));
+        assert!(!shadow_would_admit(&policy, shadow(1), 191, now));
+        assert!(shadow_would_admit(&policy, shadow(2), 390, now));
+        assert!(
+            !shadow_would_admit(&policy, shadow(0), 50, now),
+            "tier 0 adds nothing"
+        );
+        assert!(!shadow_would_admit(&policy, None, 50, now));
+        let applied = Some(StoredEvaluationHead {
+            growth_policy_version: "growth-test-v1",
+            mode: "applied",
+            as_of: now,
+            tier: 2,
+        });
+        assert!(
+            !shadow_would_admit(&policy, applied, 50, now),
+            "the shadow count reads shadow rows only"
+        );
+    }
 
     const DAY: i64 = 86_400;
 

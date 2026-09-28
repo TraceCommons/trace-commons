@@ -494,6 +494,64 @@
                 through tc_grant_void_notice. The button records that the
                 notice was shown and nothing else.
             -->
+            <!--
+                Every armed folder whose arming wording no longer claims a
+                model scrubs it (K5), not yet shown by any shell. Every string
+                is bound and comes from the Rust through
+                tc_arming_reworded_notice. Got it records that the notice was
+                shown; Ask me first is the Settings call.
+            -->
+            <ItemsControl ItemsSource="{x:Bind ViewModel.ArmingRewordingCards, Mode=OneWay}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="interop:ArmingRewordingCard">
+                        <Border Padding="14,12"
+                                Margin="0,0,0,8"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind Notice.Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Body}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.NowHeading}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Scope}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Limit}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.NoReview}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1"
+                                            Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <Button Visibility="{x:Bind CanAskFirst}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.AskFirstAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAskFirstArmingRewording" />
+                                    <Button Visibility="{x:Bind CanAcknowledge}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.Acknowledge}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAcknowledgeArmingRewording" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
             <ItemsControl ItemsSource="{x:Bind ViewModel.GrantVoidCards, Mode=OneWay}">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate x:DataType="interop:GrantVoidCard">
@@ -796,6 +854,66 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                 </Grid>
+            </Border>
+
+            <!--
+                Armed folders the automatic contribution gate is holding, from
+                status.automatic_contribution_held in the Rust's words. A
+                banner of its own for the reason the witness banner is: a
+                higher label can hold the health slot while folders are held.
+                No dismiss button: it goes when the hold does. Each folder has
+                an Ask me first button, the Settings call.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasGateHeldBanner, Mode=OneWay}"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Title, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Body, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Reasons, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{x:Bind}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           Margin="12,0,0,0"
+                                           TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Release, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.AskFirst, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Margin="0,6,0,0"
+                               TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Projects, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="interop:GateHeldProjectNotice">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0,4,0,0">
+                                    <TextBlock Grid.Column="0"
+                                               Text="{x:Bind Line}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               VerticalAlignment="Center"
+                                               TextWrapping="Wrap" />
+                                    <Button Grid.Column="1"
+                                            Visibility="{x:Bind CanAskFirst}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind AskFirstAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAskFirstHeldProject" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
             </Border>
 
             </StackPanel>

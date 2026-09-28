@@ -499,7 +499,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
-| `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
+| `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept`, `legacy_session_revoked` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
@@ -4016,7 +4016,11 @@ verifies the countersigned record against its own legacy key and the account
 it signed into; then, under the watcher's pass lock, writes the new config,
 promotes the staged key and stores the new session together, re-records
 every armed folder's grant with the new identity term and nothing else, and
-retires the legacy key last. A failure at any step leaves the legacy
+retires the legacy key last. Once committed, it revokes the legacy account
+session on the server (`POST /v1/account/logout` with that session;
+best effort, audited as `legacy-account-session-revoked` or
+`-revocation-failed`, and reported as `legacy_session_revoked`). A failure
+at any step leaves the legacy
 identity as it was; a daemon that dies mid-switch is rolled back, or
 finished once committed, at its next start. There is no IPC method for the
 re-baseline itself.

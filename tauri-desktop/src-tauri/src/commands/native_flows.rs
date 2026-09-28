@@ -126,6 +126,8 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
             "offer_decline": inference.offer_decline,
             "offer_asked_once": inference.offer_asked_once,
         },
+        "project_automatic_unavailable":
+            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
         "credential_cost": trace_commons_contributor::private_inference_copy::CREDENTIAL_COST,
         "credential_wallet_notice": trace_commons_contributor::private_inference_copy::CREDENTIAL_WALLET_NOTICE,
         "near_ai_enroll_title": inference.near_ai_enroll_title,
@@ -167,6 +169,28 @@ fn automatic_contribution_value(
 ) -> Value {
     let disclosure = trace_commons_contributor::daemon::automatic_gate::disclosure(config);
     json!(trace_commons_contributor::consent_copy::automatic_grant_copy(disclosure))
+}
+
+/// What an armed project is told about its sessions (K6).
+///
+/// The same words as the grant screens, but the choice between them is made
+/// by the contributor core over that project's own sessions:
+/// `automatic_gate::project_disclosure`, which earns the model-scrub wording
+/// only when every session the project has sent unattended since it was
+/// armed carried a certificate naming an allowlisted full pipeline. This
+/// wrapper forwards the core's answer and never chooses.
+#[tauri::command]
+pub(crate) async fn project_automatic_contribution_copy(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Value, String> {
+    let project_id = required(&project_id, "project-id-required")?;
+    call_result_or_view(
+        shared_state(&state)?,
+        "project_automatic_copy",
+        json!({ "project_id": project_id }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -274,6 +298,15 @@ mod tests {
             let escaped = serde_json::to_string(sentence).unwrap();
             assert!(!wire.contains(escaped.trim_matches('"')));
         }
+    }
+
+    /// K6: an armed project's failure line reaches the shell from the core.
+    #[test]
+    fn the_shared_copy_carries_the_project_disclosure_failure_line() {
+        assert_eq!(
+            contributor_disclosure_copy()["project_automatic_unavailable"],
+            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE
+        );
     }
 
     #[test]

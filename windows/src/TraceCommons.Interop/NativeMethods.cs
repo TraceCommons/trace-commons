@@ -315,6 +315,25 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string capacityJson);
 
     /// <summary>
+    /// The notice for one element of <c>status.arming_rewordings</c> (K5),
+    /// passed through as the daemon sent it, as an owned JSON object. NULL
+    /// for an argument that is not a JSON object, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_arming_reworded_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string rewordingJson);
+
+    /// <summary>
+    /// The notice for armed folders the automatic-contribution gate holds,
+    /// from <c>status.automatic_contribution_held</c>, as an owned JSON
+    /// object. NULL when nothing is held, for an unreadable argument, and on
+    /// a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_gate_held_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string heldJson);
+
+    /// <summary>
     /// Every fixed word on the private-inference offer and settings card, as
     /// an owned JSON object.
     ///
