@@ -4,6 +4,7 @@ import {
   parseGrantVoidNotice,
   parseGrantVoids,
   rearmTarget,
+  regrantOffered,
 } from "./grant-void-notice.ts";
 
 const projectVoid = {
@@ -62,6 +63,8 @@ const notice = {
   acknowledge: "Got it",
   rearm_action: "Turn back on",
   rearm_failed: "It could not be turned back on.",
+  regrant: null,
+  regrant_action: null,
 };
 
 const noButton = { ...notice, rearm_action: null, rearm_failed: null };
@@ -92,6 +95,32 @@ test("the re-arm target is the element's project, only when offered", () => {
   assert.equal(rearmTarget(projectVoidParsed, notice), "3f1c");
   assert.equal(rearmTarget(projectVoidParsed, noButton), null);
   assert.equal(rearmTarget(grantVoidParsed, notice), null);
+});
+
+// K10: the grant's notice carries the re-grant sentence and its button,
+// which opens the grant screens. They travel together, and a notice that
+// offers them is re-granted only when both are present.
+const grantNotice = {
+  ...noButton,
+  title: "Automatic contributing stopped for new projects",
+  regrant: "You can turn automatic contributing back on for new projects.",
+  regrant_action: "Review and turn back on",
+};
+
+test("the grant's notice is taken whole with its re-grant", () => {
+  const parsed = parseGrantVoidNotice(grantNotice);
+  assert.deepEqual(parsed, grantNotice);
+  assert.equal(regrantOffered(parsed), true);
+  assert.equal(regrantOffered(parseGrantVoidNotice(notice)), false);
+  assert.equal(regrantOffered(parseGrantVoidNotice(noButton)), false);
+});
+
+test("the re-grant sentence and its button come as a pair", () => {
+  assert.throws(() =>
+    parseGrantVoidNotice({ ...grantNotice, regrant_action: null }),
+  );
+  assert.throws(() => parseGrantVoidNotice({ ...grantNotice, regrant: null }));
+  assert.throws(() => parseGrantVoidNotice({ ...grantNotice, regrant: "" }));
 });
 
 test("a notice missing a sentence is refused rather than shown in part", () => {

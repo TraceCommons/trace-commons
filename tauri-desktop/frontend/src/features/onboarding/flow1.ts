@@ -66,7 +66,10 @@ export const initialFlow1Progress: Flow1Progress = {
 // The order is the spec's (connect-and-forget design, R7): source roots are
 // settled before connect, the scope picker runs immediately after connect
 // and before the path question, and the automatic path reaches the grant
-// only through both disclosure screens.
+// only through both disclosure screens. Connecting inference (K12, rev 7)
+// is optional and comes on every path before the disclosures, so the
+// witness screen shows a witness the contributor just connected. It is
+// never a grant blocker.
 export type OnboardingStep =
   | "welcome"
   | "roots"
@@ -74,13 +77,20 @@ export type OnboardingStep =
   | "consent"
   | "path"
   | "privacy"
+  | "inference"
   | "disclosure_scrub"
   | "disclosure_witness"
   | "grant"
   | "projects"
   | "done";
 
-export function afterPrivacy(path: ContributionPath | null): OnboardingStep {
+/** After the NEAR AI notice (or the path, without one): connecting inference. */
+export function afterPrivacy(_path: ContributionPath | null): OnboardingStep {
+  return "inference";
+}
+
+/** After connecting inference, connected or skipped. */
+export function afterInference(path: ContributionPath | null): OnboardingStep {
   return path === "automatic" ? "disclosure_scrub" : "projects";
 }
 
@@ -101,15 +111,17 @@ export function previousStep(
       return "consent";
     case "privacy":
       return scopesChosen ? "path" : "consent";
+    case "inference":
+      if (privacyIncluded) return "privacy";
+      return scopesChosen && path !== null ? "path" : "consent";
     case "disclosure_scrub":
-      return privacyIncluded ? "privacy" : "path";
+      return "inference";
     case "disclosure_witness":
       return "disclosure_scrub";
     case "grant":
       return "disclosure_witness";
     case "projects":
-      if (privacyIncluded) return "privacy";
-      return scopesChosen && path !== null ? "path" : "consent";
+      return "inference";
     default:
       return current;
   }
@@ -152,7 +164,7 @@ export function decideLater(showPrivacy: boolean): {
   privacyIncluded: boolean;
 } {
   return {
-    step: showPrivacy ? "privacy" : "projects",
+    step: showPrivacy ? "privacy" : "inference",
     progress: { ...initialFlow1Progress, path: "ask_first" },
     privacyIncluded: showPrivacy,
   };
