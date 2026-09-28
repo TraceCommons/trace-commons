@@ -447,6 +447,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `status` | — | see below | |
 | `list_pending` | — | `pending[]` of queue entries | |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
+| `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" below |
@@ -2685,9 +2686,81 @@ artifact is written and the pin recorded under one queue lock. An entry
 re-offered because its bytes moved loses the pin and therefore the claim --
 the certificate covered the old bytes.
 
-No current client calls this method. It defines the read-only projection a
-future witness-certificate review surface can use without exposing raw
-artifacts or inventing a control action.
+The Tauri client calls it from the redacted-view inspector, for an entry
+whose `holds_certificate` is true, to show the measurement and signer the
+witness was checked against at review (K11). The other shells do not call it
+yet.
+
+### `route_disclosure`
+
+K11 of the connect-and-forget consent design ("The disclosure"): the facts
+behind the disclosure screens. Read-only and local -- it reads the config,
+the daemon's settings and the daemon process's environment, and makes no
+network call. Answered by the daemon rather than read by a shell from the
+config file, because the daemon is the process that sends: the privacy filter
+`TRACE_PRIVACY_FILTER_BACKEND` attaches is the daemon's environment, and
+`ironwire_attested_bodies` is the daemon's setting.
+
+```json
+{
+  "route": "witness",
+  "witness": {
+    "state": "pinned",
+    "url": "https://witness.example",
+    "signing_address": "0x…",
+    "pinned_measurements": ["mrtd=…,rtmr0=…"],
+    "origin": "published_at_join"
+  },
+  "local_filter": null,
+  "receipts": { "endpoint_configured": true, "check_attestation": false },
+  "attested_bodies": false
+}
+```
+
+| `route` | Means |
+|---|---|
+| `witness` | a pinned witness: each session is sent unredacted to it, and it redacts inside its enclave |
+| `witness_refusing` | a witness is configured and refusing (nothing pinned, or a pin that does not parse): nothing is sent |
+| `local` | no witness: redaction runs on this machine and the unredacted session does not leave it |
+| `not_enrolled` | no enrollment: nothing is sent |
+| `settings_unreadable` | the config could not be read: nothing is sent |
+
+`witness` is present whenever a witness is configured, pinned or refusing, and
+`null` otherwise. `state` is the same `WitnessTrustState` the witness settings
+card shows; `pinned_measurements` are verbatim, in stored order.
+
+`witness.origin` says how the witness came to be configured:
+
+| `origin` | Written by |
+|---|---|
+| `published_at_join` | a NEAR AI or wallet join, from what the commons publishes, without asking |
+| `connected_inference` | `inference_connection_install`, on the contributor's confirmation |
+| `settings` | a shell's witness settings (Tauri, the C ABI's `tc_witness_configure`, GTK) |
+| `environment` | `TRACE_COMMONS_WITNESS_*` read at enrollment |
+| `not_recorded` | no record, or a record written for a different witness |
+
+The config records the origin beside the witness, keyed by a digest of the
+witness's URL, signing address and pins (`ContributorConfig::witness_origin`),
+so a witness changed later by something that does not record an origin reads
+as `not_recorded` rather than inheriting a stale answer. Configs written before
+the record existed read the same way. The record is not an input to
+`input_fingerprint`.
+
+`local_filter` is present only when `route` is `local`: `none`, `near_ai`,
+`self_hosted`, `sidecar`, or `invalid` (a setting the redactor refuses to
+build, so nothing is sent). It is the config's `pii_filter` when set, and
+otherwise the environment's backend.
+
+**What this does not report, because this client does not know it:** which
+privacy filter the witness itself calls (it is set in the configuration the
+witness's measurement covers, which this client never reads), that filter's
+attestation, and whether a receipt signer is one the witness pins. A shell
+says so rather than implying either way; `consent_copy::route_disclosure_copy`
+has the sentences.
+
+A shell renders the words `consent_copy::route_disclosure_copy` gives for these
+facts and branches on neither. A shape it cannot read -- an unknown `route` or
+`origin` from a newer daemon -- is refused, not rendered as the nearest value.
 
 ### The attested-inference record
 
