@@ -894,7 +894,7 @@ impl DaemonShared {
         let mut held = self.private_inference.lock().await;
         // Read after acquiring lifecycle ownership: a queued reconciliation
         // must not replay a setting superseded while it waited for that lock.
-        let (on, generation, credential, capture_enabled) = {
+        let (on, generation, credential, capture_enabled, attestor_key) = {
             let settings = self.settings.lock().expect("settings lock");
             (
                 !self.private_inference_terminating.load(Ordering::Acquire)
@@ -909,6 +909,9 @@ impl DaemonShared {
                     .as_ref()
                     .map(|c| ironwire_proxy::embed::HostSecret::from(c.key.clone())),
                 settings.token_capture_enabled,
+                // The same key, for the attestor's gateway fetch. Never
+                // logged; it goes where IronWire already sends it.
+                settings.near_ai_inference.as_ref().map(|c| c.key.clone()),
             )
         };
         let Some(host) = held.as_mut() else {
@@ -929,6 +932,11 @@ impl DaemonShared {
             return;
         };
         host.set_runtime(self.proxy_runtime.get().cloned());
+        host.set_signer_attestor(signer_attestor_for(
+            &self.store,
+            attestor_key,
+            crate::routing::proof_attestor::pins_from_env(),
+        ));
         host.set_credential(credential);
         host.set_token_capture(capture_enabled);
         if host.accept_generation(generation) {
@@ -6060,6 +6068,35 @@ fn routed_tools(body: &[u8]) -> Vec<serde_json::Value> {
 #[path = "cloud_credential_recovery_tests.rs"]
 mod cloud_credential_recovery_tests;
 
+/// The receipt-proof attestor for the embedded IronWire, or none.
+///
+/// Built only when all three hold: a NEAR AI key (the gateway refuses the
+/// attestation registry without one, and it is the key IronWire already sends
+/// there), an enrolled config (ingest serves the collateral, and its allowlist
+/// governs egress), and at least one measurement pin. Without pins no key can
+/// be earned, so installing an attestor would buy one receipt `GET` per NEAR
+/// AI answer and never a `verified` row; without one, IronWire leaves those
+/// rows `pending`, which is also true.
+fn signer_attestor_for(
+    store: &ConfigStore,
+    key: Option<String>,
+    pins: Vec<trace_commons_attestation::measurements::ExpectedMeasurements>,
+) -> Option<std::sync::Arc<dyn ironwire_proxy::proof::SignerAttestor>> {
+    use crate::routing::proof_attestor::{HttpAttestationSource, NearAiQuoteAttestor};
+    if pins.is_empty() {
+        return None;
+    }
+    let key = key?;
+    let cfg = store.load_config().ok().flatten()?;
+    let source =
+        HttpAttestationSource::new(&crate::config::config_allowlist(&cfg), &cfg.ingest_url, key)
+            .ok()?;
+    Some(std::sync::Arc::new(NearAiQuoteAttestor::new(
+        Box::new(source),
+        pins,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     mod witnessed_flow {
@@ -10972,6 +11009,58 @@ mod tests {
         s.reconcile_private_inference().await;
         assert_eq!(s.private_inference_value()["state"], "off");
         assert!(!absent_home.exists());
+    }
+
+    /// The attestor needs all three -- a key, an enrollment, and a pin -- and
+    /// with any one missing IronWire gets none, so its NEAR AI rows stay
+    /// `pending` rather than spending a receipt fetch that can never verify.
+    #[test]
+    fn an_attestor_is_built_only_with_a_key_an_enrollment_and_a_pin() {
+        let pins = || {
+            crate::routing::proof_attestor::parse_pins(&format!("mrconfigid={}", "aa".repeat(48)))
+                .expect("valid pins")
+        };
+        let bare = shared();
+        let enrolled = enrolled_shared();
+        let key = || Some("sk-minted".to_string());
+        assert!(signer_attestor_for(&enrolled.store, key(), Vec::new()).is_none());
+        assert!(signer_attestor_for(&enrolled.store, None, pins()).is_none());
+        assert!(signer_attestor_for(&bare.store, key(), pins()).is_none());
+        assert!(signer_attestor_for(&enrolled.store, key(), pins()).is_some());
+    }
+
+    /// With no pins in the environment -- every test run, and every
+    /// contributor today -- reconcile hands IronWire no attestor even with a
+    /// key held.
+    #[tokio::test]
+    async fn reconcile_hands_ironwire_no_attestor_without_pins() {
+        assert!(
+            std::env::var_os(crate::routing::proof_attestor::NEAR_AI_EXPECTED_MEASUREMENTS_ENV)
+                .is_none(),
+            "the premise: nothing is pinned in the test environment"
+        );
+        let s = enrolled_shared();
+        let home = tempfile::tempdir().unwrap();
+        *s.private_inference.lock().await = Some(
+            super::super::private_inference::PrivateInference::with_port(
+                home.path().join("never-created"),
+                0,
+            ),
+        );
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-minted".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-min".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        s.reconcile_private_inference().await;
+        let held = s.private_inference.lock().await;
+        let host = held.as_ref().unwrap();
+        assert!(host.holds_credential());
+        assert!(!host.holds_signer_attestor());
     }
 
     /// A key obtained after the daemon started still reaches the proxy, and
