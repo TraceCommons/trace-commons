@@ -11129,6 +11129,51 @@ async fn run_pipeline_app_stops_within_the_grace_period() {
         .unwrap();
 }
 
+/// A worker that never notices its own stop signal must be aborted once the
+/// shutdown grace period elapses, not left running. Merely dropping a
+/// `JoinHandle` detaches its task rather than cancelling it, so a shutdown
+/// path that only waits and logs on timeout -- without calling `abort()` --
+/// leaves that task running: exactly the kind of leftover background
+/// activity that can go on touching a shared database a later caller assumes
+/// is now quiescent. This exercises `join_or_abort`, the piece of
+/// `run_pipeline_app`'s shutdown path that must prevent that, directly: a
+/// spawned task that only ever awaits `std::future::pending()` (so it can
+/// never finish on its own, standing in for a worker pass that never checks
+/// `stop` mid-drain) must be aborted, and aborting a task drops its future
+/// even without the future ever being polled to completion -- observed here
+/// through a drop guard the stuck task holds.
+#[tokio::test]
+async fn join_or_abort_aborts_a_task_that_outlives_its_grace_period() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SetOnDrop(Arc<AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guard = SetOnDrop(dropped.clone());
+    let handle = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+
+    pipeline_runtime::join_or_abort(handle, std::time::Duration::from_millis(50)).await;
+
+    // `abort()` schedules cancellation; give the aborted task a moment to
+    // actually unwind and drop its guard before checking it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !dropped.load(Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a task that outlives its grace period must be aborted, not left running"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[test]
 fn db_read_cutover_guard_requires_fail_closed_writes_when_reconciliation_is_required() {
     let gates = TraceTenantRolloutGates::for_feature(

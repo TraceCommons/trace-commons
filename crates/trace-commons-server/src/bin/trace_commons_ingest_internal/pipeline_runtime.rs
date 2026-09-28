@@ -403,13 +403,32 @@ async fn register_default_bundles_for_rollout_tenants(state: &AppState) -> anyho
     Ok(())
 }
 
+/// Waits up to `grace` for a spawned task to finish on its own; if it has
+/// not, aborts it. Mirrors the wait-then-abort rule
+/// `serve_ingest_with_graceful_shutdown`'s watchdog already applies to the
+/// HTTP server task: a task that does not notice its own stop signal within
+/// the shutdown grace period is a defect (a stuck drain, a wedged
+/// connection), and letting it keep running after shutdown has already
+/// logged as complete is exactly how it would go on touching a database a
+/// later caller assumes is now quiescent. `handle` is taken by value and
+/// consumed either way, so a caller cannot accidentally await or drop it
+/// again afterward.
+pub(crate) async fn join_or_abort<T>(mut handle: tokio::task::JoinHandle<T>, grace: StdDuration) {
+    if tokio::time::timeout(grace, &mut handle).await.is_err() {
+        tracing::warn!(
+            "pipeline worker did not stop within the shutdown grace period; aborting it"
+        );
+        handle.abort();
+    }
+}
+
 /// Serves ingest and, when a pipeline runtime is injected, runs the owned
 /// worker loop alongside it. `shutdown` stops HTTP first, through
 /// `serve_ingest_with_graceful_shutdown`'s own grace period; once that
 /// resolves, the worker (if any) is asked to stop and given the same grace
-/// period to confirm it did. A worker that does not stop in time is logged
-/// with a label and left running rather than panicking -- shutdown still
-/// completes.
+/// period to confirm it did. A worker that does not stop in time is aborted
+/// (`join_or_abort`) rather than left running -- shutdown still completes
+/// either way.
 pub async fn run_pipeline_app(
     state: Arc<AppState>,
     listener: TcpListener,
@@ -432,12 +451,7 @@ pub async fn run_pipeline_app(
         worker
             .ready
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        if tokio::time::timeout(std::time::Duration::from_secs(grace), worker.join)
-            .await
-            .is_err()
-        {
-            tracing::warn!("pipeline worker did not stop within the shutdown grace period");
-        }
+        join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
     }
     result
 }
