@@ -208,16 +208,26 @@ leg's `operation_ref_hash` in the adapter's records and reconcile it by
 hand. Nothing retries it once the run has failed. On a run that is still
 live, Settle dispatches a `settlement_unreconciled` leg again on its next
 attempt -- the label only means the *last* reconciling call did not confirm
-a match, not that the leg is done being tried.
+a match, not that the leg is done being tried. A leg a withdrawal forfeits
+(below) can carry this same label, for the same reason.
 
-A withdrawal forfeits every leg that is not `complete` without an adapter
-call. Any leg of another instrument whose `dispatched_at` is set may have
-taken effect when it is forfeited this way, whatever its state or label:
-its adapter was called at least once. That includes a
-`settlement_unreconciled` leg of a live run and a leg dispatched earlier
-and later refused by a lowered cap. The leg keeps its `dispatched_at`, and
-only the adapter's records for its `operation_ref_hash` show whether the
-payment happened. A Trace Credit leg that is not `complete` paid nothing.
+A withdrawal (or another way a submission stops being operable -- revoked,
+purged, or expired) forfeits every leg that is not `complete` without an
+adapter call. A dispatched leg of an external instrument -- `dispatched_at`
+is set, and the instrument is not `trace_credit` -- is forfeited as
+`settlement_unreconciled` instead of `submission_inoperable`: its adapter
+was called at least once, so it may have taken effect, whatever its state or
+label. That includes a leg already `settlement_unreconciled` on a live run
+and a leg dispatched earlier and later refused by a lowered cap. The leg
+keeps its `dispatched_at`; find its `operation_ref_hash` in the adapter's
+own records and reconcile it by hand, the same as a `settlement_unreconciled`
+leg a failed run leaves behind (above) -- nothing in this release reconciles
+it automatically. The exception is a leg whose own label already says no
+effect happened (`settlement_request_conflict` or
+`settlement_request_rejected`): it stays `submission_inoperable`. An
+undispatched leg had no effect, and a Trace Credit leg that is not
+`complete` paid nothing -- it pays only through the ledger row that commits
+with its completion -- so both of those stay `submission_inoperable` too.
 
 ## Receipt staging and the orphan sweep
 

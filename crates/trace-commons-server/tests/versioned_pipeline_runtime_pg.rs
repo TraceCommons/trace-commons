@@ -6173,6 +6173,250 @@ async fn withdrawal_after_score_forfeits_pending_operations_and_settle_completes
     assert_eq!(evidence.submission_operable, Some(false));
 }
 
+/// Step 6's top-level inoperable branch: a Settle run has
+/// already dispatched one external leg and left it waiting -- `storage_bonus`
+/// answers `Unavailable`, so it is `retry` with `dispatched_at` set -- while
+/// a second external leg, `storage_rebate`, never got a cap configured and
+/// so never reached its adapter at all (an uncharged suspension raised
+/// before any adapter call), and `trace_credit` was never reached either
+/// (the missing cap aborts the pass before Step 6's loop gets past
+/// `storage_rebate`, which sorts ahead of it). A real withdrawal
+/// (`record_trace_withdrawal`) then lands. The next pass must forfeit
+/// `storage_bonus` as `settlement_unreconciled` -- its adapter was called at
+/// least once, so it may have taken effect -- while `storage_rebate` (never
+/// dispatched) and `trace_credit` (pays only through its ledger row) both
+/// keep `submission_inoperable`. No adapter is called in that pass, and
+/// Settle still completes under the inoperable guard.
+#[tokio::test]
+async fn withdrawal_flags_a_dispatched_external_leg_for_reconciliation() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage_bonus = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_bonus").unwrap(),
+        "recording_storage_bonus_test_only",
+        "none",
+    );
+    let storage_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let service = test_service_with_adapters_and_caps(
+        backend.clone(),
+        artifact_store(&dir),
+        three_leg_config(),
+        vec![
+            storage_bonus.clone() as Arc<dyn SettlementAdapter>,
+            storage_rebate.clone() as Arc<dyn SettlementAdapter>,
+            trace_credit.clone() as Arc<dyn SettlementAdapter>,
+        ],
+        // `storage_rebate` gets no cap: a configuration gap that waits
+        // uncharged before its adapter is ever called, so it stays
+        // undispatched through the withdrawal below.
+        uncapped_caps(&["storage_bonus", InstrumentId::trace_credit().as_str()]),
+    )
+    .await;
+    let tenant = format!("settle-withdraw-unreconciled-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    storage_bonus.fail_next();
+    let waited = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the first Settle attempt waits, uncharged, on the missing cap");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    assert_eq!(
+        waited.last_error_label.as_deref(),
+        Some(PIPELINE_SETTLEMENT_CAP_MISSING_LABEL)
+    );
+    assert_eq!(
+        waited.attempt_count, run.attempt_count,
+        "a missing cap is a configuration gap, never charged"
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_bonus"), "retry");
+    assert!(leg_dispatched(&rows, "storage_bonus"));
+    assert_eq!(leg_state(&rows, "storage_rebate"), "pending");
+    assert!(!leg_dispatched(&rows, "storage_rebate"));
+    assert_eq!(leg_state(&rows, "trace_credit"), "pending");
+    assert!(!leg_dispatched(&rows, "trace_credit"));
+
+    backend
+        .record_trace_withdrawal(
+            &tenant,
+            run.submission_id,
+            chrono::Utc::now(),
+            "accepted",
+            "not_distributed",
+        )
+        .await
+        .expect("record the withdrawal");
+
+    let calls_before = (
+        storage_bonus.requests().len(),
+        storage_rebate.requests().len(),
+        trace_credit.requests().len(),
+    );
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+    assert_eq!(
+        (
+            storage_bonus.requests().len(),
+            storage_rebate.requests().len(),
+            trace_credit.requests().len(),
+        ),
+        calls_before,
+        "no adapter call in the pass that forfeits every leg"
+    );
+
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_bonus"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_bonus"),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+        "a dispatched external leg may have taken effect"
+    );
+    assert!(
+        leg_dispatched(&rows, "storage_bonus"),
+        "dispatched_at is kept"
+    );
+    assert_eq!(leg_state(&rows, "storage_rebate"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "an undispatched leg had no effect"
+    );
+    assert!(!leg_dispatched(&rows, "storage_rebate"));
+    assert_eq!(leg_state(&rows, "trace_credit"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "trace_credit"),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "a Trace Credit leg pays only through its ledger row"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(evidence.submission_operable, Some(false));
+}
+
+/// A leg that had no effect keeps the ordinary withdrawal label: a leg whose own label
+/// already says no effect happened -- the adapter answered `Conflict` --
+/// keeps `submission_inoperable` when a later withdrawal forfeits it, even
+/// though it was dispatched: unlike an ambiguous `Unavailable` or
+/// `settlement_result_mismatch` answer, `Conflict` (and `Rejected`) already
+/// mean nothing needs reconciling.
+#[tokio::test]
+async fn a_conflict_leg_forfeited_on_withdrawal_keeps_submission_inoperable() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let storage_rebate = Arc::new(RefusingSettlementAdapter {
+        instrument_id: InstrumentId::new("storage_rebate").unwrap(),
+        error: SettlementError::Conflict,
+    });
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        vec![
+            storage_rebate as Arc<dyn SettlementAdapter>,
+            trace_credit.clone() as Arc<dyn SettlementAdapter>,
+        ],
+    )
+    .await;
+    let tenant = format!("settle-withdraw-conflict-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    let blocked = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the first Settle attempt retries on the charged conflict");
+    assert_eq!(blocked.state, PipelineRunState::Retry);
+    assert_eq!(
+        blocked.last_error_label.as_deref(),
+        Some("settlement_operation_retry")
+    );
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(SettlementError::Conflict.label())
+    );
+    assert!(leg_dispatched(&rows, "storage_rebate"));
+    assert_eq!(
+        leg_state(&rows, "trace_credit"),
+        "complete",
+        "the leg ahead of the conflicted one still settles in the same pass"
+    );
+
+    backend
+        .record_trace_withdrawal(
+            &tenant,
+            run.submission_id,
+            chrono::Utc::now(),
+            "accepted",
+            "not_distributed",
+        )
+        .await
+        .expect("record the withdrawal");
+
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+
+    let rows = settlement_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(leg_state(&rows, "storage_rebate"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "storage_rebate"),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "a leg whose own label already says no effect happened keeps its \
+         withdrawal label, even though it was dispatched"
+    );
+    assert!(
+        leg_dispatched(&rows, "storage_rebate"),
+        "dispatched_at is kept"
+    );
+    assert_eq!(
+        leg_state(&rows, "trace_credit"),
+        "complete",
+        "a leg completed earlier stays complete: no leg reverses another"
+    );
+}
+
 /// A withdrawal recorded after a run has already completed leaves the
 /// settled leg, its finalized batch, and the committed Settle outcome
 /// untouched -- there is no reprocessing path that could revisit them, and
@@ -6861,6 +7105,211 @@ async fn a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award(
                 }
             },
             other => panic!("unexpected instrument: {other}"),
+        }
+    }
+
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "revoked",
+        "the submission stays revoked"
+    );
+}
+
+/// The in-pass branch after `InternalCreditResult::Inoperable`:
+/// `credit_then_vector_config` sorts `trace_credit` ahead of `vector_rebate`,
+/// so a withdrawal the credit leg's own ledger transaction catches mid-pass
+/// still reaches a later leg in the same pass. `vector_rebate` is dispatched
+/// and left waiting (`Unavailable`) on the first Settle attempt, while
+/// `trace_credit` is held by an account hold that attempt and so never
+/// reaches its adapter -- "dispatched in an earlier attempt" for the later
+/// leg, untouched for the credit leg. Once the hold is released, the second
+/// attempt's credit leg triggers a real withdrawal from inside its own
+/// adapter call (the seam
+/// `a_withdrawal_during_the_credit_adapter_call_forfeits_the_pending_award`
+/// uses); its ledger transaction's own re-check finds the submission
+/// inoperable and forfeits the credit leg as `submission_inoperable` (Trace
+/// Credit keeps that label), then treats every remaining leg of the same
+/// pass the way Step 6's top-level branch would -- so `vector_rebate` is
+/// forfeited as `settlement_unreconciled` without another adapter call, and
+/// Settle still completes.
+#[tokio::test]
+async fn a_withdrawal_inside_the_credit_call_also_forfeits_a_later_dispatched_leg() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner_url =
+        std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!(
+        "settle-credit-then-vector-withdraw-{}",
+        uuid::Uuid::new_v4()
+    );
+    let submission_id = uuid::Uuid::new_v4();
+    let hold_id = uuid::Uuid::new_v4();
+
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let withdrawing = Arc::new(WithdrawOnCreditSettleAdapter {
+        inner: trace_credit.clone(),
+        runtime_url: runtime_role_url(&owner_url),
+        tenant_id: tenant.clone(),
+        submission_id,
+        triggered: AtomicBool::new(false),
+    });
+    let vector_rebate = RecordingSettlementAdapter::new(
+        InstrumentId::new("vector_rebate").unwrap(),
+        "recording_vector_rebate_test_only",
+        "none",
+    );
+    let service = test_service_with_adapters_and_caps(
+        backend.clone(),
+        artifact_store(&dir),
+        credit_then_vector_config(),
+        vec![
+            withdrawing as Arc<dyn SettlementAdapter>,
+            vector_rebate.clone() as Arc<dyn SettlementAdapter>,
+        ],
+        credit_then_vector_caps(),
+    )
+    .await;
+
+    let env = envelope(submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let scored = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+
+    // First Settle attempt: the credit account is held, so `trace_credit`
+    // never reaches its adapter (the withdrawing adapter is never
+    // triggered), while `vector_rebate` answers `Unavailable` and so is left
+    // `retry` with `dispatched_at` set -- dispatched in this earlier
+    // attempt.
+    backend
+        .upsert_trace_credit_hold(credit_hold(&tenant, hold_id, None))
+        .await
+        .expect("hold the credit account");
+    vector_rebate.fail_next();
+    let waited = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the first Settle attempt waits, uncharged, on the credit hold");
+    assert_eq!(waited.state, PipelineRunState::Retry);
+    assert_eq!(
+        waited.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+    let rows = settlement_rows(&backend, &tenant, created.run_id).await;
+    assert_eq!(leg_state(&rows, "trace_credit"), "held");
+    assert!(!leg_dispatched(&rows, "trace_credit"));
+    assert_eq!(leg_state(&rows, "vector_rebate"), "retry");
+    assert!(leg_dispatched(&rows, "vector_rebate"));
+    assert_eq!(
+        vector_rebate.requests().len(),
+        0,
+        "an `Unavailable` answer is not a logical request"
+    );
+
+    // Release the hold: the second attempt reaches the credit adapter for
+    // the first time, and its own `settle` call triggers the real
+    // withdrawal before the ledger transaction re-checks operability.
+    backend
+        .upsert_trace_credit_hold(credit_hold(&tenant, hold_id, Some(chrono::Utc::now())))
+        .await
+        .expect("release the credit hold");
+    let vector_calls_before = vector_rebate.requests().len();
+    force_due(&backend, &tenant, created.run_id).await;
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the mid-pass withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.next_phase, None);
+
+    assert_eq!(
+        trace_credit.requests().len(),
+        1,
+        "the credit adapter is called exactly once, on this attempt"
+    );
+    assert_eq!(
+        vector_rebate.requests().len(),
+        vector_calls_before,
+        "vector_rebate is forfeited without another adapter call"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0,
+        "no ledger row for the withdrawn submission's pending award"
+    );
+
+    let rows = settlement_rows(&backend, &tenant, created.run_id).await;
+    assert_eq!(leg_state(&rows, "trace_credit"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "trace_credit"),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(leg_state(&rows, "vector_rebate"), "forfeited");
+    assert_eq!(
+        leg_label(&rows, "vector_rebate"),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+        "a leg dispatched in an earlier attempt may have taken effect"
+    );
+    assert!(
+        leg_dispatched(&rows, "vector_rebate"),
+        "dispatched_at is kept"
+    );
+
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let settle_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Settle)
+        .expect("Settle outcome recorded");
+    let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
+    assert_eq!(
+        evidence.submission_operable,
+        Some(false),
+        "the run's Settle outcome records the inoperable guard"
+    );
+    let decision: SettleDecision = serde_json::from_value(settle_outcome.decision).unwrap();
+    let operations = decision.settlement_operations();
+    assert_eq!(operations.len(), 2);
+    for operation in operations {
+        match operation.outcome() {
+            InstrumentSettlementOutcome::Forfeited { reason } => {
+                assert_eq!(
+                    reason.as_str(),
+                    PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+                    "the committed decision's reason never changes, whatever the \
+                     stored row's own label says"
+                );
+            }
+            InstrumentSettlementOutcome::Completed { .. } => {
+                panic!("every operation must be forfeited")
+            }
         }
     }
 
@@ -7929,6 +8378,46 @@ fn three_leg_caps() -> PipelineCaps {
         "storage_rebate",
         InstrumentId::trace_credit().as_str(),
     ])
+}
+
+/// A fourth off-chain instrument whose id sorts *after* `trace_credit`
+/// (`vector_rebate`), for the in-pass withdrawal test:
+/// Step 6 settles `trace_credit` first and only reaches this leg afterward
+/// in the same pass, so a withdrawal the credit leg's own transaction
+/// catches can still forfeit this leg before the pass ends.
+fn vector_rebate_descriptor() -> InstrumentDescriptor {
+    InstrumentDescriptor {
+        kind: InstrumentKind::CreditAccount,
+        network: "pipeline-test".to_string(),
+        contract: "vector-rebate".to_string(),
+        decimals: 0,
+    }
+}
+
+/// Just the two legs the in-pass withdrawal test needs: `trace_credit`
+/// (1,000,000 atomic units) and `vector_rebate` (9 atomic units), an
+/// external instrument that sorts after it.
+fn credit_then_vector_config() -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![
+            PipelineInstrumentAwardConfig {
+                instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+                atomic_units: AtomicUnits::from_raw(1_000_000),
+                descriptor: trace_credit_descriptor(),
+            },
+            PipelineInstrumentAwardConfig {
+                instrument_id: "vector_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(9),
+                descriptor: vector_rebate_descriptor(),
+            },
+        ],
+        include_index: false,
+        variant: None,
+    }
+}
+
+fn credit_then_vector_caps() -> PipelineCaps {
+    uncapped_caps(&[InstrumentId::trace_credit().as_str(), "vector_rebate"])
 }
 
 /// Counts every `settle` call, a repeated call for one operation included,

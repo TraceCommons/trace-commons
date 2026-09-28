@@ -597,6 +597,47 @@ fn forfeited_settlement_update(label: &str) -> SettlementUpdate<'_> {
     }
 }
 
+/// The label a leg gets when the submission it belongs to stops being
+/// operable during Settle (withdrawn, revoked, purged, or expired) and the
+/// leg is forfeited without a further adapter call. A dispatched leg of an
+/// external instrument (anything but `trace_credit`) may have taken effect
+/// -- its adapter was called at least once -- so it is flagged
+/// `settlement_unreconciled` instead of `submission_inoperable`: an operator
+/// reconciles it by hand against the adapter's own records by
+/// `operation_ref_hash`; nothing in this release reconciles it
+/// automatically. The exception is a leg whose own label already says no
+/// effect happened (the adapter's own `Conflict`/`Rejected` answer): it
+/// keeps `submission_inoperable`. An undispatched leg had no effect, and a
+/// Trace Credit leg pays only through the ledger row that commits with its
+/// completion, so both of those keep `submission_inoperable` too.
+fn withdrawal_forfeit_label(settlement: &PipelineSettlementRecord) -> &'static str {
+    let already_no_effect = matches!(
+        settlement.last_error_label.as_deref(),
+        Some(label)
+            if label == SettlementError::Conflict.label()
+                || label == SettlementError::Rejected.label()
+    );
+    if settlement.instrument_id != InstrumentId::trace_credit().as_str()
+        && settlement.dispatched_at.is_some()
+        && !already_no_effect
+    {
+        PIPELINE_SETTLEMENT_UNRECONCILED_LABEL
+    } else {
+        PIPELINE_SUBMISSION_INOPERABLE_LABEL
+    }
+}
+
+/// The settlement-row update for a leg forfeited because its submission
+/// stopped being operable during Settle. See `withdrawal_forfeit_label` for
+/// the label rule; both of Step 6's withdrawal-forfeit branches in
+/// `complete_settle_phase` share this one function rather than each
+/// picking a label on its own.
+fn withdrawal_forfeited_settlement_update(
+    settlement: &PipelineSettlementRecord,
+) -> SettlementUpdate<'static> {
+    forfeited_settlement_update(withdrawal_forfeit_label(settlement))
+}
+
 /// `PgPipelineStore::update_settlement`'s per-call update. `credit_event_id`
 /// and `settlement_batch_id` only ever move from `NULL` to `Some` (a `None`
 /// here leaves whatever is already stored); `payout_state` similarly leaves
@@ -5155,19 +5196,25 @@ impl PipelineService {
             // may have taken effect when it is forfeited here, whatever its
             // state or label: its adapter was called at least once. That
             // includes a `settlement_unreconciled` leg of a live run and a leg
-            // dispatched earlier and later refused by a lowered cap. This
-            // forfeit does not reconcile it against its adapter; the leg
-            // keeps its `dispatched_at`, and the adapter's records for its
-            // `operation_ref_hash` are the only evidence of the effect. A
-            // Trace Credit leg that is not `complete` paid nothing: it pays
+            // dispatched earlier and later refused by a lowered cap. Such a
+            // leg is flagged `settlement_unreconciled` here instead of
+            // `submission_inoperable`, for an operator to reconcile by hand
+            // against the adapter's own records -- this forfeit does not make
+            // that reconciling call itself, and the leg keeps its
+            // `dispatched_at`. The exception is a leg whose own label already
+            // says no effect happened (`Conflict`/`Rejected`): it keeps
+            // `submission_inoperable`. An undispatched leg had no effect, and
+            // a Trace Credit leg that is not `complete` paid nothing: it pays
             // only through the ledger row that commits with its completion.
+            // `withdrawal_forfeit_label` is the one rule both this branch and
+            // the in-pass branch below share.
             for settlement in &settlements {
                 if settlement.operation_state != "complete" {
                     self.store
                         .update_settlement(
                             &run,
                             &settlement.instrument_id,
-                            forfeited_settlement_update(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+                            withdrawal_forfeited_settlement_update(settlement),
                         )
                         .await?;
                 }
@@ -5207,14 +5254,16 @@ impl PipelineService {
                 // branch treats a submission already known inoperable:
                 // forfeited without calling its adapter, including a leg that
                 // was dispatched before and whose effect may have happened
-                // (see that branch). A leg that already completed earlier in
-                // this pass is untouched: no leg reverses another.
+                // (see that branch, and `withdrawal_forfeit_label`, the same
+                // rule this branch shares with it). A leg that already
+                // completed earlier in this pass is untouched: no leg
+                // reverses another.
                 if !guard.operable {
                     self.store
                         .update_settlement(
                             &run,
                             instrument_id.as_str(),
-                            forfeited_settlement_update(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+                            withdrawal_forfeited_settlement_update(&settlement),
                         )
                         .await?;
                     continue;
@@ -6408,6 +6457,100 @@ mod tests {
         assert!(settlement_leg_is_open_to_dispatch("failed", None));
         assert!(SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL.contains("COALESCE("));
         assert!(SETTLEMENT_LEG_OPEN_TO_DISPATCH_SQL.contains("FALSE"));
+    }
+
+    /// The label rule both withdrawal-forfeit branches of
+    /// `complete_settle_phase` share (Step 6's top-level inoperable branch,
+    /// and the in-pass branch after `InternalCreditResult::Inoperable`).
+    /// Only a dispatched leg of an external instrument gets flagged
+    /// `settlement_unreconciled` for an operator to reconcile by hand; an
+    /// undispatched leg, a Trace Credit leg, and a leg whose own label
+    /// already says no effect happened all keep `submission_inoperable`.
+    #[test]
+    fn withdrawal_forfeit_flags_a_dispatched_external_leg_for_reconciliation() {
+        fn settlement(
+            instrument_id: &str,
+            dispatched_at: Option<DateTime<Utc>>,
+            last_error_label: Option<&str>,
+        ) -> PipelineSettlementRecord {
+            PipelineSettlementRecord {
+                tenant_id: "tenant-a".to_string(),
+                run_id: Uuid::new_v4(),
+                instrument_id: instrument_id.to_string(),
+                atomic_units: AtomicUnits::from_raw(1),
+                operation_ref_hash: "sha256:test".to_string(),
+                result_ref_hash: None,
+                external_receipt_hash: None,
+                operation_state: "retry".to_string(),
+                credit_event_id: None,
+                settlement_batch_id: None,
+                payout_rail: "none".to_string(),
+                payout_state: "none".to_string(),
+                attempt_count: 1,
+                last_error_label: last_error_label.map(str::to_string),
+                dispatched_at,
+            }
+        }
+
+        let now = Utc::now();
+        // A dispatched external leg is flagged for reconciliation, whether
+        // or not it already carries a label.
+        assert_eq!(
+            withdrawal_forfeit_label(&settlement("storage_rebate", Some(now), None)),
+            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL
+        );
+        assert_eq!(
+            withdrawal_forfeit_label(&settlement(
+                "storage_rebate",
+                Some(now),
+                Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+            )),
+            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL
+        );
+        // `settlement_result_mismatch` is ambiguous, not "no effect
+        // happened", so a dispatched leg with it still gets flagged.
+        assert_eq!(
+            withdrawal_forfeit_label(&settlement(
+                "storage_rebate",
+                Some(now),
+                Some(PIPELINE_SETTLEMENT_RESULT_MISMATCH_LABEL)
+            )),
+            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL
+        );
+        // An undispatched external leg had no effect.
+        assert_eq!(
+            withdrawal_forfeit_label(&settlement("storage_rebate", None, None)),
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL
+        );
+        // A Trace Credit leg pays only through its ledger row, dispatched or
+        // not.
+        assert_eq!(
+            withdrawal_forfeit_label(&settlement(
+                InstrumentId::trace_credit().as_str(),
+                Some(now),
+                None
+            )),
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL
+        );
+        // A leg whose own label already says no effect happened keeps
+        // `submission_inoperable` rather than `settlement_unreconciled`,
+        // even dispatched.
+        for label in [
+            SettlementError::Conflict.label(),
+            SettlementError::Rejected.label(),
+        ] {
+            assert_eq!(
+                withdrawal_forfeit_label(&settlement("storage_rebate", Some(now), Some(label))),
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+                "{label}"
+            );
+        }
+
+        assert_eq!(
+            withdrawal_forfeited_settlement_update(&settlement("storage_rebate", Some(now), None))
+                .operation_state,
+            "forfeited"
+        );
     }
 
     /// A transient database failure -- the pool
