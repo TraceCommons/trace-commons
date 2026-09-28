@@ -997,13 +997,19 @@ async fn restricted_merge_backend(backend: &PgBackend) -> PgBackend {
         .await
         .expect("raw connection");
     client
+        // One transaction under an advisory lock: the suite runs in parallel,
+        // and concurrent GRANTs on one table fail with "tuple concurrently
+        // updated" (and concurrent CREATE ROLE with a duplicate key).
         .batch_execute(
-            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+            "BEGIN;
+             SELECT pg_advisory_xact_lock(hashtextextended('account_merge_pg restricted login', 0));
+             DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_trust_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
                  trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_trust_merge_runtime;
-             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;",
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;
+             COMMIT;",
         )
         .await
         .expect("provision restricted merge login");
@@ -1413,55 +1419,84 @@ async fn live_near_device(
 /// holding only `tenant_id`.
 ///
 /// The function is fleet-wide and this database is shared with every other
-/// test, so inside one transaction every other tenant's devices are revoked,
-/// its accounts closed, and any legacy-link conflict (V81) resolved -- then
-/// the real function is asked, and the transaction is rolled back. The
+/// test in the suite, which CI runs in parallel. Inside one transaction the
+/// tables that decide readiness are locked against concurrent writers, every
+/// other tenant's devices are revoked, its accounts closed, and every
+/// legacy-link conflict (V81) resolved -- then the real function is asked,
+/// and the transaction is rolled back. Only other tenants' rows are hidden,
+/// so the answer is exactly what the function says about this tenant; the
 /// predicate itself is never restated here.
 async fn linkage_ready_for_tenant(backend: &PgBackend, tenant_id: &str) -> bool {
+    for _ in 0..1000 {
+        match linkage_ready_for_tenant_once(backend, tenant_id).await {
+            Ok(ready) => return ready,
+            // Another test holds a lock the probe needs. Back off and try
+            // again rather than wait: see `lock_timeout` below.
+            Err(error)
+                if error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+                    || error.code()
+                        == Some(&tokio_postgres::error::SqlState::T_R_DEADLOCK_DETECTED) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("readiness probe: {error:?}"),
+        }
+    }
+    panic!("readiness probe could not lock the readiness tables");
+}
+
+async fn linkage_ready_for_tenant_once(
+    backend: &PgBackend,
+    tenant_id: &str,
+) -> Result<bool, tokio_postgres::Error> {
     let mut client = backend
         .raw_pool_for_tests_and_diagnostics()
         .get()
         .await
         .expect("raw connection");
-    let tx = client.transaction().await.expect("raw tx");
+    let tx = client.transaction().await?;
+    // Freeze every table whose OTHER-tenant rows can make readiness false.
+    // SHARE ROW EXCLUSIVE blocks concurrent writes (and other probes) until
+    // the rollback, so a row another test commits between the isolating
+    // UPDATEs and the readiness call cannot reach the function. Without it
+    // the suite's parallel tests raced this probe in CI.
+    //
+    // A short `lock_timeout` covers both the table locks and the row locks
+    // the UPDATEs can meet (a merge holds its absorbed account `FOR UPDATE`,
+    // which the table lock does not exclude). The probe gives up and retries
+    // well inside `deadlock_timeout`, so while it holds the table locks it
+    // never waits long enough to be half of a deadlock that the server
+    // resolves by aborting another test's merge.
+    tx.batch_execute(
+        "SET LOCAL lock_timeout = '50ms';
+         LOCK TABLE trace_accounts, device_keys, trace_legacy_invite_link_conflicts
+            IN SHARE ROW EXCLUSIVE MODE",
+    )
+    .await?;
     tx.execute(
         "UPDATE device_keys SET revoked_at = now()
           WHERE tenant_id <> $1 AND revoked_at IS NULL",
         &[&tenant_id],
     )
-    .await
-    .expect("isolate devices");
+    .await?;
     tx.execute(
         "UPDATE trace_accounts SET closed_at = now()
           WHERE tenant_id <> $1 AND closed_at IS NULL",
         &[&tenant_id],
     )
-    .await
-    .expect("isolate accounts");
-    let has_conflicts: bool = tx
-        .query_one(
-            "SELECT to_regclass('public.trace_legacy_invite_link_conflicts') IS NOT NULL",
-            &[],
-        )
-        .await
-        .expect("inspect schema")
-        .get(0);
-    if has_conflicts {
-        tx.execute(
-            "UPDATE trace_legacy_invite_link_conflicts SET resolved_at = now()
-              WHERE resolved_at IS NULL",
-            &[],
-        )
-        .await
-        .expect("isolate conflicts");
-    }
+    .await?;
+    tx.execute(
+        "UPDATE trace_legacy_invite_link_conflicts SET resolved_at = now()
+          WHERE resolved_at IS NULL",
+        &[],
+    )
+    .await?;
     let ready: bool = tx
         .query_one("SELECT public.trace_account_admission_linkage_ready()", &[])
-        .await
-        .expect("readiness")
+        .await?
         .get(0);
-    tx.rollback().await.expect("rollback");
-    ready
+    tx.rollback().await?;
+    Ok(ready)
 }
 
 /// `(account_id, count)` of the tenant's rows in `table`, sorted.
