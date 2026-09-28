@@ -137,6 +137,8 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             // V95
             "approved_object_ref_id",
             "approved_content_hash",
+            // V96
+            "index_invalidation_state",
         ],
     ),
     ("phase_outcomes", "SELECT", &[]),
@@ -179,6 +181,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_admission_usage", "INSERT", &[]),
     // V96
     ("pipeline_index_invalidations", "SELECT", &[]),
+    ("pipeline_index_invalidations", "INSERT", &[]),
     ("pipeline_review_claims", "SELECT", &[]),
     ("pipeline_review_claims", "INSERT", &[]),
     ("pipeline_review_claims", "DELETE", &[]),

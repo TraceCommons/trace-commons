@@ -2079,6 +2079,56 @@ impl PgPipelineStore {
         pipeline_run_from_row(&row)
     }
 
+    /// Queues the removal of `run`'s revision from the vector index, on the
+    /// caller's transaction: one `pipeline_index_invalidations` row, due at
+    /// once, and `pipeline_runs.index_invalidation_state = 'pending'`.
+    /// `reason_code` must match `^[a-z0-9_]{1,64}$` (the table's CHECK).
+    ///
+    /// The rule: an `index_write_state` of `pending` may be partly written.
+    /// A dispatch attempt can apply some or all of its entries and then roll
+    /// its transaction back -- an `Uncertain` or `Failed` answer after
+    /// earlier entries were applied, a crash after the last upsert, a failed
+    /// commit -- so `pending` stays while entries are live. Whoever stops a
+    /// `pending` write because the submission is no longer operable must
+    /// therefore queue an invalidation, as for a `complete` one. Removing a
+    /// revision that has no entries changes nothing
+    /// (`VectorIndexWriter::invalidate_revision` returns `Ok(false)`).
+    ///
+    /// Idempotent: a run that already has an invalidation row keeps that
+    /// row as it is, and `index_invalidation_state` moves only from `none`.
+    pub async fn enqueue_index_invalidation_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        reason_code: &str,
+    ) -> Result<(), DatabaseError> {
+        let revision_id = run.approved_revision_id.ok_or_else(|| {
+            DatabaseError::Constraint("index_invalidation_revision_missing".to_string())
+        })?;
+        tx.execute(
+            "INSERT INTO pipeline_index_invalidations (
+                tenant_id, run_id, submission_id, registry_revision_id, reason_code
+             ) VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (tenant_id, run_id) DO NOTHING",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &run.submission_id,
+                &revision_id,
+                &reason_code,
+            ],
+        )
+        .await?;
+        tx.execute(
+            "UPDATE pipeline_runs
+                SET index_invalidation_state = 'pending', updated_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2
+                AND index_invalidation_state = 'none'",
+            &[&run.tenant_id, &run.run_id],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Whether the submission behind `run` is operable for Score and Settle:
     /// accepted, not revoked, not purged, not expired, and with no
     /// `trace_withdrawals` row. Runs on the caller's transaction and holds
@@ -5792,7 +5842,8 @@ impl PipelineService {
         // submission row locked `FOR SHARE` through every upsert, and
         // commits the `index_write_state` it records. A withdrawal locks
         // that row `FOR UPDATE`, so it either commits before the guard read
-        // (the dispatch then sees it and cancels) or waits until the write
+        // (the dispatch then sees it, cancels, and queues an invalidation
+        // for whatever an earlier attempt wrote) or waits until the write
         // and its `complete` have committed.
         if run.index_write_state == "pending" {
             // Both reads below come before the dispatch transaction opens:
@@ -5810,6 +5861,16 @@ impl PipelineService {
             ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
             let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
             if !guard.operable {
+                // `pending` may be partly written: an earlier attempt can
+                // have applied entries and then rolled back. So the cancel
+                // queues an invalidation of the revision in the same
+                // transaction (a no-op for the index if nothing was written).
+                PgPipelineStore::enqueue_index_invalidation_on_tx(
+                    &tx,
+                    &run,
+                    PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+                )
+                .await?;
                 run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "cancelled").await?;
             } else {
                 let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;

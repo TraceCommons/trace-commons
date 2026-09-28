@@ -7994,6 +7994,125 @@ async fn index_dispatch_never_holds_two_pooled_connections() {
     assert_eq!(failed.index_write_state, "failed");
 }
 
+/// The run's `pipeline_index_invalidations` rows, as `(registry_revision_id,
+/// reason_code, state, due now)`, and its `index_invalidation_state`.
+async fn index_invalidation_rows(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> (Vec<(uuid::Uuid, String, String, bool)>, String) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT registry_revision_id, reason_code, state, next_attempt_at <= NOW()
+               FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .collect();
+    let run_state: String = tx
+        .query_one(
+            "SELECT index_invalidation_state FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    (rows, run_state)
+}
+
+/// `index_write_state = 'pending'` may be partly written. Here a dispatch
+/// attempt writes the first entry and then rolls back: the index stores it
+/// and answers `Uncertain` (`IndexFault::LostAfterApply`), so the run
+/// retries under `index_unavailable` with `pending` kept and the entry
+/// live. A withdrawal then commits. The retry's guard reads the submission
+/// inoperable and records `cancelled`, and in the same transaction it
+/// queues an invalidation of the revision (due at once), so the entry the
+/// earlier attempt wrote does not stay visible. The queue itself is
+/// processed elsewhere; this test checks only that the work is queued, and
+/// that queueing it again changes nothing.
+#[tokio::test]
+async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("dispatch-partial-cancel-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let revision_id = run.approved_revision_id.expect("an approved revision");
+
+    index.set_fault(IndexFault::LostAfterApply);
+    let retried = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(retried.state, PipelineRunState::Retry);
+    assert_eq!(
+        retried.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+    );
+    assert_eq!(retried.index_write_state, "pending");
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        1,
+        "the attempt wrote its first entry before it rolled back"
+    );
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+    force_due(&backend, &tenant, run.run_id).await;
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "cancelled");
+    assert_eq!(settled.index_membership, "excluded");
+
+    let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        rows,
+        vec![(
+            revision_id,
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            "pending".to_string(),
+            true,
+        )],
+        "one invalidation of the revision is queued, due at once"
+    );
+    assert_eq!(run_state, "pending");
+
+    // Queueing it again (the withdrawal path does the same) keeps the one
+    // row and the run's state as they are.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &settled, "withdrawn")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        index_invalidation_rows(&backend, &tenant, run.run_id).await,
+        (rows, run_state)
+    );
+}
+
 /// Amendments-971 A9: each instrument settles as an independent leg with no
 /// atomicity across instruments. One leg's adapter failure retries only
 /// that leg; the other, already `complete`, is never dispatched again, and

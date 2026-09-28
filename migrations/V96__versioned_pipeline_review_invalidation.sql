@@ -146,9 +146,15 @@ DO $$ BEGIN
     END IF;
 END $$;
 
--- pipeline_index_invalidations: the lifecycle and operational summaries
--- count the tenant's pending and failed invalidations.
-GRANT SELECT ON pipeline_index_invalidations TO trace_ingest_runtime;
+-- pipeline_index_invalidations: stopping an index write that may have
+-- written entries queues the revision's removal (INSERT ... ON CONFLICT DO
+-- NOTHING), and the lifecycle and operational summaries count the tenant's
+-- pending and failed invalidations.
+GRANT SELECT, INSERT ON pipeline_index_invalidations TO trace_ingest_runtime;
+
+-- pipeline_runs: queueing an invalidation marks the run's
+-- index_invalidation_state pending.
+GRANT UPDATE (index_invalidation_state) ON pipeline_runs TO trace_ingest_runtime;
 
 -- pipeline_review_claims: a reviewer's claim inserts the row, or takes over
 -- an expired one or renews its own (INSERT ... ON CONFLICT DO UPDATE of the
