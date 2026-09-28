@@ -680,7 +680,11 @@ async fn the_switch_waits_for_a_pass_in_flight() {
     let migration =
         tokio::spawn(async move { migrate(&shared, &p, Some(INVITE_CODE)).await.map(|_| ()) });
     // The link lands, but nothing is switched while the pass holds the lock.
-    for _ in 0..200 {
+    // Waiting for the link is only the precondition, so the bound is loose:
+    // on a loaded machine the ceremony and link took longer than the two
+    // seconds this once allowed, and the test failed without any ordering
+    // being wrong.
+    for _ in 0..6000 {
         if f.ingest.links.load(Ordering::SeqCst) == 1 {
             break;
         }
