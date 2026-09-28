@@ -9,6 +9,8 @@ use std::collections::HashSet;
 mod account_onboarding;
 #[path = "postgres_account_trust.rs"]
 mod account_trust;
+#[path = "postgres_account_trust_growth.rs"]
+mod account_trust_growth;
 #[path = "postgres_legacy_invite_link.rs"]
 mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
@@ -1436,6 +1438,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_invite_link",
         include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
     ),
+    (
+        84,
+        "account_trust_fact_kinds",
+        include_str!("../../../../migrations/V84__account_trust_fact_kinds.sql"),
+    ),
+    (
+        85,
+        "account_trust_fact_recorder",
+        include_str!("../../../../migrations/V85__account_trust_fact_recorder.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -1479,6 +1491,22 @@ impl Database for PgBackend {
         source: crate::account_trust::TrustFactSource,
     ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
         PgBackend::record_account_trust_fact(self, account, source).await
+    }
+
+    async fn list_account_trust_worker_accounts(
+        &self,
+        after: Option<&crate::account_trust::TrustAccount>,
+        limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustAccount>, DatabaseError> {
+        PgBackend::list_account_trust_worker_accounts(self, after, limit).await
+    }
+
+    async fn list_account_trust_fact_candidates(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
+        PgBackend::list_account_trust_fact_candidates(self, account, limit).await
     }
     async fn legacy_admission_record(
         &self,

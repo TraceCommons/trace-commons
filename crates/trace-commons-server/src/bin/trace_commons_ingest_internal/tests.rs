@@ -27685,6 +27685,38 @@ async fn rollback_drill_without_db_mirror_returns_operator_error() {
     );
 }
 
+/// Earned-trust worker routes (decision 7 of the earned-trust spec): admin
+/// only during shadow, and fail closed without a DB mirror.
+#[tokio::test]
+async fn account_trust_worker_routes_require_admin_and_a_db_mirror() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for uri in ["/v1/admin/record-account-trust-facts?limit=5"] {
+        for (token, expected) in [
+            ("Bearer token-a", StatusCode::FORBIDDEN),
+            ("Bearer review-token-a", StatusCode::FORBIDDEN),
+            ("Bearer utility-worker-token-a", StatusCode::FORBIDDEN),
+            ("Bearer admin-token-a", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let state = test_state(temp.path().to_path_buf());
+            let response = app(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(AUTHORIZATION, token)
+                        .body(Body::empty())
+                        .expect("request builds"),
+                )
+                .await
+                .expect("route responds");
+            assert_eq!(response.status(), expected, "{uri} with {token}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn db_reconciliation_drill_without_db_mirror_returns_operator_error() {
     use axum::body::Body;
