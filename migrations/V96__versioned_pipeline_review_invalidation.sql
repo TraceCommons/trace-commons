@@ -149,3 +149,19 @@ END $$;
 -- pipeline_index_invalidations: the lifecycle and operational summaries
 -- count the tenant's pending and failed invalidations.
 GRANT SELECT ON pipeline_index_invalidations TO trace_ingest_runtime;
+
+-- pipeline_review_claims: a reviewer's claim inserts the row, or takes over
+-- an expired one or renews its own (INSERT ... ON CONFLICT DO UPDATE of the
+-- reviewer, the lease and claimed_at), the assessment locks it
+-- (`FOR UPDATE OF c`) and deletes the spent claim. Nothing updates a
+-- claim's tenant or run.
+GRANT SELECT, INSERT, DELETE ON pipeline_review_claims TO trace_ingest_runtime;
+GRANT UPDATE (reviewer_principal_ref, lease_token, lease_expires_at, claimed_at)
+    ON pipeline_review_claims TO trace_ingest_runtime;
+
+-- pipeline_review_assessments: append-only. An assessment inserts its row,
+-- and the claim, the review queue and every Review attempt read it. No
+-- UPDATE or DELETE: the triggers above refuse both, and an assessment
+-- leaves only with its run, through the foreign key's cascade, which runs
+-- as the table owner.
+GRANT SELECT, INSERT ON pipeline_review_assessments TO trace_ingest_runtime;

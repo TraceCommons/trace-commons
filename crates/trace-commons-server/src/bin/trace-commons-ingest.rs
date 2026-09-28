@@ -56,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use trace_commons_gate_api::pipeline::{Phase, ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
@@ -254,7 +255,7 @@ use trace_commons_server::trace_score_attestation::{
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
     PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineService,
+    PipelineReviewClaim, PipelineService,
 };
 use uuid::Uuid;
 
@@ -8027,6 +8028,18 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/review/{submission_id}/credit-events",
             post(append_credit_event_handler),
+        )
+        .route(
+            "/v1/review/pipeline/quarantine",
+            get(pipeline_review_quarantine_handler),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/claim",
+            post(pipeline_review_claim_handler),
+        )
+        .route(
+            "/v1/review/pipeline/runs/{run_id}/assessment",
+            post(pipeline_review_assessment_handler),
         )
         .route("/v1/datasets/replay", get(dataset_replay_handler))
         .route(
@@ -40335,6 +40348,229 @@ async fn release_review_lease_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(TraceReviewLeaseResponse::from_record(&record)))
+}
+
+// Versioned pipeline human review (Task 3): claims, assessments, and the
+// quarantine queue for a run parked at Review. These three routes sit
+// behind the same reviewer credential as `claim_review_lease_handler`
+// above -- a tenant-scoped bearer token whose role can review -- and copy
+// its authentication and error-mapping shape. Without an injected pipeline
+// runtime (`state.pipeline_service`), all three return 404: there is
+// nothing for a reviewer to claim or assess.
+
+/// `reviewer_sha256:` plus the lowercase hex SHA-256 of the authenticated
+/// reviewer principal -- the `pipeline_review_claims.reviewer_principal_ref`
+/// shape `PgPipelineStore::claim_review` requires.
+fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
+    format!(
+        "reviewer_sha256:{}",
+        hex::encode(Sha256::digest(principal_ref.as_bytes()))
+    )
+}
+
+/// 404 when no pipeline runtime was injected -- the shared refusal for all
+/// three pipeline review routes.
+fn require_pipeline_service(state: &AppState) -> ApiResult<&Arc<PipelineService>> {
+    state
+        .pipeline_service
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline runtime not configured"))
+}
+
+/// Maps `claim_review`/`record_review_assessment`'s labeled `Constraint`
+/// refusals to their HTTP shape: a stale or inoperable claim is a conflict
+/// with the run's current state, an unresolved quarantine reason is a
+/// semantically invalid request. Every other `DatabaseError` -- including
+/// `claim_review`'s own `invalid review claim`, which this handler's fixed
+/// 30-minute duration and derived reviewer ref should never trigger -- falls
+/// back to the generic hash-only internal error.
+fn pipeline_review_db_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
+    if let DatabaseError::Constraint(label) = &error {
+        if label == "review claim is stale or inoperable" {
+            return api_error(StatusCode::CONFLICT, label.clone());
+        }
+        if label == "quarantine reason is unresolved" {
+            return api_error(StatusCode::UNPROCESSABLE_ENTITY, label.clone());
+        }
+    }
+    internal_error(error)
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineReviewQuarantineQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+const DEFAULT_PIPELINE_REVIEW_QUEUE_LIMIT: usize = 50;
+
+#[derive(Debug, Serialize)]
+struct PipelineReviewQueueItem {
+    run_id: Uuid,
+    submission_id: Uuid,
+    admission_reason: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+/// `GET /v1/review/pipeline/quarantine?limit=N`: quarantined pipeline runs
+/// waiting for a human assessment, oldest first. `PgPipelineStore::
+/// list_review_queue` already excludes a run whose submission is no longer
+/// operable (Ruling T3-6).
+async fn pipeline_review_quarantine_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<PipelineReviewQuarantineQuery>,
+) -> ApiResult<Json<Vec<PipelineReviewQueueItem>>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let limit = query.limit.unwrap_or(DEFAULT_PIPELINE_REVIEW_QUEUE_LIMIT);
+    let queue = pipeline_service
+        .store()
+        .list_review_queue(&tenant.tenant_id, limit)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|run| PipelineReviewQueueItem {
+            run_id: run.run_id,
+            submission_id: run.submission_id,
+            admission_reason: run.admission_reason,
+            created_at: run.created_at,
+        })
+        .collect();
+    Ok(Json(queue))
+}
+
+/// 30 minutes: the fixed lease duration `PgPipelineStore::claim_review`
+/// accepts (also its own upper bound).
+const PIPELINE_REVIEW_CLAIM_LEASE_MINUTES: i64 = 30;
+
+#[derive(Debug, Serialize)]
+struct PipelineReviewClaimResponse {
+    lease_token: Uuid,
+    lease_expires_at: DateTime<Utc>,
+}
+
+/// `POST /v1/review/pipeline/runs/{run_id}/claim`: claims the run for the
+/// authenticated reviewer, for 30 minutes.
+async fn pipeline_review_claim_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineReviewClaimResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let reviewer_principal_ref = pipeline_reviewer_principal_ref(&tenant.principal_ref);
+    let claimed = pipeline_service
+        .store()
+        .claim_review(
+            &tenant.tenant_id,
+            run_id,
+            &reviewer_principal_ref,
+            Duration::minutes(PIPELINE_REVIEW_CLAIM_LEASE_MINUTES),
+        )
+        .await
+        .map_err(pipeline_review_db_error)?;
+    let Some(claim) = claimed else {
+        return pipeline_review_claim_conflict(pipeline_service, &tenant.tenant_id, run_id).await;
+    };
+    Ok(Json(PipelineReviewClaimResponse {
+        lease_token: claim.lease_token,
+        lease_expires_at: claim.lease_expires_at,
+    }))
+}
+
+/// `claim_review` returning `Ok(None)` covers two cases a caller cannot tell
+/// apart from that value alone: the run does not exist, is not at Review, or
+/// is no longer quarantine-eligible (404); or another reviewer already
+/// holds a live claim on it (409). Reads the run back to tell them apart,
+/// the same shape `claim_review_lease_handler`'s own
+/// `review_lease_claim_conflict` uses for the legacy lease.
+async fn pipeline_review_claim_conflict(
+    pipeline_service: &PipelineService,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> ApiResult<Json<PipelineReviewClaimResponse>> {
+    let run = pipeline_service
+        .store()
+        .get_run(tenant_id, run_id)
+        .await
+        .map_err(internal_error)?;
+    match run {
+        Some(run) if run.next_phase == Some(Phase::Review) => Err(api_error(
+            StatusCode::CONFLICT,
+            "pipeline review claim is held by another reviewer",
+        )),
+        _ => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "pipeline run is not waiting for review",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PipelineReviewAssessmentRequest {
+    lease_token: Uuid,
+    recommendation: String,
+    reason: String,
+    #[serde(default)]
+    resolved_quarantine_reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PipelineReviewAssessmentResponse {
+    assessment_id: Uuid,
+}
+
+/// `POST /v1/review/pipeline/runs/{run_id}/assessment`: records the
+/// authenticated reviewer's Approve/Reject recommendation against the run
+/// they hold `lease_token` for.
+async fn pipeline_review_assessment_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+    Json(body): Json<PipelineReviewAssessmentRequest>,
+) -> ApiResult<Json<PipelineReviewAssessmentResponse>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_reviewer(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let recommendation = match body.recommendation.as_str() {
+        "approve" => ReviewRecommendation::Approve,
+        "reject" => ReviewRecommendation::Reject,
+        _ => {
+            return Err(api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid review recommendation",
+            ));
+        }
+    };
+    let reason = ReasonCode::new(body.reason)
+        .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid reason code"))?;
+    let resolved_quarantine_reasons = body
+        .resolved_quarantine_reasons
+        .into_iter()
+        .map(ReasonCode::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid reason code"))?;
+    let claim = PipelineReviewClaim {
+        tenant_id: tenant.tenant_id.clone(),
+        run_id,
+        reviewer_principal_ref: pipeline_reviewer_principal_ref(&tenant.principal_ref),
+        lease_token: body.lease_token,
+        // Not read by `record_review_assessment`: it re-checks the live
+        // claim's own `lease_expires_at`, under the row lock, against the
+        // stored claim -- not against this field.
+        lease_expires_at: Utc::now(),
+    };
+    let assessment = pipeline_service
+        .store()
+        .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
+        .await
+        .map_err(pipeline_review_db_error)?;
+    Ok(Json(PipelineReviewAssessmentResponse {
+        assessment_id: assessment.assessment_id,
+    }))
 }
 
 fn validate_review_lease_ttl_seconds(ttl_seconds: Option<i64>) -> ApiResult<i64> {

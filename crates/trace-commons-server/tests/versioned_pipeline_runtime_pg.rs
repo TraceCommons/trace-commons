@@ -19,8 +19,9 @@ use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
     InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult,
-    ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ScoreEvidence,
-    SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS, UnverifiedScoreDecision,
+    ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
+    ReviewRecommendation, ScoreEvidence, SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
+    UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     Embedder, IdentifiedEmbedder, IndexEntryKey, IndexUpsertResult, ReferenceEmbedder,
@@ -3099,6 +3100,476 @@ async fn a_quarantined_receipt_waits_for_review_without_retrying() {
         .expect("the run still exists");
     assert_eq!(still_parked.state, PipelineRunState::AwaitingReview);
     assert_eq!(still_parked.attempt_count, 0);
+}
+
+// Task 3: human review claims, assessments, and routes. Every test below
+// starts from a run quarantined (Medium risk) and parked in
+// `awaiting_review` -- the same fixture shape as
+// `a_quarantined_receipt_waits_for_review_without_retrying` above, factored
+// into `quarantined_and_parked` so each test starts from the same place a
+// reviewer would find the run in `list_review_queue`.
+
+/// A Medium-risk envelope, receipted and run once through Review so it
+/// parks in `awaiting_review` under `review_assessment_required` (Ruling
+/// T3-1): the fixture every Task 3 review test starts from.
+async fn quarantined_and_parked(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "quarantine");
+    let parked = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs and parks the run awaiting a human assessment");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    parked
+}
+
+/// A syntactically valid `reviewer_sha256:` principal ref (64 lowercase hex
+/// digits), distinct per `tag` byte so two reviewers in the same test never
+/// collide.
+fn reviewer_principal_ref(tag: char) -> String {
+    format!("reviewer_sha256:{}", tag.to_string().repeat(64))
+}
+
+/// Expires a live review claim directly, in a tenant-scoped transaction --
+/// the shape `claim_is_exclusive_until_expiry` needs to prove a second
+/// reviewer can claim only once the first lease has actually elapsed.
+async fn expire_review_claim(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    tx.execute(
+        "UPDATE pipeline_review_claims
+            SET lease_expires_at = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant_id, &run_id],
+    )
+    .await
+    .expect("expire the review claim");
+    tx.commit().await.expect("commit review claim expiry");
+}
+
+/// Ruling T3-1 (parking) plus T3-2/T3-3 (claim, approve, resolve): the run
+/// parks in `awaiting_review` uncharged; a second pass does nothing while it
+/// waits; `list_review_queue` finds it; a claim and an approving assessment
+/// resolve the quarantine and release it back to `pending`; Review then
+/// completes with no further wait, and its outcome evidence carries the
+/// assessment's own evidence hash.
+#[tokio::test]
+async fn quarantined_run_completes_after_an_approving_assessment() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-approve-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    assert_eq!(
+        parked.admission_reason.as_deref(),
+        Some("privacy_review_required"),
+        "the receipt stores the Quarantine reason label on the run"
+    );
+    assert_eq!(
+        parked.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(parked.attempt_count, 0, "parking is not a charged attempt");
+
+    // Ruling T3-1: a second pass does no work while the run waits.
+    assert!(
+        service
+            .process_run(&tenant, parked.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a run awaiting review is never claimed on its own"
+    );
+
+    let store = service.store();
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].run_id, parked.run_id);
+
+    let reviewer = reviewer_principal_ref('a');
+    // A claim attempt does no work on the parked run beyond the claim
+    // itself either -- the run stays `awaiting_review` until an assessment
+    // resolves it.
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the queued run is claimable");
+    assert_eq!(claim.run_id, parked.run_id);
+    assert_eq!(claim.reviewer_principal_ref, reviewer);
+    let still_parked = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_parked.state, PipelineRunState::AwaitingReview);
+
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let assessment = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect("an approval that resolves the admission reason succeeds");
+    assert_eq!(assessment.recommendation, ReviewRecommendation::Approve);
+
+    // Ruling T3-3: released back to `pending`, due at once, label cleared.
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert_eq!(released.last_error_label, None);
+
+    let completed = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("Review now resolves the quarantine with no further wait");
+    assert_eq!(completed.next_phase, Some(Phase::Score));
+    assert_eq!(completed.state, PipelineRunState::Pending);
+
+    let outcomes = store.list_outcomes(&tenant, parked.run_id).await.unwrap();
+    let review_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review committed an outcome");
+    assert_eq!(
+        review_outcome
+            .evidence
+            .get("human_assessment_hash")
+            .and_then(serde_json::Value::as_str),
+        Some(assessment.evidence_hash.as_str()),
+        "the Review outcome evidence records the assessment"
+    );
+}
+
+/// A `Reject` recommendation ends the run: Review's decision is `Rejected`,
+/// there is no next phase, and the submission's status moves to `rejected`.
+#[tokio::test]
+async fn rejecting_assessment_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-reject-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('b');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the queued run is claimable");
+    let reason = ReasonCode::new("reviewer_declined").unwrap();
+    store
+        .record_review_assessment(&claim, ReviewRecommendation::Reject, reason, vec![])
+        .await
+        .expect("a rejection needs no resolved reason");
+
+    let ended = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("Review now ends the run with the rejection");
+    assert_eq!(ended.next_phase, None);
+    assert_eq!(ended.state, PipelineRunState::Complete);
+    assert_eq!(
+        submission_status(&backend, &tenant, parked.submission_id).await,
+        "rejected"
+    );
+
+    let outcomes = store.list_outcomes(&tenant, parked.run_id).await.unwrap();
+    let review_outcome = outcomes
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review committed an outcome");
+    let decision: ReviewDecision = serde_json::from_value(review_outcome.decision).unwrap();
+    assert!(matches!(decision, ReviewDecision::Rejected { .. }));
+}
+
+/// An `Approve` recommendation that resolves nothing is refused before any
+/// assessment row is written.
+#[tokio::test]
+async fn approval_without_resolving_the_reason_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-unresolved-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('c');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the queued run is claimable");
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let error = store
+        .record_review_assessment(&claim, ReviewRecommendation::Approve, reason, Vec::new())
+        .await
+        .expect_err("approval with nothing resolved must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("quarantine reason is unresolved"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_assessments").await,
+        0,
+        "no assessment row on refusal"
+    );
+}
+
+/// A second reviewer cannot claim a run while the first reviewer's claim is
+/// live; once that lease has expired, the second claim succeeds with a
+/// fresh lease token.
+#[tokio::test]
+async fn claim_is_exclusive_until_expiry() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-exclusive-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer_a = reviewer_principal_ref('d');
+    let reviewer_b = reviewer_principal_ref('e');
+    let claim_a = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_a,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the first reviewer claims the parked run");
+
+    let second = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_b,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert!(second.is_none(), "a live claim blocks a second reviewer");
+
+    expire_review_claim(&backend, &tenant, parked.run_id).await;
+
+    let claim_b = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_b,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the second reviewer claims it once the first lease has expired");
+    assert_eq!(claim_b.reviewer_principal_ref, reviewer_b);
+    assert_ne!(claim_a.lease_token, claim_b.lease_token);
+}
+
+/// A withdrawal landing after a reviewer has already claimed the run
+/// refuses the assessment (Ruling T3-6), and releases the parked run back
+/// to `pending` the same way `claim_review`'s own refusal would.
+#[tokio::test]
+async fn assessment_after_withdrawal_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-withdrawn-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let reviewer = reviewer_principal_ref('f');
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the queued run is claimable");
+
+    withdraw_submission(&backend, &tenant, parked.submission_id).await;
+
+    let reason = ReasonCode::new("privacy_review_required").unwrap();
+    let error = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect_err("a withdrawn submission's claim must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("review claim is stale or inoperable"),
+        "unexpected error: {error}"
+    );
+
+    // Ruling T3-6: released the same way `claim_review`'s own refusal
+    // would release it.
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+}
+
+/// Ruling T3-6: a parked run whose submission becomes inoperable while it
+/// waits is excluded from the queue, refuses a claim, and is released back
+/// to `pending` -- the three behaviours `list_review_queue`, `claim_review`,
+/// and `record_review_assessment` themselves own.
+///
+/// KNOWN GAP (reported, not fixed here): the ruling also says the runner
+/// then ends the released run under PR2's `submission_inoperable` routing.
+/// That routing only fires when the phase's own read raises
+/// `submission_inoperable`, and Review's `load_source_bytes` (PR2 code,
+/// `load_object_bytes`'s query) checks only `trace_submissions.status`/
+/// `revoked_at`/`purged_at`/`expires_at` -- never `trace_withdrawals` --
+/// unlike `commit_review`'s own re-check just below it in this file, which
+/// does check `trace_withdrawals` separately. A tombstone-only withdrawal
+/// (this test's setup, and the shape the brief specifies) leaves
+/// `trace_submissions.status` at `quarantined`, so `load_object_bytes` still
+/// finds the row and Review reruns `MinimalReviewPolicy` with
+/// `human_assessment: None` exactly as before: `review_assessment_required`
+/// again, parking the run right back into `awaiting_review` instead of
+/// failing it. Verified directly: running `process_run` here after the
+/// release below lands the run back in `AwaitingReview`, not `Failed`. Since
+/// `load_object_bytes` is shared with Score's `load_approved_bytes` and
+/// predates this task, widening it is a PR2-code change this task must not
+/// make (worktree rule); the task report flags it for the controller
+/// instead.
+#[tokio::test]
+async fn parked_run_with_an_inoperable_submission_is_released() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-inoperable-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+
+    withdraw_submission(&backend, &tenant, parked.submission_id).await;
+
+    let store = service.store();
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert!(
+        queue.is_empty(),
+        "an inoperable submission's run is excluded from the queue"
+    );
+
+    let reviewer = reviewer_principal_ref('9');
+    let error = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer,
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .expect_err("an inoperable submission refuses the claim");
+    assert!(
+        error
+            .to_string()
+            .contains("review claim is stale or inoperable"),
+        "unexpected error: {error}"
+    );
+
+    let released = store
+        .get_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        released.state,
+        PipelineRunState::Pending,
+        "released so the runner can reach it, whatever it then does with it"
+    );
 }
 
 #[tokio::test]

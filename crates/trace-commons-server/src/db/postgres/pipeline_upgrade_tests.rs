@@ -179,6 +179,21 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_admission_usage", "INSERT", &[]),
     // V96
     ("pipeline_index_invalidations", "SELECT", &[]),
+    ("pipeline_review_claims", "SELECT", &[]),
+    ("pipeline_review_claims", "INSERT", &[]),
+    ("pipeline_review_claims", "DELETE", &[]),
+    (
+        "pipeline_review_claims",
+        "UPDATE",
+        &[
+            "reviewer_principal_ref",
+            "lease_token",
+            "lease_expires_at",
+            "claimed_at",
+        ],
+    ),
+    ("pipeline_review_assessments", "SELECT", &[]),
+    ("pipeline_review_assessments", "INSERT", &[]),
     // V97
     ("pipeline_export_snapshots", "SELECT", &[]),
 ];

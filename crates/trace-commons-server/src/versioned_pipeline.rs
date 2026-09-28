@@ -15,12 +15,13 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AdmissionEvaluation, AdmissionEvidence, AdmissionInput, AtomicUnits,
-    BundlePackage, IndexMembershipDecision, InstrumentAward, InstrumentAwards, InstrumentId,
-    InstrumentSettlement, InstrumentSettlementProgress, Microcredits, PIPELINE_OUTCOME_SCHEMA_ID,
-    PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult, PolicyError, PrivacyRisk, ReasonCode,
-    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewInput, SchemaRef, ScoreDecision,
-    ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision,
-    SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef, UnverifiedScoreDecision,
+    BundlePackage, HumanReviewAssessment, IndexMembershipDecision, InstrumentAward,
+    InstrumentAwards, InstrumentId, InstrumentSettlement, InstrumentSettlementProgress,
+    Microcredits, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
+    PolicyError, PrivacyRisk, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence,
+    ReviewInput, ReviewRecommendation, SchemaRef, ScoreDecision, ScoreEvaluation, ScoreEvidence,
+    ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation, SettleEvidence, SettleInput,
+    TenantStorageRef, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
@@ -409,9 +410,12 @@ pub enum PipelineRunState {
     /// A run Review quarantined with no human assessment yet
     /// (`PgPipelineStore::mark_awaiting_review`, label
     /// `review_assessment_required`). No claim query selects this state, so
-    /// the run does not retry hourly forever while it waits. The route that
-    /// moves it back to `Pending` once an assessment lands is not in this
-    /// code.
+    /// the run does not retry hourly forever while it waits.
+    /// `PgPipelineStore::record_review_assessment` moves it back to
+    /// `Pending`, due at once, once an assessment lands (Ruling T3-3); a
+    /// parked run whose submission has since become inoperable is released
+    /// the same way by `claim_review` or `record_review_assessment`
+    /// themselves (Ruling T3-6).
     AwaitingReview,
     Complete,
     Failed,
@@ -493,6 +497,11 @@ pub struct PipelineRunRecord {
     pub index_command_hash: Option<String>,
     pub index_write_state: String,
     pub admission_decision: String,
+    /// The Admission decision's quarantine reason label (Quarantine and
+    /// Reject alike, V75's shape constraint requires one for each); `None`
+    /// for Admit. Read by `list_review_queue`'s callers and by
+    /// `record_review_assessment`'s approval check.
+    pub admission_reason: Option<String>,
     pub approved_object_ref_id: Option<Uuid>,
     pub approved_content_hash: Option<String>,
     pub score_neighbor_ref: Option<String>,
@@ -500,6 +509,21 @@ pub struct PipelineRunRecord {
     pub settle_selection_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A human reviewer's exclusive, time-boxed claim on a quarantined run at
+/// Review (`pipeline_review_claims`), separate from the run's own
+/// worker-phase lease (`pipeline_runs.lease_token`): a reviewer can hold this
+/// while the run itself sits idle in `pending`, `retry`, or
+/// `awaiting_review`, waiting for `record_review_assessment` to resolve it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineReviewClaim {
+    #[serde(skip_serializing, default)]
+    pub tenant_id: String,
+    pub run_id: Uuid,
+    pub reviewer_principal_ref: String,
+    pub lease_token: Uuid,
+    pub lease_expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1461,6 +1485,330 @@ impl PgPipelineStore {
         Ok(updated)
     }
 
+    /// A reviewer's exclusive claim on a run quarantined at Review (port
+    /// `ef97a459` lines 832 to 892), adapted for Ruling T3-6: before
+    /// attempting the claim, this locks the run row and refuses -- releasing
+    /// an `awaiting_review` run back to `pending` in the same transaction --
+    /// when the run's submission is no longer operable, the same predicate
+    /// `commit_review` re-checks (`review_submission_is_operable`). The port
+    /// folded its own narrower `trace_withdrawals` check into the claiming
+    /// `INSERT ... SELECT`; that check is now this broader one, done first.
+    ///
+    /// Beyond that, `Ok(None)` still covers two cases a caller cannot tell
+    /// apart from the return value alone: the run does not exist, is not at
+    /// Review, or (after the check above) is no longer quarantine-eligible;
+    /// or another reviewer already holds a live claim on it. Ingest's
+    /// `pipeline_review_claim_conflict` resolves the ambiguity by reading
+    /// the run back, the same shape `claim_review_lease_handler`'s
+    /// `review_lease_claim_conflict` uses for the legacy lease.
+    pub async fn claim_review(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        reviewer_principal_ref: &str,
+        lease_duration: Duration,
+    ) -> Result<Option<PipelineReviewClaim>, DatabaseError> {
+        if !reviewer_principal_ref.starts_with("reviewer_sha256:")
+            || lease_duration <= Duration::zero()
+            || lease_duration > Duration::minutes(30)
+        {
+            return Err(DatabaseError::Constraint(
+                "invalid review claim".to_string(),
+            ));
+        }
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let run_row = tx
+            .query_opt(
+                "SELECT state, submission_id FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2 AND next_phase = 'review'
+                  FOR UPDATE",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        let Some(run_row) = run_row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let run_state: String = run_row.get("state");
+        let submission_id: Uuid = run_row.get("submission_id");
+        if !review_submission_is_operable(&tx, tenant_id, submission_id).await? {
+            if run_state == "awaiting_review" {
+                release_awaiting_review(&tx, tenant_id, run_id).await?;
+            }
+            tx.commit().await?;
+            return Err(DatabaseError::Constraint(
+                "review claim is stale or inoperable".to_string(),
+            ));
+        }
+        let lease_token = Uuid::new_v4();
+        let lease_milliseconds = lease_duration.num_milliseconds();
+        let row = tx
+            .query_opt(
+                "INSERT INTO pipeline_review_claims (
+                    tenant_id, run_id, reviewer_principal_ref, lease_token, lease_expires_at
+                 ) VALUES ($1, $2, $3, $4, NOW() + ($5::bigint * INTERVAL '1 millisecond'))
+                 ON CONFLICT (tenant_id, run_id) DO UPDATE
+                 SET reviewer_principal_ref = EXCLUDED.reviewer_principal_ref,
+                     lease_token = EXCLUDED.lease_token,
+                     lease_expires_at = EXCLUDED.lease_expires_at,
+                     claimed_at = NOW()
+                 WHERE pipeline_review_claims.lease_expires_at <= NOW()
+                    OR pipeline_review_claims.reviewer_principal_ref = $3
+                 RETURNING *",
+                &[
+                    &tenant_id,
+                    &run_id,
+                    &reviewer_principal_ref,
+                    &lease_token,
+                    &lease_milliseconds,
+                ],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|row| PipelineReviewClaim {
+            tenant_id: row.get("tenant_id"),
+            run_id: row.get("run_id"),
+            reviewer_principal_ref: row.get("reviewer_principal_ref"),
+            lease_token: row.get("lease_token"),
+            lease_expires_at: row.get("lease_expires_at"),
+        }))
+    }
+
+    /// Records a reviewer's Approve/Reject assessment of a quarantined run
+    /// (port `ef97a459` lines 893 to 1006): the assessment row and the
+    /// spent claim's deletion commit together, in the same transaction as
+    /// (Ruling T3-3) releasing an `awaiting_review` run back to `pending`,
+    /// due at once with its parking label cleared, so the next claim
+    /// reaches it without waiting out any backoff. A `pending` or `retry`
+    /// run needs no such release; the update is a harmless no-op for it.
+    ///
+    /// Ruling T3-6 adds the same submission-operability re-check
+    /// `claim_review` takes, under the same row locks this already holds
+    /// (`FOR UPDATE OF c, p`): an inoperable submission refuses with the
+    /// port's stale-claim label and releases an `awaiting_review` run back
+    /// to `pending` in this same transaction, so the run still ends under
+    /// `submission_inoperable` rather than staying parked with a claim that
+    /// can never be assessed.
+    ///
+    /// An `Approve` recommendation still refuses
+    /// (`quarantine reason is unresolved`) unless `resolved_quarantine_reasons`
+    /// names the run's own `admission_reason`, or the run was quarantined
+    /// under no logged reason at all and at least one reason is resolved --
+    /// unchanged from the port.
+    pub async fn record_review_assessment(
+        &self,
+        claim: &PipelineReviewClaim,
+        recommendation: ReviewRecommendation,
+        reason: ReasonCode,
+        resolved_quarantine_reasons: Vec<ReasonCode>,
+    ) -> Result<HumanReviewAssessment, DatabaseError> {
+        let mut resolved = resolved_quarantine_reasons;
+        resolved.sort();
+        resolved.dedup();
+        let recommendation_label = match recommendation {
+            ReviewRecommendation::Approve => "approve",
+            ReviewRecommendation::Reject => "reject",
+        };
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT p.admission_reason, p.state, p.submission_id
+                 FROM pipeline_review_claims c
+                 JOIN pipeline_runs p
+                   ON p.tenant_id = c.tenant_id AND p.run_id = c.run_id
+                 WHERE c.tenant_id = $1 AND c.run_id = $2
+                   AND c.lease_token = $3
+                   AND c.reviewer_principal_ref = $4
+                   AND c.lease_expires_at > NOW()
+                   AND p.next_phase = 'review'
+                 FOR UPDATE OF c, p",
+                &[
+                    &claim.tenant_id,
+                    &claim.run_id,
+                    &claim.lease_token,
+                    &claim.reviewer_principal_ref,
+                ],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Err(DatabaseError::Constraint(
+                "review claim is stale or inoperable".to_string(),
+            ));
+        };
+        let admission_reason: Option<String> = row.get("admission_reason");
+        let run_state: String = row.get("state");
+        let submission_id: Uuid = row.get("submission_id");
+        if !review_submission_is_operable(&tx, &claim.tenant_id, submission_id).await? {
+            if run_state == "awaiting_review" {
+                release_awaiting_review(&tx, &claim.tenant_id, claim.run_id).await?;
+            }
+            tx.commit().await?;
+            return Err(DatabaseError::Constraint(
+                "review claim is stale or inoperable".to_string(),
+            ));
+        }
+        if recommendation == ReviewRecommendation::Approve {
+            let resolved_admission_reason = admission_reason
+                .as_ref()
+                .is_some_and(|reason| resolved.iter().any(|item| item.as_str() == reason));
+            if !resolved_admission_reason && !(admission_reason.is_none() && !resolved.is_empty()) {
+                return Err(DatabaseError::Constraint(
+                    "quarantine reason is unresolved".to_string(),
+                ));
+            }
+        }
+        let resolved_json = serde_json::to_value(&resolved).map_err(|_| {
+            DatabaseError::Serialization("review assessment encode failed".to_string())
+        })?;
+        let evidence_hash = sha256_prefixed(
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "trace_commons.pipeline_review_assessment.v1",
+                "run_id": claim.run_id,
+                "recommendation": recommendation_label,
+                "reason": reason.as_str(),
+                "resolved_quarantine_reasons": resolved,
+            }))
+            .map_err(|_| {
+                DatabaseError::Serialization("review assessment encode failed".to_string())
+            })?
+            .as_slice(),
+        );
+        let assessment_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "tracecommons:pipeline-review-assessment:{}:{evidence_hash}",
+                claim.run_id
+            )
+            .as_bytes(),
+        );
+        tx.execute(
+            "INSERT INTO pipeline_review_assessments (
+                tenant_id, assessment_id, run_id, reviewer_principal_ref,
+                recommendation, reason_code, resolved_quarantine_reasons, evidence_hash
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            &[
+                &claim.tenant_id,
+                &assessment_id,
+                &claim.run_id,
+                &claim.reviewer_principal_ref,
+                &recommendation_label,
+                &reason.as_str(),
+                &resolved_json,
+                &evidence_hash,
+            ],
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM pipeline_review_claims
+             WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3",
+            &[&claim.tenant_id, &claim.run_id, &claim.lease_token],
+        )
+        .await?;
+        // Ruling T3-3: unparks the run so the worker's ordinary claim query
+        // reaches it right away, whether this assessment approved (Review
+        // now resolves) or rejected (Review now ends the run) it.
+        release_awaiting_review(&tx, &claim.tenant_id, claim.run_id).await?;
+        tx.commit().await?;
+        Ok(HumanReviewAssessment {
+            assessment_id,
+            recommendation,
+            reason,
+            resolved_quarantine_reasons: resolved,
+            evidence_hash,
+        })
+    }
+
+    /// The stored assessment for `run_id`, if a reviewer has recorded one
+    /// (port `ef97a459` lines 1007 to 1052, unchanged). Read into
+    /// `ReviewInput.human_assessment` before every Review attempt.
+    pub async fn load_review_assessment(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<HumanReviewAssessment>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT assessment_id, recommendation, reason_code,
+                        resolved_quarantine_reasons, evidence_hash
+                 FROM pipeline_review_assessments
+                 WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        tx.commit().await?;
+        row.map(|row| {
+            let recommendation = match row.get::<_, String>("recommendation").as_str() {
+                "approve" => Ok(ReviewRecommendation::Approve),
+                "reject" => Ok(ReviewRecommendation::Reject),
+                _ => Err(DatabaseError::Serialization(
+                    "unknown review recommendation".to_string(),
+                )),
+            }?;
+            let reason = ReasonCode::new(row.get::<_, String>("reason_code")).map_err(|_| {
+                DatabaseError::Serialization("invalid review assessment reason".to_string())
+            })?;
+            let resolved_quarantine_reasons = serde_json::from_value(
+                row.get::<_, serde_json::Value>("resolved_quarantine_reasons"),
+            )
+            .map_err(|_| {
+                DatabaseError::Serialization("invalid resolved quarantine reasons".to_string())
+            })?;
+            Ok(HumanReviewAssessment {
+                assessment_id: row.get("assessment_id"),
+                recommendation,
+                reason,
+                resolved_quarantine_reasons,
+                evidence_hash: row.get("evidence_hash"),
+            })
+        })
+        .transpose()
+    }
+
+    /// Runs waiting for a human assessment, oldest first, label-only fields
+    /// (brief Step 3). Ruling T3-2 adds `awaiting_review` to the states
+    /// selected -- the port's `list_policy_interventions`-adjacent draft
+    /// predates that state. Ruling T3-6 excludes a run whose submission is
+    /// no longer operable, the same predicate `commit_review` re-checks,
+    /// applied here as a join and an anti-join rather than a per-row lock
+    /// (this is a plain read, not a claim).
+    pub async fn list_review_queue(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PipelineRunRecord>, DatabaseError> {
+        let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT p.* FROM pipeline_runs p
+                  JOIN trace_submissions s
+                    ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
+                  WHERE p.tenant_id = $1 AND p.next_phase = 'review'
+                    AND p.admission_decision = 'quarantine'
+                    AND p.state IN ('pending', 'retry', 'awaiting_review')
+                    AND NOT EXISTS (SELECT 1 FROM pipeline_review_assessments a
+                                     WHERE a.tenant_id = p.tenant_id AND a.run_id = p.run_id)
+                    AND s.status IN ('received', 'quarantined')
+                    AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                    AND s.withdrawn_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                    AND NOT EXISTS (SELECT 1 FROM trace_withdrawals w
+                                     WHERE w.tenant_id = p.tenant_id
+                                       AND w.submission_id = p.submission_id)
+                  ORDER BY p.created_at, p.run_id
+                  LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(pipeline_run_from_row).collect()
+    }
+
     /// Commits the Score outcome together with the exact index command it
     /// proposed (if any) and one pending settlement row per award, in one
     /// transaction (decision D5). `command`/`neighbor` are each `(object
@@ -1871,11 +2219,14 @@ impl PgPipelineStore {
     /// label `review_assessment_required`) instead of retrying it under
     /// `mark_transient_retry`'s hourly backoff forever. No claim query
     /// selects `awaiting_review`, so a parked run does no further work on
-    /// its own; the route that moves it back to `pending` once an
-    /// assessment lands is not in this code. A parked run whose submission
-    /// is later withdrawn, expired, or purged stays parked -- nothing here
-    /// moves it -- so that route must itself handle an inoperable
-    /// submission when it runs.
+    /// its own; `record_review_assessment` moves it back to `pending`, due
+    /// at once, once an assessment lands (Ruling T3-3). A parked run whose
+    /// submission is later withdrawn, expired, or purged stays parked here
+    /// -- nothing in this call moves it -- but `claim_review` and
+    /// `record_review_assessment` each check the submission's operability
+    /// themselves and release such a run back to `pending` when they find
+    /// it inoperable (Ruling T3-6), so the run still ends under
+    /// `submission_inoperable` rather than staying parked forever.
     ///
     /// Fenced by the lease exactly like `mark_transient_retry`: the lease
     /// is cleared and the claim's attempt is given back
@@ -2803,6 +3154,79 @@ async fn ensure_current_lease(
     Ok(())
 }
 
+/// The submission-operability predicate `commit_review` re-checks under its
+/// own transaction lock, factored out for `claim_review` and
+/// `record_review_assessment` (Ruling T3-6): neither pre-review status, nor
+/// revoked, purged, withdrawn, or expired, and no separate
+/// `trace_withdrawals` tombstone. Locks the submission row `FOR UPDATE`,
+/// after the run row a caller may already hold locked -- the same order
+/// `commit_review` documents (run row, then submission row).
+async fn review_submission_is_operable(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> Result<bool, DatabaseError> {
+    let submission_row = tx
+        .query_opt(
+            "SELECT status, revoked_at, purged_at, withdrawn_at, expires_at
+               FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR UPDATE",
+            &[&tenant_id, &submission_id],
+        )
+        .await?;
+    let operable = match &submission_row {
+        None => false,
+        Some(row) => {
+            let status: String = row.get("status");
+            let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
+            let purged_at: Option<DateTime<Utc>> = row.get("purged_at");
+            let withdrawn_at: Option<DateTime<Utc>> = row.get("withdrawn_at");
+            let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
+            matches!(status.as_str(), "received" | "quarantined")
+                && revoked_at.is_none()
+                && purged_at.is_none()
+                && withdrawn_at.is_none()
+                && expires_at.is_none_or(|expires_at| expires_at > Utc::now())
+        }
+    };
+    if !operable {
+        return Ok(false);
+    }
+    let withdrawn = tx
+        .query_opt(
+            "SELECT 1 FROM trace_withdrawals WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await?
+        .is_some();
+    Ok(!withdrawn)
+}
+
+/// Moves an `awaiting_review` run back to `pending`, due at once, with its
+/// parking label cleared (Ruling T3-3): the shape both an assessment that
+/// resolves the quarantine and the inoperable-submission release (Ruling
+/// T3-6) need, so the run leaves `awaiting_review` and reaches a worker's
+/// ordinary claim query again -- whether that worker then runs Review to
+/// completion or ends the run under `submission_inoperable`. A no-op when
+/// the run is not currently `awaiting_review` (already `pending` or
+/// `retry`, or gone).
+async fn release_awaiting_review(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> Result<(), DatabaseError> {
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'pending', next_attempt_at = NOW(), last_error_label = NULL,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND run_id = $2 AND state = 'awaiting_review'",
+        &[&tenant_id, &run_id],
+    )
+    .await?;
+    Ok(())
+}
+
 fn stale_lease_error() -> DatabaseError {
     DatabaseError::Constraint("pipeline lease is stale".to_string())
 }
@@ -2931,6 +3355,7 @@ fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> 
         index_command_hash: row.get("index_command_hash"),
         index_write_state: row.get("index_write_state"),
         admission_decision: row.get("admission_decision"),
+        admission_reason: row.get("admission_reason"),
         approved_object_ref_id: row.get("approved_object_ref_id"),
         approved_content_hash: row.get("approved_content_hash"),
         score_neighbor_ref: row.get("score_neighbor_ref"),
@@ -4903,6 +5328,16 @@ impl PipelineService {
                     .await?;
                 let source_artifact = self.load_source_bytes(run).await?;
                 let source_content_hash = sha256_prefixed(&source_artifact);
+                // Ruling T3-5: loads whatever assessment a reviewer has
+                // already recorded for this run, so `MinimalReviewPolicy`
+                // (and any other Review policy) can resolve a quarantine
+                // once `record_review_assessment` has moved it back to
+                // `pending`. `None` for a run that has never been
+                // quarantined, or one still waiting on a human assessment.
+                let human_assessment = self
+                    .store
+                    .load_review_assessment(&run.tenant_id, run.run_id)
+                    .await?;
                 let output = bundle
                     .review
                     .execute(&ReviewInput {
@@ -4912,7 +5347,7 @@ impl PipelineService {
                         source_content_hash: source_content_hash.clone(),
                         source_artifact,
                         admission,
-                        human_assessment: None,
+                        human_assessment,
                     })
                     .await?;
                 let (result, content) = output.into_parts();
