@@ -239,18 +239,23 @@ DO $$ BEGIN
     END IF;
 END $$;
 
--- pipeline_export_snapshots: the lifecycle and operational summaries count
--- the tenant's snapshots by state, a withdrawal reads whether a snapshot
--- carrying the submission was delivered, and it invalidates every snapshot
--- that carries the submission (state, invalidated_at). Nothing updates a
--- snapshot's identity, which the trigger above refuses too, and nothing
--- inserts or deletes one here.
-GRANT SELECT ON pipeline_export_snapshots TO trace_ingest_runtime;
-GRANT UPDATE (state, invalidated_at) ON pipeline_export_snapshots TO trace_ingest_runtime;
+-- pipeline_export_snapshots: export creation inserts a snapshot and reads
+-- it back (also by its request key); completion records the delivery
+-- (state, export_manifest_id, completed_at); the lifecycle and operational
+-- summaries count the tenant's snapshots by state; a withdrawal reads
+-- whether a snapshot carrying the submission was delivered, and it
+-- invalidates every snapshot that carries the submission (state,
+-- invalidated_at). Nothing updates a snapshot's identity, which the trigger
+-- above refuses too, and nothing deletes one here.
+GRANT SELECT, INSERT ON pipeline_export_snapshots TO trace_ingest_runtime;
+GRANT UPDATE (state, export_manifest_id, completed_at, invalidated_at)
+    ON pipeline_export_snapshots TO trace_ingest_runtime;
 
--- pipeline_export_snapshot_items: a withdrawal reads the items that carry
--- the submission and invalidates them (invalidated_at, invalidation_reason).
--- Nothing updates an item's identity, which the trigger above refuses too.
-GRANT SELECT ON pipeline_export_snapshot_items TO trace_ingest_runtime;
+-- pipeline_export_snapshot_items: export creation inserts a snapshot's
+-- items and reads them back; a withdrawal reads the items that carry the
+-- submission and invalidates them (invalidated_at, invalidation_reason).
+-- Nothing updates an item's identity, which the trigger above refuses too,
+-- and nothing deletes one here.
+GRANT SELECT, INSERT ON pipeline_export_snapshot_items TO trace_ingest_runtime;
 GRANT UPDATE (invalidated_at, invalidation_reason)
     ON pipeline_export_snapshot_items TO trace_ingest_runtime;

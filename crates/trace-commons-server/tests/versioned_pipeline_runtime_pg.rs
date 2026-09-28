@@ -61,7 +61,8 @@ use trace_commons_server::versioned_pipeline_credit::{
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
-    PipelineCreditStatus, PipelineProcessingStatus, PipelineProductStore,
+    PIPELINE_EXPORT_ITEM_MAX, PipelineCreditStatus, PipelineExportSnapshot,
+    PipelineProcessingStatus, PipelineProductStore,
 };
 
 use pilot_runtime_login::{
@@ -12687,8 +12688,8 @@ async fn an_unreconciled_leg_on_a_live_run_is_dispatched_again() {
 /// `pipeline_bundle_policy_status` rows (`register_default_bundle`, inside
 /// `submit_registered`), its committed `pipeline_receipt_artifacts` row, its
 /// `pipeline_admission_usage` row, and -- inserted directly by SQL through
-/// an owner connection, since the product write paths for them (Tasks 3 and
-/// 12) do not exist yet -- one `pipeline_review_claims`,
+/// an owner connection, as fixtures: no product write path puts all of
+/// them on one admitted run -- one `pipeline_review_claims`,
 /// `pipeline_review_assessments`, and `pipeline_index_invalidations` row, and
 /// one `pipeline_export_snapshots` row with one
 /// `pipeline_export_snapshot_items` row.
@@ -12711,10 +12712,10 @@ async fn run_with_every_pipeline_row_kind(
 
 /// Inserts one `pipeline_review_claims` row and one
 /// `pipeline_review_assessments` row for `run_id`, directly by SQL in the
-/// run's own tenant-scoped transaction -- Tasks 3 and 12 have not yet added
-/// the product write paths for these tables. Test setup, not the runtime
-/// under test, so it writes through an owner connection. Returns the
-/// assessment's id.
+/// run's own tenant-scoped transaction, as a fixture: the product write
+/// paths claim and assess only a quarantined run. Test setup, not the
+/// runtime under test, so it writes through an owner connection. Returns
+/// the assessment's id.
 async fn insert_review_claim_and_assessment(tenant: &str, run_id: uuid::Uuid) -> uuid::Uuid {
     let mut owner = owner_client().await;
     let tx = owner_tenant_tx(&mut owner, tenant).await;
@@ -13181,7 +13182,17 @@ async fn submit_and_complete(
     principal: &str,
 ) -> PipelineRunRecord {
     let env = envelope(uuid::Uuid::new_v4()).await;
-    let raw = serde_json::to_vec(&env).unwrap();
+    submit_envelope_and_complete(service, tenant, principal, &env).await
+}
+
+/// `submit_and_complete` for an envelope the caller built.
+async fn submit_envelope_and_complete(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+    env: &TraceContributionEnvelope,
+) -> PipelineRunRecord {
+    let raw = serde_json::to_vec(env).unwrap();
     let key = env.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = submit_registered(
         service,
@@ -13191,7 +13202,7 @@ async fn submit_and_complete(
             counts_toward_quota: true,
             request_idempotency_key: &key,
             request_bytes: &raw,
-            server_envelope: &env,
+            server_envelope: env,
             residual_risk_basis: &[],
             limits: NO_LIMITS,
         },
@@ -15205,7 +15216,9 @@ async fn withdrawal_releases_a_parked_review_run() {
 
 /// Inserts a pipeline export snapshot carrying `run`'s approved revision,
 /// `complete` (delivered) or `ready`. Test setup through an owner
-/// connection: the runtime login holds no INSERT on the export tables.
+/// connection, written directly rather than through
+/// `create_export_snapshot`, so a test can place a delivered snapshot
+/// without running the export path.
 async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid::Uuid {
     let snapshot_id = uuid::Uuid::new_v4();
     let hash = |seed: &str| format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())));
@@ -15495,4 +15508,681 @@ async fn withdrawal_of_either_session_submission_withdraws_the_session() {
             "a later upload of the session is refused"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Approved exports (`PipelineProductStore::create_export_snapshot` and
+// `complete_export_snapshot`)
+// ---------------------------------------------------------------------------
+
+/// The requester every export test creates snapshots as, in the shape the
+/// snapshot table requires of `requester_principal_ref`.
+const EXPORTER: &str = "exporter_sha256:exporttest";
+
+/// A `sha256:` hash of `seed`, the shape the store takes for a request key
+/// and a purpose (the route hashes the raw values).
+fn export_hash(seed: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())))
+}
+
+/// Creates a snapshot of `tenant`'s approved revisions for `allowed_use`,
+/// as `EXPORTER`, keyed by `key_seed`, with the largest item bound.
+async fn create_snapshot(
+    product: &PipelineProductStore,
+    tenant: &str,
+    key_seed: &str,
+    allowed_use: TraceAllowedUse,
+) -> PipelineExportSnapshot {
+    product
+        .create_export_snapshot(
+            tenant,
+            EXPORTER,
+            &export_hash(key_seed),
+            allowed_use,
+            &export_hash("purpose"),
+            PIPELINE_EXPORT_ITEM_MAX,
+        )
+        .await
+        .expect("create the export snapshot")
+}
+
+/// The snapshot's item run ids, sorted.
+fn item_runs(snapshot: &PipelineExportSnapshot) -> Vec<uuid::Uuid> {
+    let mut runs = snapshot
+        .items
+        .iter()
+        .map(|item| item.run_id)
+        .collect::<Vec<_>>();
+    runs.sort();
+    runs
+}
+
+/// An export carries the approved revision, the bytes the privacy boundary
+/// transformed at receipt, and never the raw request. The run goes through
+/// `MarkerRedactingBoundary`, which replaces `MARKER_SECRET` with
+/// `[redacted]`. The item names the run's approved object and its
+/// `approved_content_hash`; that object reads back as the transformed bytes;
+/// no item carries the request's hash or its object. Completing the snapshot
+/// records `main`'s export manifest for it, which `main`'s own readers load.
+#[tokio::test]
+async fn export_items_carry_the_approved_revision_only() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        Some(Arc::new(MarkerRedactingBoundary)),
+    )
+    .await;
+    let tenant = format!("export-approved-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    for event in &mut env.events {
+        if let Some(content) = event.redacted_content.as_mut() {
+            content.push_str(" MARKER_SECRET");
+        }
+    }
+    let raw = serde_json::to_vec(&env).unwrap();
+    assert!(
+        String::from_utf8_lossy(&raw).contains("MARKER_SECRET"),
+        "the raw request carries the marker"
+    );
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let run = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let approved_content_hash = run
+        .approved_content_hash
+        .clone()
+        .expect("Review approval records a content hash");
+    assert_ne!(approved_content_hash, created.request_content_hash);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let snapshot =
+        create_snapshot(&product, &tenant, "approved", TraceAllowedUse::Evaluation).await;
+    assert_eq!(snapshot.state, "ready");
+    let completed = product
+        .complete_export_snapshot(&tenant, EXPORTER, snapshot.snapshot_id)
+        .await
+        .expect("complete the snapshot");
+    assert_eq!(completed.state, "complete");
+    assert_eq!(completed.export_manifest_id, Some(snapshot.snapshot_id));
+    assert_eq!(completed.items, snapshot.items);
+    let [item] = completed.items.as_slice() else {
+        panic!("one item: {:?}", completed.items)
+    };
+    assert_eq!(item.run_id, run.run_id);
+    assert_eq!(item.submission_id, run.submission_id);
+    assert_eq!(
+        Some(item.registry_revision_id),
+        run.approved_revision_id,
+        "the item is the run's approved revision"
+    );
+    assert_eq!(Some(item.source_object_ref_id), run.approved_object_ref_id);
+    assert_ne!(
+        item.source_object_ref_id, run.source_object_ref_id,
+        "the raw request's object is never an item"
+    );
+    assert_eq!(item.source_content_hash, approved_content_hash);
+    assert!(
+        completed
+            .items
+            .iter()
+            .all(|item| item.source_content_hash != created.request_content_hash),
+        "no item carries the raw request's hash"
+    );
+
+    // The item's own object: it decodes to bytes whose hash is the item's
+    // hash, and those bytes are the transformed content.
+    let item_bytes = service
+        .load_approved_bytes(&PipelineRunRecord {
+            approved_object_ref_id: Some(item.source_object_ref_id),
+            approved_content_hash: Some(item.source_content_hash.clone()),
+            ..run.clone()
+        })
+        .await
+        .expect("the item's object reads back and hashes to the item's hash");
+    let item_text = String::from_utf8(item_bytes).unwrap();
+    assert!(item_text.contains("[redacted]"));
+    assert!(
+        !item_text.contains("MARKER_SECRET"),
+        "the exported bytes never carry the raw request's marker"
+    );
+
+    // `main`'s export manifest, read through `main`'s own store methods.
+    let manifests = backend
+        .list_trace_export_manifests(&tenant)
+        .await
+        .expect("main reads the tenant's export manifests");
+    let [manifest] = manifests.as_slice() else {
+        panic!("one export manifest: {manifests:?}")
+    };
+    assert_eq!(manifest.export_manifest_id, snapshot.snapshot_id);
+    assert_eq!(
+        manifest.artifact_kind,
+        TraceObjectArtifactKind::ExportArtifact
+    );
+    assert_eq!(manifest.source_submission_ids, vec![run.submission_id]);
+    assert_eq!(manifest.item_count, 1);
+    let manifest_items = backend
+        .list_trace_export_manifest_items(&tenant, snapshot.snapshot_id)
+        .await
+        .expect("main reads the manifest's items");
+    let [manifest_item] = manifest_items.as_slice() else {
+        panic!("one manifest item: {manifest_items:?}")
+    };
+    assert_eq!(manifest_item.submission_id, run.submission_id);
+    assert_eq!(manifest_item.derived_id, Some(item.registry_revision_id));
+    assert_eq!(manifest_item.object_ref_id, Some(item.source_object_ref_id));
+    assert_eq!(manifest_item.source_hash_at_export, approved_content_hash);
+}
+
+/// A snapshot holds only the requesting tenant's runs. Both tenants use the
+/// same request key, which each tenant holds on its own; each snapshot
+/// holds only its own tenant's run; and a tenant cannot complete another
+/// tenant's snapshot, which does not exist for it.
+#[tokio::test]
+async fn exports_never_include_another_tenants_runs() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant_a = format!("export-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("export-tenant-b-{}", uuid::Uuid::new_v4());
+    let run_a = submit_and_complete(&service, &tenant_a, RECEIPT_PRINCIPAL).await;
+    let run_b = submit_and_complete(&service, &tenant_b, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+
+    let snapshot_a = create_snapshot(
+        &product,
+        &tenant_a,
+        "tenant-scope",
+        TraceAllowedUse::Evaluation,
+    )
+    .await;
+    let snapshot_b = create_snapshot(
+        &product,
+        &tenant_b,
+        "tenant-scope",
+        TraceAllowedUse::Evaluation,
+    )
+    .await;
+    assert_ne!(snapshot_a.snapshot_id, snapshot_b.snapshot_id);
+    assert_eq!(item_runs(&snapshot_a), vec![run_a.run_id]);
+    assert_eq!(item_runs(&snapshot_b), vec![run_b.run_id]);
+
+    let error = product
+        .complete_export_snapshot(&tenant_b, EXPORTER, snapshot_a.snapshot_id)
+        .await
+        .expect_err("tenant B cannot complete tenant A's snapshot");
+    assert!(
+        matches!(error, DatabaseError::NotFound { .. }),
+        "unexpected error: {error:?}"
+    );
+    let completed_a = product
+        .complete_export_snapshot(&tenant_a, EXPORTER, snapshot_a.snapshot_id)
+        .await
+        .expect("tenant A completes its own snapshot");
+    assert_eq!(item_runs(&completed_a), vec![run_a.run_id]);
+    assert!(
+        backend
+            .list_trace_export_manifests(&tenant_b)
+            .await
+            .unwrap()
+            .is_empty(),
+        "completing tenant A's snapshot writes nothing for tenant B"
+    );
+}
+
+/// A withdrawal reaches the whole source session. Two submissions of one
+/// session and a third, unrelated one all complete and enter a snapshot.
+/// Withdrawing one of the session's submissions invalidates the snapshot
+/// and marks both session items `withdrawn` in the withdrawal's own
+/// transaction, so the snapshot is never completed; a new snapshot leaves
+/// out the withdrawn submission and its sibling, and keeps the unrelated
+/// one.
+#[tokio::test]
+async fn withdrawn_submissions_are_excluded_and_invalidate_snapshots() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-withdrawn-{}", uuid::Uuid::new_v4());
+    let withdrawn = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let sibling = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let unrelated = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    // Claiming a source session is account admission's write, not the
+    // ingest runtime's (V90), so the fixture claims it as the owner.
+    for submission_id in [withdrawn.submission_id, sibling.submission_id] {
+        assert_eq!(
+            owner
+                .claim_trace_source_session(&tenant, account_id, &digest, submission_id)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Active
+        );
+    }
+    let product = PipelineProductStore::new(backend.clone());
+    let before = create_snapshot(&product, &tenant, "before", TraceAllowedUse::Evaluation).await;
+    let mut every_run = vec![withdrawn.run_id, sibling.run_id, unrelated.run_id];
+    every_run.sort();
+    assert_eq!(item_runs(&before), every_run);
+
+    let outcome = service
+        .withdraw_submission(
+            &tenant,
+            withdrawn.submission_id,
+            RECEIPT_PRINCIPAL,
+            Some(account_id),
+        )
+        .await
+        .expect("the owner's withdrawal succeeds");
+    let mut session = vec![withdrawn.submission_id, sibling.submission_id];
+    session.sort();
+    assert_eq!(outcome.affected_submission_ids, session);
+
+    // The same request again reads the stored snapshot back.
+    let invalidated =
+        create_snapshot(&product, &tenant, "before", TraceAllowedUse::Evaluation).await;
+    assert_eq!(invalidated.snapshot_id, before.snapshot_id);
+    assert_eq!(invalidated.state, "invalidated");
+    assert!(invalidated.invalidated_at.is_some());
+    for item in &invalidated.items {
+        let expected = (item.submission_id != unrelated.submission_id).then_some("withdrawn");
+        assert_eq!(
+            item.invalidation_reason.as_deref(),
+            expected,
+            "item for run {}",
+            item.run_id
+        );
+    }
+    let error = product
+        .complete_export_snapshot(&tenant, EXPORTER, before.snapshot_id)
+        .await
+        .expect_err("an invalidated snapshot is never completed");
+    assert!(
+        matches!(error, DatabaseError::Constraint(_)),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_export_manifests").await,
+        0
+    );
+
+    let after = create_snapshot(&product, &tenant, "after", TraceAllowedUse::Evaluation).await;
+    assert_eq!(
+        item_runs(&after),
+        vec![unrelated.run_id],
+        "neither the withdrawn submission nor its session sibling is exported again"
+    );
+}
+
+/// The request key makes creation idempotent. The same key returns the
+/// same snapshot, with the items it selected the first time, even after
+/// another run has completed; there is one snapshot row and one item row.
+/// The same key with a different request is refused, not answered with
+/// the stored snapshot.
+#[tokio::test]
+async fn export_request_key_is_idempotent() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-idempotent-{}", uuid::Uuid::new_v4());
+    let first_run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+
+    let first = create_snapshot(&product, &tenant, "idempotent", TraceAllowedUse::Evaluation).await;
+    assert_eq!(item_runs(&first), vec![first_run.run_id]);
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let again = create_snapshot(&product, &tenant, "idempotent", TraceAllowedUse::Evaluation).await;
+    assert_eq!(again, first, "the same key returns the same snapshot");
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        1
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        1
+    );
+
+    let conflict = product
+        .create_export_snapshot(
+            &tenant,
+            EXPORTER,
+            &export_hash("idempotent"),
+            TraceAllowedUse::Evaluation,
+            &export_hash("another purpose"),
+            PIPELINE_EXPORT_ITEM_MAX,
+        )
+        .await
+        .expect_err("the same key with another purpose is refused");
+    assert!(
+        matches!(conflict, DatabaseError::Constraint(_)),
+        "unexpected error: {conflict:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        1
+    );
+}
+
+/// An export selects a submission only when the submission's own allowed
+/// uses hold the requested use (`main`'s record-level export rule). One
+/// submission allows the fixture default (debugging, evaluation, aggregate
+/// analytics), the other only debugging: an evaluation export holds the
+/// first alone, a debugging export holds both, and a model-training export
+/// holds neither.
+#[tokio::test]
+async fn exports_honor_allowed_uses() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-uses-{}", uuid::Uuid::new_v4());
+    let evaluation_run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let mut debugging_only = envelope(uuid::Uuid::new_v4()).await;
+    debugging_only.trace_card.allowed_uses = vec![TraceAllowedUse::Debugging];
+    let debugging_run =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &debugging_only).await;
+    let product = PipelineProductStore::new(backend.clone());
+
+    let evaluation =
+        create_snapshot(&product, &tenant, "evaluation", TraceAllowedUse::Evaluation).await;
+    assert_eq!(
+        item_runs(&evaluation),
+        vec![evaluation_run.run_id],
+        "a submission that does not allow evaluation is not exported for it"
+    );
+    assert_eq!(
+        evaluation.items[0].allowed_uses,
+        serde_json::json!(["debugging", "evaluation", "aggregate_analytics"])
+    );
+
+    let debugging =
+        create_snapshot(&product, &tenant, "debugging", TraceAllowedUse::Debugging).await;
+    let mut both = vec![evaluation_run.run_id, debugging_run.run_id];
+    both.sort();
+    assert_eq!(item_runs(&debugging), both);
+
+    let model_training = create_snapshot(
+        &product,
+        &tenant,
+        "model-training",
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+    assert!(
+        model_training.items.is_empty(),
+        "no submission allows model training"
+    );
+}
+
+/// A submission withdrawn while export creation waits on it is not exported,
+/// and the two do not deadlock. A transaction here plays a withdrawal, in
+/// the withdrawal's lock order: it holds the run row `FOR UPDATE`, and
+/// creation, which has read the run as exportable, waits for it there. The
+/// transaction then locks the submission row `FOR UPDATE`, granted at once
+/// because the waiting creation holds nothing on it yet, revokes the
+/// submission, and commits. Creation then reads the submission again under
+/// its own lock and leaves it out.
+///
+/// A creation that inserted its items before waiting would hold the
+/// submission row through the items' foreign key: the submission lock
+/// would wait for it, and it would wait for the run row at commit, a
+/// deadlock. One that trusted its first read would export the revoked
+/// submission after the revocation's transaction had ended, so nothing
+/// would ever mark that item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn export_selection_rechecks_a_submission_revoked_while_it_waits() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-race-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    let mut holder_client = backend.trace_pool_for_test().get().await.unwrap();
+    let holder = tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    let holder_xid: String = holder
+        .query_one("SELECT pg_current_xact_id()::text", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let product = PipelineProductStore::new(backend.clone());
+    let creation = tokio::spawn({
+        let product = product.clone();
+        let tenant = tenant.clone();
+        async move {
+            product
+                .create_export_snapshot(
+                    &tenant,
+                    EXPORTER,
+                    &export_hash("race"),
+                    TraceAllowedUse::Evaluation,
+                    &export_hash("purpose"),
+                    PIPELINE_EXPORT_ITEM_MAX,
+                )
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &holder_xid, &creation).await;
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        holder.query_one(
+            "SELECT 1 FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2
+              FOR UPDATE",
+            &[&tenant, &run.submission_id],
+        ),
+    )
+    .await
+    .expect("the submission row is not held by the waiting creation")
+    .expect("the submission lock is granted, not a deadlock victim");
+    holder
+        .execute(
+            "UPDATE trace_submissions
+                SET status = 'revoked', revoked_at = NOW(), updated_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    holder
+        .commit()
+        .await
+        .expect("the withdrawal's stand-in commits");
+    drop(holder_client);
+
+    let snapshot = tokio::time::timeout(HELD_CALL_BOUND, creation)
+        .await
+        .expect("creation finishes once the withdrawal's stand-in commits")
+        .expect("the creation task did not panic")
+        .expect("creation is not a deadlock victim");
+    assert!(
+        snapshot.items.is_empty(),
+        "the submission revoked during creation is not exported: {:?}",
+        snapshot.items
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshot_items").await,
+        0
+    );
+}
+
+/// Completing a snapshot delivers it, so completion checks each item's
+/// submission again, under a lock, with the rule the selection applied. A
+/// submission that expired after the snapshot was created is refused with
+/// `submission_inoperable`, and nothing is delivered: no export manifest,
+/// and the snapshot stays `ready`. Only a withdrawal marks the items it
+/// reaches; an expiry marks none, so the items' own marks are not enough.
+#[tokio::test]
+async fn completing_a_snapshot_rechecks_that_its_submissions_are_exportable() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-expired-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let snapshot = create_snapshot(&product, &tenant, "expired", TraceAllowedUse::Evaluation).await;
+    assert_eq!(item_runs(&snapshot), vec![run.run_id]);
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET expires_at = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .expect("expire the submission");
+    tx.commit().await.unwrap();
+
+    let error = product
+        .complete_export_snapshot(&tenant, EXPORTER, snapshot.snapshot_id)
+        .await
+        .expect_err("a snapshot with an expired submission is not delivered");
+    assert!(
+        matches!(&error, DatabaseError::Constraint(label) if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_export_manifests").await,
+        0
+    );
+    let stored = create_snapshot(&product, &tenant, "expired", TraceAllowedUse::Evaluation).await;
+    assert_eq!(stored.state, "ready");
+    assert!(stored.completed_at.is_none());
+}
+
+/// The item count is bounded: a request for 0 items or for more than
+/// `PIPELINE_EXPORT_ITEM_MAX` is refused before anything is written, and a
+/// request for one item, with two runs exportable, holds the older run only.
+#[tokio::test]
+async fn export_item_count_is_bounded() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-bound-{}", uuid::Uuid::new_v4());
+    let older = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let create = |key_seed: &'static str, max_items: usize| {
+        let product = product.clone();
+        let tenant = tenant.clone();
+        async move {
+            product
+                .create_export_snapshot(
+                    &tenant,
+                    EXPORTER,
+                    &export_hash(key_seed),
+                    TraceAllowedUse::Evaluation,
+                    &export_hash("purpose"),
+                    max_items,
+                )
+                .await
+        }
+    };
+
+    for (key_seed, max_items) in [("none", 0), ("too-many", PIPELINE_EXPORT_ITEM_MAX + 1)] {
+        let error = create(key_seed, max_items)
+            .await
+            .expect_err("an item bound outside 1..=PIPELINE_EXPORT_ITEM_MAX is refused");
+        assert!(
+            matches!(error, DatabaseError::Constraint(_)),
+            "unexpected error: {error:?}"
+        );
+    }
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        0
+    );
+
+    let one = create("one", 1).await.expect("create a one-item snapshot");
+    assert_eq!(item_runs(&one), vec![older.run_id], "the older run first");
 }

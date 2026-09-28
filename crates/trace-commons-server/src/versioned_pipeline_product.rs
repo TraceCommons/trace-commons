@@ -9,26 +9,40 @@
 //! status table to fall out of sync with them.
 //!
 //! Withdrawal (`withdraw_submission`) is not read through this module --
-//! `PgPipelineStore` owns it. Export-snapshot lifecycle operations (create,
-//! complete, invalidate, load one snapshot's items) are not ported here
-//! either -- this module only reads the aggregate counts those snapshots
-//! contribute to `lifecycle_summary` and `operational_summary`.
+//! `PgPipelineStore` owns it, and it is also what invalidates an export
+//! snapshot and its items when a submission they carry is withdrawn.
+//!
+//! Approved exports live here: `create_export_snapshot` selects the
+//! tenant's approved revisions into an immutable snapshot, and
+//! `complete_export_snapshot` records its delivery as `main`'s export
+//! manifest.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Transaction;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
+use trace_commons_protocol::trace_contribution::TraceAllowedUse;
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
 use crate::error::DatabaseError;
-use crate::versioned_pipeline::{PipelineRunState, phase_from_db, sha256_prefixed};
+use crate::trace_corpus_storage::TraceObjectArtifactKind;
+use crate::versioned_pipeline::{
+    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PipelineRunState, phase_from_db, sha256_prefixed,
+};
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
+/// The most items one export snapshot holds. V97 bounds a snapshot's
+/// `item_count` and its items' `ordinal` to the same number.
+pub const PIPELINE_EXPORT_ITEM_MAX: usize = 500;
+pub const PIPELINE_EXPORT_SELECTION_POLICY_ID: &str = "trace_commons.pipeline_export_selection.v1";
+pub const PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID: &str = "trace_commons.authorized_trace_view.v1";
 
 /// Amounts cross the API as decimal strings, because a JavaScript client
 /// (the Tauri app) cannot hold an integer above `2^53` exactly. `AtomicUnits`
@@ -156,6 +170,48 @@ pub struct PipelineScoreAttestationEntry {
     pub decision: serde_json::Value,
 }
 
+/// One approved revision in an export snapshot. `source_object_ref_id` is
+/// the run's approved object and `source_content_hash` its
+/// `approved_content_hash`: the bytes Review approved, after the privacy
+/// boundary transformed the request. The raw request's object is never an
+/// item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineExportSnapshotItem {
+    pub ordinal: u32,
+    pub run_id: Uuid,
+    pub submission_id: Uuid,
+    pub trace_id: Uuid,
+    pub registry_revision_id: Uuid,
+    pub source_object_ref_id: Uuid,
+    pub source_content_hash: String,
+    pub bundle_id: String,
+    pub outcome_schema_id: String,
+    pub outcome_schema_version: u32,
+    pub authorized_view_schema_id: String,
+    pub consent_scopes: serde_json::Value,
+    pub allowed_uses: serde_json::Value,
+    pub invalidation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineExportSnapshot {
+    #[serde(skip_serializing, default)]
+    pub tenant_id: String,
+    pub snapshot_id: Uuid,
+    pub request_idempotency_key: String,
+    pub requester_principal_ref: String,
+    pub allowed_use: TraceAllowedUse,
+    pub purpose_hash: String,
+    pub selection_policy_id: String,
+    pub source_list_hash: String,
+    pub state: String,
+    pub export_manifest_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+    pub items: Vec<PipelineExportSnapshotItem>,
+}
+
 // Every `u64` field below is checked against the decimal-string amount rule.
 // None of them is an amount -- `PipelineLifecycleSummary`,
 // `PipelineWorkSummary`, and `PipelineOperationalSummary`'s fields are all
@@ -276,6 +332,63 @@ const TRACE_CREDIT_LEDGER_JOIN: &str = "
                             ON ledger.tenant_id = settlement.tenant_id
                            AND ledger.credit_event_id = settlement.credit_event_id
                            AND ledger.instrument_id = settlement.instrument_id";
+
+/// Whether the submission aliased `s` may be exported for the allowed use
+/// bound as `$2`.
+///
+/// The first four lines are the operability rule of
+/// `PgPipelineStore::submission_guard_on_tx`, the guard Score and Settle
+/// commit under: status `accepted`, not revoked, purged, or expired, and no
+/// `trace_withdrawals` row. They are repeated here in SQL because an export
+/// filters many submissions in one statement; a change to that rule must
+/// change this text too. The last line is `main`'s record-level export
+/// rule (`record_matches_export_policy_abac`): the submission's own
+/// `allowed_uses` holds the requested use.
+const EXPORTABLE_SUBMISSION_PREDICATE: &str = "
+                        s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                    AND NOT EXISTS (
+                        SELECT 1 FROM trace_withdrawals w
+                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+                    )
+                    AND s.allowed_uses ? $2";
+
+/// The export selection: complete runs of tenant `$1` with a committed
+/// Review approved revision whose approved object is live, and whose
+/// submission may be exported for `$2` (`EXPORTABLE_SUBMISSION_PREDICATE`),
+/// oldest run first, at most `$4`. `$3`, when not NULL, keeps only those
+/// run ids.
+fn export_selection_sql() -> String {
+    format!(
+        "SELECT r.run_id, r.submission_id, r.trace_id, r.approved_revision_id,
+                r.approved_object_ref_id, r.approved_content_hash, r.bundle_id,
+                review.outcome_schema_id, review.outcome_schema_version,
+                s.consent_scopes, s.allowed_uses
+           FROM pipeline_runs r
+           JOIN trace_submissions s
+             ON s.tenant_id = r.tenant_id
+            AND s.submission_id = r.submission_id
+           JOIN trace_object_refs approved_object
+             ON approved_object.tenant_id = r.tenant_id
+            AND approved_object.submission_id = r.submission_id
+            AND approved_object.object_ref_id = r.approved_object_ref_id
+            AND approved_object.invalidated_at IS NULL
+            AND approved_object.deleted_at IS NULL
+           JOIN phase_outcomes review
+             ON review.tenant_id = r.tenant_id
+            AND review.run_id = r.run_id
+            AND review.phase = 'review'
+          WHERE r.tenant_id = $1
+            AND r.state = 'complete'
+            AND r.approved_revision_id IS NOT NULL
+            AND r.approved_object_ref_id IS NOT NULL
+            AND r.approved_content_hash IS NOT NULL
+            AND ($3::uuid[] IS NULL OR r.run_id = ANY($3))
+            AND {EXPORTABLE_SUBMISSION_PREDICATE}
+          ORDER BY r.created_at ASC, r.run_id ASC
+          LIMIT $4"
+    )
+}
 
 #[derive(Clone)]
 pub struct PipelineProductStore {
@@ -583,6 +696,300 @@ impl PipelineProductStore {
             .await?;
         tx.commit().await?;
         rows.iter().map(attestation_from_row).collect()
+    }
+
+    /// Creates an immutable snapshot of the tenant's approved revisions for
+    /// `allowed_use`, at most `max_items` of them, oldest run first. A
+    /// request whose `request_idempotency_key` an earlier one used gets that
+    /// snapshot back unchanged, or a conflict when the request differs.
+    ///
+    /// An item is a complete run with a committed Review approved revision
+    /// whose submission is exportable (`EXPORTABLE_SUBMISSION_PREDICATE`).
+    /// The item names the approved object and its `approved_content_hash`,
+    /// never the raw request.
+    ///
+    /// The selection runs twice. The first run picks the candidates without
+    /// a lock. Their run rows are then locked `FOR KEY SHARE` in `run_id`
+    /// order (the lock the items' run foreign key takes at commit, taken
+    /// first) and their submission rows `FOR SHARE` in `submission_id`
+    /// order: the order `withdraw_submission` locks them in (run rows
+    /// `FOR UPDATE`, then submission rows), so the two never wait for each
+    /// other in a cycle. The second run, restricted to the candidates, is a
+    /// new statement, so under READ COMMITTED it sees a withdrawal or a
+    /// revocation that committed while this waited, and leaves that
+    /// submission out. A withdrawal that starts after the locks waits for
+    /// this transaction, and then invalidates the new snapshot and items
+    /// itself.
+    pub async fn create_export_snapshot(
+        &self,
+        tenant_id: &str,
+        requester_principal_ref: &str,
+        request_idempotency_key: &str,
+        allowed_use: TraceAllowedUse,
+        purpose_hash: &str,
+        max_items: usize,
+    ) -> Result<PipelineExportSnapshot, DatabaseError> {
+        if max_items == 0 || max_items > PIPELINE_EXPORT_ITEM_MAX {
+            return Err(DatabaseError::Constraint(
+                "export item limit is invalid".to_string(),
+            ));
+        }
+        if !is_sha256(request_idempotency_key) || !is_sha256(purpose_hash) {
+            return Err(DatabaseError::Constraint(
+                "export request metadata is invalid".to_string(),
+            ));
+        }
+        let allowed_use_label = storage_label(allowed_use)?;
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+            &[&format!("{tenant_id}:{request_idempotency_key}")],
+        )
+        .await?;
+        if let Some(existing) =
+            load_snapshot_by_request_key(&tx, tenant_id, request_idempotency_key).await?
+        {
+            if existing.requester_principal_ref != requester_principal_ref
+                || existing.allowed_use != allowed_use
+                || existing.purpose_hash != purpose_hash
+            {
+                return Err(DatabaseError::Constraint(
+                    "export idempotency content conflict".to_string(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(existing);
+        }
+        let limit = i64::try_from(max_items)
+            .map_err(|_| DatabaseError::Constraint("export item limit is invalid".to_string()))?;
+        let selection = export_selection_sql();
+        let candidates = tx
+            .query(
+                &selection,
+                &[&tenant_id, &allowed_use_label, &None::<Vec<Uuid>>, &limit],
+            )
+            .await?;
+        let mut run_ids = candidates
+            .iter()
+            .map(|row| row.get::<_, Uuid>("run_id"))
+            .collect::<Vec<_>>();
+        run_ids.sort();
+        tx.execute(
+            "SELECT 1 FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = ANY($2)
+              ORDER BY run_id
+              FOR KEY SHARE",
+            &[&tenant_id, &run_ids],
+        )
+        .await?;
+        lock_submissions_for_share(
+            &tx,
+            tenant_id,
+            candidates
+                .iter()
+                .map(|row| row.get::<_, Uuid>("submission_id")),
+        )
+        .await?;
+        let rows = tx
+            .query(
+                &selection,
+                &[&tenant_id, &allowed_use_label, &Some(run_ids), &limit],
+            )
+            .await?;
+        let snapshot_id = Uuid::new_v4();
+        let source_list_hash = source_list_hash(&rows);
+        let item_count = i32::try_from(rows.len())
+            .map_err(|_| DatabaseError::Constraint("export item count overflow".to_string()))?;
+        tx.execute(
+            "INSERT INTO pipeline_export_snapshots (
+                tenant_id, snapshot_id, request_idempotency_key,
+                requester_principal_ref, allowed_use, purpose_hash,
+                selection_policy_id, source_list_hash, item_count
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            &[
+                &tenant_id,
+                &snapshot_id,
+                &request_idempotency_key,
+                &requester_principal_ref,
+                &allowed_use_label,
+                &purpose_hash,
+                &PIPELINE_EXPORT_SELECTION_POLICY_ID,
+                &source_list_hash,
+                &item_count,
+            ],
+        )
+        .await?;
+        for (ordinal, row) in rows.iter().enumerate() {
+            let ordinal = i32::try_from(ordinal).map_err(|_| {
+                DatabaseError::Constraint("export item ordinal overflow".to_string())
+            })?;
+            tx.execute(
+                "INSERT INTO pipeline_export_snapshot_items (
+                    tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+                    registry_revision_id, source_object_ref_id, source_content_hash,
+                    bundle_id, outcome_schema_id, outcome_schema_version,
+                    authorized_view_schema_id, consent_scopes, allowed_uses
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                &[
+                    &tenant_id,
+                    &snapshot_id,
+                    &ordinal,
+                    &row.get::<_, Uuid>("run_id"),
+                    &row.get::<_, Uuid>("submission_id"),
+                    &row.get::<_, Uuid>("trace_id"),
+                    &row.get::<_, Uuid>("approved_revision_id"),
+                    &row.get::<_, Uuid>("approved_object_ref_id"),
+                    &row.get::<_, String>("approved_content_hash"),
+                    &row.get::<_, String>("bundle_id"),
+                    &row.get::<_, String>("outcome_schema_id"),
+                    &row.get::<_, i32>("outcome_schema_version"),
+                    &PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID,
+                    &row.get::<_, serde_json::Value>("consent_scopes"),
+                    &row.get::<_, serde_json::Value>("allowed_uses"),
+                ],
+            )
+            .await?;
+        }
+        let snapshot = load_snapshot(&tx, tenant_id, snapshot_id, requester_principal_ref)
+            .await?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pipeline_export_snapshot".to_string(),
+                id: snapshot_id.to_string(),
+            })?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    /// Delivers a `ready` snapshot: records `main`'s export manifest and its
+    /// items for it and moves the snapshot to `complete`. A `complete`
+    /// snapshot is returned unchanged. An `invalidated` snapshot, or one
+    /// with an invalidated item, is refused. Only the requester that created
+    /// the snapshot finds it.
+    ///
+    /// Delivery checks the items' submissions again: it locks their rows
+    /// `FOR SHARE` in `submission_id` order and then, in a new statement,
+    /// requires each still to be exportable for the snapshot's use
+    /// (`EXPORTABLE_SUBMISSION_PREDICATE`), or refuses with
+    /// `PIPELINE_SUBMISSION_INOPERABLE_LABEL` and records nothing. A
+    /// withdrawal marks the items it reaches, but an expiry, or a
+    /// revocation outside the pipeline, marks none. A withdrawal that
+    /// arrives during delivery waits at the submission row, and then
+    /// invalidates the delivered snapshot and the manifest's items.
+    pub async fn complete_export_snapshot(
+        &self,
+        tenant_id: &str,
+        requester_principal_ref: &str,
+        snapshot_id: Uuid,
+    ) -> Result<PipelineExportSnapshot, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let snapshot = load_snapshot(&tx, tenant_id, snapshot_id, requester_principal_ref)
+            .await?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pipeline_export_snapshot".to_string(),
+                id: snapshot_id.to_string(),
+            })?;
+        if snapshot.state == "invalidated" {
+            return Err(DatabaseError::Constraint(
+                "export snapshot is invalidated".to_string(),
+            ));
+        }
+        if snapshot.state == "complete" {
+            tx.commit().await?;
+            return Ok(snapshot);
+        }
+        if snapshot
+            .items
+            .iter()
+            .any(|item| item.invalidation_reason.is_some())
+        {
+            return Err(DatabaseError::Constraint(
+                "export snapshot contains an invalidated source".to_string(),
+            ));
+        }
+        let submission_ids = snapshot
+            .items
+            .iter()
+            .map(|item| item.submission_id)
+            .collect::<Vec<_>>();
+        let locked =
+            lock_submissions_for_share(&tx, tenant_id, submission_ids.iter().copied()).await?;
+        let allowed_use_label = storage_label(snapshot.allowed_use)?;
+        let exportable = tx
+            .query(
+                &format!(
+                    "SELECT s.submission_id
+                       FROM trace_submissions s
+                      WHERE s.tenant_id = $1 AND s.submission_id = ANY($3)
+                        AND {EXPORTABLE_SUBMISSION_PREDICATE}"
+                ),
+                &[&tenant_id, &allowed_use_label, &locked],
+            )
+            .await?;
+        if exportable.len() != locked.len() {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        let item_count = i32::try_from(snapshot.items.len())
+            .map_err(|_| DatabaseError::Constraint("export item count overflow".to_string()))?;
+        // `main` reads every manifest's kind back as a
+        // `TraceObjectArtifactKind`, so the manifest carries one of those.
+        let artifact_kind = storage_label(TraceObjectArtifactKind::ExportArtifact)?;
+        tx.execute(
+            "INSERT INTO trace_export_manifests (
+                tenant_id, export_manifest_id, artifact_kind, purpose_code,
+                source_submission_ids, source_submission_ids_hash, item_count, generated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+             ON CONFLICT (tenant_id, export_manifest_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &snapshot_id,
+                &artifact_kind,
+                &allowed_use_label,
+                &submission_ids,
+                &snapshot.source_list_hash,
+                &item_count,
+            ],
+        )
+        .await?;
+        for item in &snapshot.items {
+            tx.execute(
+                "INSERT INTO trace_export_manifest_items (
+                    tenant_id, export_manifest_id, submission_id, trace_id,
+                    derived_id, object_ref_id, source_status_at_export,
+                    source_hash_at_export
+                 ) VALUES ($1,$2,$3,$4,$5,$6,'accepted',$7)
+                 ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO NOTHING",
+                &[
+                    &tenant_id,
+                    &snapshot_id,
+                    &item.submission_id,
+                    &item.trace_id,
+                    &item.registry_revision_id,
+                    &item.source_object_ref_id,
+                    &item.source_content_hash,
+                ],
+            )
+            .await?;
+        }
+        tx.execute(
+            "UPDATE pipeline_export_snapshots
+                SET state = 'complete', export_manifest_id = $3,
+                    completed_at = COALESCE(completed_at, NOW())
+              WHERE tenant_id = $1 AND snapshot_id = $2 AND state = 'ready'",
+            &[&tenant_id, &snapshot_id, &snapshot_id],
+        )
+        .await?;
+        let completed = load_snapshot(&tx, tenant_id, snapshot_id, requester_principal_ref)
+            .await?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "pipeline_export_snapshot".to_string(),
+                id: snapshot_id.to_string(),
+            })?;
+        tx.commit().await?;
+        Ok(completed)
     }
 
     pub async fn lifecycle_summary(
@@ -1081,6 +1488,159 @@ fn attestation_from_row(row: &Row) -> Result<PipelineScoreAttestationEntry, Data
     })
 }
 
+/// Locks the tenant's `submission_ids` rows `FOR SHARE`, in `submission_id`
+/// order, and returns those ids sorted and without repeats.
+async fn lock_submissions_for_share(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_ids: impl Iterator<Item = Uuid>,
+) -> Result<Vec<Uuid>, DatabaseError> {
+    let mut submission_ids = submission_ids.collect::<Vec<_>>();
+    submission_ids.sort();
+    submission_ids.dedup();
+    tx.execute(
+        "SELECT 1 FROM trace_submissions
+          WHERE tenant_id = $1 AND submission_id = ANY($2)
+          ORDER BY submission_id
+          FOR SHARE",
+        &[&tenant_id, &submission_ids],
+    )
+    .await?;
+    Ok(submission_ids)
+}
+
+/// The snapshot an earlier request with `request_idempotency_key` created,
+/// loaded for the requester that created it.
+async fn load_snapshot_by_request_key(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    request_idempotency_key: &str,
+) -> Result<Option<PipelineExportSnapshot>, DatabaseError> {
+    let row = tx
+        .query_opt(
+            "SELECT snapshot_id, requester_principal_ref
+               FROM pipeline_export_snapshots
+              WHERE tenant_id = $1 AND request_idempotency_key = $2",
+            &[&tenant_id, &request_idempotency_key],
+        )
+        .await?;
+    match row {
+        Some(row) => {
+            let snapshot_id = row.get("snapshot_id");
+            let principal: String = row.get("requester_principal_ref");
+            load_snapshot(tx, tenant_id, snapshot_id, &principal).await
+        }
+        None => Ok(None),
+    }
+}
+
+/// The snapshot and its items, in ordinal order; `None` when the tenant has
+/// no such snapshot or another requester created it.
+async fn load_snapshot(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    snapshot_id: Uuid,
+    requester_principal_ref: &str,
+) -> Result<Option<PipelineExportSnapshot>, DatabaseError> {
+    let Some(row) = tx
+        .query_opt(
+            "SELECT *
+               FROM pipeline_export_snapshots
+              WHERE tenant_id = $1 AND snapshot_id = $2
+                AND requester_principal_ref = $3",
+            &[&tenant_id, &snapshot_id, &requester_principal_ref],
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let item_rows = tx
+        .query(
+            "SELECT *
+               FROM pipeline_export_snapshot_items
+              WHERE tenant_id = $1 AND snapshot_id = $2
+              ORDER BY ordinal",
+            &[&tenant_id, &snapshot_id],
+        )
+        .await?;
+    let items = item_rows
+        .iter()
+        .map(snapshot_item_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(PipelineExportSnapshot {
+        tenant_id: row.get("tenant_id"),
+        snapshot_id: row.get("snapshot_id"),
+        request_idempotency_key: row.get("request_idempotency_key"),
+        requester_principal_ref: row.get("requester_principal_ref"),
+        allowed_use: from_storage_label(row.get("allowed_use"), "export allowed use")?,
+        purpose_hash: row.get("purpose_hash"),
+        selection_policy_id: row.get("selection_policy_id"),
+        source_list_hash: row.get("source_list_hash"),
+        state: row.get("state"),
+        export_manifest_id: row.get("export_manifest_id"),
+        created_at: row.get("created_at"),
+        completed_at: row.get("completed_at"),
+        invalidated_at: row.get("invalidated_at"),
+        items,
+    }))
+}
+
+fn snapshot_item_from_row(row: &Row) -> Result<PipelineExportSnapshotItem, DatabaseError> {
+    let ordinal: i32 = row.get("ordinal");
+    let version: i32 = row.get("outcome_schema_version");
+    Ok(PipelineExportSnapshotItem {
+        ordinal: u32::try_from(ordinal)
+            .map_err(|_| DatabaseError::Serialization("invalid export ordinal".to_string()))?,
+        run_id: row.get("run_id"),
+        submission_id: row.get("submission_id"),
+        trace_id: row.get("trace_id"),
+        registry_revision_id: row.get("registry_revision_id"),
+        source_object_ref_id: row.get("source_object_ref_id"),
+        source_content_hash: row.get("source_content_hash"),
+        bundle_id: row.get("bundle_id"),
+        outcome_schema_id: row.get("outcome_schema_id"),
+        outcome_schema_version: u32::try_from(version).map_err(|_| {
+            DatabaseError::Serialization("invalid export outcome schema version".to_string())
+        })?,
+        authorized_view_schema_id: row.get("authorized_view_schema_id"),
+        consent_scopes: row.get("consent_scopes"),
+        allowed_uses: row.get("allowed_uses"),
+        invalidation_reason: row.get("invalidation_reason"),
+    })
+}
+
+/// A hash of the selected approved revisions, in selection order.
+fn source_list_hash(rows: &[Row]) -> String {
+    let mut hasher = Sha256::new();
+    for row in rows {
+        hasher.update(row.get::<_, Uuid>("approved_revision_id").as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
+/// The stored text of a snake_case enum value, as `main` stores its enums.
+fn storage_label<T: Serialize>(value: T) -> Result<String, DatabaseError> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| DatabaseError::Serialization("enum value is not a label".to_string()))
+}
+
+/// `storage_label`'s inverse; `what` names the value in the error.
+fn from_storage_label<T: DeserializeOwned>(value: String, what: &str) -> Result<T, DatabaseError> {
+    serde_json::from_value(serde_json::Value::String(value))
+        .map_err(|_| DatabaseError::Serialization(format!("{what} is invalid")))
+}
+
 /// Reads the committed Score decision's `trace_credit` award. Under the
 /// #971 settlement shape an award's `atomic_units` serializes as a decimal
 /// string, not a JSON number (`AtomicUnits` holds a `u128`), so this parses
@@ -1123,6 +1683,23 @@ fn count_from_row(row: &Row, column: &str) -> Result<u64, DatabaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_export_request_metadata_is_bounded() {
+        assert!(is_sha256(&sha256_prefixed(b"request")));
+        assert!(!is_sha256("request"));
+        assert!(!is_sha256(&format!("sha256:{}", "A".repeat(64))));
+        assert_eq!(
+            storage_label(TraceAllowedUse::RankingModelTraining).unwrap(),
+            "ranking_model_training"
+        );
+        assert_eq!(
+            from_storage_label::<TraceAllowedUse>("ranking_model_training".to_string(), "use")
+                .unwrap(),
+            TraceAllowedUse::RankingModelTraining
+        );
+        assert!(from_storage_label::<TraceAllowedUse>("research".to_string(), "use").is_err());
+    }
 
     #[test]
     fn score_amount_requires_the_versioned_decision_field() {

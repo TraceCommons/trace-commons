@@ -199,12 +199,19 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_review_assessments", "INSERT", &[]),
     // V97
     ("pipeline_export_snapshots", "SELECT", &[]),
+    ("pipeline_export_snapshots", "INSERT", &[]),
     (
         "pipeline_export_snapshots",
         "UPDATE",
-        &["state", "invalidated_at"],
+        &[
+            "state",
+            "export_manifest_id",
+            "completed_at",
+            "invalidated_at",
+        ],
     ),
     ("pipeline_export_snapshot_items", "SELECT", &[]),
+    ("pipeline_export_snapshot_items", "INSERT", &[]),
     (
         "pipeline_export_snapshot_items",
         "UPDATE",
