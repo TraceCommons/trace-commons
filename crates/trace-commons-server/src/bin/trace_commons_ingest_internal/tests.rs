@@ -96207,7 +96207,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        12,
+        13,
         "every spawned driver loop must register; got {seen:?}"
     );
 }
