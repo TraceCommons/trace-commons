@@ -860,13 +860,33 @@ pub async fn build_witnessed_preview(
             .await?;
         (response, record, Some(bundle))
     } else {
-        let (response, record) = context
+        let (response, record) = match context
             .prepare_witnessed_review(
                 &transcript,
                 options.correction,
                 options.include_inference_bodies,
             )
-            .await?;
+            .await
+        {
+            Ok(reviewed) => reviewed,
+            // This route reports witness refusals as labels. A busy witness
+            // is restored to its typed error, with the delay the witness
+            // asked for, so the handler can tell the person when to try
+            // again rather than reporting a refusal.
+            Err(error)
+                if error.to_string()
+                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR =>
+            {
+                return Err(anyhow::Error::new(
+                    crate::witness::WitnessTrustError::WitnessSaturated {
+                        retry_after_secs: context.last_witness_retry_after().unwrap_or(
+                            trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS,
+                        ),
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         (response, record, None)
     };
     let mut pin_guard =

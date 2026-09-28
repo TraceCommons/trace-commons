@@ -2195,6 +2195,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                 actor_principal_ref: "principal:ranker-worker".to_string(),
                 actor_role: "utility_worker".to_string(),
                 settlement_state: TraceCreditSettlementState::Pending,
+                witness_provenance_class: None,
             })
             .await
             .expect("insert tenant settlement source credit event");
