@@ -13,50 +13,29 @@ use tower::ServiceExt;
 const WALLET_ACCOUNT: &str = "wallet-v2-fixture.testnet";
 const WALLET_RECIPIENT: &str = "app.tracecommons.test";
 
-fn database_config(url: &str, resolver_url: Option<&str>) -> DatabaseConfig {
-    DatabaseConfig {
-        url: SecretString::from(url.to_owned()),
-        pool_size: 4,
-        ssl_mode: trace_commons_server::config::SslMode::Prefer,
-        login_resolver_url: resolver_url.map(|value| SecretString::from(value.to_owned())),
-        gate_driver_url: None,
-        pii_backstop_driver_url: None,
-        invite_registry_url: None,
-    }
+/// The migrated database, plus a runtime backend on a NOSUPERUSER
+/// NOBYPASSRLS role, so provisioning writes and the session read go through
+/// the tenant policies exactly as production's do. The anchor lookup still
+/// uses the resolver role and its narrow policy.
+///
+/// `admin` is the migration owner (a superuser in CI). It is used only for
+/// this fixture's probes and seed rows, never as the handlers' database.
+struct WalletDb {
+    admin: Arc<PgBackend>,
+    runtime: Arc<PgBackend>,
 }
 
-async fn fresh_db() -> Arc<PgBackend> {
-    let url = std::env::var("TRACE_COMMONS_WALLET_V2_PG_TEST_URL")
-        .expect("wallet v2 needs an explicit fresh PostgreSQL URL");
-    let parsed = reqwest::Url::parse(&url).unwrap();
-    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
-    assert_eq!(parsed.path(), "/admission_test_walletv2");
-    let migrator = PgBackend::new(&database_config(&url, None)).await.unwrap();
-    migrator.run_migrations().await.unwrap();
-
-    // The anchor lookup must use the resolver role and its narrow RLS policy.
-    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-        .await
-        .unwrap();
-    let connection_task = tokio::spawn(connection);
-    client
-        .batch_execute(
-            "ALTER ROLE trace_login_resolver LOGIN; \
-             GRANT USAGE ON SCHEMA public TO trace_login_resolver; \
-             GRANT SELECT (tenant_id, anchor_hash) \
-               ON trace_near_account_anchors TO trace_login_resolver;",
-        )
-        .await
-        .unwrap();
-    drop(client);
-    connection_task.abort();
-    let mut resolver = parsed;
-    resolver.set_username("trace_login_resolver").unwrap();
-    Arc::new(
-        PgBackend::new(&database_config(&url, Some(resolver.as_str())))
-            .await
-            .unwrap(),
+async fn fresh_db() -> WalletDb {
+    let pg = super::migrated_pg_fixture::migrated_pg(
+        "TRACE_COMMONS_WALLET_V2_PG_TEST_URL",
+        Some("admission_test_walletv2"),
     )
+    .await;
+    let runtime = pg.narrow_runtime("tc_walletv2_runtime").await;
+    WalletDb {
+        admin: pg.admin,
+        runtime,
+    }
 }
 
 fn identity() -> trace_commons_server::near_account_identity::NearAccountIdentity {
@@ -99,6 +78,16 @@ fn challenge_pair() -> (String, String) {
 /// Independently form the NEP-413 Borsh preimage, including the Some(callback)
 /// option emitted by the actual wallet v2 start route.
 fn sign_wallet(started: &serde_json::Value, wallet: &ring::signature::Ed25519KeyPair) -> String {
+    sign_wallet_preimage(started, wallet, true)
+}
+
+/// The same preimage, optionally with the callback encoded as `None`: a
+/// well-formed signature by the right key over bytes the ceremony never issued.
+fn sign_wallet_preimage(
+    started: &serde_json::Value,
+    wallet: &ring::signature::Ed25519KeyPair,
+    with_callback: bool,
+) -> String {
     let message = started["message"].as_str().unwrap();
     let recipient = started["recipient"].as_str().unwrap();
     let callback = started["wallet_url"].as_str().unwrap();
@@ -112,9 +101,13 @@ fn sign_wallet(started: &serde_json::Value, wallet: &ring::signature::Ed25519Key
     bytes.extend_from_slice(&nonce);
     bytes.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
     bytes.extend_from_slice(recipient.as_bytes());
-    bytes.push(1); // Borsh Option::Some(callback_url)
-    bytes.extend_from_slice(&(callback.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(callback.as_bytes());
+    if with_callback {
+        bytes.push(1); // Borsh Option::Some(callback_url)
+        bytes.extend_from_slice(&(callback.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(callback.as_bytes());
+    } else {
+        bytes.push(0); // Borsh Option::None
+    }
     base64::engine::general_purpose::STANDARD.encode(wallet.sign(&Sha256::digest(bytes)).as_ref())
 }
 
@@ -148,7 +141,9 @@ async fn rpc_fixture(public_key: String) -> (String, Arc<std::sync::atomic::Atom
     (url, calls)
 }
 
-fn state(db: Arc<PgBackend>, rpc_url: String) -> Arc<AppState> {
+/// The returned directory backs the state's local storage; hold it for the
+/// test's lifetime so it is removed afterwards rather than leaked.
+fn state(db: Arc<PgBackend>, rpc_url: String) -> (Arc<AppState>, tempfile::TempDir) {
     // No legacy witness is published; v2 must still complete. This ignored test
     // runs alone in CI because readiness reads these process-global variables.
     unsafe {
@@ -161,7 +156,6 @@ fn state(db: Arc<PgBackend>, rpc_url: String) -> Arc<AppState> {
     }
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state(temp.path().to_path_buf());
-    std::mem::forget(temp);
     let settings = Arc::make_mut(&mut state);
     settings.near_provisioning_enabled = true;
     settings.near_provisioning_admission_ready = true;
@@ -173,7 +167,7 @@ fn state(db: Arc<PgBackend>, rpc_url: String) -> Arc<AppState> {
     }));
     settings.near_account_identity = Some(Arc::new(identity()));
     settings.db_mirror = Some(db as Arc<dyn Database>);
-    state
+    (state, temp)
 }
 
 async fn request(
@@ -299,6 +293,11 @@ async fn row_counts(db: &PgBackend, tenant: &str) -> [i64; 6] {
     [0, 1, 2, 3, 4, 5].map(|index| row.get(index))
 }
 
+/// Table-wide counts, with no tenant context. The tables are FORCE ROW LEVEL
+/// SECURITY, so this sees rows only on a role that bypasses RLS; on any other
+/// it reads 0 everywhere and every "nothing persisted" comparison against it
+/// passes whatever happened. Pass the admin backend, and pair each such
+/// comparison with a positive control showing the probe saw a write.
 async fn global_provisioned_counts(db: &PgBackend) -> [i64; 8] {
     let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     let row = client
@@ -380,15 +379,16 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
 async fn wallet_v2_signed_completion_and_refusal_boundaries() {
     use std::sync::atomic::Ordering;
     let _serial = serial().lock().await;
-    let db = fresh_db().await;
+    let WalletDb { admin, runtime: db } = fresh_db().await;
     let wallet = keypair();
+    let wrong_wallet = keypair();
     let device = keypair();
     let wrong_device = keypair();
     let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
     let (rpc_url, rpc_calls) = rpc_fixture(wallet_key(&wallet)).await;
-    let state = state(db.clone(), rpc_url);
+    let (state, _temp) = state(db.clone(), rpc_url);
     let (verifier, challenge) = challenge_pair();
-    let before = global_provisioned_counts(&db).await;
+    let before = global_provisioned_counts(&admin).await;
 
     let (status, legacy) = request(
         &state,
@@ -452,19 +452,36 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
         "v1 start still needs a witness"
     );
 
-    // Each failed finish consumes its own ceremony. Invalid proofs must never
-    // reach RPC or produce an account, session, device or connection selection.
+    // Every refused variant carries well-formed values, so it is refused by
+    // the check it names and not by a decoder in front of it: the finish
+    // handler maps every failure to the same 400, and a malformed signature
+    // would still be refused with Ed25519 verification skipped entirely.
+    //
+    // Each failed finish consumes its own ceremony, which the retry pins: a
+    // fully valid body for the same ceremony must be refused too, or a caller
+    // could keep trying proofs against one ceremony. Neither attempt may reach
+    // RPC or produce an account, session, device or connection selection.
     for variant in [
-        "wallet_signature",
+        "wallet_signature_wrong_key",
+        "wallet_signature_tampered_preimage",
         "account",
         "pkce",
         "device_key",
-        "device_signature",
+        "device_signature_wrong_key",
     ] {
         let started = start(&state, WALLET_ACCOUNT, &public_key, &challenge).await;
-        let mut body = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+        let valid = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+        let mut body = valid.clone();
         match variant {
-            "wallet_signature" => body["wallet_signature"] = serde_json::json!("AAAA"),
+            // The right preimage, signed by a key the body does not name.
+            "wallet_signature_wrong_key" => {
+                body["wallet_signature"] = serde_json::json!(sign_wallet(&started, &wrong_wallet))
+            }
+            // The named key, over a preimage with the callback left out.
+            "wallet_signature_tampered_preimage" => {
+                body["wallet_signature"] =
+                    serde_json::json!(sign_wallet_preimage(&started, &wallet, false))
+            }
             "account" => body["account_id"] = serde_json::json!("other.testnet"),
             "pkce" => body["code_verifier"] = serde_json::json!("b".repeat(64)),
             "device_key" => {
@@ -473,14 +490,35 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
                         .encode(wrong_device.public_key().as_ref())
                 )
             }
-            "device_signature" => body["device_signature"] = serde_json::json!("AAAA"),
+            // The real device key is named; the bytes are signed by another.
+            "device_signature_wrong_key" => {
+                let signing_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(started["device_signing_bytes"].as_str().unwrap())
+                    .unwrap();
+                body["device_signature"] = serde_json::json!(
+                    base64::engine::general_purpose::STANDARD
+                        .encode(wrong_device.sign(&signing_bytes).as_ref())
+                )
+            }
             _ => unreachable!(),
+        }
+        for field in ["wallet_signature", "device_signature"] {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(body[field].as_str().unwrap())
+                .unwrap();
+            assert_eq!(decoded.len(), 64, "{variant}: {field} is a real signature");
         }
         let (status, refused) = finish(&state, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{variant}: {refused}");
+        let (status, retried) = finish(&state, valid).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{variant}: a refused finish must consume its ceremony: {retried}"
+        );
         assert_eq!(rpc_calls.load(Ordering::SeqCst), 0, "{variant} reached RPC");
         assert_eq!(
-            global_provisioned_counts(&db).await,
+            global_provisioned_counts(&admin).await,
             before,
             "{variant} persisted account, identity, device, session or connection state"
         );
@@ -507,6 +545,30 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
     ] {
         assert!(finished.get(absent).is_none(), "finish leaked {absent}");
     }
+    // Positive control for every `before` comparison above: the probe must see
+    // this finish's writes, one more row in each provisioned table and still no
+    // connection selection. On a role that RLS applies to it would read 0 both
+    // times, and the refusals above would have passed without proving anything.
+    let after = global_provisioned_counts(&admin).await;
+    for (index, table) in [
+        "trace_near_account_anchors",
+        "trace_accounts",
+        "trace_near_identities",
+        "device_keys",
+        "trace_account_principals",
+        "trace_near_provisioned_devices",
+        "trace_sessions",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            after[index],
+            before[index] + 1,
+            "the global probe must observe the successful finish in {table}"
+        );
+    }
+    assert_eq!(after[7], before[7], "finish never selects a connection");
     let tenant = finished["tenant_id"].as_str().unwrap();
     assert_eq!(row_counts(&db, tenant).await, [1, 1, 1, 1, 1, 0]);
     assert_eq!(
@@ -565,7 +627,7 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
 #[ignore = "requires isolated TRACE_COMMONS_WALLET_V2_PG_TEST_URL"]
 async fn wallet_v2_refuses_a_device_key_registered_to_another_tenant() {
     let _serial = serial().lock().await;
-    let db = fresh_db().await;
+    let WalletDb { admin: db, runtime } = fresh_db().await;
     let wallet = keypair();
     let device = keypair();
     let device_public_key =
@@ -595,9 +657,15 @@ async fn wallet_v2_refuses_a_device_key_registered_to_another_tenant() {
         .await
         .unwrap();
     let (rpc_url, _rpc_calls) = rpc_fixture(wallet_key(&wallet)).await;
-    let state = state(db.clone(), rpc_url);
+    let (state, _temp) = state(runtime, rpc_url);
     let (verifier, challenge) = challenge_pair();
     let before = global_provisioned_counts(&db).await;
+    // Positive control: the probe sees the legacy row seeded above, so it is
+    // reading through RLS rather than returning 0 for every table.
+    assert!(
+        before[3] >= 1,
+        "the global probe must see the seeded device key"
+    );
 
     let started = start(&state, WALLET_ACCOUNT, &device_public_key, &challenge).await;
     let (status, refused) = finish(
