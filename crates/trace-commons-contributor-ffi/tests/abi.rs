@@ -5002,6 +5002,69 @@ fn the_certificate_detail_labels_are_the_cores() {
 }
 
 #[test]
+fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 4, "project_id": "p-1", "project_label": "api",
+        "was": "model_scrubbed", "now": "patterns_only",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for text in ["not json", "[]", "\"x\""] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr()) }
+                .is_null(),
+            "{text}"
+        );
+    }
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
+fn a_gate_held_notice_crosses_the_abi_and_nothing_held_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "held_sessions": 2,
+        "reasons": ["admission-evidence-is-per-session"],
+        "projects": [{ "project_id": "p-1", "project_label": "api", "held_sessions": 2 }],
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json =
+        take_owned(unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::gate_held_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(std::ptr::null()) }.is_null()
+    );
+    for text in [
+        "not json",
+        "[]",
+        r#"{"held_sessions":0,"reasons":[],"projects":[]}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn nothing_waiting_on_the_witness_gets_null() {
     use std::ffi::CString;
     use trace_commons_contributor_ffi::tc_witness_capacity_notice;

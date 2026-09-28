@@ -77,6 +77,13 @@ impl DeviceIdentity {
         Self::from_pkcs8(&pkcs8_der)
     }
 
+    /// A key read from the staging slot (`commons_credentials::Kind::
+    /// StagedDevice`). The same parse as the live key; a separate name so
+    /// that a staged key is only ever built where one was asked for.
+    pub(crate) fn from_staged_pkcs8(pkcs8_der: &[u8]) -> Result<Self> {
+        Self::from_pkcs8(pkcs8_der)
+    }
+
     fn from_pkcs8(pkcs8_der: &[u8]) -> Result<Self> {
         let keypair = Ed25519KeyPair::from_pkcs8(pkcs8_der)
             .map_err(|_| anyhow!("parsing stored device key"))?;

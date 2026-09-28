@@ -103,6 +103,13 @@ public static class DaemonProtocol
         public const string AcknowledgeGrantVoids = "acknowledge_grant_voids";
 
         /// <summary>
+        /// Records that the rewording notices with these ids were shown (K5).
+        /// Only the ids actually drawn, with no "all". Changes nothing about
+        /// the folders.
+        /// </summary>
+        public const string AcknowledgeArmingRewordings = "acknowledge_arming_rewordings";
+
+        /// <summary>
         /// Asks IronWire which tools on this machine are set to send through
         /// it, one row per tool it knows about.
         ///
@@ -722,6 +729,25 @@ public sealed class DaemonStatus
     /// </remarks>
     [JsonPropertyName("witness_capacity")]
     public WitnessCapacity? WitnessCapacity { get; set; }
+
+    /// <summary>
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5), each kept as the daemon sent it
+    /// so it can go back to the ABI for its words. Null from a daemon older
+    /// than the field.
+    /// </summary>
+    [JsonPropertyName("arming_rewordings")]
+    public List<JsonElement>? ArmingRewordings { get; set; }
+
+    /// <summary>
+    /// What the automatic-contribution gate held at the daemon's last full
+    /// pass, kept as the daemon sent it for the ABI to word. Read
+    /// independently of <see cref="Health"/>: a higher label can hold the
+    /// slot while armed folders are held. Null from a daemon older than the
+    /// field, which holds nothing.
+    /// </summary>
+    [JsonPropertyName("automatic_contribution_held")]
+    public JsonElement? AutomaticContributionHeld { get; set; }
 
     /// <summary>
     /// Whether there is nothing to report.
