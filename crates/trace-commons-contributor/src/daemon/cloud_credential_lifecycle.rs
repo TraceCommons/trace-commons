@@ -35,7 +35,18 @@ pub(crate) fn native(
             .ok_or_else(unavailable)?;
         Ok(CloudCredentialLifecycle::new(store.clone(), backend))
     }
-    #[cfg(not(test))]
+    // Integration tests and the binaries they spawn: a file store in the
+    // test's own config dir, never the user's keychain.
+    #[cfg(all(not(test), feature = "test-credential-store"))]
+    {
+        Ok(CloudCredentialLifecycle::new(
+            store.clone(),
+            std::sync::Arc::new(
+                crate::daemon::test_credential_store::TestFileBackend::for_store(store),
+            ),
+        ))
+    }
+    #[cfg(all(not(test), not(feature = "test-credential-store")))]
     Ok(CloudCredentialLifecycle::new(
         store.clone(),
         std::sync::Arc::new(crate::daemon::os_secret_store::OsSecretBackend::new()?),

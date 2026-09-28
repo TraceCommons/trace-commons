@@ -32,6 +32,13 @@ enum LinkMode {
     ForeignSignature,
     /// 409 `legacy_link_tenant_pooled`, as for a Devfolio shared code.
     Pooled,
+    /// The tenant is already linked to this account by another of its
+    /// devices, and the server predates V91: it returns the first device's
+    /// original record, naming and signed by that device.
+    FirstDeviceRecord,
+    /// The same, on a V91 server: this device's own attestation under the
+    /// existing link, with an attestation id of its own.
+    SecondDeviceAttestation,
 }
 
 struct Ingest {
@@ -157,6 +164,25 @@ async fn link_route(
     };
     match ingest.mode {
         LinkMode::OtherAccount => record.statement.account_id = Uuid::new_v4(),
+        LinkMode::FirstDeviceRecord => {
+            let first = Ed25519KeyPair::from_pkcs8(
+                Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                    .unwrap()
+                    .as_ref(),
+            )
+            .unwrap();
+            use ring::signature::KeyPair as _;
+            record.statement.device_key_id =
+                trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+                    first.public_key().as_ref(),
+                );
+            record.statement.nonce = "e".repeat(64);
+            record.device_signature = engine.encode(
+                first
+                    .sign(&legacy_invite_link_statement_bytes(&record.statement))
+                    .as_ref(),
+            );
+        }
         LinkMode::ForeignSignature => {
             let other = Ed25519KeyPair::from_pkcs8(
                 Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
@@ -654,7 +680,11 @@ async fn the_switch_waits_for_a_pass_in_flight() {
     let migration =
         tokio::spawn(async move { migrate(&shared, &p, Some(INVITE_CODE)).await.map(|_| ()) });
     // The link lands, but nothing is switched while the pass holds the lock.
-    for _ in 0..200 {
+    // Waiting for the link is only the precondition, so the bound is loose:
+    // on a loaded machine the ceremony and link took longer than the two
+    // seconds this once allowed, and the test failed without any ordering
+    // being wrong.
+    for _ in 0..6000 {
         if f.ingest.links.load(Ordering::SeqCst) == 1 {
             break;
         }
@@ -981,4 +1011,28 @@ async fn a_move_without_a_legacy_session_revokes_nothing_and_completes() {
     assert_eq!(answer["migrated"], true);
     assert_eq!(answer["legacy_session_revoked"], false);
     assert!(f.ingest.logouts.lock().unwrap().is_empty());
+}
+
+/// A second device of a tenant another of its devices already linked to
+/// this same account gets its own attestation from a V91 server, verifies
+/// it against its own key, and moves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_device_of_a_linked_tenant_moves_on_its_own_attestation() {
+    let f = fixture(LinkMode::SecondDeviceAttestation, true).await;
+    let answer = f.migrate(&provisioner(&f.ingest)).await.unwrap();
+    assert_eq!(answer["migrated"], true);
+    let link = load_link(&f.shared.store).unwrap();
+    assert_eq!(link.record.statement.device_key_id, f.legacy.device_key_id);
+    assert!(f.sweep().voided.is_empty());
+}
+
+/// Against a server that predates V91 the second device is handed the first
+/// device's record. It cannot verify that against its own key, so it
+/// refuses and nothing changes: the reason V91 exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_device_record_is_refused_by_a_second_device() {
+    let f = fixture(LinkMode::FirstDeviceRecord, true).await;
+    let error = f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    assert_eq!(label(&error), "legacy_migration_verification_failed");
+    f.assert_legacy_intact();
 }
