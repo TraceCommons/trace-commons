@@ -97,6 +97,72 @@ pub(crate) async fn acknowledge_grant_voids(
     .await
 }
 
+/// The offer to move a legacy invite identity to a NEAR AI account: the
+/// words, from the contributor core. Shown only while
+/// `status.legacy_invite_migration.offered` is true.
+#[tauri::command]
+pub(crate) fn legacy_migration_copy() -> serde_json::Value {
+    serde_json::to_value(trace_commons_contributor::consent_copy::legacy_migration_offer())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The notice after the move, for `status.legacy_invite_migration.notice`
+/// passed through. `null` when there is nothing to show.
+#[tauri::command]
+pub(crate) fn legacy_migration_notice(notice: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::legacy_migration_notice_for_wire(&notice)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Ask the daemon to move this legacy invite identity to the contributor's
+/// NEAR AI account -- the contributor chose to. `invite` is sent only when
+/// the daemon asked for it (`legacy_migration_invite_needed`). A refusal is
+/// an answer, not an error: `{"refused": <label>, "line": <sentence>}`, the
+/// sentence from the contributor core.
+#[tauri::command]
+pub(crate) async fn migrate_legacy_invite(
+    state: State<'_, AppState>,
+    invite: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let invite = invite
+        .map(|value| value.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let response = crate::ipc::call_daemon_response(
+        shared_state(&state)?,
+        "legacy_invite_migrate",
+        serde_json::json!({ "invite": invite }),
+    )
+    .await?;
+    if let Some(result) = response.result {
+        return Ok(result);
+    }
+    if let Some(error) = response.error {
+        return Ok(legacy_migration_refusal(&error.message));
+    }
+    Err("Rust core returned an invalid IPC response".to_owned())
+}
+
+fn legacy_migration_refusal(label: &str) -> serde_json::Value {
+    serde_json::json!({
+        "refused": label,
+        "line": trace_commons_contributor::consent_copy::legacy_migration_refusal_line(label),
+    })
+}
+
+/// Record that the move notice was shown.
+#[tauri::command]
+pub(crate) async fn acknowledge_legacy_invite_migration(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "acknowledge_legacy_invite_migration",
+        serde_json::json!({}),
+    )
+    .await
+}
+
 /// What the Tauri shell can check before asking for the Flow 1 grant.
 ///
 /// A first line only: the daemon's `grant_automatic` refuses on its own
@@ -181,7 +247,32 @@ pub(crate) async fn withdraw_automatic_grant(
 
 #[cfg(test)]
 mod tests {
-    use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
+    use super::{
+        grant_precondition, grant_void_notice, legacy_migration_notice, legacy_migration_refusal,
+        scrubber_pattern_names,
+    };
+
+    /// A refused move is answered with the core's sentence for its label,
+    /// and the notice is the core's, or `null` when there is none.
+    #[test]
+    fn legacy_migration_answers_come_from_the_core() {
+        let refused = legacy_migration_refusal("legacy_migration_tenant_pooled");
+        assert_eq!(refused["refused"], "legacy_migration_tenant_pooled");
+        assert_eq!(
+            refused["line"],
+            trace_commons_contributor::consent_copy::legacy_migration_refusal_line(
+                "legacy_migration_tenant_pooled"
+            )
+        );
+        assert!(legacy_migration_notice(serde_json::Value::Null).is_null());
+        let notice = legacy_migration_notice(
+            serde_json::json!({"folders_kept": 1, "automatic_grant_kept": false}),
+        );
+        assert_eq!(
+            notice["title"],
+            trace_commons_contributor::consent_copy::LEGACY_MIGRATION_NOTICE_TITLE
+        );
+    }
 
     fn config(
         scopes: &[&str],

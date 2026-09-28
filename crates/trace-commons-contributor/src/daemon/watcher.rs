@@ -177,6 +177,9 @@ fn tick_over(
     source_identities: SourceIdentities,
     max_queue_entries: usize,
 ) -> Result<TickReport> {
+    // The whole pass, from the config read to the epilogue, under the pass
+    // lock: see `DaemonShared::pass_lock`.
+    let _pass = shared.pass_lock.lock().expect("pass lock");
     release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
@@ -405,6 +408,9 @@ fn tick_over_paths(
     paths: &[PathBuf],
     session_at: SessionAt<'_>,
 ) -> Result<TickReport> {
+    // The whole pass, from the config read to the epilogue, under the pass
+    // lock: see `DaemonShared::pass_lock`.
+    let _pass = shared.pass_lock.lock().expect("pass lock");
     release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
@@ -2429,6 +2435,39 @@ mod tests {
 
         assert_eq!(second.auto_ready, 1, "{second:?}");
         assert_eq!(the_only_project(&f).mode, ProjectMode::AutoUpload);
+    }
+
+    /// A pass does not start while the pass lock is held -- which is how
+    /// the legacy invite migration keeps every pass off the config, the
+    /// device key and the grant terms while it switches them together.
+    #[test]
+    fn a_pass_waits_while_the_pass_lock_is_held() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let finished = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let held = f.shared.pass_lock.lock().unwrap();
+            let pass = scope.spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(tick(&f.shared, Utc::now()))
+                    .unwrap();
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(
+                !finished.load(std::sync::atomic::Ordering::SeqCst),
+                "a pass ran while the pass lock was held"
+            );
+            drop(held);
+            pass.join().unwrap();
+        });
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     fn grant_automatic(f: &WatcherFixture) {

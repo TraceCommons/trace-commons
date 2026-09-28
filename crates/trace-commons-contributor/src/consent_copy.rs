@@ -633,6 +633,159 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
     (waiting > 0).then(|| witness_capacity_notice(waiting))
 }
 
+// ---------------------------------------------------------------------------
+// Moving a legacy invite identity to a NEAR AI account
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section is DRAFT, NEEDS APPROVAL (copy for Zaki's
+// approval): written with the client half of the legacy invite migration so
+// that no shell writes its own. The Tauri client renders it; macOS, Windows
+// and GTK do not take it yet. The daemon reports the move under
+// `status.legacy_invite_migration` and refuses it with
+// `legacy_migration_*` labels (`daemon::legacy_migration::LABELS`).
+
+/// **DRAFT, NEEDS APPROVAL.** Heading of the offer, shown only while
+/// `status.legacy_invite_migration.offered` is true.
+pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
+
+/// **DRAFT, NEEDS APPROVAL.** The offer. Says it is optional and that
+/// declining changes nothing, because coexistence is the default.
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+
+/// **DRAFT, NEEDS APPROVAL.** The button that starts the move.
+pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move to my NEAR AI account";
+
+/// **DRAFT, NEEDS APPROVAL.** Shown while the move runs.
+pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
+
+/// **DRAFT, NEEDS APPROVAL.** Asked only when neither the device nor the
+/// commons can say which invite it joined with
+/// (`legacy_migration_invite_needed`).
+pub const LEGACY_MIGRATION_INVITE_PROMPT: &str = "Paste the invite link you joined with. It is used only to show which invite is yours, and it is not stored.";
+
+/// **DRAFT, NEEDS APPROVAL.** The notice's heading: the one sentence the
+/// consent spec requires every shell to show after the move.
+pub const LEGACY_MIGRATION_NOTICE_TITLE: &str =
+    "Your contributions now go under your NEAR AI account";
+
+/// **DRAFT, NEEDS APPROVAL.**
+pub const LEGACY_MIGRATION_NOTICE_BODY: &str = "From now on, what you contribute is credited to your NEAR AI account instead of your invite. What you contributed before stays recorded under your invite.";
+
+/// **DRAFT, NEEDS APPROVAL.** When at least one folder, or the automatic
+/// grant, was carried over.
+pub const LEGACY_MIGRATION_NOTICE_ARMED_KEPT: &str = "Folders you set to contribute automatically still do. You were not asked again because only the account they go under changed.";
+
+/// **DRAFT, NEEDS APPROVAL.** When nothing was armed.
+pub const LEGACY_MIGRATION_NOTICE_NOTHING_ARMED: &str =
+    "You had no folders contributing automatically, so nothing else changed.";
+
+/// **DRAFT, NEEDS APPROVAL.**
+pub const LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE: &str = "Got it";
+
+/// The notice after a move, as a shell renders it.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct LegacyMigrationNoticeCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub folders: &'static str,
+    pub acknowledge: &'static str,
+}
+
+/// The notice for `status.legacy_invite_migration.notice`, or `None` when
+/// there is nothing to show (`null`, or not an object).
+#[must_use]
+pub fn legacy_migration_notice_for_wire(
+    notice: &serde_json::Value,
+) -> Option<LegacyMigrationNoticeCopy> {
+    let object = notice.as_object()?;
+    let folders = object
+        .get("folders_kept")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let grant = object
+        .get("automatic_grant_kept")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(LegacyMigrationNoticeCopy {
+        title: LEGACY_MIGRATION_NOTICE_TITLE,
+        body: LEGACY_MIGRATION_NOTICE_BODY,
+        folders: if folders > 0 || grant {
+            LEGACY_MIGRATION_NOTICE_ARMED_KEPT
+        } else {
+            LEGACY_MIGRATION_NOTICE_NOTHING_ARMED
+        },
+        acknowledge: LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE,
+    })
+}
+
+/// **DRAFT, NEEDS APPROVAL.** What a refused move says, by the daemon's
+/// label. Every refusal leaves the invite identity exactly as it was, and
+/// the pooled one says so plainly because it is the common case (a shared
+/// event code).
+#[must_use]
+pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
+    match label {
+        "legacy_migration_tenant_pooled" => {
+            "This invite was shared by many people, so it can't be moved to one account. It keeps working exactly as it does now."
+        }
+        "legacy_migration_admission_not_ready" => {
+            "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
+        }
+        "legacy_migration_no_near_ai_session" => {
+            "Sign in to NEAR AI first, then try again. Your invite keeps working."
+        }
+        "legacy_migration_invite_needed" => {
+            "We couldn't tell which invite you joined with. Paste your invite link to continue."
+        }
+        "legacy_migration_invite_other_commons" => "That invite is for a different commons.",
+        "legacy_migration_invite_invalid" => "That doesn't look like an invite link or code.",
+        "legacy_migration_tenant_claimed" => {
+            "This invite has already been moved to a different account. Nothing changed here."
+        }
+        "legacy_migration_invite_revoked" => {
+            "This invite was revoked, so it can't be moved. Nothing changed here."
+        }
+        "legacy_migration_device_not_eligible" => {
+            "This device can't be moved to an account. It keeps working as it does now."
+        }
+        "legacy_migration_link_not_enabled" => {
+            "This commons doesn't offer moving an invite to an account yet. Your invite keeps working."
+        }
+        "legacy_migration_verification_failed" => {
+            "The commons's answer didn't check out, so nothing was changed."
+        }
+        "legacy_migration_identity_changed" => {
+            "You signed out or changed accounts while this was running, so nothing was moved."
+        }
+        "legacy_migration_commons_changed" => {
+            "This commons's settings changed since you joined, so nothing was moved. Try again later."
+        }
+        "legacy_migration_already_migrated" => "You've already moved to your NEAR AI account.",
+        _ => "Nothing was changed. Your invite keeps working; try again later.",
+    }
+}
+
+/// The offer's words, in one object, for a shell to render.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct LegacyMigrationOfferCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub action: &'static str,
+    pub working: &'static str,
+    pub invite_prompt: &'static str,
+}
+
+#[must_use]
+pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
+    LegacyMigrationOfferCopy {
+        title: LEGACY_MIGRATION_OFFER_TITLE,
+        body: LEGACY_MIGRATION_OFFER_BODY,
+        action: LEGACY_MIGRATION_OFFER_ACTION,
+        working: LEGACY_MIGRATION_WORKING,
+        invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,5 +1313,55 @@ mod tests {
         ] {
             assert_eq!(witness_capacity_notice_for_wire(&value), None, "{value}");
         }
+    }
+
+    /// Every refusal the daemon can send has its own sentence, except the
+    /// two generic ones, and each says what happened to the invite.
+    #[test]
+    fn every_migration_refusal_is_worded() {
+        let generic = legacy_migration_refusal_line("no-such-label");
+        for label in crate::daemon::legacy_migration::LABELS {
+            let line = legacy_migration_refusal_line(label);
+            if matches!(
+                *label,
+                "legacy_migration_unavailable"
+                    | "legacy_migration_not_enrolled"
+                    | "legacy_migration_not_applicable"
+                    | "legacy_migration_device_key_missing"
+                    | "legacy_migration_pending"
+                    | "legacy_migration_account_unavailable"
+                    | "legacy_migration_link_refused"
+            ) {
+                continue;
+            }
+            assert_ne!(line, generic, "{label} has no sentence of its own");
+        }
+        assert!(
+            legacy_migration_refusal_line("legacy_migration_tenant_pooled")
+                .contains("keeps working"),
+            "a pooled invite is told it keeps working"
+        );
+    }
+
+    #[test]
+    fn the_migration_notice_says_whether_armed_folders_were_kept() {
+        let kept = legacy_migration_notice_for_wire(
+            &serde_json::json!({"folders_kept": 2, "automatic_grant_kept": false}),
+        )
+        .unwrap();
+        assert_eq!(kept.title, LEGACY_MIGRATION_NOTICE_TITLE);
+        assert!(kept.title.contains("NEAR AI account"));
+        assert_eq!(kept.folders, LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        let grant_only = legacy_migration_notice_for_wire(
+            &serde_json::json!({"folders_kept": 0, "automatic_grant_kept": true}),
+        )
+        .unwrap();
+        assert_eq!(grant_only.folders, LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        let none = legacy_migration_notice_for_wire(
+            &serde_json::json!({"folders_kept": 0, "automatic_grant_kept": false}),
+        )
+        .unwrap();
+        assert_eq!(none.folders, LEGACY_MIGRATION_NOTICE_NOTHING_ARMED);
+        assert!(legacy_migration_notice_for_wire(&serde_json::Value::Null).is_none());
     }
 }

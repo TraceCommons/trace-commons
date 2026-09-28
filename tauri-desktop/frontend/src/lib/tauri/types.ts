@@ -43,6 +43,10 @@ export const coreStatusSchema = z.object({
     // `parseWitnessCapacity`, which refuses a malformed object rather than
     // letting it fail the whole status payload.
     witness_capacity: z.unknown().optional(),
+    // Whether the move to a NEAR AI account is offered, and its notice. Read
+    // by `parseLegacyMigrationStatus`, which refuses a malformed object
+    // rather than letting it fail the whole status payload.
+    legacy_invite_migration: z.unknown().optional(),
   }),
 });
 

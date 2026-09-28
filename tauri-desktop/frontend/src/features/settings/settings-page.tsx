@@ -6,8 +6,9 @@ import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
 import { BehaviorSettingsPanel } from "./components/behavior-settings-panel";
 import { ConnectionPanel } from "./components/connection-panel";
 import { ConsentSettingsPanel } from "./components/consent-settings-panel";
-import { PrivacyControlsPanel } from "./components/privacy-controls-panel";
+import { LegacyMigrationPanel } from "./components/legacy-migration-panel";
 import { PlatformPanel } from "./components/platform-panel";
+import { PrivacyControlsPanel } from "./components/privacy-controls-panel";
 import { ProjectsPanel } from "./components/projects-panel";
 import { RoutingPanel } from "./components/routing-panel";
 import { SettingRow } from "./components/setting-row";
@@ -57,6 +58,9 @@ export function SettingsPage() {
         phase="PHASE 4"
       />
       <ConnectionPanel status={core.data} settings={settings.data} />
+      <LegacyMigrationPanel
+        status={core.data?.daemon.legacy_invite_migration}
+      />
       <PlatformPanel />
       {settings.state === "loading" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">

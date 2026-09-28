@@ -48,6 +48,23 @@ pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
 /// installation wrote into the config. Belongs to this enrollment, so it is
 /// swept by `wipe()` with the config it describes.
 pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
+/// The reference to the second device key a legacy invite migration stages
+/// for the NEAR AI identity it is moving to (`daemon::legacy_migration`).
+/// Swept by `wipe()`: a logout mid-migration ends the migration.
+pub const STAGED_DEVICE_KEY_FILE: &str = "device.staged.pk8";
+/// The in-progress record of a legacy invite identity switch: what to put
+/// back if it does not finish. Holds credential references and the old
+/// config, never a secret. Swept by `wipe()`.
+pub const IDENTITY_SWITCH_JOURNAL_FILE: &str = "identity-switch.json";
+/// The countersigned legacy invite link record and the migration notice
+/// (`daemon::legacy_migration`). Belongs to this enrollment; swept by
+/// `wipe()`.
+pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
+/// The subject hash of the invite this device was enrolled with, saved at
+/// invite enrollment so a later move to a NEAR AI account can name it
+/// without asking the issuer or the contributor. A hash, never the code.
+/// Swept by `wipe()`.
+pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -772,9 +789,7 @@ impl ConfigStore {
     /// temp file and renaming it into place in `write_atomic_0600`.
     pub fn wipe(&self) -> Result<()> {
         use crate::daemon::commons_credentials::{self, Kind};
-        commons_credentials::clear_with(self, &[Kind::Device, Kind::Account], || {
-            self.wipe_files()
-        })?;
+        commons_credentials::clear_with(self, &Kind::ALL, || self.wipe_files())?;
         // The local state is gone even if the native service is locked. Keep
         // its cleanup journal for retry rather than restoring either secret.
         let _ = commons_credentials::cleanup(self);
@@ -807,6 +822,10 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -827,6 +846,10 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            STAGED_DEVICE_KEY_FILE,
+            IDENTITY_SWITCH_JOURNAL_FILE,
+            LEGACY_INVITE_LINK_FILE,
+            INVITE_SUBJECT_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))

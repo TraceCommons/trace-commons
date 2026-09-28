@@ -498,6 +498,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
+| `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
+| `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
@@ -545,6 +547,10 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity` is
 additive; see its section below.
+
+`legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
+{"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
+invite identity" below.
 
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
@@ -3846,3 +3852,40 @@ Single-submission `withdraw` also returns an optional `token_deletion_note` from
 shared Rust copy. It distinguishes pending deletion, a retention hold, completed
 server-managed deletion and an unknown result. This does not claim deletion from
 backups or previously distributed copies. Older servers omit the field.
+
+## Moving a legacy invite identity
+
+A daemon enrolled with a legacy `tenant-…` invite can move to the
+contributor's NEAR AI account, only when the contributor asks
+(`legacy_invite_migrate`). `status.legacy_invite_migration.offered` is true
+while the config is a legacy invite identity enrolled without an instance
+and no move has happened. Nothing moves otherwise: coexistence is the
+default, and a pooled (shared event) invite is refused by the server with
+`legacy_migration_tenant_pooled` and keeps working.
+
+The daemon, in order: stages a second device key; provisions it into the
+NEAR AI account with the retained NEAR AI login; requires an affirmative,
+`ready` `/v1/account/contribution-status` for that account; asks ingest for a
+challenge, signs the #1066 statement with the legacy device key, and
+verifies the countersigned record against its own legacy key and the account
+it signed into; then, under the watcher's pass lock, writes the new config,
+promotes the staged key and stores the new session together, re-records
+every armed folder's grant with the new identity term and nothing else, and
+retires the legacy key last. A failure at any step leaves the legacy
+identity as it was; a daemon that dies mid-switch is rolled back, or
+finished once committed, at its next start. There is no IPC method for the
+re-baseline itself.
+
+The invite is named by its subject hash: from `invite` when given, else the
+hash saved at invite enrollment, else the issuer
+(`POST /v1/device/invite-subject`, signed by the legacy key). When none can
+say, the answer is `legacy_migration_invite_needed` and a shell asks for the
+invite link.
+
+Queued sessions already approved return to pending after the move, because
+their approval was bound to the old identity; armed folders re-approve them
+on the next pass. The move is audited label-only (`auto-upload-rebaselined`
+per folder, `legacy-invite-migrated`), and
+`status.legacy_invite_migration.notice` stays until
+`acknowledge_legacy_invite_migration`. The words are
+`consent_copy::legacy_migration_*`.

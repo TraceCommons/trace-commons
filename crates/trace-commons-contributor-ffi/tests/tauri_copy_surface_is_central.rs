@@ -219,6 +219,16 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
             "acknowledge_grant_voids",
             "consent::acknowledge_grant_voids",
         ),
+        ("legacy_migration_copy", "consent::legacy_migration_copy"),
+        (
+            "legacy_migration_notice",
+            "consent::legacy_migration_notice",
+        ),
+        ("migrate_legacy_invite", "consent::migrate_legacy_invite"),
+        (
+            "acknowledge_legacy_invite_migration",
+            "consent::acknowledge_legacy_invite_migration",
+        ),
     ] {
         assert!(
             build.contains(&format!("\"{name}\"")),
