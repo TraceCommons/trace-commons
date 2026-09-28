@@ -7,6 +7,8 @@ mod admission;
 mod file_witness;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
 mod inference_connection_routes;
+#[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
+mod legacy_invite_link_routes;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -1791,6 +1793,12 @@ struct AppState {
     /// `attestation_signing_key_unconfigured`) rather than ever return an
     /// unsigned document. See `trace_score_attestation`.
     attestation_signing: Option<Arc<AttestationSigningState>>,
+    /// Legacy invite -> NEAR account linking (V81): the countersigning key,
+    /// present only when `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED` is on.
+    /// `None` keeps both link routes closed (503
+    /// `legacy_invite_link_not_enabled`).
+    legacy_invite_link:
+        Option<Arc<trace_commons_server::legacy_invite_link::LegacyInviteLinkSigner>>,
     /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
     /// instance from the novelty index — sharing the novelty index would
     /// pollute its nearest-neighbor results and silently change novelty
@@ -4142,6 +4150,10 @@ impl AppState {
             Some(config) => Some(Arc::new(AttestationSigningState::build(&config)?)),
             None => None,
         };
+        // Off unless the operator switches it on; on without the attestation
+        // key fails startup rather than serve unsigned link records.
+        let legacy_invite_link =
+            trace_commons_server::legacy_invite_link::signer_from_env()?.map(Arc::new);
 
         // One client, two seams, and deliberately two hosts inside it: the
         // ECDSA drill proves the completions endpoint we score against is an
@@ -4309,6 +4321,7 @@ impl AppState {
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             attestation_signing,
+            legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index: build_dedup_vector_index_from_env(),
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -7546,6 +7559,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/account/invites/redeem",
             post(account_invite_redeem_handler),
         )
+        .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
         .route("/v1/account/traces", get(account_traces_list_handler))
         .route(
