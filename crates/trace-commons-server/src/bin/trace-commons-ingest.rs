@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/account_routes.rs"]
+mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/admission.rs"]
@@ -40,7 +42,7 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{
     Extension, Json, Router, extract::Path as AxumPath, extract::Request, extract::State,
     middleware::Next,
@@ -7558,111 +7560,137 @@ fn community_routes() -> Router<Arc<AppState>> {
 /// response. `from_fn_with_state` binds the shared `AppState` the middleware needs
 /// to resolve + rotate.
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let reward_routes = rewards::account_routes(state.clone());
-    Router::new()
-        .route(
+    authenticated_account_surface(state).into_router()
+}
+
+/// Every authenticated account route, with the record of what was registered.
+///
+/// Routes join ONLY through [`account_routes::AccountRoutes`], which records
+/// each `(method, path)`. Each one must also be classified in
+/// [`account_routes::UNBOUND_ACCOUNT_ROUTE_POLICY`] -- the unbound gate in
+/// `account_auth_middleware` refuses any route that is not -- and the test
+/// `every_authenticated_account_route_is_classified_for_unbound_accounts`
+/// fails until it is.
+fn authenticated_account_surface(
+    state: Arc<AppState>,
+) -> account_routes::AuthenticatedAccountRoutes {
+    let (general, rewards) = account_route_groups();
+    general
+        .authenticated(state.clone())
+        .merge(rewards::protected(rewards.authenticated(state)))
+}
+
+/// The account routes before authentication, as two groups because the reward
+/// routes take an extra response layer outside the auth middleware. The
+/// production surface above and the gate tests both build from this, so they
+/// cannot disagree about which routes exist.
+fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
+    let general = account_routes::AccountRoutes::new()
+        .get(
             "/v1/account/contribution-status",
-            get(admission::account_status_handler),
+            admission::account_status_handler,
         )
-        .route(
-            "/v1/account/invites/redeem",
-            post(account_invite_redeem_handler),
-        )
+        // Z2 S1: the caller's binding state, for the native app's state machine.
+        .get("/v1/account/binding", account_binding_handler)
+        .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
-        .route("/v1/account/traces", get(account_traces_list_handler))
-        .route(
+        .get("/v1/account/traces", account_traces_list_handler)
+        .post(
             "/v1/account/source-sessions/status",
-            post(account_source_session_status_handler),
+            account_source_session_status_handler,
         )
-        .route(
-            "/v1/account/credit-summary",
-            get(account_credit_summary_handler),
-        )
-        .route(
+        .get("/v1/account/credit-summary", account_credit_summary_handler)
+        .get(
             "/v1/account/traces/{submission_id}",
-            get(account_trace_detail_handler),
+            account_trace_detail_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/content",
-            get(account_trace_content_handler),
+            account_trace_content_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/session-detail",
-            get(account_public_run_session_detail_handler),
+            account_public_run_session_detail_handler,
         )
-        .route(
+        .post(
             "/v1/account/traces/{submission_id}/withdraw",
-            post(account_trace_withdraw_handler),
+            account_trace_withdraw_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/publication",
-            get(account_public_run_handler)
-                .put(account_public_run_publish_handler)
-                .delete(account_public_run_unpublish_handler),
+            account_public_run_handler,
         )
-        .route("/v1/account/logout", post(account_logout_handler))
-        .route(
+        .put(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_publish_handler,
+        )
+        .delete(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_unpublish_handler,
+        )
+        .post("/v1/account/logout", account_logout_handler)
+        .post(
             "/v1/account/sessions/revoke-all",
-            post(account_revoke_all_handler),
+            account_revoke_all_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/start",
-            post(account_passkey_register_start_handler),
+            account_passkey_register_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/finish",
-            post(account_passkey_register_finish_handler),
+            account_passkey_register_finish_handler,
         )
         // Passkey credential management (Slice 2 Task 7). list / rename / remove the
         // caller's OWN credentials. `{credential_id}` is the public base64url id.
-        .route("/v1/account/passkeys", get(account_passkeys_list_handler))
-        .route(
+        .get("/v1/account/passkeys", account_passkeys_list_handler)
+        .patch(
             "/v1/account/passkeys/{credential_id}",
-            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+            account_passkey_rename_handler,
+        )
+        .delete(
+            "/v1/account/passkeys/{credential_id}",
+            account_passkey_remove_handler,
         )
         // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
         // key to the caller's account behind the same account-auth middleware.
-        .route(
+        .post(
             "/v1/account/near/enroll/start",
-            post(account_near_enroll_start_handler),
+            account_near_enroll_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/near/enroll/finish",
-            post(account_near_enroll_finish_handler),
+            account_near_enroll_finish_handler,
         )
         // NEAR identity management (Slice 3a Task 9). list / rename / remove the
         // caller's OWN NEAR identities. `{public_key}` is the public NEAR access
         // key. Removal shares the Task 8 strong-authenticator gate; list/rename
         // are not gated.
-        .route(
+        .get(
             "/v1/account/near-identities",
-            get(account_near_identities_list_handler),
+            account_near_identities_list_handler,
         )
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}",
-            patch(account_near_identity_rename_handler)
-                .delete(account_near_identity_remove_handler),
+            account_near_identity_rename_handler,
+        )
+        .delete(
+            "/v1/account/near-identities/{public_key}",
+            account_near_identity_remove_handler,
         )
         // Payout designation (Slice 3b Task 6). Designate / clear where credit
         // settles. Money-sensitive, so it shares the strong-authenticator gate.
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}/payout",
-            patch(account_near_identity_payout_handler),
+            account_near_identity_payout_handler,
         )
         // Device-principal merge (Slice 3b Task 8). `start` stages a proposal by
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
-        .route("/v1/account/merge/start", post(account_merge_start_handler))
-        .route(
-            "/v1/account/merge/confirm",
-            post(account_merge_confirm_handler),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state,
-            account_auth_middleware,
-        ))
-        .merge(reward_routes)
+        .post("/v1/account/merge/start", account_merge_start_handler)
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler);
+    (general, rewards::account_routes())
 }
 
 fn community_cors_layer() -> CorsLayer {
@@ -15858,7 +15886,7 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_secret_value) =
+    let (ctx, rotated_secret_value, binding) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
@@ -15872,6 +15900,23 @@ async fn account_auth_middleware(
             }
         };
 
+    // The unbound gate (Z2 S1). An account whose binding state is gated
+    // reaches only the routes `UNBOUND_ACCOUNT_ROUTE_POLICY` marks `Allowed`,
+    // looked up by method and matched path template; anything else, including
+    // a route missing from the policy, is refused here, before any handler.
+    // Legacy (no binding row) and bound accounts skip this entirely. The
+    // binding state was read in the same query that validated the session, and
+    // a failed read already refused above.
+    //
+    // A refusal still flows through the rotation attach below: the session may
+    // have rotated in this very request, and withholding the new secret would
+    // sign the client out once the grace window lapses.
+    let gate_refused = binding.is_gated()
+        && account_routes::unbound_access(
+            request.method(),
+            request.extensions().get::<axum::extract::MatchedPath>(),
+        ) != account_routes::UnboundAccess::Allowed;
+
     // A native token rotates exactly like a cookie session, but a native client
     // has no cookie jar. Hand the new token back in a response header — the
     // bearer analogue of `Set-Cookie`, on the same channel, to the same
@@ -15879,8 +15924,13 @@ async fn account_auth_middleware(
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
     if native_rotation {
-        request.extensions_mut().insert(ctx);
-        let mut response = next.run(request).await;
+        let mut response = if gate_refused {
+            unbound_gate_refusal(state.as_ref(), &ctx).await
+        } else {
+            request.extensions_mut().insert(ctx);
+            request.extensions_mut().insert(binding);
+            next.run(request).await
+        };
         if let Some(token) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
@@ -15895,8 +15945,13 @@ async fn account_auth_middleware(
         return response;
     }
 
-    request.extensions_mut().insert(ctx);
-    let mut response = next.run(request).await;
+    let mut response = if gate_refused {
+        unbound_gate_refusal(state.as_ref(), &ctx).await
+    } else {
+        request.extensions_mut().insert(ctx);
+        request.extensions_mut().insert(binding);
+        next.run(request).await
+    };
 
     if let Some(cookie_value) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
@@ -15938,8 +15993,63 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
     // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
-    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
+    let (ctx, _rotated, _binding) = resolve_account_ctx_with_rotation(state, headers).await?;
     Ok(ctx)
+}
+
+/// The unbound gate's refusal: `403 account_unbound`, one label-only audit row
+/// (`account_unbound_gate_denied`, empty metadata), and a label-only log line.
+/// The refusal does not depend on the audit write: if that fails, the request
+/// is refused all the same.
+async fn unbound_gate_refusal(state: &AppState, ctx: &AccountCtx) -> axum::response::Response {
+    if let Some(db) = state.db_mirror.as_ref() {
+        if db
+            .append_account_audit(
+                &ctx.tenant_id,
+                "account_unbound_gate_denied",
+                &ctx.actor_ref,
+                "denied",
+                serde_json::json!({}),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                label = "account_unbound_gate_audit_failed",
+                "unbound gate refusal could not be audited"
+            );
+        }
+    }
+    tracing::info!(
+        label = account_routes::ACCOUNT_UNBOUND,
+        "unbound gate refusal"
+    );
+    let mut response =
+        api_error(StatusCode::FORBIDDEN, account_routes::ACCOUNT_UNBOUND).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `GET /v1/account/binding` (Z2 S1): the caller's binding state, as a label.
+///
+/// `unbound` and `bound` for a passkey-origin account, `closed` for one closed
+/// by the existing-account branch of bind, and `legacy` for an account with no
+/// binding row. The state comes from `account_auth_middleware`, which read it
+/// in the session validation query; a request that did not pass through the
+/// middleware has no such extension and is refused by the extractor.
+async fn account_binding_handler(
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
+) -> axum::response::Response {
+    let mut response =
+        Json(serde_json::json!({ "binding_state": binding.label() })).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
@@ -15949,7 +16059,11 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
 async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -16009,7 +16123,11 @@ async fn resolve_account_ctx_with_rotation(
 async fn resolve_account_ctx_native(
     state: &AppState,
     bearer: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16058,6 +16176,7 @@ async fn resolve_account_ctx_native(
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
         },
         rotated,
+        session.binding,
     ))
 }
 
@@ -16069,7 +16188,11 @@ async fn resolve_account_ctx_native(
 async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16119,6 +16242,7 @@ async fn resolve_account_ctx_cookie(
             client_kind: session.client_kind,
         },
         rotated_cookie_value,
+        session.binding,
     ))
 }
 

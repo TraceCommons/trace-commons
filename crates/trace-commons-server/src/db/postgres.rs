@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 
+#[path = "postgres_account_binding.rs"]
+mod account_binding;
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
 #[path = "postgres_account_trust.rs"]
@@ -219,6 +221,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_legacy_invite_links",
     "trace_legacy_invite_link_conflicts",
     "trace_legacy_invite_link_devices",
+    "trace_account_bindings",
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
@@ -1495,6 +1498,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         91,
         "legacy_invite_link_devices",
         include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+    ),
+    // V92-V96 are claimed by pull requests in flight; V97 depends only on V30
+    // (trace_accounts) and V90 (trace_ingest_runtime).
+    (
+        97,
+        "account_bindings",
+        include_str!("../../../../migrations/V97__account_bindings.sql"),
     ),
 ];
 
@@ -3744,11 +3754,17 @@ impl Database for PgBackend {
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
                         (s.token_hash = $1) AS matched_current,
-                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
+                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
+                        b.state AS binding_state
                    FROM trace_sessions s
                    JOIN trace_accounts a
                      ON a.tenant_id = s.tenant_id
                     AND a.account_id = s.account_id
+                   -- Z2 S1: the unbound gate's input, folded into this query.
+                   -- LEFT JOIN because no row means a legacy account.
+                   LEFT JOIN trace_account_bindings b
+                     ON b.tenant_id = s.tenant_id
+                    AND b.account_id = s.account_id
                   WHERE s.tenant_id = trace_current_tenant_id()
                     AND a.closed_at IS NULL
                     AND (s.token_hash = $1
@@ -3789,6 +3805,12 @@ impl Database for PgBackend {
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
+        // A state this build does not know refuses the session (the error
+        // drops the transaction before any write) rather than guessing.
+        let binding_state: Option<String> = row.get("binding_state");
+        let binding =
+            crate::account_binding::AccountBindingState::from_stored(binding_state.as_deref())
+                .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
 
         // Rotate only on a CURRENT-token match that has aged past the interval. A
         // prev-token (within-grace) request slides the idle window forward but must
@@ -3853,6 +3875,7 @@ impl Database for PgBackend {
             auth_credential_id,
             client_kind,
             rotated_secret,
+            binding,
         }))
     }
 
@@ -7474,6 +7497,7 @@ mod tests {
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+            include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7504,6 +7528,7 @@ mod tests {
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+            include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

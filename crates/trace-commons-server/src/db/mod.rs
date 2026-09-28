@@ -1892,6 +1892,12 @@ pub struct ValidatedSession {
     /// matched the previous token within grace (multi-tab) does NOT re-rotate and
     /// leaves this `None`.
     pub rotated_secret: Option<String>,
+    /// The account's binding state (Z2 S1), read in the SAME query that
+    /// validated the session, so the unbound gate costs no second round trip
+    /// and cannot see a different account than the session did. No binding row
+    /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
+    /// which is never gated.
+    pub binding: crate::account_binding::AccountBindingState,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only

@@ -558,6 +558,17 @@ GRANT trace_ingest_runtime TO <ingest runtime login>;
 
 A deployment that migrates and serves as one role needs nothing.
 
+V97 (`trace_account_bindings`, native passkey identity) grants
+`trace_ingest_runtime` `SELECT` on the new table and nothing else. Session
+validation joins it on every authenticated `/v1/account/*` request, so an
+ingest login that holds its grants some other way than through
+`trace_ingest_runtime` fails those requests with a 500 until it can read the
+table. Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
+```
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

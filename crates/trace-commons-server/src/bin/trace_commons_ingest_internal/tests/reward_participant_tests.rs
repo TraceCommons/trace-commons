@@ -724,6 +724,7 @@ async fn provision_test_logins(admin: &PgBackend) {
              GRANT trace_login_resolver TO trace_reward_http_resolver;\n\
              GRANT SELECT, INSERT, UPDATE ON trace_tenants, trace_accounts, trace_account_principals,\n\
                  trace_login_links, trace_sessions, trace_account_audit TO trace_reward_http_participant;\n\
+             GRANT SELECT ON trace_account_bindings TO trace_reward_http_participant;\n\
              GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trace_reward_http_participant;",
         )
         .await
