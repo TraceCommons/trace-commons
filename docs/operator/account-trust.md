@@ -148,6 +148,32 @@ nothing new. The login running it needs the NOLOGIN role
 functions and no table privilege; do not grant it to
 `trace_account_admission_runtime`. See
 `docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
+
+Earned-trust evaluation runs in shadow only. Admission never reads it, the
+production policy keeps `"growth_rule": "none"`, and V86's write function
+refuses every mode but `shadow`. A candidate growth policy is supplied
+separately: `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON` (a base policy
+with `"growth_rule": "tiered-v1"` and a `growth` object) and
+`TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION`. Both absent is off. One
+without the other, or a malformed policy, refuses startup. With it set, each
+of these takes the admin bearer:
+
+- `POST /v1/admin/evaluate-account-trust?limit=N&as_of=RFC3339`: stores a
+  `shadow` evaluation for each account with facts, and appends a hash-only
+  `account_trust_tier_changed` row (outcome `shadow`) to `trace_account_audit`
+  when the tier moves. Run it on a schedule: decay takes effect only when it
+  runs.
+- `GET /v1/admin/account-trust/explain?account_ref=sha256:<hex>`: returns the
+  stored and recomputed evaluation side by side, with `reproduced`. The ref is
+  `sha256("trace-account-trust-ref.v1\n" || tenant_id || "\n" || account_id)`.
+- `POST /v1/admin/account-trust-drill` (`{"record_evidence": true}`): reproduces
+  every stored shadow evaluation and records `account_trust_explain`
+  rollout-smoke evidence. It passes only if at least one evaluation was
+  checked and every one reproduced. A later dedup rederive or a change to
+  credit quality legitimately breaks reproduction until the next evaluation
+  run. The check is not in the required rollout-smoke set while growth is
+  shadow-only.
+
 The runtime can insert trust rows and can update only authority, version, and
 timestamp, including demotion after invite revocation. An inserted or updated
 authority field alone cannot grant invited admission: reserve and

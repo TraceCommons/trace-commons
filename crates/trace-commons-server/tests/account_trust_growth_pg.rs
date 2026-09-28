@@ -859,3 +859,463 @@ async fn recorder_run_is_idempotent_bounded_and_reports_only_counts() {
         assert!(!rendered.contains(&identifier), "summary is label-only");
     }
 }
+
+// ---------------------------------------------------------------------------
+// V86: evaluations, the cross-tenant first-in-cluster boolean, explain, drill.
+// ---------------------------------------------------------------------------
+
+const DEDUP_V2: &str = "events.v2+simhash.v2";
+
+/// A gate decision stamped with a dedup cluster and signal version.
+async fn seed_clustered_decision(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    submission: Uuid,
+    cluster: Option<Uuid>,
+    decided_at: DateTime<Utc>,
+) -> Uuid {
+    let decision = seed_gate_decision(admin, tenant, submission, true, decided_at).await;
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions SET dedup_cluster_id=$3, dedup_signal_version=$4,
+                credit_quality_micros=900000, credit_quality_calibration_version=3
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &decision, &cluster, &DEDUP_V2],
+        )
+        .await
+        .unwrap();
+    decision
+}
+
+/// An accepted submission with its credit event and one clustered decision.
+async fn seed_qualified(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    owner: &str,
+    cluster: Option<Uuid>,
+    at_time: DateTime<Utc>,
+) -> Uuid {
+    let (submission, trace) = seed_submission(admin, tenant, owner, "accepted", at_time).await;
+    seed_credit(
+        admin, tenant, submission, trace, "accepted", owner, "system", at_time,
+    )
+    .await;
+    seed_clustered_decision(admin, tenant, submission, cluster, at_time).await;
+    submission
+}
+
+fn shadow_policy() -> trace_commons_server::account_trust_rule::GrowthPolicy {
+    let json = serde_json::json!({
+        "version": "growth-shadow-test-v1",
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "fixed", "seconds": 604800},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 3650 * 86400,
+            "weekly_cap": 10,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 300,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": [DEDUP_V2],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 2, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+            ]
+        }
+    });
+    trace_commons_server::account_trust_rule::parse_shadow_growth_policy(
+        &json.to_string(),
+        &["growth-shadow-test-v1"],
+    )
+    .unwrap()
+}
+
+async fn find(worker: &PgBackend, tenant: &str, account: Uuid) -> TrustAccount {
+    enumerate_all(worker)
+        .await
+        .into_iter()
+        .find(|a| a.tenant_id() == tenant && a.account_id() == account)
+        .expect("enumerated")
+}
+
+#[tokio::test]
+async fn first_in_cluster_is_answered_across_tenants_as_a_boolean_only() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_cluster_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    let shared = Uuid::new_v4();
+    let tenant_a = anchored_tenant();
+    let owner_a = principal();
+    let account_a = seed_account(admin, &tenant_a, &[&owner_a]).await;
+    let tenant_b = anchored_tenant();
+    let owner_b = principal();
+    let account_b = seed_account(admin, &tenant_b, &[&owner_b]).await;
+    // B's copy reached the gate first; A's copy of the same trace is second.
+    let first_b = seed_qualified(admin, &tenant_b, &owner_b, Some(shared), at(0)).await;
+    let copy_a = seed_qualified(admin, &tenant_a, &owner_a, Some(shared), at(10)).await;
+    let unique_a = seed_qualified(admin, &tenant_a, &owner_a, Some(Uuid::new_v4()), at(5)).await;
+    let unassigned_a = seed_qualified(admin, &tenant_a, &owner_a, None, at(6)).await;
+
+    let db: &dyn Database = worker.as_ref();
+    trace_commons_server::account_trust_growth::record_account_trust_facts(db, None, false)
+        .await
+        .unwrap();
+    let trust_a = find(&worker, &tenant_a, account_a).await;
+    let trust_b = find(&worker, &tenant_b, account_b).await;
+    let first = |facts: &[trace_commons_server::account_trust_rule::EvaluationFact],
+                 submission: Uuid| {
+        facts
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.submission_id == submission)
+            .and_then(|f| f.first_in_cluster)
+    };
+    let inputs_a = worker
+        .account_trust_evaluation_inputs(&trust_a)
+        .await
+        .unwrap();
+    assert_eq!(
+        first(&inputs_a, copy_a),
+        Some(false),
+        "a later copy is not first"
+    );
+    assert_eq!(first(&inputs_a, unique_a), Some(true));
+    assert_eq!(
+        first(&inputs_a, unassigned_a),
+        Some(false),
+        "no cluster yet earns nothing"
+    );
+    assert!(
+        inputs_a
+            .iter()
+            .filter(|f| f.source_kind != "gate_evaluation")
+            .all(|f| f.first_in_cluster.is_none())
+    );
+    let inputs_b = worker
+        .account_trust_evaluation_inputs(&trust_b)
+        .await
+        .unwrap();
+    assert_eq!(first(&inputs_b, first_b), Some(true));
+    // Nothing of B's reaches A's inputs.
+    assert!(inputs_a.iter().all(|f| f.submission_id != first_b));
+
+    // The boolean is callable only by the facts guard, never by the worker.
+    let raw = worker
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    assert!(
+        raw.query_one(
+            "SELECT trace_account_trust_first_in_cluster($1,$2)",
+            &[&tenant_a, &copy_a]
+        )
+        .await
+        .is_err()
+    );
+    // An account named under another tenant's context reads nothing.
+    let mut client = worker
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_b],
+    )
+    .await
+    .unwrap();
+    let crossed = tx
+        .query(
+            "SELECT * FROM trace_account_trust_evaluation_inputs($1,$2)",
+            &[&tenant_a, &account_a],
+        )
+        .await
+        .unwrap();
+    assert!(crossed.is_empty());
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn shadow_evaluations_are_stored_audited_and_reproduced() {
+    use trace_commons_server::account_trust_growth::{
+        account_trust_ref, account_trust_reproduction_drill, evaluate_account_trust,
+        explain_account_trust, find_account_by_ref, record_account_trust_facts,
+    };
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_evaluator_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    let runtime = login_with_role(
+        &fx,
+        "tc_account_trust_eval_runtime_login",
+        "trace_account_admission_runtime",
+    )
+    .await;
+    let policy = shadow_policy();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let idle_tenant = anchored_tenant();
+    let idle = seed_account(admin, &idle_tenant, &[&principal()]).await;
+    let first = seed_qualified(admin, &tenant, &owner, Some(Uuid::new_v4()), at(0)).await;
+    seed_qualified(admin, &tenant, &owner, Some(Uuid::new_v4()), at(100)).await;
+    let db: &dyn Database = worker.as_ref();
+    record_account_trust_facts(db, None, false).await.unwrap();
+
+    let as_of = at(1_000);
+    let summary = evaluate_account_trust(db, &policy, as_of, None)
+        .await
+        .unwrap();
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.mode, "shadow");
+    assert!(summary.tier_distribution.get(&1).copied().unwrap_or(0) >= 1);
+    let rows = admin
+        .query(
+            "SELECT tier, previous_tier, mode, effective_allowance, units, facts_digest
+               FROM trace_account_trust_evaluations WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i32>(0), 1);
+    assert_eq!(rows[0].get::<_, Option<i32>>(1), None);
+    assert_eq!(rows[0].get::<_, String>(2), "shadow");
+    assert_eq!(rows[0].get::<_, i64>(3), 200);
+    assert_eq!(rows[0].get::<_, i32>(4), 2);
+    let idle_rows: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_account_trust_evaluations WHERE tenant_id=$1 AND account_id=$2",
+            &[&idle_tenant, &idle],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(idle_rows, 0, "an account with no facts gets no row");
+
+    async fn audit(admin: &deadpool_postgres::Object, tenant: &str) -> Vec<tokio_postgres::Row> {
+        admin
+            .query(
+                "SELECT outcome, actor_ref, safe_metadata FROM trace_account_audit
+                  WHERE tenant_id=$1 AND action='account_trust_tier_changed'
+                  ORDER BY audit_sequence",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+    }
+    let changes = audit(admin, &tenant).await;
+    assert_eq!(changes.len(), 1, "0 -> 1 is a tier change");
+    assert_eq!(changes[0].get::<_, String>(0), "shadow");
+    assert_eq!(
+        changes[0].get::<_, String>(1),
+        format!("account-actor:{account}")
+    );
+    let metadata: serde_json::Value = changes[0].get(2);
+    assert_eq!(metadata["from_tier"], 0);
+    assert_eq!(metadata["to_tier"], 1);
+    assert_eq!(metadata["growth_policy_version"], "growth-shadow-test-v1");
+    assert!(!metadata.to_string().contains(&first.to_string()));
+    assert!(!metadata.to_string().contains(&owner));
+
+    // Re-running at the same as_of changes nothing and audits nothing.
+    evaluate_account_trust(db, &policy, as_of, None)
+        .await
+        .unwrap();
+    assert_eq!(audit(admin, &tenant).await.len(), 1);
+
+    // Explain, by hash-only ref.
+    let trust = find(&worker, &tenant, account).await;
+    let account_ref = account_trust_ref(&trust);
+    assert!(account_ref.starts_with("sha256:"));
+    assert!(!account_ref.contains(&account.to_string()));
+    let found = find_account_by_ref(db, &account_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found, trust);
+    let report = explain_account_trust(db, &policy, &trust).await.unwrap();
+    assert!(report.reproduced);
+    assert_eq!(report.stored.as_ref().unwrap().tier, 1);
+    let rendered = serde_json::to_string(&report).unwrap();
+    assert!(!rendered.contains(&first.to_string()));
+    assert!(!rendered.contains(&account.to_string()));
+    assert!(!rendered.contains(&tenant));
+    assert!(
+        account_trust_reproduction_drill(db, &policy, None)
+            .await
+            .unwrap()
+            .passed()
+    );
+
+    // A later dedup rederive that makes the first submission a copy of an
+    // earlier trace elsewhere changes the recomputation: not reproduced.
+    let other_tenant = anchored_tenant();
+    let other_owner = principal();
+    seed_account(admin, &other_tenant, &[&other_owner]).await;
+    let earlier_cluster = Uuid::new_v4();
+    seed_qualified(
+        admin,
+        &other_tenant,
+        &other_owner,
+        Some(earlier_cluster),
+        at(-50),
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions SET dedup_cluster_id=$3 WHERE tenant_id=$1 AND submission_id=$2",
+            &[&tenant, &first, &earlier_cluster],
+        )
+        .await
+        .unwrap();
+    let drifted = explain_account_trust(db, &policy, &trust).await.unwrap();
+    assert!(!drifted.reproduced);
+    assert_ne!(
+        drifted.stored.as_ref().unwrap().facts_digest,
+        drifted.recomputed.as_ref().unwrap().facts_digest
+    );
+    let drill = account_trust_reproduction_drill(db, &policy, None)
+        .await
+        .unwrap();
+    assert!(drill.not_reproduced >= 1);
+    assert!(!drill.passed());
+    // Re-evaluating records the drop (1 -> 0) and reproduces again.
+    evaluate_account_trust(db, &policy, at(1_001), None)
+        .await
+        .unwrap();
+    let changes = audit(admin, &tenant).await;
+    assert_eq!(changes.len(), 2);
+    assert!(
+        explain_account_trust(db, &policy, &trust)
+            .await
+            .unwrap()
+            .reproduced
+    );
+
+    // Shadow only, enforced in the database: the write function refuses
+    // 'applied', and no role but its guard can insert.
+    let mut client = worker
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let applied = tx
+        .query_one(
+            "SELECT trace_record_account_trust_evaluation($1,$2,$3,'growth-shadow-test-v1',
+                'applied',now(),5,500,9,0,9,9,0,0,0,FALSE,$4)",
+            &[
+                &tenant,
+                &Uuid::new_v4(),
+                &account,
+                &format!("sha256:{}", "0".repeat(64)),
+            ],
+        )
+        .await;
+    let error = applied.expect_err("an applied evaluation is refused");
+    assert_eq!(
+        error.as_db_error().map(|db| db.message()),
+        Some("account_trust_evaluation_shadow_only")
+    );
+    tx.rollback().await.unwrap();
+    let applied_rows: i64 = admin
+        .query_one(
+            "SELECT count(*) FROM trace_account_trust_evaluations WHERE mode='applied'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(applied_rows, 0);
+    for login in [&worker, &runtime] {
+        let mut client = login
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+        let visible: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_trust_evaluations WHERE account_id=$1",
+                &[&account],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            visible, 3,
+            "SELECT under the caller's tenant: one row per run"
+        );
+        assert!(
+            tx.execute(
+                "INSERT INTO trace_account_trust_evaluations(tenant_id,evaluation_id,account_id,
+                    growth_policy_version,mode,as_of,tier,effective_allowance,units,units_capped,
+                    active_weeks,age_weeks,netted_withdrawn,netted_revoked,netted_quarantined,
+                    penalty_active,facts_digest)
+                 VALUES($1,$2,$3,'v','shadow',now(),9,900,9,0,9,9,0,0,0,FALSE,$4)",
+                &[
+                    &tenant,
+                    &Uuid::new_v4(),
+                    &account,
+                    &format!("sha256:{}", "0".repeat(64)),
+                ],
+            )
+            .await
+            .is_err(),
+            "no direct write"
+        );
+        tx.rollback().await.unwrap();
+        let mut client = login
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&other_tenant],
+        )
+        .await
+        .unwrap();
+        let crossed: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_trust_evaluations WHERE account_id=$1",
+                &[&account],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(crossed, 0, "RLS isolates evaluations by tenant");
+        tx.rollback().await.unwrap();
+    }
+}

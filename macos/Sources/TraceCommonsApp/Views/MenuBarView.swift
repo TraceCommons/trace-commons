@@ -353,6 +353,10 @@ struct MenuBarContent: View {
             Text(witness.title)
             Text(witness.detail.replacingOccurrences(of: "\n", with: " "))
         }
+        if let held = model.gateHeldNotice {
+            Text(held.title)
+            Text(held.body)
+        }
     }
 
     @ViewBuilder
