@@ -1158,6 +1158,31 @@ jobs:
       # runs exactly when a save is about to happen.
       - uses: ./.github/actions/trim-cargo-cache
 
+  # The community site's own checks and the AASA render/worker/check-script tests
+  # (Z2 S4 of #1118). Not a required check. The Team ID below is a fake used only
+  # so the render step has something valid to render; nothing here deploys.
+  community-site:
+    name: community site (AASA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Site checks and AASA tests
+        working-directory: community
+        env:
+          TC_APPLE_TEAM_ID: ABCDE12345
+        run: |
+          npm run render:aasa
+          npm run check
+          npm test
+      - name: Render fails closed without a Team ID
+        working-directory: community
+        run: |
+          if env -u TC_APPLE_TEAM_ID node scripts/render-aasa.mjs; then
+            echo "render-aasa succeeded without TC_APPLE_TEAM_ID" >&2
+            exit 1
+          fi
+
   privacy-filter-shim-tests:
     name: privacy-filter shim tests
     runs-on: ubuntu-latest

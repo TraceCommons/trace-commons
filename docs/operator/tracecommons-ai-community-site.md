@@ -33,16 +33,19 @@ proxied to `https://ingest.tracecommons.ai/v1/community/*`.
    npm run check
    ```
 
-   Use build command `npm run check` and output directory `public`. Attach
-   custom domain `tracecommons.ai`.
+   Use build command `npm run render:aasa && npm run check` (with
+   `TC_APPLE_TEAM_ID` set in the Pages build environment) and output directory
+   `public`. Attach custom domain `tracecommons.ai`.
    The repo also carries `community/wrangler.toml` for direct uploads:
 
    ```sh
    cd community
-   npm run deploy:pages
+   TC_APPLE_TEAM_ID=<TEAMID> npm run deploy:pages
    ```
 
    This command requires Cloudflare credentials in the operator environment.
+   It renders the AASA file first (see below) and refuses to deploy if
+   `TC_APPLE_TEAM_ID` is unset or malformed.
 
 3. Edit `community/public/experience.json` for the current cohort prompt,
    milestone targets, and weekly rhythm. This is the participant-facing
@@ -160,3 +163,64 @@ submission so it can auto-accept.
 - Issuer onboarding response includes `profile_url` and `leaderboard_url`.
 - First accepted submission appears after snapshot recompute.
 - Withdraw profile flow removes the contributor after the next snapshot.
+- `scripts/check-aasa.sh https://tracecommons.ai` passes (see below).
+
+## Apple app-site-association (native passkeys)
+
+The macOS app creates and uses passkeys for the relying party
+`tracecommons.ai`. macOS only allows that after fetching
+`https://tracecommons.ai/.well-known/apple-app-site-association` (through
+Apple's CDN) and finding the app's ID in it. Design:
+`docs/superpowers/specs/2026-09-28-native-passkey-identity-design.md`
+(Z2 of #1118, slice S4).
+
+**How it is produced.** `community/scripts/render-aasa.mjs` writes
+`community/public/.well-known/apple-app-site-association` (git-ignored) from:
+
+| Variable | Meaning |
+| --- | --- |
+| `TC_APPLE_TEAM_ID` | Required. The Team ID of the Developer ID certificate that signs the app: exactly 10 uppercase alphanumerics. Not a secret. |
+| `TC_MACOS_BUNDLE_ID` | Optional, default `ai.tracecommons.shell` (`macos/scripts/info-plist.sh`). |
+
+The body is exactly `{"webcredentials":{"apps":["<TEAMID>.ai.tracecommons.shell"]}}`.
+There is no `applinks` section. With `TC_APPLE_TEAM_ID` unset or malformed the
+render step deletes any stale file, writes nothing and exits non-zero, and
+`npm run deploy:pages` stops there. The site never ships a placeholder.
+
+**How it is served.** `community/public/_worker.js` answers `/.well-known/*`
+itself, before its SPA fallback. Without that, a missing AASA (no dot in the
+last path segment) would be returned as `index.html` with a `200`. The worker
+returns the file with `Content-Type: application/json` and
+`Cache-Control: public, max-age=3600`, and returns a real `404` for anything
+under `/.well-known/` that is not a plain `200` asset, redirects included.
+`_headers` carries the same two headers as a second line of defence.
+
+**Post-deploy smoke.** Run this after every deploy, and after any change to the
+worker or `_headers`:
+
+```sh
+scripts/check-aasa.sh https://tracecommons.ai
+# or pin the exact app id:
+scripts/check-aasa.sh https://tracecommons.ai "<TEAMID>.ai.tracecommons.shell"
+```
+
+It requires `200`, no `Location` header (redirects are never followed),
+`Content-Type: application/json`, valid JSON of exactly the shape above, and an
+app id matching `^[A-Z0-9]{10}\.ai\.tracecommons\.shell$` (or equal to the
+pinned value). It needs `curl` and `jq`. `cd community && npm test` covers the
+renderer (unset and malformed Team IDs are refused), the worker route, and this
+script against a local server; the `community site (AASA)` CI job runs them.
+
+**macOS side (native team, not done here).** The app needs the entitlement
+
+```xml
+<key>com.apple.developer.associated-domains</key>
+<array><string>webcredentials:tracecommons.ai</string></array>
+```
+
+and must be signed with a Developer ID certificate of the Team in
+`TC_APPLE_TEAM_ID`, with a provisioning profile that carries associated
+domains. An ad-hoc or unsigned build cannot use the association, so passkey
+calls fail closed there. Whether a Developer ID profile carries `webcredentials`
+for a non-App-Store app is still to be confirmed (spec, open questions). A
+Tauri build would need its own entitlement and an additional `apps` entry.

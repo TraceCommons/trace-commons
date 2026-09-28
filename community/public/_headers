@@ -6,6 +6,10 @@
   Cross-Origin-Opener-Policy: same-origin
   Content-Security-Policy: default-src 'self'; connect-src 'self' https://ingest.tracecommons.ai http://localhost:*; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'
 
+/.well-known/apple-app-site-association
+  Content-Type: application/json
+  Cache-Control: public, max-age=3600
+
 /snapshot.json
   Cache-Control: public, max-age=300, stale-while-revalidate=120
 
