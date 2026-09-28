@@ -184,6 +184,7 @@ fn tick_over(
     // against the same config snapshot the pass uses, so a widening written
     // between two reads cannot be missed by the sweep and used by the pass.
     sweep_grants(shared, &ctx);
+    sweep_arming_wording(shared, &ctx);
     let mut out = PassOutcome::default();
 
     // Read before anything is listed: a grant given while discovery walks the
@@ -205,8 +206,10 @@ fn tick_over(
         }
     }
 
+    let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
     let report = finish_pass(shared, out, true)?;
     report_gate(shared, &ctx.gate, &report);
+    record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
 }
 
@@ -320,6 +323,11 @@ fn arm_by_default(
     {
         return ProjectMode::NotifyOnly;
     }
+    // What the grant screen claimed, so a later rewording can be told (K5).
+    policy.record_arming_claim(
+        project_key,
+        super::arming_wording::grant_arming_claim(ctx.disclosure),
+    );
     if policy.save(&shared.store).is_err() {
         tracing::warn!("could not persist arming a new project");
     }
@@ -412,6 +420,7 @@ fn tick_over_paths(
     // against the same config snapshot the pass uses, so a widening written
     // between two reads cannot be missed by the sweep and used by the pass.
     sweep_grants(shared, &ctx);
+    sweep_arming_wording(shared, &ctx);
     let mut out = PassOutcome::default();
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
@@ -543,6 +552,95 @@ fn sweep_grants(shared: &DaemonShared, ctx: &PassContext) {
     }
 }
 
+/// K5: tell every armed folder whose arming words claimed more than the
+/// words in force for it now. See `arming_wording`.
+///
+/// The folder stays armed; the notice, the recorded claim and the audit row
+/// are the whole effect. Notice and claim go in one save, so a rewording is
+/// never recorded without the notice that tells the contributor. Audit and
+/// log carry labels only.
+fn sweep_arming_wording(shared: &DaemonShared, ctx: &PassContext) {
+    // The words in force for a folder follow its disclosure. Today that is
+    // the contributor-level `automatic_gate::disclosure`, the same for every
+    // folder; K6's per-folder disclosure replaces it here when it lands, and
+    // nothing else in this sweep changes.
+    let claim_now = super::arming_wording::project_arming_claim(ctx.disclosure);
+    let reworded = {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let reworded = policy.sweep_arming_claims(|_| claim_now, ctx.now);
+        if !reworded.is_empty() && policy.save(&shared.store).is_err() {
+            tracing::warn!("could not persist an arming rewording");
+        }
+        reworded
+    };
+    for label in &reworded {
+        let entry = super::audit::AuditEntry {
+            at: ctx.now,
+            action: "arming-reworded".to_string(),
+            project_label: Some(label.clone()),
+            detail: Some("patterns-only".to_string()),
+        };
+        if super::audit::append(&shared.store, &entry).is_err() {
+            tracing::warn!("could not record an arming rewording");
+        }
+    }
+    if !reworded.is_empty() {
+        tracing::info!(
+            folders = reworded.len(),
+            "armed folders' wording no longer claims a model scrubs them; the contributor is told"
+        );
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+}
+
+/// Record what the gate held on this full pass, for
+/// `status.automatic_contribution_held`, and raise or retract the health
+/// label `automatic-contribution-held` from it.
+///
+/// Only from a full pass (`report.gate_blocked` is `Some`): the count is a
+/// level, and a scoped pass sees only changed paths, so it can neither raise
+/// nor clear it. See `automatic_gate::ENFORCED`.
+fn record_gate_held(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    report: &TickReport,
+    by_project: std::collections::BTreeMap<String, usize>,
+) {
+    let Some(held_sessions) = report.gate_blocked else {
+        return;
+    };
+    let held = super::ipc::GateHeld {
+        held_sessions,
+        reasons: if held_sessions > 0 {
+            ctx.gate.unmet.iter().map(|u| u.reason).collect()
+        } else {
+            Vec::new()
+        },
+        projects: if held_sessions > 0 {
+            by_project
+        } else {
+            std::collections::BTreeMap::new()
+        },
+    };
+    let changed = {
+        let mut slot = shared.gate_held.lock().expect("gate held lock");
+        let changed = *slot != held;
+        *slot = held;
+        changed
+    };
+    {
+        let mut health = shared.health.lock().expect("health lock");
+        if held_sessions > 0 {
+            health.fail(health::LABEL_AUTOMATIC_CONTRIBUTION_HELD, ctx.now);
+        } else {
+            health.resolve(health::LABEL_AUTOMATIC_CONTRIBUTION_HELD);
+        }
+    }
+    if changed {
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+}
+
 /// Each source's name and root, as `SourceRoots::source_identities` gives
 /// them.
 type SourceIdentities = std::collections::BTreeMap<&'static str, String>;
@@ -561,6 +659,9 @@ struct PassContext {
     /// with the config, because every requirement it checks today is about
     /// the contributor rather than a particular session.
     gate: super::automatic_gate::GateVerdict,
+    /// R1's disclosure for this contributor, from the same config: which
+    /// arming wording is in force. See `sweep_arming_wording`.
+    disclosure: super::automatic_gate::Disclosure,
     /// The grant terms in force, from the same config and settings this pass
     /// reads. `None` without a config. See `sweep_grants`.
     grant_terms: Option<super::grant_terms::GrantTerms>,
@@ -626,6 +727,7 @@ impl PassContext {
             gate_enforced(),
             shared.account_admission.current(cfg.as_ref()),
         );
+        let disclosure = super::automatic_gate::disclosure(cfg.as_ref());
         Self {
             now,
             max_queue_entries,
@@ -633,6 +735,7 @@ impl PassContext {
             approval_inputs,
             admission_evidence,
             gate,
+            disclosure,
             grant_terms,
             source_identities,
         }
@@ -655,6 +758,19 @@ struct PassOutcome {
     /// epilogue knows whether the pass was exhaustive; see
     /// `TickReport::gate_blocked`.
     gate_blocked: usize,
+    /// The same, per project key, for the held-folder notice. Read only
+    /// from a full pass; see `record_gate_held`.
+    gate_blocked_by_project: std::collections::BTreeMap<String, usize>,
+}
+
+impl PassOutcome {
+    fn hold(&mut self, project_key: &str) {
+        self.gate_blocked += 1;
+        *self
+            .gate_blocked_by_project
+            .entry(project_key.to_string())
+            .or_insert(0) += 1;
+    }
 }
 
 /// Everything one session costs: observe, evaluate, ask the queue, and load
@@ -813,7 +929,7 @@ fn visit_session(
             && !held_for_review
             && !held_back_from_the_grant(shared, &project_key, &obs.path);
         if would_approve && ctx.gate.blocks() {
-            out.gate_blocked += 1;
+            out.hold(&project_key);
         } else if would_approve {
             let mut queue = shared.queue.lock().expect("queue lock");
             if queue.approve_unattended(
@@ -1076,7 +1192,7 @@ fn visit_session(
                 } else {
                     out.report.queued += 1;
                     if gate_held {
-                        out.gate_blocked += 1;
+                        out.hold(&project_key);
                     }
                 }
                 // A new entry passed the capacity check: there is
@@ -1126,7 +1242,7 @@ fn visit_session(
                         .is_some_and(|e| e.state == QueueState::Pending && !e.held_for_review())
                 {
                     // Held for a person, it waits on them, not on the gate.
-                    out.gate_blocked += 1;
+                    out.hold(&project_key);
                 }
                 // This path returns Ok without checking capacity, so
                 // it does not prove space is available. Do not
@@ -1217,6 +1333,7 @@ fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Res
         too_large,
         unsupported_export_version,
         gate_blocked,
+        gate_blocked_by_project: _,
     } = out;
     report.gate_blocked = exhaustive.then_some(gate_blocked);
 
@@ -2206,6 +2323,133 @@ mod tests {
 
         assert_eq!(full.gate_blocked, Some(1), "{full:?}");
         assert_eq!(scoped.gate_blocked, None, "{scoped:?}");
+    }
+
+    /// The held-folder notice's source: a full pass under an enforced gate
+    /// reports what it holds, per folder, on `status`, and raises the health
+    /// label. A scoped pass changes neither. When the gate stops holding, the
+    /// next full pass clears both on its own.
+    #[tokio::test]
+    async fn a_full_pass_reports_the_held_folders_and_raises_the_label() {
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(true));
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        let status = f.shared.status_value();
+        let held = &status["automatic_contribution_held"];
+        assert_eq!(held["held_sessions"], 1, "{held}");
+        assert!(
+            !held["reasons"].as_array().unwrap().is_empty(),
+            "says why: {held}"
+        );
+        let projects = held["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1, "{held}");
+        assert_eq!(projects[0]["project_label"], "proj");
+        assert_eq!(projects[0]["held_sessions"], 1);
+        assert_eq!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_AUTOMATIC_CONTRIBUTION_HELD)
+        );
+
+        // A scoped pass over an unrelated session measures nothing.
+        let unrelated = f.write_session("other", "22222222-2222-2222-2222-222222222222", 0);
+        let (l, d) = (loads(), loads());
+        f.settle_paths(
+            Utc::now() + chrono::Duration::hours(31),
+            &l,
+            &d,
+            std::slice::from_ref(&unrelated),
+        );
+        assert_eq!(
+            f.shared.status_value()["automatic_contribution_held"]["held_sessions"],
+            1
+        );
+        assert_eq!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_AUTOMATIC_CONTRIBUTION_HELD)
+        );
+
+        // It releases on its own: the next full pass the gate passes.
+        ENFORCE_GATE_FOR_TEST.with(|c| c.set(false));
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        let held = f.shared.status_value()["automatic_contribution_held"].clone();
+        assert_eq!(
+            held,
+            serde_json::json!({ "held_sessions": 0, "reasons": [], "projects": [] })
+        );
+        assert_ne!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_AUTOMATIC_CONTRIBUTION_HELD)
+        );
+    }
+
+    /// Shipped unenforced, the gate holds nothing and says nothing.
+    #[tokio::test]
+    async fn an_unenforced_gate_raises_no_held_notice() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(
+            f.shared.status_value()["automatic_contribution_held"]["held_sessions"],
+            0
+        );
+        assert_ne!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_AUTOMATIC_CONTRIBUTION_HELD)
+        );
+    }
+
+    /// K5 through the watcher: today's arming offer says "will be scrubbed"
+    /// for every folder, so nothing is reworded. When the arming copy for a
+    /// patterns-only folder changes, a folder armed under the old words gets
+    /// one notice, audited and saved, stays armed, and is not told twice.
+    #[tokio::test]
+    async fn a_folder_armed_under_the_old_wording_is_told_once_when_it_changes() {
+        use super::super::arming_wording::{ArmingClaim, reword_patterns_only_for_test};
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(
+            f.shared.status_value()["arming_rewordings"],
+            serde_json::json!([]),
+            "nothing has been reworded yet"
+        );
+
+        reword_patterns_only_for_test(Some(ArmingClaim::PatternsOnly));
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        reword_patterns_only_for_test(None);
+
+        let status = f.shared.status_value();
+        let list = status["arming_rewordings"].as_array().unwrap().clone();
+        assert_eq!(list.len(), 1, "told once: {list:?}");
+        assert_eq!(list[0]["project_label"], "proj");
+        assert_eq!(list[0]["was"], "model_scrubbed");
+        assert_eq!(list[0]["now"], "patterns_only");
+        let persisted = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
+        assert_eq!(persisted.arming_rewordings.len(), 1, "survives a restart");
+        let audit = super::super::audit::load(&f.shared.store).unwrap();
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|e| e.action == "arming-reworded")
+                .count(),
+            1
+        );
+        assert_eq!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .resolve(&persisted.arming_rewordings[0].project_key),
+            ProjectMode::AutoUpload,
+            "the folder stays armed"
+        );
     }
 
     /// The "holding" line is written when what the gate holds changes: the

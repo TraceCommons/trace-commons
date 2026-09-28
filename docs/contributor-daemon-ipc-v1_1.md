@@ -498,6 +498,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
+| `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
 | `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
@@ -539,12 +540,15 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
-  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null }
+  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
+  "arming_rewordings": [],
+  "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] }
 }
 ```
 
-`grant_voids` is additive; see "Void notices" below. `witness_capacity` is
-additive; see its section below.
+`grant_voids` is additive; see "Void notices" below. `witness_capacity`,
+`arming_rewordings` and `automatic_contribution_held` are additive; see their
+sections below.
 
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
@@ -618,6 +622,61 @@ Counts and timestamps only. No entry id, hash, or path appears here.
 Approved entries are not listed by `list_pending`, which returns `pending`
 entries only, so this is the only place the condition is reported; there is
 no per-entry equivalent.
+
+#### `arming_rewordings`
+
+Additive. K5 of the connect-and-forget design: armed folders whose arming
+words claimed a model scrubs their sessions (the "will be scrubbed" arming
+offer, or the grant's model-scrub wording), where the words in force for them
+now claim only the fixed patterns. The folder stays armed; this notice is how
+the contributor is told what its arming now means. Always present; `[]` when
+there is nothing to show.
+
+```json
+[{ "id": 0, "reworded_at": "2026-09-27T01:00:00Z",
+   "project_id": "3f2a...", "project_label": "api",
+   "was": "model_scrubbed", "now": "patterns_only" }]
+```
+
+Each element is named the way `list_projects` names the project, never by its
+key. A notice is recorded once per narrowing, in the policy file with the
+claim it records, so it survives a restart; the watcher checks on every pass.
+It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
+(audited as `arming-rewordings-acknowledged`, no "all") or the contributor
+sets the project's mode, which answers it. A void takes it with it. The
+rewording itself is audited as `arming-reworded` with the project label.
+
+Today no rewording is recorded: every shell's arming offer says "will be
+scrubbed" whatever R1's disclosure is, so the words in force have not
+changed. It fires when the arming offer becomes disclosure-dependent
+(`arming_wording::project_arming_claim`), or when a folder's disclosure drops
+to patterns-only. The words are
+`consent_copy::arming_reworded_notice_for_wire` (`tc_arming_reworded_notice`);
+its `ask_first_action` button is `set_project_mode` with the element's
+`project_id` and `notify_only`.
+
+#### `automatic_contribution_held`
+
+Additive. What the automatic-contribution gate held at the last **full**
+watcher pass: sessions in armed folders it is holding instead of approving
+(for example, R3 before this commons admits the account), the unmet
+requirements' reason labels, and each folder, named as `list_projects` names
+it. Always present; zero, `[]` and `[]` when nothing is held, which is always
+the case while `automatic_gate::ENFORCED` is off.
+
+| field | meaning |
+| --- | --- |
+| `held_sessions` | sessions held, as `TickReport::gate_blocked` counts them |
+| `reasons` | `automatic_gate::REASON_*` labels; empty when nothing is held |
+| `projects[]` | `project_id`, `project_label`, `held_sessions` per armed folder |
+
+Set and cleared only by a full pass; a scoped pass sees only changed paths and
+leaves it as it was. In memory only: a restarted daemon's first full pass
+measures it again. The daemon also sets `automatic-contribution-held` in the
+health slot from the same pass, but a higher label can mask it, so render the
+condition from this object. It is never acknowledged: it releases on its own
+on the first full pass that finds the gate met. The words are
+`consent_copy::gate_held_notice_for_wire` (`tc_gate_held_notice`).
 
 #### `routing`
 
@@ -3746,8 +3805,10 @@ listed highest first:
 6. `ingest-unreachable`
 7. `queue-full`
 8. `witness-saturated`
-9. `daily-cap-reached`
-10. `session-too-large`
+9. `automatic-contribution-held`
+10. `admission-limit-reached`
+11. `daily-cap-reached`
+12. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an

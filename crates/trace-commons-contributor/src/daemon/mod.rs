@@ -24,6 +24,7 @@ pub mod account_admission;
 pub mod account_onboarding;
 pub mod admission_setup;
 pub mod approved_envelope;
+pub mod arming_wording;
 pub mod attached;
 pub mod attestation_mark;
 pub mod audit;
