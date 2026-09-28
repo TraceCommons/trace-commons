@@ -119,11 +119,13 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
 /// Whether every dependency an injected pipeline runtime holds is
 /// production-qualified.
 ///
-/// Checks only `scorer`, `embedder`, `index_reader`, `index_writer`, and
-/// every registered settlement adapter (decision P4's
-/// `PipelineDependencyQualification`). Authority, privacy, and payout
-/// qualification are PR 3 and are not part of this bundle-runtime
-/// dependency set.
+/// Checks `scorer`, `embedder`, `index_reader`, `index_writer`, every
+/// registered settlement adapter (decision P4's
+/// `PipelineDependencyQualification`), and now `authority` and `privacy`
+/// (Ruling T2-2): an unqualified authority provider or privacy boundary
+/// fails closed the same way an unqualified scorer or index does, whenever
+/// tenants are routed. Payout qualification is not part of this
+/// bundle-runtime dependency set.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
     let qualification = service.dependency_qualification();
     qualification.scorer
@@ -135,6 +137,8 @@ pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService
             .settlement_adapters
             .values()
             .all(|ready| *ready)
+        && qualification.authority
+        && qualification.privacy
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is

@@ -8,7 +8,7 @@ mod pilot_runtime_grants;
 #[path = "support/pilot_runtime_login.rs"]
 mod pilot_runtime_login;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -29,8 +29,8 @@ use trace_commons_gate_api::{
 };
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
-    RecordedTraceContributionOptions, ResidualPiiRisk, TraceContributionEnvelope, TraceRedactor,
-    retention_policy_for_trace,
+    RecordedTraceContributionOptions, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
+    TraceContributionEnvelope, TraceRedactor, retention_policy_for_trace,
 };
 use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;
@@ -39,11 +39,15 @@ use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
     PreparedSerializedJsonArtifact, TraceArtifactKind, TraceArtifactStore,
 };
+use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::trace_corpus_storage::{
     TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite, TraceObjectArtifactKind,
     TraceObjectRefWrite,
 };
 use trace_commons_server::versioned_pipeline::*;
+use trace_commons_server::versioned_pipeline_authority::{
+    PipelineAuthorityProvider, PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
+};
 use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle, PipelineBundleConfig,
     PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
@@ -1608,6 +1612,64 @@ fn scored_config(include_index: bool) -> PipelineBundleConfig {
     }
 }
 
+/// An authority provider whose `SubmissionAuthority` permits everything: no
+/// tenant or policy allowlist, and `require_policy: false`. Every harness
+/// service below defaults to this, so every test written before Task 2
+/// keeps passing unchanged; `authority_allowlist_rejects_a_disallowed_use`
+/// builds its own restrictive authority instead.
+fn allow_all_authority() -> Arc<dyn PipelineAuthorityProvider> {
+    Arc::new(StaticPipelineAuthorityProvider::test_only(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: None,
+            require_policy: false,
+        },
+    ))
+}
+
+/// A privacy boundary that transforms nothing and finds nothing.
+///
+/// Ruling T2-4: the harness default is this, not
+/// `DeterministicPipelinePrivacyBoundary`. The production residual-risk
+/// model applies a Medium floor whenever message content is present (the
+/// port's own comment at `ef97a459:crates/trace-commons-server/src/
+/// versioned_pipeline.rs` around line 3963: "That consent fact is
+/// persisted, but it is not a PII finding. Admission quarantines only when
+/// another server-computed condition accompanies the content flag."), so a
+/// real rescrub gives every message-bearing fixture envelope a
+/// `ConsentContentFlag` finding whether or not the test wants one --
+/// intended production behaviour, but it silently overrides a fixture that
+/// force-sets `residual_pii_risk` to simulate Quarantine/Reject without a
+/// real finding. `DeterministicPipelinePrivacyBoundary` keeps its own unit
+/// tests in `versioned_pipeline_authority.rs`; the four Task 2 tests below
+/// that need a specific boundary (`FailingPrivacyBoundary`,
+/// `MarkerRedactingBoundary`) still build their own.
+struct PassThroughPipelinePrivacyBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "pass_through_privacy_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+}
+
+/// The Task 2 privacy boundary every harness service below defaults to: see
+/// `PassThroughPipelinePrivacyBoundary`.
+fn default_privacy_boundary() -> Arc<dyn PipelinePrivacyBoundary> {
+    Arc::new(PassThroughPipelinePrivacyBoundary)
+}
+
 /// Builds a service over an isolated index (as both reader and writer), the
 /// reference scorer and embedder, and `storage_rebate`/`trace_credit`
 /// recording settlement adapters with an uncapped (`u64::MAX`) cap for each,
@@ -1671,7 +1733,9 @@ async fn test_service(
         caps,
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary());
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -1737,6 +1801,8 @@ async fn test_service_with_adapters_and_caps(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -1785,7 +1851,9 @@ async fn test_service_with_adapters_and_index(
         caps,
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary());
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -1844,9 +1912,54 @@ async fn test_service_with_embedder(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)
+}
+
+/// Task 2: like `test_service`, but the caller supplies the authority and
+/// privacy controls directly instead of the allow-all/deterministic
+/// defaults every other harness variant uses -- for a test that needs a
+/// missing or failing control rather than one that lets everything through.
+/// `None` leaves the corresponding builder call out entirely (a service
+/// with no control at all), matching what `submit` sees when ingest boots
+/// one without an assembler wiring it up.
+async fn test_service_with_controls(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    authority: Option<Arc<dyn PipelineAuthorityProvider>>,
+    privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry");
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(authority) = authority {
+        builder = builder.with_authority(authority);
+    }
+    if let Some(privacy) = privacy {
+        builder = builder.with_privacy(privacy);
+    }
+    Arc::new(builder.build().expect("build pipeline service"))
 }
 
 /// An embedder whose descriptor is chosen by the test and which counts
@@ -2040,6 +2153,8 @@ async fn score_lease_test_service(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_lease_config(lease_config)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)
@@ -3019,6 +3134,344 @@ async fn tombstoned_content_is_refused_before_the_store() {
         count_files_under(dir.path()),
         0,
         "a tombstoned receipt writes no artifact file"
+    );
+}
+
+/// Task 2: a service built without `with_authority` fails every receipt
+/// closed before any database work -- no run, no staged artifact.
+#[tokio::test]
+async fn receipt_without_authority_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+        Some(default_privacy_boundary()),
+    )
+    .await;
+    let tenant = format!("authority-missing-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("a service with no authority control fails every receipt closed");
+    assert_eq!(error.to_string(), "authority_control_missing");
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    assert_eq!(count_staged_artifacts(&backend, &tenant).await, 0);
+}
+
+/// Task 2: an authority that allows only a use the envelope does not carry
+/// denies the submission -- but it is a normal Admission Reject, exactly
+/// like `a_rejected_receipt_records_the_decision_and_creates_no_review_work`
+/// for a high-risk envelope, not a hard failure of `submit` itself.
+#[tokio::test]
+async fn authority_allowlist_rejects_a_disallowed_use() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // The fixture envelope's consent scope is DebuggingEvaluation, whose
+    // default allowed uses are Debugging/Evaluation/AggregateAnalytics
+    // (trace_contribution.rs's `default_allowed_uses_for_scope`).
+    // `RankingModelTraining` is not among them, so this allowlist denies it.
+    let authority: Arc<dyn PipelineAuthorityProvider> = Arc::new(
+        StaticPipelineAuthorityProvider::test_only(SubmissionAuthority {
+            tenant: SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::new(),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::RankingModelTraining]),
+            },
+            policy: None,
+            require_policy: false,
+        }),
+    );
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(authority),
+        Some(default_privacy_boundary()),
+    )
+    .await;
+    let tenant = format!("authority-denied-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("a denied receipt still creates its run record")
+    };
+    assert_eq!(created.admission_decision, "reject");
+    assert_eq!(created.state, PipelineRunState::Complete);
+    assert_eq!(created.next_phase, None);
+    assert_eq!(
+        submission_status(&backend, &tenant, env.submission_id).await,
+        "rejected"
+    );
+
+    // Ruling T2-3: a denial by a resolved authority is an ordinary
+    // Admission Reject with reason `grant_invalid`, not the permanent
+    // `authority_missing` failure `MinimalAdmissionPolicy` reserves for a
+    // missing authority source.
+    let outcomes = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1, "only the Admission outcome");
+    assert_eq!(outcomes[0].phase, Phase::Admission);
+    let decision: AdmissionDecision = serde_json::from_value(outcomes[0].decision.clone()).unwrap();
+    match decision {
+        AdmissionDecision::Reject { reason } => {
+            assert_eq!(reason.as_str(), "grant_invalid");
+        }
+        other => panic!("expected an Admission Reject, got {other:?}"),
+    }
+
+    // No Review work: nothing is claimable, for this run or the tenant.
+    assert!(
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(service.process_one(&tenant).await.unwrap().is_none());
+}
+
+/// A privacy boundary whose rescrub always fails -- the classifier-outage
+/// case `submit` must fail closed on, storing nothing.
+struct FailingPrivacyBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        anyhow::bail!("privacy classifier unavailable (test double)")
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "failing_privacy_boundary_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+}
+
+/// Task 2: a rescrub failure fails the receipt closed -- no run, no staged
+/// artifact, no artifact file. The rescrub runs before the attempt's object
+/// is even prepared, so a failing classifier costs no encryption either.
+#[tokio::test]
+async fn privacy_boundary_failure_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        Some(Arc::new(FailingPrivacyBoundary)),
+    )
+    .await;
+    let tenant = format!("privacy-failure-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+        .await
+        .expect_err("a failing privacy boundary fails the receipt closed");
+    assert_eq!(error.to_string(), "privacy_classification_failed");
+    assert_eq!(count_runs(&backend, &tenant).await, 0);
+    assert_eq!(count_staged_artifacts(&backend, &tenant).await, 0);
+    assert_eq!(
+        count_files_under(dir.path()),
+        0,
+        "a rescrub failure writes no artifact file"
+    );
+}
+
+/// Replaces a marker token in the envelope, as a redacting classifier would.
+struct MarkerRedactingBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
+    async fn rescrub(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        let text = serde_json::to_string(envelope)?;
+        *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
+        Ok(Vec::new())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "marker_redacting_boundary_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+}
+
+/// An embedder that records every chunk of plaintext Score asks it to
+/// embed, concatenated -- so a test can inspect exactly what bytes Score
+/// fed it, rather than merely counting calls (`CountingEmbedder` above).
+struct CapturingEmbedder {
+    seen: std::sync::Mutex<Vec<u8>>,
+}
+
+impl Embedder for CapturingEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.seen.lock().unwrap().extend_from_slice(plaintext);
+        ReferenceEmbedder::new().embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for CapturingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "capturing_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "capturing-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"capturing-embedder-test-descriptor-v1".to_vec()
+    }
+}
+
+/// Review Focus 2 (Task 2): content the privacy boundary transforms. The
+/// stored source is the transformed content, not the raw request -- Score
+/// reads the rescrubbed bytes, and a replay of the identical raw request
+/// bytes still replays the same run (the classifier never runs twice for
+/// one key, since `submit`'s replay check runs before the rescrub).
+#[tokio::test]
+async fn transformed_content_flows_to_score_and_replay_stays_exact() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(CapturingEmbedder {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(true),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(Vec::new()).expect("build settlement adapter registry");
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder.clone())
+    .with_authority(allow_all_authority())
+    .with_privacy(Arc::new(MarkerRedactingBoundary))
+    .build()
+    .expect("build pipeline service");
+
+    let tenant = format!("privacy-transform-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    for event in &mut env.events {
+        if let Some(content) = event.redacted_content.as_mut() {
+            content.push_str(" MARKER_SECRET");
+        }
+    }
+    let raw = serde_json::to_vec(&env).unwrap();
+    assert!(
+        String::from_utf8_lossy(&raw).contains("MARKER_SECRET"),
+        "the raw request the caller submits carries the marker"
+    );
+    let key = env.submission_id.to_string();
+
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+
+    let processed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the newly created run");
+    assert_eq!(processed.next_phase, Some(Phase::Score));
+    let approved_content_hash = processed
+        .approved_content_hash
+        .clone()
+        .expect("Review approval records a content hash");
+    assert_ne!(
+        approved_content_hash, created.request_content_hash,
+        "the approved content is the rescrubbed envelope, not the raw request"
+    );
+
+    let approved_bytes = service.load_approved_bytes(&processed).await.unwrap();
+    let approved_text = String::from_utf8(approved_bytes).unwrap();
+    assert!(
+        !approved_text.contains("MARKER_SECRET"),
+        "the stored source is the transformed content, not the raw request"
+    );
+    assert!(
+        approved_text.contains("[redacted]"),
+        "the transform's replacement text reaches storage"
+    );
+
+    // A replay of the identical raw request bytes still replays the same
+    // run: the replay check in `submit` runs before the rescrub, so a
+    // replay never calls the privacy boundary again.
+    let PipelineReceiptResult::Replayed(replayed) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("identical raw bytes replay the same run")
+    };
+    assert_eq!(replayed.run_id, created.run_id);
+
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs the reviewed run");
+    let seen = embedder.seen.lock().unwrap().clone();
+    let seen_text = String::from_utf8_lossy(&seen);
+    assert!(
+        !seen_text.contains("MARKER_SECRET"),
+        "Score never embeds the raw marker"
+    );
+    assert!(
+        seen_text.contains("[redacted]"),
+        "Score embeds the transformed bytes"
     );
 }
 
@@ -12093,6 +12546,8 @@ async fn compatibility_test_service(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
     .build()
     .expect("build pipeline service");
     Arc::new(service)

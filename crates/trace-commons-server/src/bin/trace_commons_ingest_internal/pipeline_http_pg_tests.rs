@@ -39,8 +39,12 @@ use trace_commons_protocol::trace_contribution::{
 };
 use trace_commons_server::admission_evidence::AdmissionProviderTrust;
 use trace_commons_server::admission_ledger::AdmissionLimits;
+use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::versioned_pipeline::{
     PipelineCaps, PipelineCrashPoint, PipelineServiceBuilder,
+};
+use trace_commons_server::versioned_pipeline_authority::{
+    PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
 };
 use trace_commons_server::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
@@ -175,6 +179,31 @@ fn storage_rebate_descriptor() -> InstrumentDescriptor {
     }
 }
 
+/// A privacy boundary that transforms nothing and finds nothing -- Ruling
+/// T2-4's harness default, the same test double as
+/// `versioned_pipeline_runtime_pg.rs`'s `PassThroughPipelinePrivacyBoundary`
+/// (test doubles live in the test files, so this file holds its own copy
+/// rather than sharing one).
+struct PassThroughPipelinePrivacyBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "pass_through_privacy_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+}
+
 /// A `LocalEncryptedTraceArtifactStore` rooted at `dir`, reused by both the
 /// `AppState` the router reads objects through and the `TestAssembler` the
 /// pipeline runtime reads and writes pipeline artifacts through. Delegates to
@@ -243,7 +272,15 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
         )
         .with_scorer(scorer)
         .with_embedder(embedder)
-        .with_object_store_name(context.object_store_name);
+        .with_object_store_name(context.object_store_name)
+        .with_authority(Arc::new(StaticPipelineAuthorityProvider::test_only(
+            SubmissionAuthority {
+                tenant: SubmissionAllowlists::default(),
+                policy: None,
+                require_policy: false,
+            },
+        )))
+        .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary));
         if let Some(crash_point) = self.crash_point {
             builder = builder.with_crash_point(crash_point);
         }

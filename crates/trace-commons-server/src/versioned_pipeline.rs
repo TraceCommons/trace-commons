@@ -43,6 +43,10 @@ use crate::trace_corpus_storage::{
     TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
     TraceSubmissionWrite, safe_residual_risk_basis_labels,
 };
+use crate::versioned_pipeline_authority::{
+    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
+};
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
     PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, PipelineTraceCreditEvent, dependency_content_hash,
@@ -3062,6 +3066,10 @@ pub struct SubmissionGuard {
 /// `embedder` are true only when every scorer/embedder the service holds is
 /// (decision P4); a bundle can name any one of them by content hash, so a
 /// single unqualified reference dependency disqualifies the whole set.
+/// `authority` and `privacy` follow the same shape (Ruling T2-2): true only
+/// when the held object is `production_qualified()`, false when the service
+/// holds none at all (`submit` already fails closed on that case before any
+/// dependency check runs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineDependencyQualification {
     pub scorer: bool,
@@ -3069,6 +3077,8 @@ pub struct PipelineDependencyQualification {
     pub index_reader: bool,
     pub index_writer: bool,
     pub settlement_adapters: BTreeMap<String, bool>,
+    pub authority: bool,
+    pub privacy: bool,
 }
 
 /// The per-tenant and per-principal hourly receipt limits. A limit of `0` is
@@ -3146,6 +3156,8 @@ pub struct PipelineServiceBuilder {
     object_store_name: String,
     lease_config: PipelineLeaseConfig,
     crash_point: Option<PipelineCrashPoint>,
+    authority: Option<Arc<dyn PipelineAuthorityProvider>>,
+    privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
 }
 
 impl PipelineServiceBuilder {
@@ -3172,6 +3184,8 @@ impl PipelineServiceBuilder {
             object_store_name: PIPELINE_DEFAULT_OBJECT_STORE_NAME.to_string(),
             lease_config: PipelineLeaseConfig::default(),
             crash_point: None,
+            authority: None,
+            privacy: None,
         }
     }
 
@@ -3214,6 +3228,22 @@ impl PipelineServiceBuilder {
         self
     }
 
+    /// The tenant authority provider `submit` consults before it does any
+    /// database work. A service built without this fails every receipt
+    /// closed with `authority_control_missing`.
+    pub fn with_authority(mut self, authority: Arc<dyn PipelineAuthorityProvider>) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    /// The privacy boundary `submit` rescrubs the server envelope through
+    /// before it stages or stores anything. A service built without this
+    /// fails every receipt closed with `privacy_control_missing`.
+    pub fn with_privacy(mut self, privacy: Arc<dyn PipelinePrivacyBoundary>) -> Self {
+        self.privacy = Some(privacy);
+        self
+    }
+
     /// Resolves the default package once, so a service that cannot run its
     /// own default bundle fails at construction rather than on the first
     /// receipt.
@@ -3235,6 +3265,8 @@ impl PipelineServiceBuilder {
             crash_pending: AtomicBool::new(self.crash_point.is_some()),
             score_evaluations: AtomicUsize::new(0),
             settle_evaluations: AtomicUsize::new(0),
+            authority: self.authority,
+            privacy: self.privacy,
         };
         service
             .construct(service.default_package.clone())
@@ -3260,6 +3292,8 @@ pub struct PipelineService {
     crash_pending: AtomicBool,
     score_evaluations: AtomicUsize,
     settle_evaluations: AtomicUsize,
+    authority: Option<Arc<dyn PipelineAuthorityProvider>>,
+    privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
 }
 
 impl PipelineService {
@@ -3298,6 +3332,14 @@ impl PipelineService {
             index_reader: self.index_reader.production_qualified(),
             index_writer: self.index_writer.production_qualified(),
             settlement_adapters: self.settlement_adapters.production_qualifications(),
+            authority: self
+                .authority
+                .as_ref()
+                .is_some_and(|authority| authority.production_qualified()),
+            privacy: self
+                .privacy
+                .as_ref()
+                .is_some_and(|privacy| privacy.production_qualified()),
         }
     }
 
@@ -3485,25 +3527,42 @@ impl PipelineService {
     /// is recorded before it is written, and no lock is held while it is
     /// written or while Admission runs:
     ///
-    /// 1. A read-only check with no advisory lock (`precheck_receipt`)
+    /// 1. The tenant authority lookup and the privacy-boundary presence
+    ///    check run before any database work (Ruling T2-1): a tenant with no
+    ///    configured authority fails closed with
+    ///    `authority_control_missing`, and a service built without a privacy
+    ///    boundary fails closed with `privacy_control_missing`. Neither
+    ///    creates a run or a staging row.
+    /// 2. A read-only check with no advisory lock (`precheck_receipt`)
     ///    refuses the common cases -- replay, content conflict, tombstone,
     ///    quota -- before any encryption. The staging transaction repeats
-    ///    every check, so this one only saves work.
-    /// 2. The attempt's object -- the server envelope, wrapped per decision
-    ///    P1 -- is encrypted under the attempt's own object id
-    ///    (`pipeline_receipt_object_id`, a fresh random attempt id), which
-    ///    fixes its object key and ciphertext hash. Nothing is stored.
-    /// 3. The staging transaction (`stage_receipt_attempt`) checks replay, an
+    ///    every check, so this one only saves work. A replayed key returns
+    ///    here, so a replay never calls the privacy boundary again.
+    /// 3. The rescrub: the privacy boundary transforms a clone of the
+    ///    server envelope and returns any residual-risk conditions it found,
+    ///    merged into the caller's own basis. From here on the transformed
+    ///    envelope replaces `request.server_envelope` everywhere -- the
+    ///    staged and stored source bytes, the retention derivation, and the
+    ///    Admission input -- while `request_content_hash` stays the hash of
+    ///    the raw `request.request_bytes` (replay identity). This runs with
+    ///    no pooled connection held, since a rescrub can call an external
+    ///    classifier.
+    /// 4. The attempt's object -- the (now transformed) server envelope,
+    ///    wrapped per decision P1 -- is encrypted under the attempt's own
+    ///    object id (`pipeline_receipt_object_id`, a fresh random attempt
+    ///    id), which fixes its object key and ciphertext hash. Nothing is
+    ///    stored.
+    /// 5. The staging transaction (`stage_receipt_attempt`) checks replay, an
     ///    attempt for the key staged with other content, the bound bundle,
     ///    tombstones, and the quota -- in that order -- counts the quota,
     ///    and inserts the attempt's `staged` row naming the object. It
     ///    commits before anything is stored, so every refusal there stores
     ///    nothing.
-    /// 4. The object is written and Admission runs, with no transaction
+    /// 6. The object is written and Admission runs, with no transaction
     ///    open. A failure from here on (an error or a crash) leaves the
     ///    `staged` row naming the object; `sweep_staged_receipts` deletes
     ///    both once the row's `cleanup_after` passes.
-    /// 5. The final transaction (`commit_receipt_attempt`) re-checks an
+    /// 7. The final transaction (`commit_receipt_attempt`) re-checks an
     ///    existing run for the key and the tombstones, requires the
     ///    attempt's row to be still `staged` and not yet due, and commits
     ///    the records and the row's move to `committed` together. On a
@@ -3531,7 +3590,6 @@ impl PipelineService {
             "invalid idempotency key"
         );
         let tenant_id = request.tenant_id;
-        let envelope = request.server_envelope;
         let request_content_hash = sha256_prefixed(request.request_bytes);
         let request_idempotency_key_hash =
             sha256_prefixed(request.request_idempotency_key.as_bytes());
@@ -3549,7 +3607,20 @@ impl PipelineService {
             format!("tracecommons:pipeline-source-object:{run_id}").as_bytes(),
         );
 
-        // 1. The early, lock-free refusal check.
+        // 1. The authority lookup and the privacy-boundary presence check
+        // run before any database work, so a tenant with a missing control
+        // fails closed with no run and no staging row (Ruling T2-1).
+        let authority = self
+            .authority
+            .as_ref()
+            .and_then(|provider| provider.authority_for_tenant(tenant_id))
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL))?;
+        let privacy = self
+            .privacy
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_PRIVACY_CONTROL_MISSING_LABEL))?;
+
+        // 2. The early, lock-free refusal check.
         if let Some(refused) = self
             .precheck_receipt(
                 &request,
@@ -3561,7 +3632,43 @@ impl PipelineService {
             return Ok(refused);
         }
 
-        // 2. Prepare this attempt's object. Nothing is stored yet. The
+        // 3. The rescrub: after the lock-free precheck (a replay or a
+        // refusal returns before this, so a replay never calls the
+        // classifier again) and before the staging row, with no pooled
+        // connection held. From here on, the transformed envelope replaces
+        // `request.server_envelope` everywhere PR 2 used it: the staged and
+        // stored source bytes, the retention derivation, and the Admission
+        // input. `request_content_hash` (above) stays the hash of the raw
+        // `request.request_bytes` -- the replay identity never moves.
+        let mut envelope = request.server_envelope.clone();
+        let mut consent_scopes = envelope.consent.scopes.clone();
+        if !consent_scopes.contains(&envelope.trace_card.consent_scope) {
+            consent_scopes.push(envelope.trace_card.consent_scope);
+        }
+        let grant_valid = authority.permits(&consent_scopes, &envelope.trace_card.allowed_uses);
+        let mut residual_risk_basis = request.residual_risk_basis.to_vec();
+        for condition in privacy
+            .rescrub(&mut envelope)
+            .await
+            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))?
+        {
+            if !residual_risk_basis.contains(&condition) {
+                residual_risk_basis.push(condition);
+            }
+        }
+        let request = PipelineReceiptRequest {
+            tenant_id: request.tenant_id,
+            actor_principal_ref: request.actor_principal_ref,
+            counts_toward_quota: request.counts_toward_quota,
+            request_idempotency_key: request.request_idempotency_key,
+            request_bytes: request.request_bytes,
+            server_envelope: &envelope,
+            residual_risk_basis: &residual_risk_basis,
+            limits: request.limits,
+        };
+        let envelope = request.server_envelope;
+
+        // 4. Prepare this attempt's object. Nothing is stored yet. The
         // store's encrypt call is synchronous (it may reach a remote
         // key-wrap service), so it runs on a blocking thread rather than
         // this task.
@@ -3593,13 +3700,13 @@ impl PipelineService {
             receipt: prepared.receipt().clone(),
         };
 
-        // 3. The staging transaction: every refusal, then the attempt's row.
+        // 5. The staging transaction: every refusal, then the attempt's row.
         let (bundle_id, bundle) = match self.stage_receipt_attempt(&request, &attempt).await? {
             ReceiptStage::Refused(result) => return Ok(result),
             ReceiptStage::Staged { bundle_id, bundle } => (bundle_id, bundle),
         };
 
-        // 4. Write the object the row names, then run Admission. The write
+        // 6. Write the object the row names, then run Admission. The write
         // is synchronous file or network I/O, so it also runs on a blocking
         // thread -- with no transaction open and no advisory lock held (the
         // staging transaction above already committed and released both
@@ -3636,9 +3743,19 @@ impl PipelineService {
         }
         self.inject_crash(PipelineCrashPoint::AfterArtifactStorage)?;
 
-        // `authenticated`/`authority_valid`/`grant_valid` are fixed `true`
-        // in PR 2 (decision D15): the legacy handler already checked them,
-        // and authority is not ported until PR 3.
+        // `authenticated` stays fixed `true` (decision D15): the legacy
+        // handler already authenticated the request before ever calling
+        // `submit`. Ruling T2-3: a missing authority source stops the
+        // receipt outright (`PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL`,
+        // above, before any database work); reaching here means a source
+        // was resolved and validated the request, so `authority_valid` is
+        // `true`. Whether that source permits this submission's consent
+        // scopes and allowed uses (`grant_valid`, computed above) is an
+        // ordinary business decision, not a structural failure -- a denial
+        // is an Admission Reject with reason `grant_invalid`, the same as
+        // any other Reject, never `MinimalAdmissionPolicy`'s permanent
+        // `authority_missing` error (SYS-003, reserved for the missing-
+        // source case this receipt already handled).
         let privacy_risk = match envelope.privacy.residual_pii_risk {
             ResidualPiiRisk::Low => PrivacyRisk::Low,
             ResidualPiiRisk::Medium
@@ -3666,7 +3783,7 @@ impl PipelineService {
                     .redaction_pipeline_version
                     .trim()
                     .is_empty(),
-            grant_valid: true,
+            grant_valid,
             consent_valid: envelope.consent.revocable,
             allowed_uses_valid: true,
             tombstoned: false,
@@ -3680,7 +3797,7 @@ impl PipelineService {
             .map_err(|error| anyhow::anyhow!(error.label().to_string()))?;
         let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
 
-        // 5. The final transaction.
+        // 7. The final transaction.
         let run = NewPipelineRun {
             tenant_id: tenant_id.to_string(),
             run_id,
