@@ -128,6 +128,15 @@ pub struct CreateInviteRequest {
     pub credential_binding_hash: Option<String>,
     #[serde(default)]
     pub note_label: Option<String>,
+    /// Public issuer name shown to a contributor who looks the invite up
+    /// before joining. Unlike `issued_by_label` it is not operator-private.
+    #[serde(default)]
+    pub issuer_display_name: Option<String>,
+    /// Operator-set credit per accepted trace, whole points. Both or neither.
+    #[serde(default)]
+    pub credit_range_min: Option<i64>,
+    #[serde(default)]
+    pub credit_range_max: Option<i64>,
 }
 
 fn default_policy_version() -> String {
@@ -255,6 +264,31 @@ async fn create_invite_handler(
         }
     }
 
+    if request
+        .issuer_display_name
+        .as_deref()
+        .is_some_and(|name| !trace_commons_protocol::invite_lookup::valid_issuer_display_name(name))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "InviteIssuerDisplayNameMalformed" })),
+        );
+    }
+    let credit_range = match (request.credit_range_min, request.credit_range_max) {
+        (None, None) => None,
+        (Some(min), Some(max))
+            if trace_commons_protocol::invite_lookup::valid_credit_range(min, max) =>
+        {
+            Some((min, max))
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "InviteCreditRangeMalformed" })),
+            );
+        }
+    };
+
     // Bounded and overflow-checked: `Utc::now() + ChronoDuration::days(d)`
     // panics on overflow, and an admin caller supplying a huge value would
     // crash the handler. Reject non-positive and absurd values with 400
@@ -305,6 +339,8 @@ async fn create_invite_handler(
         issued_by_label: request.issued_by_label.clone(),
         credential_binding_hash: request.credential_binding_hash.clone(),
         note_label: request.note_label.clone(),
+        issuer_display_name: request.issuer_display_name.clone(),
+        credit_range,
     };
 
     match state.backend.insert_invite_grant(write).await {
@@ -326,6 +362,8 @@ async fn create_invite_handler(
                 issued_by_label: request.issued_by_label,
                 credential_binding_hash: request.credential_binding_hash,
                 note_label: request.note_label,
+                issuer_display_name: request.issuer_display_name,
+                credit_range,
                 revoked_at: None,
             });
             (
@@ -683,6 +721,119 @@ mod tests {
             registry.lookup(&hash).expect("lookup").is_some(),
             "a minted invite must be immediately redeemable"
         );
+    }
+
+    #[tokio::test]
+    async fn a_bad_public_face_is_refused_without_database_access() {
+        let state = test_invite_admin_state_without_database().await;
+        let token = state.test_admin_token();
+        let app = invite_admin_router(state.inner);
+
+        let cases = [
+            (
+                serde_json::json!({"issuer_display_name": "two\nlines"}),
+                "InviteIssuerDisplayNameMalformed",
+            ),
+            (
+                serde_json::json!({"issuer_display_name": ""}),
+                "InviteIssuerDisplayNameMalformed",
+            ),
+            (
+                serde_json::json!({"issuer_display_name": "x".repeat(65)}),
+                "InviteIssuerDisplayNameMalformed",
+            ),
+            (
+                serde_json::json!({"credit_range_min": 6, "credit_range_max": 2}),
+                "InviteCreditRangeMalformed",
+            ),
+            (
+                serde_json::json!({"credit_range_min": -1, "credit_range_max": 2}),
+                "InviteCreditRangeMalformed",
+            ),
+            (
+                serde_json::json!({"credit_range_min": 1}),
+                "InviteCreditRangeMalformed",
+            ),
+            (
+                serde_json::json!({"credit_range_max": 1}),
+                "InviteCreditRangeMalformed",
+            ),
+        ];
+        for (extra, expected) in cases {
+            let mut body = serde_json::json!({
+                "tenant_mode": "derived",
+                "tenant_template_id": "tmpl-1",
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let response = app
+                .clone()
+                .oneshot(route_request(
+                    "POST",
+                    "/v1/admin/invites",
+                    Some(&body.to_string()),
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{extra}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["error"], expected, "{extra}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_created_invite_stores_its_public_face_in_the_database_and_the_cache() {
+        let Some(state) = test_invite_admin_state().await else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let registry = state.registry_handle();
+        let token = state.test_admin_token();
+        let backend = state.inner.backend.clone();
+        let app = invite_admin_router(state.inner);
+
+        let body = serde_json::json!({
+            "tenant_mode": "derived",
+            "tenant_template_id": "tmpl-1",
+            "issuer_display_name": "Trace Commons Pilot",
+            "credit_range_min": 2,
+            "credit_range_max": 6,
+        })
+        .to_string();
+        let response = app
+            .oneshot(route_request(
+                "POST",
+                "/v1/admin/invites",
+                Some(&body),
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let hash = json["invite_subject_hash"].as_str().unwrap();
+
+        let cached = registry.lookup(hash).unwrap().expect("cached");
+        assert_eq!(
+            cached.issuer_display_name.as_deref(),
+            Some("Trace Commons Pilot")
+        );
+        assert_eq!(cached.credit_range, Some((2, 6)));
+        let peek = backend.peek_invite_grant(hash).await.unwrap().unwrap();
+        assert_eq!(
+            peek.entry.issuer_display_name.as_deref(),
+            Some("Trace Commons Pilot")
+        );
+        assert_eq!(peek.entry.credit_range, Some((2, 6)));
+        assert_eq!(peek.consumed_uses, 0);
     }
 
     #[tokio::test]

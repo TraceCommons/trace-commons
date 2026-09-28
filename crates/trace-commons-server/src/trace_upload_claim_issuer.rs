@@ -41,6 +41,10 @@ use trace_commons_protocol::device_invite_subject::{
     DEVICE_INVITE_SUBJECT_REQUEST_SCHEMA_VERSION, DEVICE_INVITE_SUBJECT_REVOKED,
     DEVICE_INVITE_SUBJECT_STALE, DeviceInviteSubjectRequest, DeviceInviteSubjectResponse,
 };
+use trace_commons_protocol::invite_lookup::{
+    INVITE_LOOKUP_PATH, INVITE_LOOKUP_REASON_MALFORMED, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+    InviteLookupRequest, InviteLookupResponse,
+};
 use trace_commons_protocol::onboarding::{
     TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TRACE_ONBOARD_REQUEST_SCHEMA_VERSION,
     TraceInstanceEnrollRequest, TraceOnboardErrorCode, TraceOnboardRequest, TraceOnboardResponse,
@@ -526,6 +530,10 @@ impl TraceUploadClaimIssuerConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(60),
+            invite_lookup_rate_per_min: std::env::var("TRACE_COMMONS_INVITE_LOOKUP_RATE_PER_MIN")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(DEFAULT_INVITE_LOOKUP_RATE_PER_MIN),
             invite_admin_backend: self.invite_admin_backend.clone(),
             invite_admin_registry: self.invite_admin_registry.clone(),
             invite_registry_authoritative: self.invite_registry_authoritative,
@@ -680,6 +688,11 @@ struct TraceUploadClaimIssuerState {
     instance_replay_cache: Arc<crate::instance_enroll_guard::ReplayCache>,
     instance_rate_limiter: Arc<crate::instance_enroll_guard::InstanceRateLimiter>,
     instance_enroll_default_rate_per_min: u32,
+    /// Lookups per minute across ALL callers of `POST /v1/invite/lookup`. The
+    /// issuer does not see client addresses, so this is one shared bucket
+    /// (the same limiter as enroll, under its own key). It caps how fast the
+    /// route can be used to guess invite codes.
+    invite_lookup_rate_per_min: u32,
     invite_admin_backend: Option<Arc<PgBackend>>,
     invite_admin_registry: Option<Arc<DbInviteRegistry>>,
     invite_registry_authoritative: bool,
@@ -1124,6 +1137,7 @@ fn router_from_state(
         .route("/v1/trace-upload-claim", post(issue_claim_handler))
         .route("/v1/onboard", post(onboard_handler))
         .route("/v1/enroll", post(enroll_handler))
+        .route(INVITE_LOOKUP_PATH, post(invite_lookup_handler))
         .route(
             DEVICE_INVITE_SUBJECT_PATH,
             post(device_invite_subject_handler),
@@ -1578,6 +1592,80 @@ async fn onboard_handler(
 ) -> Result<Json<TraceOnboardResponse>, IssuerError> {
     let response = state.onboard(request).await?;
     Ok(Json(response))
+}
+
+/// Default cap on invite lookups per minute, all callers together.
+const DEFAULT_INVITE_LOOKUP_RATE_PER_MIN: u32 = 30;
+
+/// Key of the shared lookup bucket in the issuer's rate limiter.
+const INVITE_LOOKUP_RATE_KEY: &str = "invite-lookup";
+
+/// `POST /v1/invite/lookup`: is this invite usable, who issued it and what does
+/// it pay? Read-only: spends no use, mints nothing, writes nothing. The code
+/// rides in the body (never the URL, so it cannot reach an access log), and
+/// the log line carries only the invite's subject hash.
+async fn invite_lookup_handler(
+    State(state): State<Arc<TraceUploadClaimIssuerState>>,
+    body: Bytes,
+) -> Result<Json<InviteLookupResponse>, IssuerError> {
+    let result = state.invite_lookup(&body).await;
+    match &result {
+        Ok((subject_hash, response)) => tracing::info!(
+            invite_subject_hash = subject_hash.as_deref().unwrap_or("none"),
+            valid = response.valid,
+            reason = response.reason_label.as_deref().unwrap_or("none"),
+            "invite lookup"
+        ),
+        Err(error) => tracing::info!(outcome = error.message, "invite lookup refused"),
+    }
+    result.map(|(_, response)| Json(response))
+}
+
+impl TraceUploadClaimIssuerState {
+    /// Returns the presented invite's subject hash (when the code was
+    /// well-formed) beside the answer, for the caller's hash-only log line.
+    async fn invite_lookup(
+        &self,
+        body: &Bytes,
+    ) -> Result<(Option<String>, InviteLookupResponse), IssuerError> {
+        // Throttle before any parsing or database work: an unthrottled
+        // lookup is a free oracle for guessing bearer codes.
+        if !self.instance_rate_limiter.try_acquire(
+            INVITE_LOOKUP_RATE_KEY,
+            self.invite_lookup_rate_per_min,
+            std::time::Instant::now(),
+        ) {
+            return Err(IssuerError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: "invite_lookup_rate_limited",
+            });
+        }
+        let request: InviteLookupRequest = serde_json::from_slice(body)
+            .map_err(|_| IssuerError::bad_request("invalid invite lookup request"))?;
+        if request.schema_version != INVITE_LOOKUP_REQUEST_SCHEMA_VERSION {
+            return Err(IssuerError::bad_request("invalid invite lookup request"));
+        }
+        let invite_code = request.invite_code.trim();
+        if !valid_onboard_invite_code(invite_code) {
+            return Ok((
+                None,
+                InviteLookupResponse::invalid(INVITE_LOOKUP_REASON_MALFORMED),
+            ));
+        }
+        // Fail closed: without the invite database there is nothing to
+        // answer from, and the file allowlist carries no issuer or range.
+        let backend = self.invite_admin_backend.as_ref().ok_or(IssuerError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "invite_registry_not_configured",
+        })?;
+        let subject_hash = hash_invite_code(invite_code);
+        let peek = backend
+            .peek_invite_grant(&subject_hash)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        let response = crate::invite_lookup::classify_invite(peek.as_ref(), Utc::now());
+        Ok((Some(subject_hash), response))
+    }
 }
 
 async fn enroll_handler(
@@ -4424,6 +4512,7 @@ mod tests {
                 instance_replay_cache: Arc::clone(&self.instance_replay_cache),
                 instance_rate_limiter: Arc::clone(&self.instance_rate_limiter),
                 instance_enroll_default_rate_per_min: self.instance_enroll_default_rate_per_min,
+                invite_lookup_rate_per_min: self.invite_lookup_rate_per_min,
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
@@ -6745,6 +6834,161 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        }
+    }
+
+    /// `POST /v1/invite/lookup` without a database: routing, throttling,
+    /// fail-closed behaviour and secret-free logging. The database-backed
+    /// behaviour (labels, no use spent) is `tests/invite_lookup_pg.rs`.
+    mod invite_lookup {
+        use super::*;
+        use std::io::Write;
+        use std::sync::Mutex;
+        use trace_commons_protocol::invite_lookup::{
+            INVITE_LOOKUP_PATH, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+        };
+
+        const CODE: &str = "ABCDEFGHJKLMNPQR";
+
+        #[derive(Clone, Default)]
+        struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for LogSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+            type Writer = LogSink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        fn request_body(code: &str) -> String {
+            json!({
+                "schema_version": INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+                "invite_code": code,
+            })
+            .to_string()
+        }
+
+        fn state_with_rate(rate: u32) -> Arc<TraceUploadClaimIssuerState> {
+            let mut state = test_config().build_state().expect("state builds");
+            Arc::get_mut(&mut state)
+                .expect("state is unshared")
+                .invite_lookup_rate_per_min = rate;
+            state
+        }
+
+        async fn post(
+            state: Arc<TraceUploadClaimIssuerState>,
+            body: String,
+        ) -> (StatusCode, serde_json::Value) {
+            let router = router_from_state(state, StdDuration::from_secs(5), 64 * 1024);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(INVITE_LOOKUP_PATH)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("request completes");
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("body reads");
+            (status, serde_json::from_slice(&bytes).expect("json"))
+        }
+
+        #[tokio::test]
+        async fn a_malformed_code_is_answered_without_a_database() {
+            let (status, body) = post(state_with_rate(30), request_body("short")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({"valid": false, "reason_label": "malformed"}));
+        }
+
+        #[tokio::test]
+        async fn a_well_formed_code_fails_closed_without_the_invite_database() {
+            let (status, body) = post(state_with_rate(30), request_body(CODE)).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body, json!({"error": "invite_registry_not_configured"}));
+        }
+
+        #[tokio::test]
+        async fn a_wrong_schema_or_extra_field_is_a_bad_request() {
+            let state = state_with_rate(30);
+            let wrong = json!({"schema_version": "nope", "invite_code": CODE}).to_string();
+            assert_eq!(post(state.clone(), wrong).await.0, StatusCode::BAD_REQUEST);
+            let extra = json!({
+                "schema_version": INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+                "invite_code": CODE,
+                "device_public_key": "x",
+            })
+            .to_string();
+            assert_eq!(post(state, extra).await.0, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn lookups_past_the_budget_are_throttled() {
+            let state = state_with_rate(2);
+            for _ in 0..2 {
+                let (status, _) = post(state.clone(), request_body("short")).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+            let (status, body) = post(state.clone(), request_body("short")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(body, json!({"error": "invite_lookup_rate_limited"}));
+            // Throttled before the body is even parsed, so garbage is also
+            // refused rather than answered.
+            let (status, _) = post(state, "not json".to_string()).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[tokio::test]
+        async fn a_zero_budget_refuses_every_lookup() {
+            let (status, _) = post(state_with_rate(0), request_body("short")).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[test]
+        fn the_code_never_reaches_a_log_line() {
+            let sink = LogSink::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(sink.clone())
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            tracing::subscriber::with_default(subscriber, || {
+                // Callsites cached as disabled by a parallel test would
+                // otherwise ignore this scoped subscriber.
+                tracing::callsite::rebuild_interest_cache();
+                runtime.block_on(async {
+                    let state = state_with_rate(30);
+                    post(state.clone(), request_body(CODE)).await;
+                    post(state.clone(), request_body("short-but-secret")).await;
+                    post(state, "garbage-SECRETBODY".to_string()).await;
+                });
+            });
+            let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+            assert!(logged.contains("invite lookup"), "no log emitted: {logged}");
+            for secret in [CODE, "short-but-secret", "SECRETBODY"] {
+                assert!(
+                    !logged.contains(secret),
+                    "{secret} reached the log: {logged}"
+                );
+            }
         }
     }
 }
