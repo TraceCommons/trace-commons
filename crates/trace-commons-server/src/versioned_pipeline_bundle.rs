@@ -829,6 +829,36 @@ mod tests {
         assert!(named.contains(&dependency_content_hash(&embedder.content_descriptor())));
     }
 
+    /// A package is built at the current manifest format version, and a
+    /// package whose manifest names an earlier one is refused as
+    /// `bundle_package_invalid` before any policy is built from it.
+    #[test]
+    fn packages_build_at_the_current_manifest_format_version() {
+        let scorer = Arc::new(ReferencePerplexityScorer::new());
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let package =
+            MinimalPolicyBundle::minimal_package(&config(true), scorer.as_ref(), embedder.as_ref())
+                .unwrap();
+        assert_eq!(BUNDLE_MANIFEST_FORMAT_VERSION, 2);
+        assert_eq!(
+            package.manifest.format_version,
+            BUNDLE_MANIFEST_FORMAT_VERSION
+        );
+        assert_eq!(package.bundle_id, package.manifest.bundle_id().unwrap());
+
+        let mut earlier = package;
+        earlier.manifest.format_version = BUNDLE_MANIFEST_FORMAT_VERSION - 1;
+        let error = MinimalPolicyBundle::from_package_with_runtime(
+            earlier,
+            scorer,
+            embedder,
+            IsolatedPipelineIndex::new(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+    }
+
     #[tokio::test]
     async fn settle_operations_match_score_awards_and_use_shared_references() {
         let awards = InstrumentAwards::new(vec![

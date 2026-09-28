@@ -877,6 +877,21 @@ async fn tamper_stored_bundle_manifest_network(
     instrument_id: &str,
     network: &str,
 ) {
+    tamper_stored_bundle_manifest(tenant_id, bundle_id, |manifest| {
+        manifest["instruments"][instrument_id]["network"] =
+            serde_json::Value::String(network.to_string());
+    })
+    .await;
+}
+
+/// Rewrites a stored package's manifest JSON with `edit`, as an owner
+/// connection with the immutability trigger dropped and recreated exactly
+/// like `tamper_stored_bundle_package`, keeping the artifact bytes intact.
+async fn tamper_stored_bundle_manifest(
+    tenant_id: &str,
+    bundle_id: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .expect("TRACE_COMMONS_PG_TEST_DATABASE_URL must be set for this test");
     let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
@@ -905,8 +920,7 @@ async fn tamper_stored_bundle_manifest_network(
         .await
         .expect("load the stored package");
     let mut package: serde_json::Value = row.get("package");
-    package["manifest"]["instruments"][instrument_id]["network"] =
-        serde_json::Value::String(network.to_string());
+    edit(&mut package["manifest"]);
 
     tx.execute(
         "UPDATE pipeline_bundle_packages SET package = $3
@@ -925,6 +939,107 @@ async fn tamper_stored_bundle_manifest_network(
     .expect("recreate the immutability trigger");
 
     tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// Packages build at the current manifest format version (2), and a stored
+/// package at an earlier one no longer loads. That package fails closed the
+/// way any package that no longer loads does: a registration for the tenant
+/// is refused while it is on file, and a run bound to it fails as
+/// `bundle_package_invalid` with no new outcome.
+#[tokio::test]
+async fn a_stored_package_at_an_earlier_format_version_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("earlier-format-{}", uuid::Uuid::new_v4());
+
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let stored = service
+        .store()
+        .load_bundle(&tenant, &created.bundle_id)
+        .await
+        .unwrap()
+        .expect("the bound package is stored");
+    assert_eq!(stored.manifest.format_version, 2);
+    assert_eq!(
+        stored.manifest.format_version,
+        trace_commons_gate_api::pipeline::BUNDLE_MANIFEST_FORMAT_VERSION
+    );
+
+    tamper_stored_bundle_manifest(&tenant, &created.bundle_id, |manifest| {
+        manifest["format_version"] = serde_json::Value::from(1);
+    })
+    .await;
+    let error = service
+        .store()
+        .load_bundle(&tenant, &created.bundle_id)
+        .await
+        .expect_err("a package at an earlier format version does not load");
+    assert!(error.to_string().contains("bundle_package_invalid"));
+
+    let fresh = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: false,
+            variant: Some("fresh".to_string()),
+        },
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+    .expect("build package");
+    let refused = service
+        .store()
+        .register_bundle(&tenant, &fresh)
+        .await
+        .expect_err("a registration is refused while a stored package no longer loads");
+    assert!(refused.to_string().contains("bundle_package_invalid"));
+
+    let outcomes_before = service
+        .store()
+        .list_outcomes(&tenant, created.run_id)
+        .await
+        .unwrap();
+    let failed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run fails closed on a package at an earlier format version");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some("bundle_package_invalid")
+    );
+    assert_eq!(
+        service
+            .store()
+            .list_outcomes(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .len(),
+        outcomes_before.len(),
+        "no new outcome is recorded"
+    );
 }
 
 /// The per-tenant descriptor-conflict check in `register_bundle` reads
