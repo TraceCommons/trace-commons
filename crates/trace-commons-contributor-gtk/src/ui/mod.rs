@@ -637,9 +637,26 @@ impl App {
     }
 
     /// One daemon call, with its answer delivered back on the main loop.
+    ///
+    /// A failure is its fixed label. A caller that needs the payload a
+    /// daemon sent beside an error uses [`Self::call_with_failure`].
     pub fn call<F>(self: &Rc<Self>, method: &str, params: serde_json::Value, callback: F)
     where
         F: FnOnce(&Rc<App>, Result<serde_json::Value, String>) + 'static,
+    {
+        self.call_with_failure(method, params, move |app, result| {
+            callback(app, result.map_err(|failure| failure.label))
+        });
+    }
+
+    /// [`Self::call`], keeping the `result` a daemon sent beside an error.
+    pub fn call_with_failure<F>(
+        self: &Rc<Self>,
+        method: &str,
+        params: serde_json::Value,
+        callback: F,
+    ) where
+        F: FnOnce(&Rc<App>, Result<serde_json::Value, crate::backend::DaemonFailure>) + 'static,
     {
         let id = self.worker.call(method, params);
         self.callbacks.borrow_mut().insert(

@@ -47,6 +47,12 @@ export const coreStatusSchema = z.object({
     // by `parseLegacyMigrationStatus`, which refuses a malformed object
     // rather than letting it fail the whole status payload.
     legacy_invite_migration: z.unknown().optional(),
+    // Armed folders whose arming wording no longer claims a model scrubs
+    // them, and what the automatic-contribution gate holds. Read by
+    // `parseArmingRewordings` and `parseGateHeld`, which refuse a malformed
+    // value rather than letting it fail the whole status payload.
+    arming_rewordings: z.unknown().optional(),
+    automatic_contribution_held: z.unknown().optional(),
   }),
 });
 
