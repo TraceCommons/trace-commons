@@ -533,6 +533,14 @@ is enabled; the legacy minimum-byte setting does not toggle it on or off.
 
 See [account trust](./account-trust.md) for the activation and response contract.
 
+## Legacy invite linking (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED` | optional | `false` | `true`/`1` opens `POST /v1/account/invites/legacy-link[/challenge]`; anything but `true`/`1`/`false`/`0` fails startup. On requires the `TRACE_COMMONS_INGEST_ATTESTATION_*` key, which countersigns link records. Mark pooled tenants first. |
+
+See [legacy invite migration](./legacy-invite-migration.md).
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.

@@ -3,6 +3,8 @@
 
 use super::*;
 
+#[path = "tests/legacy_invite_link_tests.rs"]
+mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
 mod mission_catalog_tests;
 #[path = "tests/public_run_lifecycle_tests.rs"]
@@ -6187,6 +6189,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
         attestation_signing: None,
+        legacy_invite_link: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
         dedup_vector_index: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -27408,6 +27411,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
         attestation_signing: None,
+        legacy_invite_link: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
         dedup_vector_index: None,
         #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
