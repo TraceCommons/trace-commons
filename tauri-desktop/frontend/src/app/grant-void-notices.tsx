@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { changeProjectMode, settingsKeys } from "../features/settings/public";
@@ -7,10 +8,12 @@ import {
   type GrantVoid,
   parseGrantVoids,
   rearmTarget,
+  regrantOffered,
 } from "../lib/tauri/grant-void-notice";
 import { coreKeys } from "../lib/tauri/query-keys";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 import { useGrantVoidNotice } from "../lib/tauri/use-contributor-copy";
+import { flowPaths } from "./routes";
 
 /**
  * Every grant the core voided that no shell has shown yet.
@@ -47,6 +50,7 @@ export function GrantVoidNotices({ grantVoids }: { grantVoids: unknown }) {
 
 function GrantVoidNoticeCard({ grantVoid }: { grantVoid: GrantVoid }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const copy = useGrantVoidNotice(grantVoid.id, grantVoid.wire);
   const core = useCoreStatus();
   const acknowledge = useMutation({
@@ -85,6 +89,7 @@ function GrantVoidNoticeCard({ grantVoid }: { grantVoid: GrantVoid }) {
               ))}
             </ul>
             <span>{copy.data.rearm}</span>
+            {regrantOffered(copy.data) && <span>{copy.data.regrant}</span>}
             <div className="flex flex-wrap gap-2">
               {/* Both buttons are offered only once the notice is on screen.
                   "Turn back on" sits under the sentence that says pressing
@@ -98,6 +103,20 @@ function GrantVoidNoticeCard({ grantVoid }: { grantVoid: GrantVoid }) {
                   onClick={() => rearm.mutate(projectId)}
                 >
                   {copy.data.rearm_action}
+                </Button>
+              )}
+              {/* The automatic grant is given again only through its own
+                  screens, never in one click here: this button opens them,
+                  and giving the grant there clears the notice. */}
+              {regrantOffered(copy.data) && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !copy.data}
+                  onClick={() => navigate(flowPaths["automatic-contributing"])}
+                >
+                  {copy.data.regrant_action}
                 </Button>
               )}
               <Button

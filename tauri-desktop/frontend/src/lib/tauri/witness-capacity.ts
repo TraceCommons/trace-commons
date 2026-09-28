@@ -85,3 +85,23 @@ export function nextRetryLine(
   if (Number.isNaN(date.getTime())) return null;
   return `${notice.next_check}: ${format(date)}`;
 }
+
+/**
+ * For a review a person asked for that met a busy witness: "<label>: <local
+ * time>", from the daemon's `view` (`state: "Busy"`, `retry_at`,
+ * `retry_label`). `null` for any other outcome, or for a time or label this
+ * shell cannot read -- never a guessed time.
+ */
+export function reviewRetryLine(
+  view: unknown,
+  format: (date: Date) => string = (date) => date.toLocaleString(),
+): string | null {
+  if (!isRecord(view) || view.state !== "Busy") return null;
+  const label = view.retry_label;
+  const at = view.retry_at;
+  if (typeof label !== "string" || label.length === 0) return null;
+  if (typeof at !== "string") return null;
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return null;
+  return `${label}: ${format(date)}`;
+}

@@ -26,10 +26,16 @@ export function WitnessReviewOverlay({
   useEffect(() => {
     if (!open) setConfirmed(false);
   }, [open]);
+  // A busy witness judged nothing: it is not a refusal, and the person may
+  // send the review again once the witness has room.
+  const busy =
+    mutation.isSuccess && !mutation.data.ready && mutation.data.state === "Busy"
+      ? mutation.data
+      : null;
   const error = mutation.isError
     ? (copy.data?.failed ??
       "Witness review result could not be confirmed. Check the entry's current state before retrying.")
-    : mutation.isSuccess && !mutation.data.ready
+    : mutation.isSuccess && !mutation.data.ready && !busy
       ? (mutation.data.message ?? "Witness review was not confirmed.")
       : null;
   const redactions = mutation.data?.ready ? mutation.data.summary.redactions : {};
@@ -55,7 +61,7 @@ export function WitnessReviewOverlay({
             onClick={() => mutation.mutate(true)}
             disabled={
               mutation.isPending ||
-              mutation.isSuccess ||
+              (mutation.isSuccess && !busy) ||
               !copy.data ||
               !confirmed
             }
@@ -79,7 +85,7 @@ export function WitnessReviewOverlay({
             <Checkbox
               checked={confirmed}
               onCheckedChange={(value) => setConfirmed(value === true)}
-              disabled={mutation.isPending || mutation.isSuccess}
+              disabled={mutation.isPending || (mutation.isSuccess && !busy)}
               aria-label="Confirm sending unredacted session to witness"
             />
             <span>I understand and want to send this session for review.</span>
@@ -87,6 +93,15 @@ export function WitnessReviewOverlay({
         )}
         {mutation.isPending && copy.data && (
           <p className="m-0">{copy.data.working}</p>
+        )}
+        {busy && (
+          <div
+            role="status"
+            className="grid gap-1 rounded-[9px] border border-border px-3.5 py-3 text-foreground"
+          >
+            <p className="m-0">{busy.message ?? copy.data?.failed_busy}</p>
+            {busy.retryLine && <p className="m-0">{busy.retryLine}</p>}
+          </div>
         )}
         {error && (
           <p className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-destructive">
