@@ -786,6 +786,38 @@ fn certificate_signing_bytes(certificate: &serde_json::Value) -> Option<Vec<u8>>
     Some(bytes)
 }
 
+/// Ingest's collateral route, joined onto the ingest base.
+pub(crate) const COLLATERAL_PATH: &str = "/v1/attestation-collateral";
+
+/// Why collateral could not be had. Carries nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CollateralUnavailable;
+
+/// Ask ingest for the Intel DCAP collateral of one quote.
+///
+/// Ingest already runs a PCCS client; asking it keeps a second HTTP stack and
+/// Intel's endpoints out of this crate. Shared by the witness transport and
+/// the IronWire quote attestor (`crate::routing::proof_attestor`), so the two
+/// cannot come to fetch or parse it differently. The caller checks `url`
+/// against its allowlist first.
+pub(crate) async fn fetch_collateral(
+    http: &reqwest::Client,
+    url: url::Url,
+    quote: &[u8],
+) -> Result<Collateral, CollateralUnavailable> {
+    let response = http
+        .post(url)
+        .json(&serde_json::json!({ "quote_hex": hex::encode(quote) }))
+        .send()
+        .await
+        .map_err(|_| CollateralUnavailable)?;
+    if !response.status().is_success() {
+        return Err(CollateralUnavailable);
+    }
+    let body = response.text().await.map_err(|_| CollateralUnavailable)?;
+    parse_collateral(&body).map_err(|_| CollateralUnavailable)
+}
+
 /// The HTTP implementation.
 pub struct HttpWitnessTransport {
     http: reqwest::Client,
@@ -921,23 +953,11 @@ impl WitnessTransport for HttpWitnessTransport {
     async fn collateral(&self, quote: &[u8]) -> Result<Collateral, WitnessTrustError> {
         let base = self.allowed(&self.collateral_url)?;
         let url = base
-            .join("/v1/attestation-collateral")
+            .join(COLLATERAL_PATH)
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
-        let response = self
-            .http
-            .post(url)
-            .json(&serde_json::json!({ "quote_hex": hex::encode(quote) }))
-            .send()
+        fetch_collateral(&self.http, url, quote)
             .await
-            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)?;
-        if !response.status().is_success() {
-            return Err(WitnessTrustError::WitnessCollateralUnavailable);
-        }
-        let body = response
-            .text()
-            .await
-            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)?;
-        parse_collateral(&body).map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)
+            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)
     }
 
     async fn witness(

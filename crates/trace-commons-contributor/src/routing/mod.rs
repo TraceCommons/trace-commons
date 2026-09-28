@@ -26,6 +26,7 @@ pub mod attestation_report;
 pub mod attested;
 pub mod enriched;
 pub mod ironwire;
+pub mod proof_attestor;
 pub mod receipt;
 
 /// One inference hop, as the proxy recorded it.
