@@ -3249,6 +3249,10 @@ const CUE_WINDOW: usize = 48;
 /// It is paired with the `{8,}` bound in `entropy_candidate_regex`: the
 /// regex decides what is a candidate at all, so raising either one alone
 /// silently disables the band while the other still claims to cover it.
+///
+/// Below 10 characters this floor never binds: `ENTROPY_BITS_MIN` already
+/// requires at least 10 distinct characters, so what is actually redacted
+/// starts at 10. Pinned by `cued_entropy_floor_is_ten_distinct_characters`.
 const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
@@ -8519,6 +8523,56 @@ mod tests {
                  mathematically reach; ENTROPY_BITS_MIN must have changed: {out}"
             );
         }
+    }
+
+    /// The effective floor of the cued-entropy pass is a count of DISTINCT
+    /// characters, not a length: ten of them, whatever the token's length.
+    ///
+    /// Shannon entropy over a token's bytes cannot exceed log2 of the number
+    /// of distinct bytes in it. log2(9) ~= 3.17 is under `ENTROPY_BITS_MIN`
+    /// (3.2) and log2(10) ~= 3.32 is over it, so a token built from nine or
+    /// fewer distinct characters is never redacted by this pass however long
+    /// it is, and a 10-character token is redacted only when all ten
+    /// characters differ. The contributor README states the range in these
+    /// terms; this pins it. It documents current behaviour -- it passed when
+    /// written -- and exists so that a change to `ENTROPY_BITS_MIN` fails
+    /// here and forces the README to be re-derived.
+    #[test]
+    fn cued_entropy_floor_is_ten_distinct_characters() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let redacted = |value: &str| {
+            let (out, rep) = r.redact_text(&format!("api_key={value}"));
+            let gone = !out.contains(value);
+            assert_eq!(
+                gone, rep.blocked_secret_detected,
+                "redaction and blocked_secret_detected disagree for {value}: {out}"
+            );
+            gone
+        };
+
+        // Nine characters, all distinct: the best a 9-char token can do.
+        assert!(!redacted("Q7vM2xP9s"), "9 distinct chars cleared 3.2 bits");
+        // Ten characters, all distinct: just over the floor.
+        assert!(
+            redacted("Q7vM2xP9sL"),
+            "10 distinct chars were not redacted"
+        );
+        // Ten characters with one repeat (nine distinct): under the floor.
+        assert!(
+            !redacted("Q7vM2xP9sQ"),
+            "10 chars with only 9 distinct cleared 3.2 bits"
+        );
+        // Length does not rescue a small alphabet: 27 chars, 9 distinct.
+        assert!(
+            !redacted("Q7vM2xP9sQ7vM2xP9sQ7vM2xP9s"),
+            "a long token over 9 distinct chars cleared 3.2 bits"
+        );
+        // Ten distinct is enough at any length, even repeated.
+        assert!(
+            redacted("Q7vM2xP9sLQ7vM2xP9sLQ7vM2xP9sL"),
+            "a 30-char token over 10 distinct chars was not redacted"
+        );
     }
 
     /// The other half of #225's bargain: lowering the LENGTH floor must not
