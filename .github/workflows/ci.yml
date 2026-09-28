@@ -1175,11 +1175,17 @@ jobs:
           npm run render:aasa
           npm run check
           npm test
-      - name: Render fails closed without a Team ID
+      - name: Render without a Team ID skips (default) and refuses (strict or malformed)
         working-directory: community
         run: |
-          if env -u TC_APPLE_TEAM_ID node scripts/render-aasa.mjs; then
-            echo "render-aasa succeeded without TC_APPLE_TEAM_ID" >&2
+          env -u TC_APPLE_TEAM_ID node scripts/render-aasa.mjs
+          test ! -e public/.well-known/apple-app-site-association
+          if env -u TC_APPLE_TEAM_ID node scripts/render-aasa.mjs --require; then
+            echo "strict render succeeded without TC_APPLE_TEAM_ID" >&2
+            exit 1
+          fi
+          if TC_APPLE_TEAM_ID=nope node scripts/render-aasa.mjs; then
+            echo "render accepted a malformed Team ID" >&2
             exit 1
           fi
 

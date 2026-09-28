@@ -37,7 +37,8 @@ npm run serve
 ```
 
 `npm run deploy:pages` also renders `/.well-known/apple-app-site-association`
-from `TC_APPLE_TEAM_ID` and refuses to deploy without it; see
+from `TC_APPLE_TEAM_ID` (skipped with a warning when unset, refused when
+malformed, required with `TC_AASA_REQUIRED=1`); see
 [the runbook](../docs/operator/tracecommons-ai-community-site.md).
 
 Open `http://127.0.0.1:8788`. The app tries the API configured in

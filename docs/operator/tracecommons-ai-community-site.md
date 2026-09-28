@@ -40,12 +40,14 @@ proxied to `https://ingest.tracecommons.ai/v1/community/*`.
 
    ```sh
    cd community
-   TC_APPLE_TEAM_ID=<TEAMID> npm run deploy:pages
+   npm run deploy:pages                          # site only; AASA skipped
+   TC_APPLE_TEAM_ID=<TEAMID> npm run deploy:pages  # site plus AASA
    ```
 
    This command requires Cloudflare credentials in the operator environment.
-   It renders the AASA file first (see below) and refuses to deploy if
-   `TC_APPLE_TEAM_ID` is unset or malformed.
+   It renders the AASA file first (see below). With `TC_APPLE_TEAM_ID` unset
+   it warns and deploys the site without the file; with it malformed it
+   refuses to deploy.
 
 3. Edit `community/public/experience.json` for the current cohort prompt,
    milestone targets, and weekly rhythm. This is the participant-facing
@@ -163,7 +165,9 @@ submission so it can auto-accept.
 - Issuer onboarding response includes `profile_url` and `leaderboard_url`.
 - First accepted submission appears after snapshot recompute.
 - Withdraw profile flow removes the contributor after the next snapshot.
-- `scripts/check-aasa.sh https://tracecommons.ai` passes (see below).
+- For the native-passkey launch only: deploy with `TC_AASA_REQUIRED=1
+  TC_APPLE_TEAM_ID=<TEAMID>`, and `scripts/check-aasa.sh https://tracecommons.ai`
+  passes (see below).
 
 ## Apple app-site-association (native passkeys)
 
@@ -183,9 +187,20 @@ Apple's CDN) and finding the app's ID in it. Design:
 | `TC_MACOS_BUNDLE_ID` | Optional, default `ai.tracecommons.shell` (`macos/scripts/info-plist.sh`). |
 
 The body is exactly `{"webcredentials":{"apps":["<TEAMID>.ai.tracecommons.shell"]}}`.
-There is no `applinks` section. With `TC_APPLE_TEAM_ID` unset or malformed the
-render step deletes any stale file, writes nothing and exits non-zero, and
-`npm run deploy:pages` stops there. The site never ships a placeholder.
+There is no `applinks` section. The render step never ships a placeholder or a
+bad ID:
+
+- `TC_APPLE_TEAM_ID` unset or empty: it deletes any stale file, writes nothing,
+  prints `AASA not rendered: TC_APPLE_TEAM_ID unset;
+  /.well-known/apple-app-site-association will 404` and exits 0, so unrelated
+  community-site deploys are not blocked while the Team ID is undecided. The
+  worker answers a real 404 for the path, which is safe (the app's passkey
+  calls fail closed).
+- Set but not `^[A-Z0-9]{10}$` (whitespace and newlines included): exits 1 and
+  the deploy stops.
+- Strict mode, `npm run render:aasa -- --require` or `TC_AASA_REQUIRED=1`:
+  unset also exits 1. Use it for the native-passkey launch, so a deploy that
+  is meant to carry the association cannot silently omit it.
 
 **How it is served.** `community/public/_worker.js` answers `/.well-known/*`
 itself, before its SPA fallback. Without that, a missing AASA (no dot in the

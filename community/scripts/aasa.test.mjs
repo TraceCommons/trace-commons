@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { renderAasa } from "./render-aasa.mjs";
+import { OUTPUT_PATH, renderAasa } from "./render-aasa.mjs";
 
 const scriptsDir = fileURLToPath(new URL(".", import.meta.url));
 const renderScript = join(scriptsDir, "render-aasa.mjs");
@@ -23,20 +23,43 @@ test("bundle id can be overridden", () => {
   assert.deepEqual(JSON.parse(body).webcredentials.apps, [`${TEAM}.ai.example.app`]);
 });
 
-for (const bad of [undefined, "", "abcde12345", "ABCDE1234", "ABCDE123456", "ABCDE-2345", "TEAMID_HERE", "XXXXXXXXXX ", "ABCDE1234\n"]) {
-  test(`unset or bad Team ID is refused: ${JSON.stringify(bad)}`, () => {
-    assert.throws(() => renderAasa(bad === undefined ? {} : { TC_APPLE_TEAM_ID: bad }), /TC_APPLE_TEAM_ID/);
+for (const bad of ["abcde12345", "ABCDE1234", "ABCDE123456", "ABCDE-2345", "TEAMID_HERE", "XXXXXXXXXX ", " ", "ABCDE1234\n"]) {
+  test(`malformed Team ID is refused: ${JSON.stringify(bad)}`, () => {
+    assert.throws(() => renderAasa({ TC_APPLE_TEAM_ID: bad }), /TC_APPLE_TEAM_ID/);
+    assert.throws(() => renderAasa({ TC_APPLE_TEAM_ID: bad }, { strict: true }), /TC_APPLE_TEAM_ID/);
   });
 }
 
-test("the render step exits non-zero and writes nothing without a Team ID", () => {
+test("unset or empty Team ID renders nothing by default and is refused when strict", () => {
+  for (const env of [{}, { TC_APPLE_TEAM_ID: "" }]) {
+    assert.equal(renderAasa(env), null);
+    assert.throws(() => renderAasa(env, { strict: true }), /TC_APPLE_TEAM_ID/);
+  }
+});
+
+function runRender(extraEnv = {}, args = []) {
   const env = { ...process.env };
   delete env.TC_APPLE_TEAM_ID;
-  const result = spawnSync(process.execPath, [renderScript], { env, encoding: "utf8" });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /TC_APPLE_TEAM_ID/);
-  const bad = spawnSync(process.execPath, [renderScript], { env: { ...env, TC_APPLE_TEAM_ID: "nope" }, encoding: "utf8" });
-  assert.notEqual(bad.status, 0);
+  delete env.TC_AASA_REQUIRED;
+  return spawnSync(process.execPath, [renderScript, ...args], { env: { ...env, ...extraEnv }, encoding: "utf8" });
+}
+
+test("render step: unset warns, exits 0 and leaves no file (a stale one is removed)", async () => {
+  await mkdir(dirname(OUTPUT_PATH), { recursive: true });
+  await writeFile(OUTPUT_PATH, "stale");
+  const result = runRender();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /AASA not rendered: TC_APPLE_TEAM_ID unset; \/\.well-known\/apple-app-site-association will 404/);
+  await assert.rejects(readFile(OUTPUT_PATH));
+});
+
+test("render step: unset with --require or TC_AASA_REQUIRED=1 exits 1", () => {
+  assert.notEqual(runRender({}, ["--require"]).status, 0);
+  assert.notEqual(runRender({ TC_AASA_REQUIRED: "1" }).status, 0);
+});
+
+test("render step: malformed exits 1 even without strict mode", () => {
+  assert.notEqual(runRender({ TC_APPLE_TEAM_ID: "nope" }).status, 0);
 });
 
 async function loadWorker() {
@@ -84,6 +107,14 @@ test("worker never returns the index fallback for a missing AASA", async () => {
   const spa = await worker.fetch(new Request("https://tracecommons.ai/leaderboard"), env);
   assert.equal(spa.status, 200);
   assert.match(await spa.text(), /index/);
+});
+
+test("with no rendered file the worker 404s the AASA path, not the index fallback", async () => {
+  const worker = await loadWorker();
+  const env = { ASSETS: assetsFor({ "/": "<html>index</html>" }) };
+  const response = await worker.fetch(new Request(AASA_URL), env);
+  assert.equal(response.status, 404);
+  assert.doesNotMatch(await response.text(), /html/);
 });
 
 test("worker refuses to relay a redirect from the asset layer", async () => {
