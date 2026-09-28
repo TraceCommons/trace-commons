@@ -953,7 +953,9 @@ impl Sheet {
             sheet.search_summary.set_text(copy.working);
             sheet.transcript.show_sentence(copy.working);
             let result_sheet = Rc::clone(&sheet);
-            sheet.app.call(
+            // `call_with_failure`: a busy witness sends the time to try again
+            // in the `result` beside its error label.
+            sheet.app.call_with_failure(
                 "witness_preview_request",
                 serde_json::json!({
                     "entry_id": entry.entry_id, "raw_session_confirmed": true
@@ -968,7 +970,10 @@ impl Sheet {
                             result_sheet.load()
                         }
                         Ok(_) => result_sheet.fill_failure("witness-review-incomplete"),
-                        Err(label) => result_sheet.fill_failure(&label),
+                        Err(failure) => result_sheet.fill_failure_with(
+                            &failure.label,
+                            crate::copy::witness_busy_retry_line(failure.result.as_ref()),
+                        ),
                     }
                     result_sheet.sync_witness();
                 },
@@ -1265,6 +1270,13 @@ impl Sheet {
     }
 
     fn fill_failure(self: &Rc<Self>, label: &str) {
+        self.fill_failure_with(label, None);
+    }
+
+    /// [`Self::fill_failure`], with a second line under the sentence: when a
+    /// busy witness asked to be tried again. Shown only for a review the
+    /// person asked for, the one path that line can describe.
+    fn fill_failure_with(self: &Rc<Self>, label: &str, retry_line: Option<String>) {
         self.pinned.set(false);
         self.sync_contribute();
         self.sync_witness();
@@ -1293,9 +1305,13 @@ impl Sheet {
                 _ => "Something went wrong working out what would be sent. Nothing has been sent.",
             }
         };
+        let text = match retry_line {
+            Some(retry) if self.witness_requested.get() => format!("{sentence}\n{retry}"),
+            _ => sentence.to_string(),
+        };
         self.copy_all.set_sensitive(false);
-        self.transcript.show_sentence(sentence);
-        self.search_summary.set_text(sentence);
+        self.transcript.show_sentence(&text);
+        self.search_summary.set_text(&text);
     }
 
     fn set_summary_tone(&self, tone: Tone) {

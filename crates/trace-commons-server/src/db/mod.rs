@@ -238,6 +238,21 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<AccountInviteRedemption, DatabaseError> {
         Err(DatabaseError::Pool("account_invite_unavailable".into()))
     }
+    /// Store a legacy-link challenge for the authenticated account. `false`
+    /// when the account already holds the maximum of open challenges.
+    async fn store_legacy_invite_link_challenge(
+        &self,
+        _challenge: &crate::legacy_invite_link::ChallengeWrite,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("legacy_invite_link_unavailable".into()))
+    }
+    /// Record a verified, countersigned legacy invite link (V81).
+    async fn link_legacy_invite(
+        &self,
+        _attempt: &crate::legacy_invite_link::LinkDbAttempt,
+    ) -> Result<crate::legacy_invite_link::LinkDbOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("legacy_invite_link_unavailable".into()))
+    }
     async fn get_reward_offer(
         &self,
         _program: uuid::Uuid,

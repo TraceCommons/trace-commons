@@ -16,7 +16,7 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 
-use crate::backend::{Backend, DaemonEvent};
+use crate::backend::{Backend, DaemonEvent, DaemonFailure};
 use crate::model::PreviewSummary;
 
 #[cfg(test)]
@@ -40,7 +40,9 @@ pub enum Job {
 }
 
 pub enum Outcome {
-    Call(Result<serde_json::Value, String>),
+    /// The daemon's answer, or its failure with any payload the daemon sent
+    /// beside the label -- see [`DaemonFailure`].
+    Call(Result<serde_json::Value, DaemonFailure>),
     /// The summary, and the redacted body when this deployment can serve
     /// one. `None` for the body is "not available here", never "empty".
     Preview(Result<(PreviewSummary, Option<String>), String>),
@@ -137,9 +139,11 @@ impl Worker {
 
             for (id, job) in job_rx {
                 let outcome = match job {
-                    Job::Call { method, params } => {
-                        Outcome::Call(backend.call(&method, params).map_err(|e| e.to_string()))
-                    }
+                    Job::Call { method, params } => Outcome::Call(
+                        backend
+                            .call(&method, params)
+                            .map_err(DaemonFailure::from_error),
+                    ),
                     Job::Preview { entry_id } => {
                         Outcome::Preview(backend.preview(&entry_id).map_err(|e| e.to_string()))
                     }

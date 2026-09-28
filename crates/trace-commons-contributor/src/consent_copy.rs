@@ -265,11 +265,11 @@ pub const VOID_REARM_FAILED: &str =
 /// and each of those gets its own notice. A project whose terms still cover
 /// what is in force stays armed. So "unaffected" would be false.
 ///
-/// K10: no shell can give the grant yet (`grant_automatic` has no caller
-/// outside the daemon until the onboarding screen exists), so this notice
-/// offers no action and promises none. When K10 lands, restore a re-grant
-/// sentence here, in the spirit of `VOID_PROJECT_REARM`, and give the notice
-/// a `rearm_action` that calls `grant_automatic`.
+/// K10: only the Tauri client can give the grant, through its Flow 1
+/// screens. This sentence promises no re-grant, so it stays true in the
+/// shells that cannot give one (macOS, Windows, GTK). A shell that can asks
+/// for [`void_notice_for_wire_with_regrant`], which adds
+/// [`VOID_GRANT_REGRANT`] and its button beside this sentence.
 pub const VOID_GRANT_PROJECTS: &str = "Projects still set to contribute automatically carry on. Any project that stopped has its own notice.";
 
 /// The title of a void this build cannot place: a `kind` it does not know,
@@ -456,6 +456,53 @@ pub fn void_notice_for_wire(void: &serde_json::Value) -> Option<VoidNoticeCopy> 
     }
 }
 
+/// How the Flow 1 grant is given again, for a shell that can give it.
+///
+/// **DRAFT, NEEDS APPROVAL.** Shown after [`VOID_GRANT_PROJECTS`], in the
+/// spirit of [`VOID_PROJECT_REARM`]. The re-grant is not one click: the
+/// button opens the grant screens again (scope, path, both disclosures, the
+/// grant), because what changed is exactly what those screens disclose.
+/// Giving the grant again clears the notice (`ProjectPolicy::grant_automatic`).
+pub const VOID_GRANT_REGRANT: &str = "You can turn automatic contributing back on for new projects. You go through the same choices again, and doing so agrees to the new settings.";
+
+/// The button beside [`VOID_GRANT_REGRANT`]. It opens the grant screens; it
+/// gives nothing by itself.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const VOID_GRANT_REGRANT_ACTION: &str = "Review and turn back on";
+
+/// A void notice for a shell that can give the Flow 1 grant.
+///
+/// `notice` is exactly [`void_notice_for_wire`]'s, flattened, so the shared
+/// fields and their invariants are unchanged (`rearm_action` is still the
+/// project button and still absent on the grant's notice). `regrant` and
+/// `regrant_action` are present exactly on the grant's notice. A shell that
+/// cannot give the grant keeps calling [`void_notice_for_wire`], and never
+/// promises a re-grant it has no screen for.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct RegrantVoidNoticeCopy {
+    #[serde(flatten)]
+    pub notice: VoidNoticeCopy,
+    pub regrant: Option<&'static str>,
+    pub regrant_action: Option<&'static str>,
+}
+
+/// [`void_notice_for_wire`], plus the re-grant on the grant's notice. The
+/// `kind` branch stays here, so the shell never decides which notice can be
+/// re-granted.
+#[must_use]
+pub fn void_notice_for_wire_with_regrant(
+    void: &serde_json::Value,
+) -> Option<RegrantVoidNoticeCopy> {
+    let notice = void_notice_for_wire(void)?;
+    let is_grant = void.get("kind").and_then(serde_json::Value::as_str) == Some("automatic_grant");
+    Some(RegrantVoidNoticeCopy {
+        notice,
+        regrant: is_grant.then_some(VOID_GRANT_REGRANT),
+        regrant_action: is_grant.then_some(VOID_GRANT_REGRANT_ACTION),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The Flow 1 grant screens (K10, K11)
 // ---------------------------------------------------------------------------
@@ -501,10 +548,11 @@ pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted t
 ///
 /// **DRAFT, NEEDS APPROVAL.** Worded for what the client can know, which is
 /// less than the spec asks for. A NEAR AI or wallet join writes the witness
-/// the commons publishes, without asking; Settings can write one too; and
-/// the config records neither, so this cannot say which happened. When the
-/// daemon records the origin, this becomes two sentences and a branch.
-pub const AUTO_WITNESS_ORIGIN: &str = "This witness was set up either by the commons you joined, which published its address and keys and had them saved when you joined without asking you, or by someone entering it in Settings. This app keeps no record of which.";
+/// the commons publishes, without asking; an inference connection the
+/// contributor chose writes one (K12); Settings can write one too; and the
+/// config records none of these, so this cannot say which happened. When the
+/// daemon records the origin, this becomes separate sentences and a branch.
+pub const AUTO_WITNESS_ORIGIN: &str = "This witness was set up by the commons you joined, which published its address and keys and had them saved when you joined without asking you; by an inference connection you chose; or by someone entering it in Settings. This screen cannot tell which.";
 
 /// Why the scope picker blocks the grant (R7), and what declining means.
 ///
@@ -900,6 +948,190 @@ pub fn gate_held_notice_for_wire(value: &serde_json::Value) -> Option<GateHeldNo
     })
 }
 
+// ---------------------------------------------------------------------------
+// Connecting inference (K12)
+// ---------------------------------------------------------------------------
+//
+// The optional onboarding step through which a contributor connects an
+// operator-published inference connection, the route to a witness for an
+// invited contributor (connect-and-forget design, rev 7). Every sentence
+// here is DRAFT, NEEDS APPROVAL. Each is worded to the daemon's contract in
+// `docs/contributor-daemon-ipc-v1_1.md`, "Connecting inference". Only the
+// Tauri client renders them.
+
+/// What connecting inference offers, and that skipping it is fine.
+///
+/// **DRAFT, NEEDS APPROVAL.** "Changes nothing" rather than "stays on this
+/// computer": a contributor who joined through NEAR AI may already have the
+/// commons' witness, and skipping leaves that as it is.
+pub const INFERENCE_WHY: &str = "Connecting inference is optional. It is one way to get a witness, a service that redacts your sessions inside an enclave before they are contributed. If you skip it, nothing about how your sessions are redacted changes.";
+
+/// Why the step asks for account sign-in: every connection method presents
+/// the account session, never the device key.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_SIGN_IN: &str =
+    "Connecting needs your account, so sign in first. Skipping needs nothing.";
+
+/// Account sign-in did not finish.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_SIGN_IN_FAILED: &str = "Sign-in did not finish. Try again, or skip this step.";
+
+/// The offers or the current connection could not be read.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_LOAD_FAILED: &str =
+    "The connections could not be read. Try again, or skip this step.";
+
+/// When the commons publishes no offer.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_NONE_OFFERED: &str =
+    "The commons you joined offers no inference connection right now. Continuing changes nothing.";
+
+/// A selection grants no other consent.
+///
+/// **DRAFT, NEEDS APPROVAL.** The IPC contract: no folder, trace,
+/// raw-session, consent-scope or standing contribution consent follows from
+/// selecting or installing, and no project mode changes.
+pub const INFERENCE_GRANTS_NOTHING: &str = "Connecting chooses no folders or sessions, does not change how your traces may be used, and does not turn on automatic contributing.";
+
+/// One installed device per account, said before selecting.
+///
+/// **DRAFT, NEEDS APPROVAL.** Every select revokes the account's live
+/// connection, so installing on another device later removes it here.
+pub const INFERENCE_ONE_DEVICE: &str = "A connection works on one device per account. Connecting later from another device removes it from this one.";
+
+/// Said before selecting when the account's selection is not installed on
+/// this device, which means another device holds it.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_OTHER_DEVICE: &str = "Your account is connected on another device. Connecting here replaces that connection, and the other device stops using its witness.";
+
+/// Said before installing: the separate step, and that it voids armed grants.
+///
+/// **DRAFT, NEEDS APPROVAL.** Installing changes the witness, a new recipient
+/// under R6, so the watcher's next sweep voids every armed project and the
+/// automatic grant given under the old terms, each with its own notice. The
+/// IPC contract asks a shell to say so before the contributor confirms.
+pub const INFERENCE_INSTALL: &str = "Using this connection's witness on this device is a separate step. It changes who reads your sessions, so any automatic contributing already turned on here stops, and you are asked again before it restarts.";
+
+/// After install.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_INSTALLED: &str =
+    "This device uses the witness from your inference connection.";
+
+/// After a select that removed this device's earlier connection's witness
+/// (`previous_witness_removed`).
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_PREVIOUS_REMOVED: &str = "The witness this device used before was removed, because choosing again ended that connection.";
+
+/// The selection's revision was retired (`reselection_required`).
+///
+/// **DRAFT, NEEDS APPROVAL.** An installed witness from a retired revision
+/// stays installed until the contributor reselects or disconnects.
+pub const INFERENCE_RESELECT: &str = "The connection you chose is no longer offered in that form. Choose again to keep it current; until then, the witness already on this device stays.";
+
+/// A refused or failed select.
+///
+/// **DRAFT, NEEDS APPROVAL.** A failed select holds nothing and installs
+/// nothing on this device. It does not claim the account is unchanged: a
+/// response refused after the server recorded the choice would make that
+/// false.
+pub const INFERENCE_SELECT_FAILED: &str =
+    "The connection was not completed, and nothing was set up on this device.";
+
+/// A refused or failed install: every refusal writes nothing.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_INSTALL_FAILED: &str =
+    "The witness was not set up on this device, and nothing was written.";
+
+/// What disconnecting does, in the daemon's order.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_DISCONNECT: &str = "Disconnecting removes this connection's witness from this device, then ends the connection on your account.";
+
+/// A disconnect whose server half is still owed (`server_disconnect:
+/// "pending"`): the local witness is already gone.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_DISCONNECT_PENDING: &str = "The witness was removed from this device, but the connection on your account could not be ended yet. Sign in and disconnect again to finish.";
+
+/// An offer whose `disclosure_version` this build has no words for.
+///
+/// **DRAFT, NEEDS APPROVAL.**
+pub const INFERENCE_UNKNOWN_DISCLOSURE: &str =
+    "This app cannot describe this connection, so it cannot be chosen here.";
+
+/// The disclosure `inference-connection-disclosure-v1` names: what choosing
+/// an offer means.
+///
+/// **DRAFT, NEEDS APPROVAL.** The offer carries a witness (URL, signing
+/// address, pins) and, optionally, an inference receipt endpoint; the
+/// receipt sentence follows `void_reason_line("receipt-endpoint-changed")`.
+/// The server's own description text is never shown.
+pub const INFERENCE_DISCLOSURE_V1: &str = "The commons you joined publishes this connection. Once it is set up on this device, sessions you contribute are sent unredacted to its witness first, which redacts them inside an enclave. If the connection includes a receipt address, your AI provider is also asked for a receipt for the last call in each of those sessions, which tells it they are being contributed.";
+
+/// The words for an offer's `disclosure_version`, or `None` for a version
+/// this build does not know. A shell that gets `None` does not offer the
+/// connection: describing it in another version's words could be false.
+#[must_use]
+pub fn inference_connection_disclosure(disclosure_version: &str) -> Option<&'static str> {
+    (disclosure_version == trace_commons_protocol::inference_connection::DISCLOSURE_VERSION)
+        .then_some(INFERENCE_DISCLOSURE_V1)
+}
+
+/// Everything the connect-inference step says, except an offer's disclosure,
+/// which [`inference_connection_disclosure`] picks per offer.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct InferenceConnectionCopy {
+    pub why: &'static str,
+    pub sign_in: &'static str,
+    pub sign_in_failed: &'static str,
+    pub load_failed: &'static str,
+    pub none_offered: &'static str,
+    pub grants_nothing: &'static str,
+    pub one_device: &'static str,
+    pub other_device: &'static str,
+    pub install: &'static str,
+    pub installed: &'static str,
+    pub previous_removed: &'static str,
+    pub reselect: &'static str,
+    pub select_failed: &'static str,
+    pub install_failed: &'static str,
+    pub disconnect: &'static str,
+    pub disconnect_pending: &'static str,
+    pub unknown_disclosure: &'static str,
+}
+
+/// The connect-inference step's words.
+#[must_use]
+pub fn inference_connection_copy() -> InferenceConnectionCopy {
+    InferenceConnectionCopy {
+        why: INFERENCE_WHY,
+        sign_in: INFERENCE_SIGN_IN,
+        sign_in_failed: INFERENCE_SIGN_IN_FAILED,
+        load_failed: INFERENCE_LOAD_FAILED,
+        none_offered: INFERENCE_NONE_OFFERED,
+        grants_nothing: INFERENCE_GRANTS_NOTHING,
+        one_device: INFERENCE_ONE_DEVICE,
+        other_device: INFERENCE_OTHER_DEVICE,
+        install: INFERENCE_INSTALL,
+        installed: INFERENCE_INSTALLED,
+        previous_removed: INFERENCE_PREVIOUS_REMOVED,
+        reselect: INFERENCE_RESELECT,
+        select_failed: INFERENCE_SELECT_FAILED,
+        install_failed: INFERENCE_INSTALL_FAILED,
+        disconnect: INFERENCE_DISCONNECT,
+        disconnect_pending: INFERENCE_DISCONNECT_PENDING,
+        unknown_disclosure: INFERENCE_UNKNOWN_DISCLOSURE,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,7 +1289,7 @@ mod tests {
         assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("second enclave"));
         assert!(AUTO_RAW_SEND_BOTH_ENCLAVES.contains("second operator"));
         // The origin sentence does not pretend to know which happened.
-        assert!(AUTO_WITNESS_ORIGIN.contains("no record of which"));
+        assert!(AUTO_WITNESS_ORIGIN.contains("cannot tell which"));
         // No default scope, and declining is not a floor-scope grant.
         assert!(AUTO_SCOPE_REQUIRED.contains("Nothing is selected for you"));
         // The exemption is for projects with sessions on disk at the grant,
@@ -1330,8 +1562,9 @@ mod tests {
         );
         assert_eq!(notice.body, VOID_GRANT_BODY);
         assert_eq!(notice.rearm, VOID_GRANT_PROJECTS);
-        // No shell can give the grant again yet (K10 is unbuilt), so the
-        // notice neither offers it nor promises it.
+        // The shared notice is for every shell, and only Tauri can give the
+        // grant again, so it neither offers it nor promises it. Tauri adds
+        // the re-grant through `void_notice_for_wire_with_regrant`.
         assert_eq!(notice.rearm_action, None);
         assert_eq!(notice.rearm_failed, None);
         assert!(!notice.rearm.contains("back on"), "{}", notice.rearm);
@@ -1514,5 +1747,111 @@ mod tests {
         ] {
             assert_eq!(witness_capacity_notice_for_wire(&value), None, "{value}");
         }
+    }
+
+    /// K10: a shell that can give the Flow 1 grant (Tauri) gets the grant
+    /// notice with a re-grant sentence and button. The notice itself is the
+    /// shared one, unchanged: the project-arming button stays absent, since
+    /// there is no project to arm, and the re-grant is a separate field.
+    #[test]
+    fn a_shell_that_can_regrant_offers_it_on_the_grant_notice() {
+        let wire = serde_json::json!({
+            "id": 5, "kind": "automatic_grant", "project_id": null,
+            "project_label": null, "reasons": ["witness-changed"],
+        });
+        let copy = void_notice_for_wire_with_regrant(&wire).expect("a notice");
+        assert_eq!(copy.notice, void_notice_for_wire(&wire).unwrap());
+        assert_eq!(copy.notice.rearm_action, None);
+        assert_eq!(copy.regrant, Some(VOID_GRANT_REGRANT));
+        assert_eq!(copy.regrant_action, Some(VOID_GRANT_REGRANT_ACTION));
+        // Flattened, so a shell reads the same fields plus the two new ones.
+        let value = serde_json::to_value(&copy).expect("serialises");
+        assert_eq!(value["rearm"], VOID_GRANT_PROJECTS);
+        assert_eq!(value["regrant"], VOID_GRANT_REGRANT);
+        assert_eq!(value["regrant_action"], VOID_GRANT_REGRANT_ACTION);
+    }
+
+    /// Only the grant's notice is re-granted. A project notice keeps its own
+    /// "Turn back on", and an unplaced one offers nothing.
+    #[test]
+    fn only_the_grant_notice_carries_the_regrant() {
+        for wire in [
+            serde_json::json!({
+                "id": 1, "kind": "project", "project_id": "p",
+                "project_label": "api", "reasons": ["scopes-widened"],
+            }),
+            serde_json::json!({ "id": 2, "kind": "folder", "reasons": [] }),
+        ] {
+            let copy = void_notice_for_wire_with_regrant(&wire).expect("a notice");
+            assert_eq!(copy.notice, void_notice_for_wire(&wire).unwrap());
+            assert_eq!(copy.regrant, None, "{wire}");
+            assert_eq!(copy.regrant_action, None, "{wire}");
+        }
+        assert!(void_notice_for_wire_with_regrant(&serde_json::json!("x")).is_none());
+    }
+
+    /// The re-grant is fresh consent: it goes back through the choices and
+    /// agrees to the settings now in force, and it is about new projects.
+    #[test]
+    fn the_regrant_sentence_says_it_goes_through_the_choices_again() {
+        assert!(VOID_GRANT_REGRANT.contains("new projects"));
+        assert!(VOID_GRANT_REGRANT.contains("same choices again"));
+        assert!(VOID_GRANT_REGRANT.contains("agrees to the new settings"));
+        assert!(!VOID_GRANT_REGRANT_ACTION.is_empty());
+    }
+
+    /// K12: an offer is described only in a disclosure version this build
+    /// knows. A version it does not know gets no words, so a shell cannot
+    /// offer that connection rather than describe it wrongly.
+    #[test]
+    fn a_connection_is_described_only_in_a_known_disclosure_version() {
+        let known = trace_commons_protocol::inference_connection::DISCLOSURE_VERSION;
+        assert_eq!(
+            inference_connection_disclosure(known),
+            Some(INFERENCE_DISCLOSURE_V1)
+        );
+        assert_eq!(
+            inference_connection_disclosure("inference-connection-disclosure-v2"),
+            None
+        );
+        assert_eq!(inference_connection_disclosure(""), None);
+    }
+
+    /// What connecting inference says before each step, held to the daemon's
+    /// contract (`docs/contributor-daemon-ipc-v1_1.md`, "Connecting
+    /// inference").
+    #[test]
+    fn the_inference_connection_copy_says_what_the_daemon_does() {
+        let copy = inference_connection_copy();
+        // Optional, and one route to a witness, not the door to anything.
+        assert!(copy.why.contains("optional"));
+        assert!(copy.why.contains("witness"));
+        // A selection grants no other consent.
+        for word in ["folders", "used", "automatic contributing"] {
+            assert!(copy.grants_nothing.contains(word), "{word}");
+        }
+        // Installing changes the witness, which voids armed grants.
+        assert!(copy.install.contains("separate"));
+        assert!(copy.install.contains("stops"));
+        // One installed device per account.
+        assert!(copy.one_device.contains("one device"));
+        assert!(copy.other_device.contains("stops using"));
+        // A retired revision keeps the installed witness until chosen again.
+        assert!(copy.reselect.contains("stays"));
+        // A refused install writes nothing.
+        assert!(copy.install_failed.contains("nothing was written"));
+        assert!(copy.previous_removed.contains("removed"));
+        assert!(copy.disconnect.contains("removes"));
+        let value = serde_json::to_value(copy).expect("serialises");
+        for (key, field) in value.as_object().expect("an object") {
+            assert!(field.as_str().is_some_and(|s| !s.is_empty()), "{key}");
+        }
+    }
+
+    /// The origin sentence names every route that writes a witness, now that
+    /// connecting inference is one.
+    #[test]
+    fn the_witness_origin_names_connected_inference() {
+        assert!(AUTO_WITNESS_ORIGIN.contains("inference connection"));
     }
 }

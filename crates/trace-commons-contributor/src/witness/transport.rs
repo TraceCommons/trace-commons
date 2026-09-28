@@ -1101,6 +1101,35 @@ pub struct TokenBundleRequest {
     pub restricted_token_consent: bool,
 }
 
+/// Read a non-success token-bundle answer.
+///
+/// The exact `503 witness_saturated` pair is the one refusal that judged
+/// nothing: the witness is busy, and a person who asked for this review can
+/// try again after the witness's own (bounded) delay. Everything else keeps
+/// this route's fail-closed reading, the witness declining the evidence.
+/// Only the head of the body is read, as on the ordinary route.
+async fn token_review_refusal(response: reqwest::Response) -> WitnessTrustError {
+    const REFUSAL_BODY_BOUND: usize = 4096;
+    let status = response.status().as_u16();
+    let retry_after_secs = saturation_retry_after(response.headers());
+    let saturated = match response.bytes().await {
+        Ok(body) => {
+            serde_json::from_slice::<serde_json::Value>(&body[..body.len().min(REFUSAL_BODY_BOUND)])
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+                .is_some_and(|label| {
+                    trace_commons_protocol::witness_pacing::is_witness_saturation(status, &label)
+                })
+        }
+        Err(_) => false,
+    };
+    if saturated {
+        WitnessTrustError::WitnessSaturated { retry_after_secs }
+    } else {
+        WitnessTrustError::WitnessAdmissionEvidenceRefused
+    }
+}
+
 impl HttpWitnessTransport {
     /// The verified witness type enforces attestation before raw bytes leave.
     pub async fn witness_token_contribution(
@@ -1146,7 +1175,7 @@ impl HttpWitnessTransport {
             .await
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
         if !response.status().is_success() {
-            return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
+            return Err(token_review_refusal(response).await);
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response
@@ -3045,6 +3074,104 @@ mod tests {
             "the declaration must describe the bodies this request carries"
         );
         task.abort();
+    }
+
+    /// A review a person asked for meets a busy witness as a busy witness.
+    ///
+    /// The token-bundle route read every non-2xx as the witness declining the
+    /// receipt, so a person was told their evidence was refused when the
+    /// witness had judged nothing. The exact `503 witness_saturated` pair is
+    /// the capacity refusal with the witness's own delay, as on the upload
+    /// path; anything else keeps the old reading. The request never declares
+    /// the background workload, even on a transport built with it: a person
+    /// is waiting on this one.
+    #[tokio::test]
+    async fn a_busy_witness_is_busy_on_the_token_review_route_too() {
+        async fn token_attempt(
+            reply: fn() -> Response,
+        ) -> (WitnessTrustError, Vec<Option<String>>) {
+            let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let recorded = seen.clone();
+            let app = Router::new().route(
+                "/v1/witness/token-bundle",
+                post(move |headers: HeaderMap| {
+                    let recorded = recorded.clone();
+                    async move {
+                        recorded.lock().unwrap().push(
+                            headers
+                                .get(
+                                    trace_commons_protocol::witness_pacing::WITNESS_WORKLOAD_HEADER,
+                                )
+                                .map(|v| v.to_str().unwrap().to_string()),
+                        );
+                        reply()
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let transport = transport_for(&url, permissive())
+                .with_admission_evidence(true)
+                .with_background_workload(true);
+            let key = test_signer("busy-token-review");
+            let witness =
+                crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+            let cfg = crate::commands::unenrolled_preview_config();
+            let isolated = crate::submit::witness_input_for_profile(raw_with_secret(), &cfg, true);
+            let receipt = offered_receipt();
+            let err = transport
+                .witness_token_contribution(
+                    &witness,
+                    isolated,
+                    AttestedInference {
+                        call: transcript.attested_call.as_deref().unwrap(),
+                        receipt: Some(&receipt),
+                    },
+                    &granted(),
+                    TokenBundleRequest {
+                        capture_store_id: "1".repeat(32),
+                        capture_id: "2".repeat(32),
+                        bundle_revision: "r1".into(),
+                        restricted_token_consent: true,
+                    },
+                )
+                .await
+                .err()
+                .expect("a refusal certifies nothing");
+            task.abort();
+            let headers = seen.lock().unwrap().clone();
+            (err, headers)
+        }
+
+        let (err, headers) = token_attempt(|| saturated_with(Some("45"))).await;
+        assert_eq!(
+            err,
+            WitnessTrustError::WitnessSaturated {
+                retry_after_secs: 45
+            }
+        );
+        assert_eq!(headers, vec![None], "a person asked; no background header");
+        let (err, _) = token_attempt(|| saturated_with(None)).await;
+        assert_eq!(
+            err,
+            WitnessTrustError::WitnessSaturated {
+                retry_after_secs: 30
+            }
+        );
+        // Not the exact pair: the old reading stands.
+        let (err, _) = token_attempt(|| {
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({"error": "witness_saturated"})),
+            )
+                .into_response()
+        })
+        .await;
+        assert_eq!(err, WitnessTrustError::WitnessAdmissionEvidenceRefused);
+        let (err, _) = token_attempt(|| StatusCode::SERVICE_UNAVAILABLE.into_response()).await;
+        assert_eq!(err, WitnessTrustError::WitnessAdmissionEvidenceRefused);
     }
 
     /// The declaration follows the payload, in both directions.
