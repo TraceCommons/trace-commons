@@ -5,7 +5,8 @@ identities onto NEAR accounts, as decided on 2026-09-27. It is operator
 procedure; the design is in the consent spec
 (`docs/superpowers/specs/2026-09-23-connect-and-forget-consent-design.md`,
 "The invite-to-account migration") and the schema in
-`migrations/V81__legacy_invite_link.sql`.
+`migrations/V81__legacy_invite_link.sql`, `V91__legacy_invite_link_devices.sql`
+and `V92__legacy_invite_link_device_guards.sql`.
 
 The client half -- the daemon performing the migration, unreachable over IPC,
 ordered against the void sweep, re-baselining armed folders -- is described
@@ -30,6 +31,17 @@ in `docs/contributor-daemon-ipc-v1_1.md`, "Moving a legacy invite identity".
    `onboarding_invites` row, the registry's `onboarding_invite_grants` row, or
    a prior account grant for the same invite is revoked. An invite that has
    expired or run out of uses, but was already redeemed, does carry over.
+5. **A second device follows the link only under the linked invite.** A link
+   carries the one invite it was made with, and only that invite is granted to
+   the account. Another device of the same tenant, signed into the same
+   account, gets an attestation of its own under the link (below) only if it
+   joined under that same invite. A device that joined the tenant under a
+   different invite -- possible wherever several invites route to one tenant
+   -- is refused (`legacy_link_invite_not_linked`, HTTP 409) and keeps working
+   as a legacy device. Its invite was never granted to the account, so this is
+   the rule, not a fault. Each refusal leaves a hash-only
+   `legacy_invite_device_attest_refused` audit row (below); it is not a
+   conflict and does not block admission.
 
 ## What linking does
 
@@ -67,16 +79,60 @@ as `legacy_tenant_hash`). The ingest login needs nothing beyond the
 
 Re-linking by the same account from the same device returns the original
 record unchanged. Since V91, another of the tenant's invite devices, signed
-into the SAME account, gets an attestation of its own instead: its own
-statement over a fresh challenge, recorded under the existing link in
-`trace_legacy_invite_link_devices` by `trace_attest_legacy_invite_device` and
-countersigned, so it can verify the record against its own key before its
-client switches. It is idempotent per device (a repeat returns the first
-attestation), changes nothing about the link, the account's trust or its
-invite grant, and is audited hash-only as `legacy_invite_device_attested`.
-Another account is still refused (`legacy_link_tenant_claimed`). A challenge
-is single-use, expires after five minutes, and an account may hold five open
-at once.
+into the SAME account under the SAME invite (rule 5), gets an attestation of
+its own instead: its own statement over a fresh challenge, recorded under the
+existing link in `trace_legacy_invite_link_devices` by
+`trace_attest_legacy_invite_device`, so it can verify the record against its
+own key before its client switches. It is idempotent per device (a repeat
+returns the first attestation), changes nothing about the link, the account's
+trust or its invite grant, and is audited hash-only as
+`legacy_invite_device_attested`. Another account is still refused
+(`legacy_link_tenant_claimed`). A challenge is single-use, expires after five
+minutes, and an account may hold five open at once.
+
+An attestation is not a link, and says so. Since V92 it is countersigned
+under its own domain, `trace-commons.legacy-invite-device-attestation-record.v1`,
+and returned with `"kind": "device_attestation"` in the record; its
+`link_id` field is the attestation's own id (`trace_legacy_invite_link_devices.attestation_id`),
+not a row of `trace_legacy_invite_links`. A link record carries no `kind`,
+exactly as before. `countersign_domain` on each attestation row says which
+domain its countersignature is under; the only rows under the link domain are
+ones V91 wrote before V92, and each is superseded in place by that device's
+next attestation.
+
+Since V92 the attestation function checks everything the link function does
+on its own, rather than relying on having run second: the account is open and
+NEAR-anchored; the statement's challenge was spent by the link function in
+the same transaction, is still unexpired, and has not backed another
+attestation (the spend is recorded against the device in
+`trace_legacy_invite_link_challenges.attested_device_key_id`); the device is
+the tenant's live invite device under an invite the tenant redeemed; the
+tenant is not pooled; the invite is not revoked anywhere; and the live link is
+this account's under this invite.
+
+A refused attestation still spends the challenge, as every refusal after the
+spend does. Undoing the spend would mean rolling back the audit row with it,
+and the same challenge would only be refused again; the device asks for a new
+one.
+
+To see second-device refusals (tenant context = the account's tenant):
+
+```sql
+BEGIN;
+SELECT set_config('trace_commons.trace_tenant_id', '<account-tenant>', true);
+SELECT created_at, safe_metadata->>'legacy_tenant_hash',
+       safe_metadata->>'invite_subject_hash',
+       safe_metadata->>'linked_invite_subject_hash'
+  FROM trace_account_audit
+ WHERE action = 'legacy_invite_device_attest_refused'
+   AND outcome = 'invite_not_linked';
+COMMIT;
+```
+
+Both invites appear only as subject hashes, and the tenant only as
+`legacy_tenant_hash`. If the device's invite should in fact follow the
+account, that is a new decision for the invite's owner, not a repair: nothing
+here grants a second invite to a linked account.
 
 Instance-enrolled devices are `invite`-origin in `device_keys` but redeemed no
 invite; they have no `onboarding_invites` row and cannot link.
@@ -166,12 +222,24 @@ Revoking a link (tenant context = the linked account's tenant):
 BEGIN;
 SELECT set_config('trace_commons.trace_tenant_id', '<account-tenant>', true);
 UPDATE trace_legacy_invite_links SET revoked_at = now()
- WHERE legacy_tenant_id = '<legacy-tenant>' AND revoked_at IS NULL;
+ WHERE legacy_tenant_id = '<legacy-tenant>' AND revoked_at IS NULL
+RETURNING link_id;
+-- Second-device attestations under that link (V91). They have no revocation
+-- of their own and need none: each names the link by link_id, and one under
+-- a revoked link attests to nothing. Listed so the record of what was revoked
+-- is complete.
+SELECT attestation_id, device_key_id
+  FROM trace_legacy_invite_link_devices
+ WHERE link_id = '<link-id from above>';
 UPDATE trace_account_invite_grants SET revoked_at = now()
  WHERE tenant_id = '<account-tenant>' AND account_id = '<account-id>'
    AND invite_subject_hash = '<invite-hash>' AND revoked_at IS NULL;
 COMMIT;
 ```
+
+Nothing carries an attestation over to a later link: attestations are keyed
+by `link_id`, so if the tenant is linked again, each further device attests
+afresh under the new link.
 
 A revoked grant demotes the account's admission authority as any revoked grant
 does, and the same account cannot re-link that invite afterwards.
@@ -251,6 +319,11 @@ nothing is lost. The steps, in order:
   pooled, claimed, revoked, expired, instance-enrolled and wrong-key cases;
   signature and challenge binding; the runtime's lack of cross-tenant reads;
   every readiness rule above; and the Devfolio-shaped onboarding regression.
+  `the_attestation_function_holds_every_refusal_on_its_own` calls
+  `trace_attest_legacy_invite_device` directly as that login for each of its
+  refusals, including rule 5, a challenge spent in another transaction, one
+  spend shared by two devices, and a challenge that expired between the two
+  calls; removing any one of the V92 checks listed above turns it red.
 - `account_trust_pg`: the shared multi-use account invite.
 - `admission_pg_tests` (ingest bin): a legacy invite identity still
   contributes with account admission on.
