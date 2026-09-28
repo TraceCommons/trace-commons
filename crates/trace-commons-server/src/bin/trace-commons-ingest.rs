@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
+mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
@@ -8101,6 +8103,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
+        )
+        .route(
+            "/v1/admin/record-account-trust-facts",
+            post(account_trust_growth_routes::record_account_trust_facts_handler),
         )
         .route(
             "/v1/admin/scores-by-submission",
