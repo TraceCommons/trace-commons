@@ -17,6 +17,7 @@ import {
 import { onboardingKeys } from "../api/query-keys";
 import {
   acknowledgeWitnessDisclosure as withWitnessRead,
+  afterInference,
   afterPrivacy,
   type ContributionPath,
   decideLater,
@@ -289,6 +290,11 @@ export function useOnboarding(alreadyEnrolled: boolean) {
       // The mutation state supplies the error copy.
     }
   };
+  // Connected or skipped, the step moves on the same way: connecting
+  // inference is never a grant blocker.
+  const finishInference = () => {
+    setStep(afterInference(progress.path));
+  };
   const finishProjects = () => {
     setStep("done");
   };
@@ -320,6 +326,7 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     skipGrant,
     withdrawGrant,
     withdrawn: withdrawMutation.data === "withdrawn",
+    finishInference,
     finishProjects,
     progress: flow1,
     setStep,
