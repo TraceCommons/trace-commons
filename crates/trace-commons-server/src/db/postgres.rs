@@ -221,6 +221,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
+    "trace_account_trust_evaluations",
     "trace_source_sessions",
     "trace_submission_sessions",
     "trace_account_inference_connections",
@@ -1453,7 +1454,12 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_fact_recorder",
         include_str!("../../../../migrations/V85__account_trust_fact_recorder.sql"),
     ),
-    // V83 and V86-V88 are reserved for work in flight; V89 is additive and
+    (
+        86,
+        "account_trust_evaluations",
+        include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+    ),
+    // V83, V87 and V88 are reserved for work in flight; V89 is additive and
     // depends on none of them.
     (
         89,
@@ -1519,6 +1525,31 @@ impl Database for PgBackend {
         limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
         PgBackend::list_account_trust_fact_candidates(self, account, limit).await
+    }
+
+    async fn account_trust_evaluation_inputs(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::account_trust_rule::EvaluationFact>, DatabaseError> {
+        PgBackend::account_trust_evaluation_inputs(self, account).await
+    }
+
+    async fn record_account_trust_evaluation(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        mode: &str,
+        evaluation: &crate::account_trust_rule::Evaluation,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::record_account_trust_evaluation(self, account, mode, evaluation).await
+    }
+
+    async fn latest_account_trust_evaluation(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        policy_version: &str,
+        mode: &str,
+    ) -> Result<Option<crate::account_trust_rule::Evaluation>, DatabaseError> {
+        PgBackend::latest_account_trust_evaluation(self, account, policy_version, mode).await
     }
     async fn legacy_admission_record(
         &self,
@@ -7411,6 +7442,7 @@ mod tests {
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7439,6 +7471,7 @@ mod tests {
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
