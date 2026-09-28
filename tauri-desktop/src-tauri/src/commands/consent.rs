@@ -86,6 +86,43 @@ pub(crate) fn witness_capacity_notice(capacity: serde_json::Value) -> serde_json
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// The notice for one element of `status.arming_rewordings`: a folder armed
+/// under the old "will be scrubbed" wording, told what its arming now means.
+/// The words come from the contributor core. `null` only for a value that is
+/// not an element at all.
+#[tauri::command]
+pub(crate) fn arming_reworded_notice(rewording: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(&rewording)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The notice for armed folders the automatic-contribution gate is holding,
+/// from `status.automatic_contribution_held` passed through: the words, the
+/// count and each folder's line, all from the contributor core. `null` when
+/// nothing is held.
+#[tauri::command]
+pub(crate) fn gate_held_notice(held: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::gate_held_notice_for_wire(&held)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Record that the rewording notices with these ids were shown. Changes
+/// nothing about the folders.
+#[tauri::command]
+pub(crate) async fn acknowledge_arming_rewordings(
+    state: State<'_, AppState>,
+    ids: Vec<u64>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "acknowledge_arming_rewordings",
+        serde_json::json!({ "ids": ids }),
+    )
+    .await
+}
+
 /// Record that the notices with these ids were shown. Acknowledging re-arms
 /// nothing.
 #[tauri::command]
@@ -97,6 +134,72 @@ pub(crate) async fn acknowledge_grant_voids(
         shared_state(&state)?,
         "acknowledge_grant_voids",
         serde_json::json!({ "ids": ids }),
+    )
+    .await
+}
+
+/// The offer to move a legacy invite identity to a NEAR AI account: the
+/// words, from the contributor core. Shown only while
+/// `status.legacy_invite_migration.offered` is true.
+#[tauri::command]
+pub(crate) fn legacy_migration_copy() -> serde_json::Value {
+    serde_json::to_value(trace_commons_contributor::consent_copy::legacy_migration_offer())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The notice after the move, for `status.legacy_invite_migration.notice`
+/// passed through. `null` when there is nothing to show.
+#[tauri::command]
+pub(crate) fn legacy_migration_notice(notice: serde_json::Value) -> serde_json::Value {
+    trace_commons_contributor::consent_copy::legacy_migration_notice_for_wire(&notice)
+        .and_then(|copy| serde_json::to_value(copy).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Ask the daemon to move this legacy invite identity to the contributor's
+/// NEAR AI account -- the contributor chose to. `invite` is sent only when
+/// the daemon asked for it (`legacy_migration_invite_needed`). A refusal is
+/// an answer, not an error: `{"refused": <label>, "line": <sentence>}`, the
+/// sentence from the contributor core.
+#[tauri::command]
+pub(crate) async fn migrate_legacy_invite(
+    state: State<'_, AppState>,
+    invite: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let invite = invite
+        .map(|value| value.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let response = crate::ipc::call_daemon_response(
+        shared_state(&state)?,
+        "legacy_invite_migrate",
+        serde_json::json!({ "invite": invite }),
+    )
+    .await?;
+    if let Some(result) = response.result {
+        return Ok(result);
+    }
+    if let Some(error) = response.error {
+        return Ok(legacy_migration_refusal(&error.message));
+    }
+    Err("Rust core returned an invalid IPC response".to_owned())
+}
+
+fn legacy_migration_refusal(label: &str) -> serde_json::Value {
+    serde_json::json!({
+        "refused": label,
+        "line": trace_commons_contributor::consent_copy::legacy_migration_refusal_line(label),
+    })
+}
+
+/// Record that the move notice was shown.
+#[tauri::command]
+pub(crate) async fn acknowledge_legacy_invite_migration(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    call_daemon(
+        shared_state(&state)?,
+        "acknowledge_legacy_invite_migration",
+        serde_json::json!({}),
     )
     .await
 }
@@ -185,7 +288,63 @@ pub(crate) async fn withdraw_automatic_grant(
 
 #[cfg(test)]
 mod tests {
-    use super::{grant_precondition, grant_void_notice, scrubber_pattern_names};
+    use super::{
+        arming_reworded_notice, gate_held_notice, grant_precondition, grant_void_notice,
+        legacy_migration_notice, legacy_migration_refusal, scrubber_pattern_names,
+    };
+
+    /// A refused move is answered with the core's sentence for its label,
+    /// and the notice is the core's, or `null` when there is none.
+    #[test]
+    fn legacy_migration_answers_come_from_the_core() {
+        let refused = legacy_migration_refusal("legacy_migration_tenant_pooled");
+        assert_eq!(refused["refused"], "legacy_migration_tenant_pooled");
+        assert_eq!(
+            refused["line"],
+            trace_commons_contributor::consent_copy::legacy_migration_refusal_line(
+                "legacy_migration_tenant_pooled"
+            )
+        );
+        assert!(legacy_migration_notice(serde_json::Value::Null).is_null());
+        let notice = legacy_migration_notice(
+            serde_json::json!({"folders_kept": 1, "automatic_grant_kept": false}),
+        );
+        assert_eq!(
+            notice["title"],
+            trace_commons_contributor::consent_copy::LEGACY_MIGRATION_NOTICE_TITLE
+        );
+    }
+
+    #[test]
+    fn the_switch_on_notices_are_the_contributor_cores_copy() {
+        use trace_commons_contributor::consent_copy as copy;
+        let rewording = serde_json::json!({
+            "id": 1, "project_id": "p", "project_label": "api",
+            "was": "model_scrubbed", "now": "patterns_only",
+        });
+        assert_eq!(
+            arming_reworded_notice(rewording.clone()),
+            serde_json::to_value(copy::arming_reworded_notice_for_wire(&rewording).unwrap())
+                .unwrap()
+        );
+        assert!(arming_reworded_notice(serde_json::json!("api")).is_null());
+
+        let held = serde_json::json!({
+            "held_sessions": 2,
+            "reasons": ["admission-evidence-is-per-session"],
+            "projects": [{ "project_id": "p", "project_label": "api", "held_sessions": 2 }],
+        });
+        assert_eq!(
+            gate_held_notice(held.clone()),
+            serde_json::to_value(copy::gate_held_notice_for_wire(&held).unwrap()).unwrap()
+        );
+        assert!(
+            gate_held_notice(serde_json::json!({
+                "held_sessions": 0, "reasons": [], "projects": [],
+            }))
+            .is_null()
+        );
+    }
 
     fn config(
         scopes: &[&str],

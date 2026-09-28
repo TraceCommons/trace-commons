@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { ProjectModeField } from "./project-mode-field";
+import { ProjectAutomaticDisclosure } from "./project-automatic-disclosure";
 import type { Project, ProjectMode } from "../api/projects-api";
 
 export function ProjectsPanel({
@@ -85,6 +86,12 @@ export function ProjectsPanel({
                   <small>
                     These sessions cannot be contributed automatically.
                   </small>
+                )}
+                {project.mode === "auto_upload" && (
+                  <ProjectAutomaticDisclosure
+                    projectId={project.project_id}
+                    disclosure={project.automatic_disclosure}
+                  />
                 )}
               </div>
               <ProjectModeField

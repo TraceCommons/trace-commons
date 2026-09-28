@@ -13,6 +13,12 @@ export type Project = {
   is_unresolved_bucket: boolean;
   pending_count?: number;
   contributable_count?: number;
+  /**
+   * Present only on an armed project: which arming disclosure its sessions
+   * have earned (K6). Used to know when to re-read the words, never to
+   * choose them; see `useProjectAutomaticCopy`.
+   */
+  automatic_disclosure?: string;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -29,6 +35,11 @@ function boolean(value: Record<string, unknown>, key: string) {
   if (typeof value[key] !== "boolean")
     throw new Error(`Invalid project field: ${key}`);
   return value[key] as boolean;
+}
+function optionalString(value: Record<string, unknown>, key: string) {
+  if (value[key] !== undefined && typeof value[key] !== "string")
+    throw new Error(`Invalid project field: ${key}`);
+  return value[key] as string | undefined;
 }
 function optionalNumber(value: Record<string, unknown>, key: string) {
   if (value[key] !== undefined && typeof value[key] !== "number")
@@ -53,6 +64,7 @@ export async function getProjects(): Promise<Project[]> {
       is_unresolved_bucket: boolean(row, "is_unresolved_bucket"),
       pending_count: optionalNumber(row, "pending_count"),
       contributable_count: optionalNumber(row, "contributable_count"),
+      automatic_disclosure: optionalString(row, "automatic_disclosure"),
     };
   });
 }

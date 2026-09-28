@@ -167,7 +167,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -189,6 +189,12 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust
+      # Earned account trust (shadow): fact recording, the worker's
+      # least-privilege roles and the one cross-tenant enumeration seam.
+      - name: account_trust_growth_pg
+        run: cargo test -p trace-commons-server --test account_trust_growth_pg
+        env:
+          TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
       - name: account invite HTTP session and authority guards
         run: cargo test -p trace-commons-server --bin trace-commons-ingest account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
         env:
@@ -200,6 +206,13 @@ jobs:
         run: cargo test -p trace-commons-server --test legacy_invite_link_pg
         env:
           TRACE_COMMONS_LEGACY_INVITE_LINK_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_invite_link
+      # A device reading back its own invite subject hash from the issuer,
+      # onboarded through the real /v1/onboard path, with the named refusals
+      # against real rows. Feeds the legacy invite link statement.
+      - name: device_invite_subject_pg
+        run: cargo test -p trace-commons-server --test device_invite_subject_pg
+        env:
+          TRACE_COMMONS_DEVICE_INVITE_SUBJECT_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_device_invite_subject
       - name: inference_connection_pg
         run: cargo test -p trace-commons-server --test inference_connection_pg
         env:
@@ -431,7 +444,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
                   -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
             echo "admission_test_$db committed ${n:-0} transactions"

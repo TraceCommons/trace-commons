@@ -603,8 +603,10 @@ body bytes unchanged. Deploy ingest with the signing address and measurement
 set pinned before enabling provenance-dependent policy. The pin controls verification even when
 `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false`; the bypass also requires its
 own explicit policy-version allowlist. A half-configured pin refuses ingest
-startup. Apply V76 and grant the ingest database login membership in
-`trace_witness_evidence_runtime` when it is not the migration owner. The table
+startup. Apply V76. When the ingest database login is not the migration owner,
+it needs membership in `trace_witness_evidence_runtime`: V90 grants that role
+to `trace_ingest_runtime`, the ingest runtime role, so grant the login that
+role (see `deployment.md`, "V90: the ingest runtime role"). The table
 uses forced tenant RLS. Only the derived `artifact_sha256` link may change
 after insert, on an exact signed-source retry. The runtime role's column
 grants allow nothing else, and a `BEFORE UPDATE` trigger
@@ -619,8 +621,8 @@ certificate, in the same transaction as the submission update.
 For each verified submission, ingest persists the original certificate and
 signature header bytes, raw submitted body SHA-256, certificate issue time,
 and closed provenance class. A failed evidence transaction prevents a success
-receipt when the database mirror is required. File-only ingestion has no
-durable provenance read. A v1 certificate is labeled `legacy_v1` and remains
+receipt when the database mirror is required. File-only ingestion reads
+provenance through `file_witness::current_claim` (below). A v1 certificate is labeled `legacy_v1` and remains
 policy-unattested; v2 `unattested` is an explicit signed claim. A provider TEE
 or gateway class covers only the last declared call's original request and
 response bytes and the pinned receipt signer. It says nothing about earlier
@@ -636,7 +638,10 @@ historical evidence, and selected current object reference in one database
 transaction. The caller does not supply an object digest. The object loader must
 still verify stored bytes against that reference before consuming them. An
 inactive, revoked, or mismatched object cannot receive an attested source
-class. This release does not assign new scoring or credit weights.
+class. Since #1059 that read (and its batch form,
+`list_current_verified_witness_evidence`) feeds a label on exports, the
+reviewer trace list and credit events (V89 `trace_credit_ledger.witness_provenance_class`).
+It is a label only and assigns no scoring or credit weight.
 
 For file-only ingest (no database mirror), verified original certificate and
 signature header bytes and the received body digest are stored privately in the
@@ -647,8 +652,10 @@ publish a partial metadata/evidence pair. Temporary metadata files use private
 permissions. Windows uses the existing `tempfile` atomic replacement primitive;
 parent-directory fsync is Unix-only.
 
-`file_witness::current_claim` is an internal, currently unused policy seam. It
-accepts authenticated tenant context and a submission ID, reads current durable
+`file_witness::current_claim` is the file-only counterpart of that read, and
+since #1059 feeds the same labels. It accepts the auth-derived tenant and a
+submission ID (the calling reviewer, export or credit path has already
+authorized the submission), reads current durable
 status and revocation tombstones, and verifies the associated stored object's
 actual digest (including encrypted-store receipt verification). Content-based
 revocation uses canonical-summary and redaction identities derived from that
@@ -670,7 +677,11 @@ Server-side re-stores intentionally drop current attestation. Review approval
 or rejection writes a reviewed envelope under a new key. Process evaluation,
 rescrub, the PII backstop and stale-prior clearing also rewrite the object.
 None of them re-binds the source proof, so afterwards `current_claim` reports
-`artifact_mismatch`. The proof is kept, but as history, not as current
+`artifact_mismatch`. **Operators should expect every review-approved trace to
+read `unattested`** in exports, the reviewer list and credit events, even when
+it arrived with a verified provider-TEE or gateway certificate: the certificate
+covers the submitted bytes, not the reviewed artifact approval stores, and R4
+forbids claiming provenance the certificate does not support. The proof is kept, but as history, not as current
 coverage. No server transform is currently defined as preserving the
 association.
 
@@ -689,4 +700,5 @@ strings.
 Other existing mutation paths keep their existing synchronization, and a stale
 status write cannot override a durable revocation tombstone in this reader.
 File-only mode does not supply database account admission or session-wide
-withdrawal, and this change activates no scoring, credit or export policy.
+withdrawal. Provenance is surfaced as a label in both modes and activates no
+scoring, credit or export policy.
