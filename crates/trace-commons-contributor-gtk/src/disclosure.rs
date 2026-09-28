@@ -102,20 +102,33 @@ pub fn session(
     if payload["facts"]["route"] == "witness" {
         rows.push(Row::Text(text(&copy["route"])));
     }
-    if let Some(detail) = certificate.filter(|d| d["verification"] == "verified_at_review") {
+    if let Some((measurement, signer)) = certificate.and_then(verified_at_review) {
         let labels = consent_copy::certificate_detail_copy();
         rows.push(Row::Heading(labels.heading.to_string()));
         rows.push(Row::Value(
             labels.measurement_label.to_string(),
-            text(&detail["witness_measurement"]),
+            measurement.to_string(),
         ));
         rows.push(Row::Value(
             labels.signer_label.to_string(),
-            text(&detail["signer"]),
+            signer.to_string(),
         ));
         rows.push(Row::Text(labels.verified_at_review.to_string()));
     }
     rows
+}
+
+/// The measurement and signer of a certificate verified at review, or
+/// `None`. The sentence under them says the certificate was checked against
+/// "this measurement" and "this signing key", so a detail missing either --
+/// null, absent or empty -- is not worded at all; macOS, Tauri and Windows
+/// refuse the same detail.
+fn verified_at_review(detail: &serde_json::Value) -> Option<(&str, &str)> {
+    if detail["verification"] != "verified_at_review" {
+        return None;
+    }
+    let present = |key: &str| detail[key].as_str().filter(|s| !s.is_empty());
+    Some((present("witness_measurement")?, present("signer")?))
 }
 
 fn text(value: &serde_json::Value) -> String {
@@ -241,5 +254,35 @@ mod tests {
         other["verification"] = serde_json::json!("verified_now");
         let rows = session(Some(&witness_facts()), "1 KB", "4 KB", Some(&other));
         assert!(!texts(&rows).contains(&labels.verified_at_review));
+    }
+
+    /// "Checked against this signing key" is never drawn beside an empty
+    /// key, nor "this measurement" beside an empty measurement: a detail
+    /// missing either one is dropped whole, as macOS
+    /// (`CertificateDetail.decode`), Tauri and Windows drop it. The rest of
+    /// the session's rows still stand.
+    #[test]
+    fn a_certificate_missing_its_measurement_or_signer_is_not_worded_as_checked() {
+        let labels = consent_copy::certificate_detail_copy();
+        let without_one = [
+            ("signer", serde_json::Value::Null),
+            ("signer", serde_json::json!("")),
+            ("witness_measurement", serde_json::Value::Null),
+            ("witness_measurement", serde_json::json!("")),
+        ];
+        for (field, value) in without_one {
+            let mut detail = serde_json::json!({
+                "state": "held", "verification": "verified_at_review",
+                "witness_measurement": "mrtd=aa", "signer": "0xab",
+            });
+            detail[field] = value.clone();
+            let rows = session(Some(&witness_facts()), "1 KB", "4 KB", Some(&detail));
+            assert_eq!(
+                rows,
+                session(Some(&witness_facts()), "1 KB", "4 KB", None),
+                "{field} = {value}: no certificate rows at all"
+            );
+            assert!(!texts(&rows).contains(&labels.verified_at_review));
+        }
     }
 }
