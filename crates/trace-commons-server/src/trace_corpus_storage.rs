@@ -2825,6 +2825,29 @@ pub trait TraceCorpusStore: Send + Sync {
         .await
     }
 
+    /// As [`Self::release_pii_backstop_hold`], without the store's own audit
+    /// row: the status flip and the invalidation stay one all-or-nothing
+    /// operation, and the caller mirrors the file audit log's event for the
+    /// change itself. The default delegates, which suits stores that keep no
+    /// audit rows of their own.
+    async fn release_pii_backstop_hold_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.release_pii_backstop_hold(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await
+    }
+
     async fn append_trace_derived_record(
         &self,
         derived_record: TraceDerivedRecordWrite,
