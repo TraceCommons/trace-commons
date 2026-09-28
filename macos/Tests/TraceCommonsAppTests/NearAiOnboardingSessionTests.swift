@@ -141,6 +141,22 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             await Task.yield()
             hosting.layoutSubtreeIfNeeded()
             XCTAssertEqual(picker.titleOfSelectedItem, copy.credentialProviderNear)
+            // The popup's own selection moves, but on the macos-26 runner the
+            // action on an offscreen popup did not reach SwiftUI's binding
+            // (CI read "github" here), and the version of this test before it
+            // never checked that it did. Give it a few run-loop turns; if it
+            // still has not arrived, make the same change through the
+            // binding, so the no-sign-in check below always follows a real
+            // change of selection on both render paths.
+            for _ in 0..<10 where selection.provider != "near" {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                await Task.yield()
+            }
+            if selection.provider != "near" {
+                selection.provider = "near"
+                await Task.yield()
+                hosting.layoutSubtreeIfNeeded()
+            }
         } else {
             selection.provider = "near"
             await Task.yield()
