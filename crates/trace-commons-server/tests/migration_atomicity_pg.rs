@@ -299,11 +299,44 @@ async fn concurrent_migration_runs_do_not_race_on_a_virgin_database() {
     dropped.expect("drop the probe database");
 }
 
+/// The membership a migrator holds, since PostgreSQL 16, in a role that already
+/// exists on the server. A superuser's grant is recorded against the bootstrap
+/// superuser, whichever superuser makes it, so it writes the same
+/// `pg_auth_members` row that creating the role does, and granting it again
+/// resets that row's options to these.
+#[derive(Clone, Copy, Debug)]
+enum Standing {
+    /// What `CREATE ROLE` gives the CREATEROLE role that runs it: ADMIN, and
+    /// neither INHERIT nor SET, since `createrole_self_grant` is empty by
+    /// default. A migrator on a fresh server holds exactly this in every role
+    /// the migrations make.
+    Creator,
+    /// What a superuser's plain `GRANT ... WITH ADMIN OPTION` gives a migrator
+    /// on a server where someone else made the roles: INHERIT and SET follow
+    /// the member's defaults, which are true.
+    GrantedWithInherit,
+}
+
+impl Standing {
+    fn grant_options(self) -> &'static str {
+        match self {
+            Standing::Creator => "WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            Standing::GrantedWithInherit => "WITH ADMIN TRUE, INHERIT TRUE, SET TRUE",
+        }
+    }
+}
+
 /// A database owned by `owner`, a login with CREATEROLE and nothing more, in
-/// the PostgreSQL 15 shape, the way an operator's migrator holds one. Drops any
+/// the PostgreSQL 15 shape, the way an operator's migrator holds one, and
+/// holding `standing` in every `trace_` role already on the server. Drops any
 /// copy an earlier run left behind. Returns a superuser connection to the
 /// `postgres` database, for dropping it again afterwards.
-async fn owned_database(url: &str, owner: &str, database: &str) -> tokio_postgres::Client {
+async fn owned_database(
+    url: &str,
+    owner: &str,
+    database: &str,
+    standing: Standing,
+) -> tokio_postgres::Client {
     let admin = connect(&with_database(url, "postgres")).await;
     admin
         .execute(
@@ -326,11 +359,17 @@ async fn owned_database(url: &str, owner: &str, database: &str) -> tokio_postgre
     // Roles are per server, so on a shared one the roles the migrations create
     // already exist, made by whoever migrated first. Since PostgreSQL 16
     // CREATEROLE may only administer roles it holds ADMIN on, which a real
-    // operator's migrator has by having created them. Give the probe the same
-    // standing; on 15 and earlier CREATEROLE already covers it. Login roles
-    // too: V30 runs `ALTER ROLE trace_login_resolver SET statement_timeout`,
-    // and 16 asks for ADMIN there as well -- leaving them out is how this
-    // test's first CI run failed.
+    // operator's migrator has by having created them. Give the probe the
+    // standing asked for; on 15 and earlier CREATEROLE already covers it, and
+    // creating a role grants its creator nothing. Login roles too: V30 runs
+    // `ALTER ROLE trace_login_resolver SET statement_timeout`, and 16 asks for
+    // ADMIN there as well -- leaving them out is how this test's first CI run
+    // failed.
+    //
+    // The standing is not a detail. This used to grant `WITH ADMIN OPTION`
+    // alone, which takes INHERIT from the member's default, so a probe on a
+    // server where another test had made the roles held more than a creator
+    // does -- and V60 failed only for a probe that made them itself.
     let sixteen_or_later: bool = admin
         .query_one(
             "SELECT current_setting('server_version_num')::int >= 160000",
@@ -354,7 +393,7 @@ async fn owned_database(url: &str, owner: &str, database: &str) -> tokio_postgre
             let role: String = row.get(0);
             admin
                 .execute(
-                    &format!("GRANT \"{role}\" TO {owner} WITH ADMIN OPTION"),
+                    &format!("GRANT \"{role}\" TO {owner} {}", standing.grant_options()),
                     &[],
                 )
                 .await
@@ -413,7 +452,7 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
 
     const OWNER: &str = "trace_migration_owner_probe";
     const OWNER_DB: &str = "trace_migration_owner_probe_db";
-    let admin = owned_database(&url, OWNER, OWNER_DB).await;
+    let admin = owned_database(&url, OWNER, OWNER_DB, Standing::Creator).await;
 
     let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
     let config = DatabaseConfig {
@@ -468,6 +507,178 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
         acl_problems.join("\n  ")
     );
     dropped.expect("drop the owner-probe database");
+}
+
+/// V60 on a fresh PostgreSQL 16 server, whichever test runs first.
+///
+/// Since 16, `CREATE ROLE` run by a CREATEROLE role that is not a superuser
+/// also grants the new role to its creator: ADMIN, and neither INHERIT nor SET.
+/// V59's `REVOKE trace_admission_guard FROM CURRENT_USER` removes the grant V59
+/// made, not that one. V60 tested `pg_has_role(current_user,
+/// 'trace_admission_guard', 'MEMBER')`, which counts it, so on a fresh server
+/// V60 took the branch meant for deployments of the pre-revocation V59 and
+/// granted the migrator the EXECUTE grant option V59 had just given it. The
+/// migrator does not hold the owner's privileges, so PostgreSQL made it the
+/// grantor of that grant to itself, and refused it as circular: 0LP01, "grant
+/// options cannot be granted back to your own grantor".
+///
+/// `a_non_superuser_owner_can_apply_every_migration` missed it whenever another
+/// test had made the roles first, because the probe was then given them with
+/// INHERIT. This sets the probe's standing in `trace_admission_guard` itself,
+/// for both standings a non-superuser migrator can hold there, and checks the
+/// standing took just before V60. Each must apply V1 to V60, must end with the
+/// migrator holding EXECUTE WITH GRANT OPTION on both admission functions in an
+/// ACL entry of its own, and must leave the standing as V60 found it.
+#[tokio::test]
+async fn v60_applies_whether_the_migrator_made_the_admission_guard_or_was_granted_it() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    // Not `trace_`: `owned_database` gives every `trace_` role on the server to
+    // the probe it sets up, and two probes given to each other are a cycle
+    // PostgreSQL refuses.
+    const OWNER: &str = "tc_v60_owner_probe";
+    const DB: &str = "trace_v60_owner_probe_db";
+
+    let server = connect(&with_database(&url, "postgres")).await;
+    let sixteen_or_later: bool = server
+        .query_one(
+            "SELECT current_setting('server_version_num')::int >= 160000",
+            &[],
+        )
+        .await
+        .expect("server version")
+        .get(0);
+    if !sixteen_or_later {
+        eprintln!(
+            "skipping: before PostgreSQL 16 creating a role grants its creator nothing, \
+             and a membership has no INHERIT or SET of its own to set"
+        );
+        return;
+    }
+    // Made here, with V59's attributes, when nothing on this server has made it
+    // yet, so that `owned_database` sets the probe's standing in it before V1.
+    // V59 creates it only when it is missing.
+    server
+        .batch_execute(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_admission_guard') THEN
+                     CREATE ROLE trace_admission_guard NOLOGIN NOBYPASSRLS;
+                 END IF;
+             END $$;",
+        )
+        .await
+        .expect("make trace_admission_guard");
+    drop(server);
+
+    /// (MEMBER, USAGE, SET) for the connected login in `trace_admission_guard`.
+    async fn held(client: &tokio_postgres::Client) -> (bool, bool, bool) {
+        let row = client
+            .query_one(
+                "SELECT pg_has_role(current_user, 'trace_admission_guard', 'MEMBER'),
+                        pg_has_role(current_user, 'trace_admission_guard', 'USAGE'),
+                        pg_has_role(current_user, 'trace_admission_guard', 'SET')",
+                &[],
+            )
+            .await
+            .expect("read the probe's standing in trace_admission_guard");
+        (row.get(0), row.get(1), row.get(2))
+    }
+
+    let mut problems: Vec<String> = Vec::new();
+    for (standing, expected) in [
+        (Standing::Creator, (true, false, false)),
+        (Standing::GrantedWithInherit, (true, true, true)),
+    ] {
+        let admin = owned_database(&url, OWNER, DB, standing).await;
+        let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+        owner
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );",
+            )
+            .await
+            .expect("create the recording table");
+
+        let mut outcome: Result<(), String> = Err("V60 is not wired into the runner".into());
+        for (version, name, sql) in registered_migrations()
+            .iter()
+            .filter(|(version, ..)| *version <= 60)
+        {
+            if *version == 60 {
+                let before = held(&owner).await;
+                if before != expected {
+                    outcome = Err(format!(
+                        "held (MEMBER, USAGE, SET) = {before:?} in trace_admission_guard \
+                         before V60, not {expected:?}, so V60 was not tried with this standing"
+                    ));
+                    break;
+                }
+            }
+            if let Err(error) = apply_and_record_migration(&mut owner, *version, name, sql).await {
+                outcome = Err(format!("V{version} failed: {error:?}"));
+                break;
+            }
+            if *version == 60 {
+                outcome = Ok(());
+            }
+        }
+
+        if outcome.is_ok() {
+            let own_grant_options: i64 = owner
+                .query_one(
+                    "SELECT count(*) FROM unnest(ARRAY[
+                         'trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT)',
+                         'trace_transition_admission(TEXT,UUID,UUID,TEXT)'
+                     ]::regprocedure[]) AS f(oid)
+                     WHERE EXISTS (
+                         SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a
+                          WHERE p.oid = f.oid
+                            AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+                            AND a.privilege_type = 'EXECUTE' AND a.is_grantable)",
+                    &[],
+                )
+                .await
+                .expect("read the admission functions' ACL")
+                .get(0);
+            let after = held(&owner).await;
+            if own_grant_options != 2 {
+                outcome = Err(format!(
+                    "the migrator holds EXECUTE WITH GRANT OPTION in an ACL entry of its own \
+                     on {own_grant_options} of the 2 admission functions"
+                ));
+            } else if after != expected {
+                outcome = Err(format!(
+                    "V59 and V60 left (MEMBER, USAGE, SET) = {after:?} in \
+                     trace_admission_guard, not the {expected:?} they found"
+                ));
+            }
+        }
+
+        drop(owner);
+        admin
+            .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+            .await
+            .expect("drop the probe database");
+        if let Err(problem) = outcome {
+            problems.push(format!("{standing:?}: {problem}"));
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "a CREATEROLE migrator must apply V60 whichever way it holds trace_admission_guard:\n  {}",
+        problems.join("\n  ")
+    );
 }
 
 /// The ACL a non-superuser migrator leaves behind on the public-run functions,
@@ -954,7 +1165,7 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
         .expect("put both logins in the group");
     drop(server);
 
-    let admin = owned_database(&url, OWNER, DB).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
     let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
     let mut owner = connect(&owner_url).await;
     owner
