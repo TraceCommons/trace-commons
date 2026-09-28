@@ -29611,7 +29611,7 @@ async fn revocation_propagation_audit_reason_hashes_worker_purpose() {
         state.as_ref(),
         &auth,
         &TraceRevocationPropagationWorkerResponse {
-            purpose: purpose.to_string(),
+            purpose_hash: sha256_prefixed(purpose),
             dry_run: false,
             checked: 3,
             completed: 1,
@@ -31061,6 +31061,15 @@ async fn revocation_worker_skips_disabled_remote_object_payload_without_secret_l
     assert_eq!(value["completed"], serde_json::json!(0));
     assert_eq!(value["failed"], serde_json::json!(0));
     assert_eq!(value["skipped"], serde_json::json!(1));
+    // Hash-only: the worker response carries the purpose hash, never the text.
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed(revocation_purpose))
+    );
+    assert!(
+        value.get("purpose").is_none(),
+        "worker response echoed purpose"
+    );
 
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     for secret in [
@@ -31312,6 +31321,15 @@ async fn revocation_worker_deletes_disabled_remote_object_payload_with_configure
     assert_eq!(value["completed"], serde_json::json!(1));
     assert_eq!(value["failed"], serde_json::json!(0));
     assert_eq!(value["skipped"], serde_json::json!(0));
+    // Hash-only: the worker response carries the purpose hash, never the text.
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed("configured remote deleter revocation"))
+    );
+    assert!(
+        value.get("purpose").is_none(),
+        "worker response echoed purpose"
+    );
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     for secret in [
         "revocation-worker-token-a",
@@ -34545,6 +34563,200 @@ async fn drill_responses_carry_purpose_hash_not_operator_purpose_text() {
     );
 }
 
+/// Every `/v1/workers/*` route plus the admin maintenance route, in the order
+/// the router declares them. The canary test below walks all of them.
+const WORKER_AND_MAINTENANCE_ROUTES: &[&str] = &[
+    "/v1/workers/benchmark-convert",
+    "/v1/workers/benchmark-evaluations/run",
+    "/v1/workers/benchmark-registry-publications/run",
+    "/v1/workers/benchmark-registry-outbox/submit",
+    "/v1/workers/benchmark-registry-outbox/confirm",
+    "/v1/workers/replay-export",
+    "/v1/workers/export/jobs/claim-next",
+    "/v1/workers/export/jobs/claim-and-run",
+    "/v1/workers/export/jobs/run-queued",
+    "/v1/workers/export/jobs/retry-failed",
+    "/v1/workers/ranker/training-candidates",
+    "/v1/workers/ranker/training-pairs",
+    "/v1/admin/maintenance",
+    "/v1/workers/credit-settlements/run",
+    "/v1/workers/credit-cycle/run",
+    "/v1/workers/credit-cycle/scheduler/run",
+    "/v1/workers/retention-maintenance",
+    "/v1/workers/revocation-propagation",
+    "/v1/workers/register-stats/refresh",
+    "/v1/workers/vector-index",
+    "/v1/workers/gate/evaluate",
+    "/v1/workers/utility-credit",
+    "/v1/workers/utility-attestations",
+    "/v1/workers/near-credit-outbox/submit",
+    "/v1/workers/near-credit-outbox/confirm",
+    "/v1/workers/near-credit-outbox/mark-status",
+    "/v1/workers/benchmark-registry-outbox/mark-status",
+    "/v1/workers/ranking/features",
+    "/v1/workers/ranking/features/run",
+    "/v1/workers/ranking/predictions",
+    "/v1/workers/ranking/prediction-credit",
+    "/v1/workers/ranking/prediction-credit/run",
+    "/v1/workers/ranking/model-promotions/run",
+    "/v1/workers/ranking/labels",
+    "/v1/workers/ranking/preference-labels",
+    "/v1/workers/ranking/calibration-runs",
+    "/v1/workers/ranking/calibration-runs/run",
+    "/v1/workers/process-evaluation",
+    "/v1/workers/process-evaluations/run",
+];
+
+/// Worker routes whose 200 response IS an export data product (replay-export
+/// manifest, ranker training export, benchmark conversion artifact) that
+/// records the operator's `purpose` verbatim as provenance. The same value is
+/// persisted in the stored manifest/artifact and in the export job and grant
+/// rows, and is served again by the non-worker `/v1/datasets/replay`,
+/// `/v1/ranker/*` and `/v1/benchmarks/*` routes. Hashing it is a storage and
+/// consumer contract change, not a response-echo fix, so it is left for an
+/// explicit decision. Listed exactly, so the set can only shrink on purpose
+/// and a new echo anywhere else fails the test.
+const EXPORT_ARTIFACT_ROUTES_CARRYING_PURPOSE: &[&str] = &[
+    "GET /v1/workers/ranker/training-candidates (200 OK)",
+    "GET /v1/workers/ranker/training-pairs (200 OK)",
+    "GET /v1/workers/replay-export (200 OK)",
+    "POST /v1/workers/benchmark-convert (200 OK)",
+    "POST /v1/workers/ranker/training-candidates (200 OK)",
+    "POST /v1/workers/ranker/training-pairs (200 OK)",
+    "POST /v1/workers/replay-export (200 OK)",
+];
+
+/// Posts `purpose` to every worker and maintenance route under every scoped
+/// credential the test state holds (the handler picks the one it accepts),
+/// as a JSON body and, for the GET-capable routes, as a query parameter.
+/// Asserts no response body contains the text (outside the export-artifact
+/// routes listed above), and that every 200 response
+/// which carries the purpose at all carries it as `purpose_hash`. Returns the
+/// `(method, route)` pairs that answered 200 with a `purpose_hash`.
+async fn assert_worker_routes_do_not_echo_purpose(
+    state: Arc<AppState>,
+    purpose: &str,
+) -> BTreeSet<(String, String)> {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    const TOKENS: &[&str] = &[
+        "admin-token-a",
+        "export-worker-token-a",
+        "retention-worker-token-a",
+        "vector-worker-token-a",
+        "benchmark-worker-token-a",
+        "utility-worker-token-a",
+        "process-eval-worker-token-a",
+        "revocation-worker-token-a",
+        "competition-read-worker-token-a",
+    ];
+    const GET_ROUTES: &[&str] = &[
+        "/v1/workers/replay-export",
+        "/v1/workers/ranker/training-candidates",
+        "/v1/workers/ranker/training-pairs",
+    ];
+    let expected_hash = serde_json::json!(sha256_prefixed(purpose));
+    let encoded = purpose.replace(' ', "%20");
+    let mut hashed = BTreeSet::new();
+    let mut echoed = BTreeSet::new();
+    for route in WORKER_AND_MAINTENANCE_ROUTES {
+        let mut requests = vec![("POST", route.to_string())];
+        if GET_ROUTES.contains(route) {
+            requests.push(("GET", format!("{route}?purpose={encoded}")));
+        }
+        for (method, uri) in requests {
+            for token in TOKENS {
+                let body = if method == "POST" {
+                    Body::from(
+                        serde_json::json!({ "purpose": purpose, "dry_run": true }).to_string(),
+                    )
+                } else {
+                    Body::empty()
+                };
+                let response = app(state.clone())
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header(AUTHORIZATION, format!("Bearer {token}"))
+                            .header(CONTENT_TYPE, "application/json")
+                            .body(body)
+                            .expect("request builds"),
+                    )
+                    .await
+                    .expect("worker response");
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                    .await
+                    .expect("body reads");
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains(purpose) {
+                    echoed.insert(format!("{method} {route} ({status})"));
+                }
+                if status == StatusCode::OK {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        if let Some(hash) = value.get("purpose_hash") {
+                            assert_eq!(
+                                hash, &expected_hash,
+                                "{method} {route} must carry the purpose as its hash"
+                            );
+                            hashed.insert((method.to_string(), route.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let expected_echo: BTreeSet<String> = EXPORT_ARTIFACT_ROUTES_CARRYING_PURPOSE
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect();
+    assert_eq!(
+        echoed, expected_echo,
+        "only the export-artifact routes may carry the operator purpose text; \
+         anything else must return purpose_hash"
+    );
+    hashed
+}
+
+/// Worker and maintenance routes take the same operator free-text `purpose`
+/// as the drills, and the same hash-only rule applies: the response carries
+/// `purpose_hash` (the hash already written to evidence), never the text.
+/// Extends `drill_responses_carry_purpose_hash_not_operator_purpose_text`
+/// to every `/v1/workers/*` route and `/v1/admin/maintenance`.
+///
+/// This PostgreSQL-free state drives six of them to a 200. Of the others,
+/// `revocation-propagation` and `vector-index` refuse here for want of a DB
+/// mirror; their `purpose_hash` is asserted in the PostgreSQL-backed route
+/// tests instead. Most of the rest take no `purpose` at all and reject this
+/// body for a missing required field; they are walked anyway, so one that
+/// starts accepting and echoing a purpose fails here.
+#[tokio::test]
+async fn worker_and_maintenance_responses_carry_purpose_hash_not_operator_purpose_text() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+    let purpose = "operator worker purpose canary 7c2a";
+    let hashed = assert_worker_routes_do_not_echo_purpose(state, purpose).await;
+    // Pin which routes this state actually drives to a 200 with a hash, so
+    // the hash assertion cannot silently stop running for all of them.
+    let hashed: Vec<(&str, &str)> = hashed
+        .iter()
+        .map(|(method, route)| (method.as_str(), route.as_str()))
+        .collect();
+    assert_eq!(
+        hashed,
+        vec![
+            ("POST", "/v1/admin/maintenance"),
+            ("POST", "/v1/workers/benchmark-registry-outbox/confirm"),
+            ("POST", "/v1/workers/benchmark-registry-outbox/submit"),
+            ("POST", "/v1/workers/near-credit-outbox/confirm"),
+            ("POST", "/v1/workers/near-credit-outbox/submit"),
+            ("POST", "/v1/workers/retention-maintenance"),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn key_rotation_drill_records_failed_evidence_for_bridge_token_config() {
     use axum::body::Body;
@@ -36497,6 +36709,15 @@ async fn vector_index_worker_honors_limit_without_retention_side_effects() {
     assert_eq!(value["vector_entries_indexed"], serde_json::json!(1));
     assert_eq!(value["checked_count"], serde_json::json!(1));
     assert_eq!(value["pending_after_count"], serde_json::json!(2));
+    // Hash-only: the worker response carries the purpose hash, never the text.
+    assert_eq!(
+        value["purpose_hash"],
+        serde_json::json!(sha256_prefixed("bounded vector worker pass"))
+    );
+    assert!(
+        value.get("purpose").is_none(),
+        "worker response echoed purpose"
+    );
     assert!(
         value.get("records_marked_expired").is_none(),
         "vector worker response should not expose retention maintenance counts"
@@ -65676,7 +65897,7 @@ fn operational_summary_promotion_gate_log_fields_capture_blockers_and_warnings()
 fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceNearCreditOutboxSubmitWorkerResponse {
-        purpose: "review settlement for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("review settlement for frontier lab batch 42"),
         dry_run: false,
         checked: 5,
         submitted: 3,
@@ -65688,7 +65909,10 @@ fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
     let fields = near_credit_outbox_submit_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("review settlement for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(!fields.dry_run);
@@ -65703,7 +65927,7 @@ fn near_credit_submit_worker_log_fields_hash_sensitive_values() {
 fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceNearCreditOutboxConfirmWorkerResponse {
-        purpose: "confirm settlement for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("confirm settlement for frontier lab batch 42"),
         dry_run: true,
         checked: 4,
         confirmed: 2,
@@ -65715,7 +65939,10 @@ fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
     let fields = near_credit_outbox_confirm_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("confirm settlement for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(fields.dry_run);
@@ -65730,7 +65957,7 @@ fn near_credit_confirm_worker_log_fields_hash_sensitive_values() {
 fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
-        purpose: "publish benchmark artifact for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("publish benchmark artifact for frontier lab batch 42"),
         dry_run: false,
         checked: 7,
         submitted: 4,
@@ -65742,7 +65969,10 @@ fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
     let fields = benchmark_registry_outbox_submit_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("publish benchmark artifact for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(!fields.dry_run);
@@ -65757,7 +65987,7 @@ fn benchmark_registry_submit_worker_log_fields_hash_sensitive_values() {
 fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
-        purpose: "confirm benchmark artifact for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("confirm benchmark artifact for frontier lab batch 42"),
         dry_run: true,
         checked: 6,
         confirmed: 5,
@@ -65769,7 +65999,10 @@ fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
     let fields = benchmark_registry_outbox_confirm_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("confirm benchmark artifact for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(fields.dry_run);
@@ -65784,7 +66017,7 @@ fn benchmark_registry_confirm_worker_log_fields_hash_sensitive_values() {
 fn revocation_propagation_worker_log_fields_hash_sensitive_values() {
     let auth = test_reviewer_auth("tenant-a");
     let response = TraceRevocationPropagationWorkerResponse {
-        purpose: "propagate revocation for frontier lab batch 42".to_string(),
+        purpose_hash: sha256_prefixed("propagate revocation for frontier lab batch 42"),
         dry_run: false,
         checked: 8,
         completed: 4,
@@ -65797,7 +66030,10 @@ fn revocation_propagation_worker_log_fields_hash_sensitive_values() {
     let fields = revocation_propagation_worker_log_fields(&auth, &response);
 
     assert_eq!(fields.tenant_storage_ref, tenant_storage_ref("tenant-a"));
-    assert_eq!(fields.purpose_hash, sha256_prefixed(&response.purpose));
+    assert_eq!(
+        fields.purpose_hash,
+        sha256_prefixed("propagate revocation for frontier lab batch 42")
+    );
     assert!(!fields.purpose_hash.contains("frontier"));
     assert!(!fields.purpose_hash.contains("batch"));
     assert!(!fields.dry_run);
@@ -93831,7 +94067,7 @@ fn a_credit_cycle_whose_outbox_submits_all_failed_is_a_failed_tick() {
 
     fn submit(submitted: usize, failed: usize) -> TraceNearCreditOutboxSubmitWorkerResponse {
         TraceNearCreditOutboxSubmitWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox"),
             dry_run: false,
             checked: submitted + failed,
             submitted,
@@ -93842,7 +94078,7 @@ fn a_credit_cycle_whose_outbox_submits_all_failed_is_a_failed_tick() {
     }
     fn confirm(confirmed: usize, failed: usize) -> TraceNearCreditOutboxConfirmWorkerResponse {
         TraceNearCreditOutboxConfirmWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox_confirm"),
             dry_run: false,
             checked: confirmed + failed,
             confirmed,
@@ -94325,7 +94561,7 @@ fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleW
             settlement_policy_excluded_reason_counts: BTreeMap::new(),
         },
         near_outbox_submit: TraceNearCreditOutboxSubmitWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox"),
             dry_run: false,
             checked: failed,
             submitted: 0,
@@ -94334,7 +94570,7 @@ fn credit_cycle_response_with_failed_submits(failed: usize) -> TraceCreditCycleW
             pending: failed,
         },
         near_outbox_confirm: TraceNearCreditOutboxConfirmWorkerResponse {
-            purpose: "trace_commons_credit_cycle_near_outbox_confirm".to_string(),
+            purpose_hash: sha256_prefixed("trace_commons_credit_cycle_near_outbox_confirm"),
             dry_run: false,
             checked: 0,
             confirmed: 0,
