@@ -5071,8 +5071,9 @@ impl PipelineService {
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
                 let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-                for entry in command.entries() {
-                    let key = command.entry_key(&tenant, entry);
+                // Each entry is written under its own key: the command pairs
+                // them, so one entry is never stored under another's key.
+                for (key, entry) in command.keyed_entries(&tenant) {
                     match self
                         .index_writer
                         .upsert(&key, &entry.embedding, &entry.content_hash)

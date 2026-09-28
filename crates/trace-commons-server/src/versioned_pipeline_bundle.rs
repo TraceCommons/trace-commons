@@ -351,10 +351,9 @@ impl ScorePolicy for FixedScorePolicy {
         let command = match &self.index {
             None => None,
             Some(spec) => {
-                let tenant = input.tenant_storage_ref.as_str();
                 let snapshot = spec
                     .index_reader
-                    .snapshot(tenant, MINIMAL_INDEX_ID)
+                    .snapshot(&input.tenant_storage_ref, MINIMAL_INDEX_ID)
                     .map_err(|_| {
                         PolicyError::transient("index_unavailable").expect("static label")
                     })?;

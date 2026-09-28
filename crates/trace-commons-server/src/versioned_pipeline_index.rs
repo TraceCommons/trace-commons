@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
+use trace_commons_gate_api::pipeline::TenantStorageRef;
 use trace_commons_gate_api::{
     IndexEntryKey, IndexSnapshot, IndexUpsertResult, IndexWriteError, NearestNeighbor,
     VectorIndexReader, VectorIndexWriter,
@@ -28,9 +29,11 @@ struct StoredEntry {
     embedding: Vec<f32>,
 }
 
+/// Entries keyed by the tenant's derived storage reference, the index id,
+/// and the entry id.
 #[derive(Debug)]
 struct IsolatedIndexState {
-    entries: BTreeMap<(String, String, Uuid), StoredEntry>,
+    entries: BTreeMap<(TenantStorageRef, String, Uuid), StoredEntry>,
     fault: IndexFault,
 }
 
@@ -59,7 +62,7 @@ impl IsolatedPipelineIndex {
         self.state.lock().expect("index mutex").fault = fault;
     }
 
-    pub fn entry_count(&self, tenant_storage_ref: &str, index_id: &str) -> usize {
+    pub fn entry_count(&self, tenant_storage_ref: &TenantStorageRef, index_id: &str) -> usize {
         self.state
             .lock()
             .expect("index mutex")
@@ -91,7 +94,11 @@ fn content_digest(embedding: &[f32], content_hash: &str) -> String {
 }
 
 impl VectorIndexReader for IsolatedPipelineIndex {
-    fn snapshot(&self, tenant_storage_ref: &str, index_id: &str) -> anyhow::Result<IndexSnapshot> {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<IndexSnapshot> {
         let state = self.state.lock().expect("index mutex");
         let mut hasher = Sha256::new();
         let mut cardinality = 0_u64;
@@ -112,7 +119,7 @@ impl VectorIndexReader for IsolatedPipelineIndex {
 
     fn nearest(
         &self,
-        tenant_storage_ref: &str,
+        tenant_storage_ref: &TenantStorageRef,
         index_id: &str,
         embedding: &[f32],
         k: usize,
@@ -195,11 +202,15 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
 mod tests {
     use super::*;
 
+    fn tenant() -> TenantStorageRef {
+        TenantStorageRef::new("tenant_sha256:80a707af7dc77ee1228f9127180f3964").unwrap()
+    }
+
     #[test]
     fn writer_refuses_equal_key_with_different_content() {
         let index = IsolatedPipelineIndex::new();
         let key = IndexEntryKey {
-            tenant_storage_ref: "tenant_sha256:80a707af7dc77ee1228f9127180f3964".to_string(),
+            tenant_storage_ref: tenant(),
             index_id: "pipeline-test-index-v1".to_string(),
             revision_id: Uuid::nil(),
             projection_id: "pipeline-test-projection-v1".to_string(),
@@ -235,13 +246,7 @@ mod tests {
             ),
             Err(IndexWriteError::ContentConflict)
         );
-        assert_eq!(
-            index.entry_count(
-                "tenant_sha256:80a707af7dc77ee1228f9127180f3964",
-                "pipeline-test-index-v1"
-            ),
-            1
-        );
+        assert_eq!(index.entry_count(&tenant(), "pipeline-test-index-v1"), 1);
     }
 
     #[test]
@@ -249,7 +254,7 @@ mod tests {
         let index = IsolatedPipelineIndex::new();
         let revision = Uuid::from_u128(7);
         let key = IndexEntryKey {
-            tenant_storage_ref: "tenant_sha256:80a707af7dc77ee1228f9127180f3964".to_string(),
+            tenant_storage_ref: tenant(),
             index_id: "pipeline-test-index-v1".to_string(),
             revision_id: revision,
             projection_id: "pipeline-test-projection-v1".to_string(),
@@ -265,7 +270,7 @@ mod tests {
             .unwrap();
         let neighbors = VectorIndexReader::nearest(
             index.as_ref(),
-            "tenant_sha256:80a707af7dc77ee1228f9127180f3964",
+            &tenant(),
             "pipeline-test-index-v1",
             &[1.0, 0.0],
             8,
@@ -273,12 +278,7 @@ mod tests {
         )
         .unwrap();
         assert!(neighbors.is_empty());
-        let snapshot = index
-            .snapshot(
-                "tenant_sha256:80a707af7dc77ee1228f9127180f3964",
-                "pipeline-test-index-v1",
-            )
-            .unwrap();
+        let snapshot = index.snapshot(&tenant(), "pipeline-test-index-v1").unwrap();
         assert_eq!(snapshot.cardinality, 1);
         assert!(snapshot.snapshot_hash.starts_with("sha256:"));
     }
@@ -287,7 +287,7 @@ mod tests {
     fn tenants_do_not_see_each_other() {
         let index = IsolatedPipelineIndex::new();
         let key = IndexEntryKey {
-            tenant_storage_ref: "tenant_sha256:80a707af7dc77ee1228f9127180f3964".to_string(),
+            tenant_storage_ref: tenant(),
             index_id: "pipeline-test-index-v1".to_string(),
             revision_id: Uuid::from_u128(9),
             projection_id: "pipeline-test-projection-v1".to_string(),
@@ -299,17 +299,18 @@ mod tests {
             index.upsert(&key, &[1.0, 0.0], &hash),
             Ok(IndexUpsertResult::Inserted)
         );
-        let other = "tenant_sha256:00000000000000000000000000000000";
+        let other =
+            TenantStorageRef::new("tenant_sha256:00000000000000000000000000000000").unwrap();
         assert_eq!(
             index
-                .snapshot(other, "pipeline-test-index-v1")
+                .snapshot(&other, "pipeline-test-index-v1")
                 .unwrap()
                 .cardinality,
             0
         );
         assert!(
             index
-                .nearest(other, "pipeline-test-index-v1", &[1.0, 0.0], 4, None)
+                .nearest(&other, "pipeline-test-index-v1", &[1.0, 0.0], 4, None)
                 .unwrap()
                 .is_empty()
         );

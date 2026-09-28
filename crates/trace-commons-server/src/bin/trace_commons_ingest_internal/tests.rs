@@ -10607,7 +10607,7 @@ struct QualifiedTestIndex(
 impl trace_commons_gate_api::VectorIndexReader for QualifiedTestIndex {
     fn snapshot(
         &self,
-        tenant_storage_ref: &str,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
         index_id: &str,
     ) -> anyhow::Result<trace_commons_gate_api::IndexSnapshot> {
         trace_commons_gate_api::VectorIndexReader::snapshot(
@@ -10619,7 +10619,7 @@ impl trace_commons_gate_api::VectorIndexReader for QualifiedTestIndex {
 
     fn nearest(
         &self,
-        tenant_storage_ref: &str,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
         index_id: &str,
         embedding: &[f32],
         k: usize,

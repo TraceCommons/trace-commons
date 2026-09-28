@@ -4617,7 +4617,7 @@ async fn settle_writes_the_stored_command_without_requerying_the_live_index() {
     // not affect the result.
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let unrelated_key = IndexEntryKey {
-        tenant_storage_ref: tenant_ref.as_str().to_string(),
+        tenant_storage_ref: tenant_ref.clone(),
         index_id: MINIMAL_INDEX_ID.to_string(),
         revision_id: uuid::Uuid::new_v4(),
         projection_id: MINIMAL_PROJECTION_ID.to_string(),
@@ -4648,8 +4648,7 @@ async fn settle_writes_the_stored_command_without_requerying_the_live_index() {
         .await
         .unwrap()
         .expect("the stored command is retained");
-    for entry in command.entries() {
-        let key = command.entry_key(&tenant_ref, entry);
+    for (key, entry) in command.keyed_entries(&tenant_ref) {
         assert_eq!(
             index.upsert(&key, &entry.embedding, &entry.content_hash),
             Ok(IndexUpsertResult::Unchanged),
@@ -5096,9 +5095,11 @@ async fn equal_key_with_different_content_fails_closed() {
         .await
         .unwrap()
         .expect("Score proposed a command");
-    let first_entry = command.entries().first().expect("at least one chunk");
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
-    let key = command.entry_key(&tenant_ref, first_entry);
+    let (key, first_entry) = command
+        .keyed_entries(&tenant_ref)
+        .next()
+        .expect("at least one chunk");
 
     // Pre-insert the stored command's first entry key with a different
     // embedding, before Settle ever dispatches to the index.
@@ -5676,7 +5677,7 @@ async fn withdrawal_between_score_and_settle_excludes_the_index() {
 
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     assert_eq!(
-        index.entry_count(tenant_ref.as_str(), MINIMAL_INDEX_ID),
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
         0,
         "no entry was applied for a withdrawn submission"
     );
@@ -5778,7 +5779,7 @@ async fn withdrawal_during_dispatch_cancels_the_index_write() {
 
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     assert_eq!(
-        index.entry_count(tenant_ref.as_str(), MINIMAL_INDEX_ID),
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
         0,
         "no entry was applied before dispatch was cancelled"
     );
@@ -7722,7 +7723,7 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
             .expect("Score proposed a command");
         let tenant_ref = pipeline_tenant_storage_ref(&tenant);
         assert_eq!(
-            index.entry_count(tenant_ref.as_str(), MINIMAL_INDEX_ID),
+            index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
             command.entries().len(),
             "the index must hold each command chunk exactly once at point {point:?}"
         );
