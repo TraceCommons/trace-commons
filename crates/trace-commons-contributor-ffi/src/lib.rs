@@ -3079,6 +3079,46 @@ pub unsafe extern "C" fn tc_grant_void_notice(void_json: *const c_char) -> *mut 
     })
 }
 
+/// The notice after a legacy invite identity moved to the contributor's NEAR
+/// AI account, from `status`'s `legacy_invite_migration.notice` object,
+/// passed as the JSON the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `LegacyMigrationNoticeCopy`'s
+/// fields -- `title`, `body`, `folders` (whether automatic folders were kept,
+/// already chosen) and `acknowledge` -- free it with [`tc_string_free`]. Once
+/// shown, a shell calls `acknowledge_legacy_invite_migration`.
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS: the choice of the `folders`
+/// sentence is made in `consent_copy`, and a shell does not read
+/// `folders_kept` to pick one. Returns NULL for a NULL, non-UTF-8 or
+/// unparseable argument, JSON `null` (nothing to show), anything that is not
+/// an object, and on a caught panic.
+///
+/// # Safety
+/// `notice_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_legacy_migration_notice(notice_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if notice_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(notice_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) =
+            trace_commons_contributor::consent_copy::legacy_migration_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// The notice for approved sessions held because the privacy witness is
 /// busy, from `status`'s `witness_capacity` object, passed as the JSON the
 /// daemon sent.

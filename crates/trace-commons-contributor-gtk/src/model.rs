@@ -56,6 +56,12 @@ pub struct Status {
     /// Absent on a daemon older than the field, which holds nothing on it.
     #[serde(default)]
     pub witness_capacity: WitnessCapacity,
+    /// Whether moving a legacy invite identity to a NEAR AI account is
+    /// offered, and the notice after it moved. Kept as the daemon sent it:
+    /// the notice goes back to `consent_copy::legacy_migration_notice_for_wire`,
+    /// which chooses the words. Absent on a daemon older than the field.
+    #[serde(default)]
+    pub legacy_invite_migration: serde_json::Value,
 }
 
 /// `status.witness_capacity`. A count and one timestamp; nothing identifying.
@@ -132,6 +138,14 @@ pub struct GrantVoidCard {
 }
 
 impl Status {
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the core's words, or `None` when there is nothing to show.
+    pub fn legacy_migration_notice(&self) -> Option<crate::copy::LegacyMigrationNoticeCopy> {
+        self.legacy_invite_migration
+            .get("notice")
+            .and_then(crate::copy::legacy_migration_notice_for_wire)
+    }
+
     /// Every void, as the cards the window draws.
     pub fn grant_void_notices(&self) -> Vec<GrantVoidCard> {
         self.grant_voids
@@ -1221,6 +1235,38 @@ mod tests {
             serde_json::json!({"waiting_sessions": 0, "next_retry_at": null}),
         );
         assert!(none.health_banner_lines().is_empty());
+    }
+
+    /// The notice after a legacy invite identity moved to a NEAR AI account
+    /// is the core's, including which folders sentence to show; a daemon
+    /// older than the field, and no notice, show nothing.
+    #[test]
+    fn the_legacy_migration_notice_is_the_cores() {
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "legacy_invite_migration": {
+                "offered": false,
+                "notice": { "folders_kept": 1, "automatic_grant_kept": false },
+            },
+        }))
+        .expect("status decodes");
+        let notice = status.legacy_migration_notice().expect("a notice");
+        assert_eq!(
+            notice,
+            trace_commons_contributor::consent_copy::legacy_migration_notice_for_wire(
+                &serde_json::json!({ "folders_kept": 1, "automatic_grant_kept": false })
+            )
+            .unwrap()
+        );
+        let none: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "legacy_invite_migration": { "offered": true, "notice": null },
+        }))
+        .expect("status decodes");
+        assert!(none.legacy_migration_notice().is_none());
+        let old: Status = serde_json::from_value(serde_json::json!({ "logged_in": true }))
+            .expect("status decodes");
+        assert!(old.legacy_migration_notice().is_none());
     }
 
     /// A daemon older than the field has nothing to report; an element the

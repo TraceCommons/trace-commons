@@ -1489,6 +1489,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Records that the legacy invite migration notice was shown, then
+    /// re-reads status so the daemon, not this shell, decides it is gone.
+    func acknowledgeLegacyInviteMigration() {
+        perform(
+            "acknowledge_legacy_invite_migration",
+            work: { try $0.acknowledgeLegacyInviteMigration() }
+        ) { _ in
+            self.refreshStatus()
+        }
+    }
+
     /// Void notices whose "Turn back on" the daemon refused, by notice id,
     /// so the card can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var grantVoidRearmRefused: Set<UInt64> = []

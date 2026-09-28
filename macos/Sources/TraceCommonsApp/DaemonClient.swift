@@ -618,6 +618,10 @@ final class DaemonClient {
     /// notices" in the contract. Only the ids actually drawn: there is no
     /// "all", so a void raised after the shell drew is never cleared unseen.
     /// Re-arms nothing.
+    func acknowledgeLegacyInviteMigration() throws {
+        _ = try rawResult("acknowledge_legacy_invite_migration", params: [:])
+    }
+
     func acknowledgeGrantVoids(ids: [UInt64]) throws {
         _ = try rawResult("acknowledge_grant_voids", params: ["ids": ids])
     }

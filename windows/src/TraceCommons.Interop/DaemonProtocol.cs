@@ -90,6 +90,12 @@ public static class DaemonProtocol
         public const string AcknowledgeGrantVoids = "acknowledge_grant_voids";
 
         /// <summary>
+        /// Records that the notice after a legacy invite migration was
+        /// shown. Changes nothing else.
+        /// </summary>
+        public const string AcknowledgeLegacyInviteMigration = "acknowledge_legacy_invite_migration";
+
+        /// <summary>
         /// Asks IronWire which tools on this machine are set to send through
         /// it, one row per tool it knows about.
         ///
@@ -695,6 +701,15 @@ public sealed class DaemonStatus
     /// </summary>
     [JsonPropertyName("grant_voids")]
     public List<JsonElement>? GrantVoids { get; set; }
+
+    /// <summary>
+    /// Whether moving a legacy invite identity to a NEAR AI account is
+    /// offered, and the notice after it moved, kept as the daemon sent it so
+    /// the notice can go back to the ABI for its words. Null from a daemon
+    /// older than the field.
+    /// </summary>
+    [JsonPropertyName("legacy_invite_migration")]
+    public JsonElement? LegacyInviteMigration { get; set; }
 
     /// <summary>
     /// Approved sessions held because the privacy witness is busy, and when

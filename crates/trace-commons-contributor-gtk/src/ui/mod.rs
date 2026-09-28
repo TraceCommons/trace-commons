@@ -1001,12 +1001,66 @@ impl App {
             self.void_notices.remove(&child);
         }
         let notices = status.grant_void_notices();
+        for card in &notices {
+            self.void_notices.append(&self.grant_void_card(card));
+        }
+        // The legacy invite migration notice shares the column: it too
+        // changes what the contributor's sessions go under, and they are told
+        // on whichever screen they are reading (the consent spec requires it
+        // in every shell).
+        let migration = status.legacy_migration_notice();
+        if let Some(notice) = &migration {
+            self.void_notices
+                .append(&self.legacy_migration_card(notice));
+        }
         if let Some(column) = self.void_notices.parent() {
-            column.set_visible(!notices.is_empty());
+            column.set_visible(!notices.is_empty() || migration.is_some());
         }
-        for card in notices {
-            self.void_notices.append(&self.grant_void_card(&card));
-        }
+    }
+
+    /// The notice after the move, in the core's words. Its one button
+    /// records that it was shown and does nothing else.
+    fn legacy_migration_card(
+        self: &Rc<Self>,
+        notice: &crate::copy::LegacyMigrationNoticeCopy,
+    ) -> gtk::Box {
+        let text = |value: &str, class: &str| {
+            let label = gtk::Label::builder()
+                .label(value)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class(class);
+            label
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        column.append(&text(notice.title, "tc-card-title"));
+        column.append(&text(notice.body, "tc-body"));
+        column.append(&text(notice.folders, "tc-body"));
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&column);
+        let button = gtk::Button::with_label(notice.acknowledge);
+        button.add_css_class("tc-quiet");
+        button.set_valign(gtk::Align::Center);
+        let app = Rc::clone(self);
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            app.call(
+                "acknowledge_legacy_invite_migration",
+                serde_json::json!({}),
+                |app, _result| app.refresh(),
+            );
+        });
+        card.append(&button);
+        card
     }
 
     fn grant_void_card(self: &Rc<Self>, card_data: &crate::model::GrantVoidCard) -> gtk::Box {

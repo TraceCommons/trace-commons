@@ -156,6 +156,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<GrantVoidCard> GrantVoidCards { get; } = new();
 
     /// <summary>
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// in the Rust's words, or null when there is nothing to show. Re-read on
+    /// every status read, so a notice another shell acknowledged goes.
+    /// </summary>
+    public LegacyMigrationNotice? LegacyMigration { get; private set; }
+
+    public bool HasLegacyMigrationNotice => LegacyMigration is not null;
+
+    public string LegacyMigrationTitle => LegacyMigration?.Title ?? string.Empty;
+
+    public string LegacyMigrationBody => LegacyMigration?.Body ?? string.Empty;
+
+    public string LegacyMigrationFolders => LegacyMigration?.Folders ?? string.Empty;
+
+    public string LegacyMigrationAcknowledge => LegacyMigration?.Acknowledge ?? string.Empty;
+
+    /// <summary>
     /// This entry as the queue describes it NOW, or null if it has left the
     /// queue.
     /// </summary>
@@ -1502,6 +1519,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 SetWitnessCapacity(parsedStatus.WitnessCapacity);
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
                 SetGrantVoids(GrantVoidNotices.Cards(parsedStatus.GrantVoids));
+                SetLegacyMigration(LegacyMigrationNotices.Notice(parsedStatus.LegacyInviteMigration));
             }
 
             DaemonResponse rollup = await _host
@@ -1674,6 +1692,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             GrantVoidCards.Add(card);
         }
+    }
+
+    private void SetLegacyMigration(LegacyMigrationNotice? notice)
+    {
+        if (Equals(LegacyMigration, notice))
+        {
+            return;
+        }
+
+        LegacyMigration = notice;
+        Raise(nameof(LegacyMigration));
+        Raise(nameof(HasLegacyMigrationNotice));
+        Raise(nameof(LegacyMigrationTitle));
+        Raise(nameof(LegacyMigrationBody));
+        Raise(nameof(LegacyMigrationFolders));
+        Raise(nameof(LegacyMigrationAcknowledge));
+    }
+
+    /// <summary>
+    /// The button on the legacy invite migration notice: records that it was
+    /// shown, then re-reads status so the daemon decides it is gone.
+    /// </summary>
+    public async Task AcknowledgeLegacyMigrationAsync()
+    {
+        await _host
+            .CallAsync(DaemonProtocol.Methods.AcknowledgeLegacyInviteMigration, "{}")
+            .ConfigureAwait(true);
+
+        await RefreshAsync().ConfigureAwait(true);
     }
 
     /// <summary>

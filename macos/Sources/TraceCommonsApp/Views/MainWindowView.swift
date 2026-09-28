@@ -98,6 +98,13 @@ struct MainWindowView: View {
                 onAcknowledge: { id in model.acknowledgeGrantVoid(id: id) },
                 onRearm: { id, projectID in model.rearmGrantVoid(id: id, projectID: projectID) }
             )
+            // Above the shell too: the contributor is told, wherever they
+            // are, that their contributions now go under their NEAR AI
+            // account (the consent spec requires it in every shell).
+            LegacyMigrationNoticeCard(
+                wire: model.status.legacyInviteMigration,
+                onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
+            )
             shell
         }
     }
@@ -783,6 +790,42 @@ struct GrantVoidNotices: View {
                     }
                 }
             }
+            .padding(.horizontal, TC.Space.md)
+            .padding(.top, TC.Space.s)
+        }
+    }
+}
+
+/// The notice after a legacy invite identity moved to a NEAR AI account. The
+/// words come from `consent_copy` across the ABI; this view only lays them
+/// out, and draws nothing when there is no notice or it cannot be read.
+struct LegacyMigrationNoticeCard: View {
+    let wire: LegacyMigrationWire
+    let onAcknowledge: () -> Void
+
+    var body: some View {
+        if let json = wire.noticeJSON,
+            let notice = TCConsentCopy.legacyMigrationNoticeJSON(forNotice: json)
+                .flatMap(LegacyMigrationNotice.decode(fromJSON:))
+        {
+            HStack(alignment: .top, spacing: TC.Space.m) {
+                VStack(alignment: .leading, spacing: TC.Space.xxs) {
+                    Text(notice.title)
+                        .font(TC.Font_.cardTitle)
+                        .foregroundStyle(TC.inkPrimary)
+                    Text(notice.body)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(notice.folders)
+                        .tcType(TC.Font_.captionText)
+                        .foregroundStyle(TC.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: TC.Space.m)
+                Button(notice.acknowledge, action: onAcknowledge)
+            }
+            .padding(TC.Space.m)
             .padding(.horizontal, TC.Space.md)
             .padding(.top, TC.Space.s)
         }

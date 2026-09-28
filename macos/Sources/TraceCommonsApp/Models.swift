@@ -268,6 +268,9 @@ struct DaemonStatus: Decodable, Equatable {
     /// Approved sessions held because the privacy witness is busy. A daemon
     /// that predates the field holds nothing on it.
     let witnessCapacity: WitnessCapacity
+    /// The notice after a legacy invite identity moved to a NEAR AI account.
+    /// A daemon that predates the field has nothing to show.
+    let legacyInviteMigration: LegacyMigrationWire
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -282,6 +285,7 @@ struct DaemonStatus: Decodable, Equatable {
         case routing
         case grantVoids = "grant_voids"
         case witnessCapacity = "witness_capacity"
+        case legacyInviteMigration = "legacy_invite_migration"
     }
 
     init(
@@ -296,7 +300,8 @@ struct DaemonStatus: Decodable, Equatable {
         dailyBudget: DailyBudget = .unknown,
         routing: RoutingStatus = .notDeclared,
         grantVoids: [GrantVoidWire] = [],
-        witnessCapacity: WitnessCapacity = .none
+        witnessCapacity: WitnessCapacity = .none,
+        legacyInviteMigration: LegacyMigrationWire = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -310,6 +315,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.routing = routing
         self.grantVoids = grantVoids
         self.witnessCapacity = witnessCapacity
+        self.legacyInviteMigration = legacyInviteMigration
     }
 
     init(from decoder: Decoder) throws {
@@ -330,6 +336,9 @@ struct DaemonStatus: Decodable, Equatable {
         grantVoids = try c.decodeIfPresent([GrantVoidWire].self, forKey: .grantVoids) ?? []
         witnessCapacity =
             try c.decodeIfPresent(WitnessCapacity.self, forKey: .witnessCapacity) ?? .none
+        legacyInviteMigration =
+            (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
+            .flatMap { $0 } ?? .none
     }
 
     static let unknown = DaemonStatus(

@@ -572,6 +572,43 @@
             </ItemsControl>
 
             <!--
+                The notice after a legacy invite identity moved to the
+                contributor's NEAR AI account, beside the void notices for the
+                same reason: it changes what their sessions go under, and the
+                consent spec requires every shell to say so.
+
+                EVERY STRING HERE IS BOUND, from the Rust through
+                tc_legacy_migration_notice. The button records that the notice
+                was shown and nothing else.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasLegacyMigrationNotice, Mode=OneWay}"
+                    Padding="14,12"
+                    Margin="0,0,0,8"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                    <StackPanel Grid.Column="0" Spacing="2">
+                        <TextBlock Text="{x:Bind ViewModel.LegacyMigrationTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.LegacyMigrationBody, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.LegacyMigrationFolders, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource TcSecondaryButtonStyle}"
+                            Content="{x:Bind ViewModel.LegacyMigrationAcknowledge, Mode=OneWay}"
+                            Click="OnAcknowledgeLegacyMigration" />
+                </Grid>
+            </Border>
+
+            <!--
                 The offer to answer model calls on this computer.
 
                 Shown once, on the screen this window opens on. Both answers

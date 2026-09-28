@@ -30,6 +30,25 @@ final class DaemonFieldDecodingTests: XCTestCase {
         XCTAssertEqual(status.grantVoids.map(\.id), [4])
     }
 
+    // MARK: - Legacy invite migration
+
+    /// The notice after a legacy invite identity moved to a NEAR AI
+    /// account. A daemon that predates the field has nothing to show.
+    func testStatusDecodesTheLegacyMigrationNotice() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null},
+         "legacy_invite_migration":{"offered":false,
+                                    "notice":{"folders_kept":1,"automatic_grant_kept":false}}}
+        """)
+        XCTAssertNotNil(status.legacyInviteMigration.noticeJSON)
+        let older = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertNil(older.legacyInviteMigration.noticeJSON)
+    }
+
     // MARK: - Witness capacity
 
     /// Sessions held on a busy witness, beside `health` because a higher
