@@ -65,9 +65,18 @@ appends a hash-only `legacy_invite_linked` audit row (tenant ids appear only
 as `legacy_tenant_hash`). The ingest login needs nothing beyond the
 `trace_account_invite_runtime` role it already holds.
 
-Re-linking by the same account, from any of the tenant's devices, returns the
-original record unchanged. A challenge is single-use, expires after five
-minutes, and an account may hold five open at once.
+Re-linking by the same account from the same device returns the original
+record unchanged. Since V91, another of the tenant's invite devices, signed
+into the SAME account, gets an attestation of its own instead: its own
+statement over a fresh challenge, recorded under the existing link in
+`trace_legacy_invite_link_devices` by `trace_attest_legacy_invite_device` and
+countersigned, so it can verify the record against its own key before its
+client switches. It is idempotent per device (a repeat returns the first
+attestation), changes nothing about the link, the account's trust or its
+invite grant, and is audited hash-only as `legacy_invite_device_attested`.
+Another account is still refused (`legacy_link_tenant_claimed`). A challenge
+is single-use, expires after five minutes, and an account may hold five open
+at once.
 
 Instance-enrolled devices are `invite`-origin in `device_keys` but redeemed no
 invite; they have no `onboarding_invites` row and cannot link.
