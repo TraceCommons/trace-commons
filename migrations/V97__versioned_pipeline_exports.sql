@@ -65,46 +65,55 @@ CREATE TABLE pipeline_export_snapshot_items (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, snapshot_id, registry_revision_id),
     UNIQUE (tenant_id, snapshot_id, ordinal),
-    -- Cascade, not restrict: an item is derived from exactly the run that
-    -- produced it (the same one-hop shape as `pipeline_run_settlements` ->
-    -- `pipeline_runs`, V77), and nothing ever deletes a `pipeline_runs` row
-    -- on its own -- only a submission or tenant delete removes it, cascading
-    -- from `trace_submissions`. The three reference foreign keys below defer
-    -- their checks instead, because each of their targets is also removed
-    -- by a separate path from that same submission or tenant, racing this
-    -- one.
+    -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
+    -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
+    -- same check, deferrable. Deferred, not cascade: nothing guards a direct
+    -- `DELETE FROM pipeline_runs` (no trigger sits on that table the way one
+    -- sits on `phase_outcomes` or the export tables), so if this key were
+    -- cascade a lone run delete -- no submission or tenant delete involved
+    -- -- could carry a retained export item away with it. The item is
+    -- instead removed by its submission's own cascade below; deferring this
+    -- check means a submission or tenant delete (which also removes
+    -- `pipeline_runs`, via `trace_submissions`, a sibling of the item's own
+    -- cascade through the same parent) can reach either branch first, and
+    -- by commit time the item is already gone either way. A lone run
+    -- delete, with a live item still referencing it, is still refused at
+    -- commit.
     FOREIGN KEY (tenant_id, run_id)
         REFERENCES pipeline_runs (tenant_id, run_id)
-        ON DELETE CASCADE,
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED,
     -- `NO ACTION`, not `RESTRICT` -- PostgreSQL never defers a `RESTRICT`
     -- action no matter what the `DEFERRABLE` clause says; `NO ACTION` is the
     -- same check, deferrable. Deferred because the item is already removed
-    -- by its run's own cascade above, and a tenant delete also cascades
-    -- `pipeline_export_snapshots` straight from `trace_tenants`, a sibling
-    -- of the run's own cascade chain up to the same tenant, so a tenant
-    -- delete can reach either branch first. By commit time the item is
-    -- already gone whenever the whole tenant is going away together; a
-    -- snapshot deleted on its own is still refused regardless of this key,
-    -- by the trigger on `pipeline_export_snapshots` itself below.
+    -- by its submission's own cascade below, and a tenant delete also
+    -- cascades `pipeline_export_snapshots` straight from `trace_tenants`, a
+    -- sibling of the submission's own cascade chain up to the same tenant,
+    -- so a tenant delete can reach either branch first. By commit time the
+    -- item is already gone whenever the whole tenant is going away
+    -- together; a snapshot deleted on its own is still refused regardless
+    -- of this key, by the trigger on `pipeline_export_snapshots` itself
+    -- below.
     FOREIGN KEY (tenant_id, snapshot_id)
         REFERENCES pipeline_export_snapshots (tenant_id, snapshot_id)
         ON DELETE NO ACTION
         DEFERRABLE INITIALLY DEFERRED,
-    -- `NO ACTION`, not `RESTRICT`, for the same reason: the item is already
-    -- removed by its run's own cascade above, and `trace_submissions` is
-    -- either the row being deleted directly or cascades straight from
-    -- `trace_tenants`, a sibling of the run's own cascade through the same
-    -- parent, so a submission or tenant delete can reach either branch
-    -- first.
+    -- Cascade, not restrict: `trace_submissions` is the item's shared
+    -- ancestor with its run (edc52070's sibling-path reasoning), and the one
+    -- foreign key here with no other row racing to remove it out from under
+    -- this one -- a submission delete removes this row directly, and a
+    -- tenant delete cascades it from `trace_tenants`. The reference foreign
+    -- keys above and below defer their checks instead, because each of
+    -- their targets is also removed by a separate path from that same
+    -- submission or tenant, racing this one.
     FOREIGN KEY (tenant_id, submission_id)
         REFERENCES trace_submissions (tenant_id, submission_id)
-        ON DELETE NO ACTION
-        DEFERRABLE INITIALLY DEFERRED,
-    -- `NO ACTION`, not `RESTRICT`, for the same reason again: the item is
-    -- already removed by its run's own cascade above, and
-    -- `trace_object_refs` cascades straight from `trace_submissions`, a
-    -- sibling of the run's own cascade up the same submission/tenant chain,
-    -- so a submission or tenant delete can reach either branch first.
+        ON DELETE CASCADE,
+    -- `NO ACTION`, not `RESTRICT`, for the same reason as the run and
+    -- snapshot keys above: the item is already removed by its submission's
+    -- own cascade above, and `trace_object_refs` cascades straight from
+    -- `trace_submissions`, a sibling of that same cascade, so a submission
+    -- or tenant delete can reach either branch first.
     FOREIGN KEY (tenant_id, submission_id, source_object_ref_id)
         REFERENCES trace_object_refs (tenant_id, submission_id, object_ref_id)
         ON DELETE NO ACTION

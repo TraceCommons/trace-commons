@@ -11114,6 +11114,51 @@ async fn a_direct_export_snapshot_item_delete_is_still_refused_while_its_run_exi
     );
 }
 
+/// Finding I1 (round 1 of the RB-5 review): nothing guards a direct `DELETE
+/// FROM pipeline_runs` -- no trigger sits on that table -- so
+/// `pipeline_export_snapshot_items`' foreign key to it must be the deferred
+/// one, not the cascade one, or a lone run delete (no submission or tenant
+/// delete involved) could carry a retained export item away with it while
+/// the submission and tenant stayed live. The deferred check still refuses
+/// that at commit: the `DELETE` itself queues without error, and the
+/// violation surfaces only when the transaction tries to commit.
+#[tokio::test]
+async fn a_direct_pipeline_run_delete_is_still_refused_while_an_export_item_references_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("run-delete-refused-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    insert_export_snapshot_and_item(&tenant, &run).await;
+
+    // The runtime login holds no DELETE on pipeline_runs; the owner does,
+    // and the deferred foreign key refuses it.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "DELETE FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .expect("the delete itself queues fine; the deferred check fires at commit");
+    let error = tx
+        .commit()
+        .await
+        .expect_err("a lone run delete is refused at commit while an export item references it");
+    assert!(
+        db_error_message(&error).contains("violates foreign key constraint"),
+        "unexpected error: {error:?}"
+    );
+}
+
 /// Submits one envelope as `principal` in `tenant` and drives it through
 /// Review, Score, and Settle to completion. Used by the product-read tests
 /// below, which do not care about the run's mechanics, only about its final
