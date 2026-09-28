@@ -49,6 +49,13 @@ final class RouteDisclosureBridgeTests: XCTestCase {
             JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         let copy = try XCTUnwrap(object["copy"] as? [String: Any])
         XCTAssertEqual(copy.keys.sorted(), RouteDisclosure.consumedCopyFields.sorted())
+        // The nested blocks too: the both-enclaves and origin sentences live
+        // in `witness`, and a sentence added there in Rust must not be
+        // dropped silently here. The witness route sends every witness key.
+        let witness = try XCTUnwrap(copy["witness"] as? [String: Any])
+        XCTAssertEqual(witness.keys.sorted(), RouteDisclosure.consumedWitnessCopyFields.sorted())
+        let session = try XCTUnwrap(copy["session"] as? [String: Any])
+        XCTAssertEqual(session.keys.sorted(), RouteDisclosure.consumedSessionCopyFields.sorted())
         let labels = try XCTUnwrap(TCConsentCopy.certificateDetailCopyJSON())
         let labelObject = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(labels.utf8)) as? [String: Any])

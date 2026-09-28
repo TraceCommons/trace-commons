@@ -100,6 +100,16 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
     public static let consumedCopyFields = [
         "title", "route", "witness", "local_filter", "receipts", "attested_bodies", "session",
     ]
+    /// The same, for the nested `copy.witness` block -- where the
+    /// both-enclaves and origin sentences live.
+    public static let consumedWitnessCopyFields = [
+        "heading", "address_label", "signing_label", "measurements_label", "check",
+        "classifier", "origin",
+    ]
+    /// The same, for the nested `copy.session` block.
+    public static let consumedSessionCopyFields = [
+        "heading", "before_label", "before_line", "after_label", "after_line",
+    ]
 
     /// Whether a session leaves this machine unredacted.
     public var sendsToWitness: Bool { facts.route == "witness" }
@@ -132,6 +142,17 @@ public struct RouteDisclosure: Decodable, Equatable, Sendable {
         if (c.attestedBodies != nil) != (sendsToWitness && facts.attestedBodies) { return false }
         return true
     }
+}
+
+/// Where a disclosure surface is. Three states, not an optional: "not read
+/// yet" and "could not be read" must never look like a panel with nothing to
+/// disclose.
+public enum RouteDisclosureState: Equatable, Sendable {
+    /// No answer yet: before the first read.
+    case loading
+    case shown(RouteDisclosure)
+    /// No daemon to ask, the ask failed, or the answer did not decode.
+    case unreadable
 }
 
 /// What a disclosure surface says when the daemon's answer could not be

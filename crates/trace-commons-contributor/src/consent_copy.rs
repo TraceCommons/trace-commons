@@ -1416,12 +1416,14 @@ pub fn route_disclosure_copy(facts: &crate::disclosure::RouteDisclosure) -> Rout
 }
 
 /// The daemon's `route_disclosure` answer, as sent, paired with the words for
-/// it: `{"facts": .., "copy": ..}`. The native shells' entry point (the C ABI's
-/// `tc_route_disclosure_copy`, and GTK directly).
+/// it: `{"facts": .., "copy": ..}`. The entry point for a shell that words the
+/// daemon's answer itself: through the C ABI's `tc_route_disclosure_copy`, or
+/// by calling this directly from a Rust shell.
 ///
 /// `None` for anything this build cannot read -- an unknown `route` or
 /// `origin` is a newer daemon's answer, and the nearest known value would
-/// claim something the daemon did not say. A shell shows nothing then.
+/// claim something the daemon did not say. A shell then shows
+/// [`disclosure_unreadable_copy`]'s words, never a disclosure of its own.
 #[must_use]
 pub fn route_disclosure_for_wire(value: &serde_json::Value) -> Option<serde_json::Value> {
     let facts: crate::disclosure::RouteDisclosure = serde_json::from_value(value.clone()).ok()?;
