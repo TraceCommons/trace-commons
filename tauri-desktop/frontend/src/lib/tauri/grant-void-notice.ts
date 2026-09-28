@@ -28,6 +28,14 @@ export type GrantVoidNotice = {
   rearm_action: string | null;
   /** Shown when the daemon refuses the re-arm; null exactly when the button is. */
   rearm_failed: string | null;
+  /**
+   * K10: how the automatic grant is given again, present only on the
+   * grant's notice. The core decides which notice carries it; this shell
+   * never reads `kind` to choose.
+   */
+  regrant: string | null;
+  /** The button that opens the grant screens; null exactly when `regrant` is. */
+  regrant_action: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -112,6 +120,11 @@ export function parseGrantVoidNotice(value: unknown): GrantVoidNotice {
   if ((rearmAction === null) !== (rearmFailed === null)) {
     throw new Error("Invalid void notice field: rearm_failed");
   }
+  const regrant = optionalText(value, "regrant");
+  const regrantAction = optionalText(value, "regrant_action");
+  if ((regrant === null) !== (regrantAction === null)) {
+    throw new Error("Invalid void notice field: regrant_action");
+  }
   return {
     title: text(value, "title"),
     body: text(value, "body"),
@@ -121,5 +134,16 @@ export function parseGrantVoidNotice(value: unknown): GrantVoidNotice {
     acknowledge: text(value, "acknowledge"),
     rearm_action: rearmAction,
     rearm_failed: rearmFailed,
+    regrant,
+    regrant_action: regrantAction,
   };
+}
+
+/**
+ * Whether the notice offers to give the automatic grant again. The button
+ * opens the grant screens; nothing is given until the contributor goes
+ * through them.
+ */
+export function regrantOffered(notice: GrantVoidNotice): boolean {
+  return notice.regrant !== null && notice.regrant_action !== null;
 }
