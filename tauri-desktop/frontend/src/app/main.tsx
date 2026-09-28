@@ -14,6 +14,11 @@ if (!root) throw new Error("Application root is missing");
 
 const queryClient = createQueryClient();
 
+// The first-run preview runs on mock data and draws imitation macOS sheets,
+// so it exists only in development builds or when a build opts in.
+const ftuxPreviewEnabled =
+  import.meta.env.DEV || import.meta.env.VITE_FTUX_PREVIEW === "1";
+
 createRoot(root).render(
   <StrictMode>
     <ThemeProvider>
@@ -21,7 +26,9 @@ createRoot(root).render(
         <QueryClientProvider client={queryClient}>
           <HashRouter>
             <Routes>
-              <Route path={ftuxPreviewPath} element={<FtuxPreviewRoute />} />
+              {ftuxPreviewEnabled ? (
+                <Route path={ftuxPreviewPath} element={<FtuxPreviewRoute />} />
+              ) : null}
               <Route path="*" element={<AppShell />} />
             </Routes>
           </HashRouter>

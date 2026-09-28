@@ -3,12 +3,12 @@ import type { SharingMode } from "../types";
 import {
   ChevronIcon,
   GlassCheckbox,
-  GlassSwitch,
   PillSelect,
   ScreenTitle,
   type SelectOption,
   Spinner,
 } from "./glass";
+import { PrivateAiCard } from "./private-ai-card";
 
 const SHARING_OPTIONS: SelectOption<SharingMode>[] = [
   { value: "auto", label: "Share automatically", tone: "green" },
@@ -141,23 +141,7 @@ export function UsesScreen({
         </div>
 
         {privateAi === null ? null : (
-          <div className="ftux-card">
-            <div className="ftux-card-row">
-              <span style={{ display: "flex", flexDirection: "column" }}>
-                <span className="ftux-card-title">Private AI</span>
-                <span className="ftux-card-text">
-                  {privateAi
-                    ? "Enabled. Your tools are connected to NEAR AI's private infrastructure from the first session."
-                    : "Enable to connect Private Inference from Near.AI. Your tools and session data will be kept private from the first connection."}
-                </span>
-              </span>
-              <GlassSwitch
-                checked={privateAi}
-                label="Private AI"
-                onToggle={onTogglePrivateAi}
-              />
-            </div>
-          </div>
+          <PrivateAiCard checked={privateAi} onToggle={onTogglePrivateAi} />
         )}
 
         {error ? (

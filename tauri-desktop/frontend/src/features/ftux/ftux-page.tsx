@@ -12,7 +12,11 @@ import {
 import { GlassWindow } from "./components/glass";
 import type { AsyncState } from "./components/join-screen";
 import { JoinScreen } from "./components/join-screen";
-import { PasskeyFlow, WelcomeBack } from "./components/passkey-flow";
+import {
+  PasskeyFlow,
+  type PasskeyResult,
+  WelcomeBack,
+} from "./components/passkey-flow";
 import { RulesScreen } from "./components/rules-screen";
 import { FoldersScreen, ToolsScreen } from "./components/tool-screens";
 import { UsesScreen } from "./components/uses-screen";
@@ -24,6 +28,7 @@ import {
   nextScreen,
   OPTIONAL_USES,
   type RepoSelection,
+  reposForWatchedTools,
   stepIndex,
   stepsFor,
   switchPath,
@@ -43,22 +48,42 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
-function initialSelections(
-  repos: RepoCandidate[],
-  defaults: Record<string, number[]>,
-): RepoSelection[] {
-  return repos.map((repo) => {
-    const picked = new Set(defaults[repo.folder] ?? []);
-    return {
-      folder: repo.folder,
-      rule: repo.defaultRule,
-      sessionCount: repo.sessions.length,
-      selected: repo.sessions.map(
-        (_, index) => repo.defaultRule !== "never" && picked.has(index),
-      ),
-    };
-  });
+// No past session starts ticked: including one is always the person's choice.
+function initialSelections(repos: RepoCandidate[]): RepoSelection[] {
+  return repos.map((repo) => ({
+    folder: repo.folder,
+    rule: repo.defaultRule,
+    sessionCount: repo.sessions.length,
+    selected: repo.sessions.map(() => false),
+  }));
 }
+
+// Rules are only set on Customize and tailor, and only for repos whose tool
+// is watched; nothing the person has not seen goes into setup.
+function offeredRepos(
+  candidates: RepoCandidate[] | null,
+  repos: RepoSelection[],
+  watch: Record<string, WatchAnswer>,
+  tools: DetectedTool[] | null,
+) {
+  const offered =
+    candidates === null ? null : reposForWatchedTools(candidates, watch);
+  const folders = new Set((offered ?? []).map((repo) => repo.folder));
+  const names = new Set(
+    (offered ?? []).map(
+      (repo) =>
+        tools?.find((tool) => tool.id === repo.sourceToolId)?.name ??
+        repo.sourceToolId,
+    ),
+  );
+  return {
+    candidates: offered,
+    repos: repos.filter((repo) => folders.has(repo.folder)),
+    sourceName: [...names].join(" and "),
+  };
+}
+
+const SIGNED_OUT: JoinState = { invite: null, passkey: null, nearAi: false };
 
 export function FtuxPage({
   initialPath = "connect",
@@ -71,17 +96,13 @@ export function FtuxPage({
   initialScreen?: FtuxScreen;
   initialInvite?: string | null;
   // Set when a passkey is already stored on this Mac (P-7).
-  returningPasskey?: string | null;
+  returningPasskey?: PasskeyResult | null;
   onComplete: (settings: FtuxSettings) => void;
 }) {
   const [path, setPath] = useState<FtuxPath>(initialPath);
   const [screen, setScreen] = useState<FtuxScreen>(initialScreen);
 
-  const [join, setJoin] = useState<JoinState>({
-    invite: null,
-    passkey: null,
-    nearAi: false,
-  });
+  const [join, setJoin] = useState<JoinState>(SIGNED_OUT);
   const [inviteDraft, setInviteDraft] = useState(initialInvite ?? "");
   const [lookup, setLookup] = useState<AsyncState>({ status: "idle" });
   const [nearAi, setNearAi] = useState<AsyncState>({ status: "idle" });
@@ -100,10 +121,10 @@ export function FtuxPage({
   const [repos, setRepos] = useState<RepoSelection[]>([]);
 
   const [optionalUses, setOptionalUses] = useState<boolean[]>(
-    OPTIONAL_USES.map(() => true),
+    OPTIONAL_USES.map(() => false),
   );
   const [listHandle, setListHandle] = useState(false);
-  const [sharing, setSharing] = useState<SharingMode>("auto");
+  const [sharing, setSharing] = useState<SharingMode>("ask");
   const [privateAi, setPrivateAi] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -113,10 +134,10 @@ export function FtuxPage({
     void detectTools().then((found) => {
       if (live) setTools(found);
     });
-    void listRepoCandidates().then(({ repos: found, defaultSelection }) => {
+    void listRepoCandidates().then((found) => {
       if (!live) return;
       setCandidates(found);
-      setRepos(initialSelections(found, defaultSelection));
+      setRepos(initialSelections(found));
     });
     return () => {
       live = false;
@@ -163,8 +184,10 @@ export function FtuxPage({
     setWatch((current) => ({ ...current, [toolId]: "watch" }));
   };
 
-  const handleAddTool = async (droppedName?: string) => {
-    const folder = droppedName ?? (await chooseFolder());
+  // A drop carries no path the page can read, so it opens the picker too.
+  // An added tool starts unanswered, like every other row.
+  const handleAddTool = async () => {
+    const folder = await chooseFolder();
     if (!folder) return;
     const id = `custom:${folder}`;
     setTools((current) =>
@@ -184,7 +207,6 @@ export function FtuxPage({
             },
           ],
     );
-    setWatch((current) => ({ ...current, [id]: "watch" }));
   };
 
   const updateRepo = (
@@ -195,13 +217,15 @@ export function FtuxPage({
       current.map((repo) => (repo.folder === folder ? update(repo) : repo)),
     );
 
+  const offer = offeredRepos(candidates, repos, watch, tools);
+
   const handleStart = async () => {
     const settings: FtuxSettings = {
       path,
       join,
       watch,
       customFolders,
-      repos,
+      repos: path === "customize" ? offer.repos : [],
       optionalUses,
       listHandle,
       sharing,
@@ -230,9 +254,6 @@ export function FtuxPage({
     onInstall: (url: string) => void openExternal(url),
     onContinue: advance,
   };
-
-  const watchedSource =
-    tools?.find((tool) => watch[tool.id] === "watch")?.name ?? "Claude Code";
 
   return (
     <div className="ftux">
@@ -273,16 +294,13 @@ export function FtuxPage({
           />
         ) : null}
         {screen === "tools" ? (
-          <ToolsScreen
-            {...toolProps}
-            onAddTool={(name) => void handleAddTool(name)}
-          />
+          <ToolsScreen {...toolProps} onAddTool={() => void handleAddTool()} />
         ) : null}
         {screen === "rules" ? (
           <RulesScreen
-            candidates={candidates}
-            selections={repos}
-            sourceName={watchedSource}
+            candidates={offer.candidates}
+            selections={offer.repos}
+            sourceName={offer.sourceName}
             onRule={(folder, rule) =>
               updateRepo(folder, (repo) => applyRule(repo, rule))
             }
@@ -323,7 +341,7 @@ export function FtuxPage({
 
       {welcomeBack && returningPasskey ? (
         <WelcomeBack
-          passkeyName={returningPasskey}
+          passkeyName={returningPasskey.name}
           onSignIn={() => {
             setWelcomeBack(false);
             setPasskeyOpen("sign-in");
@@ -335,6 +353,7 @@ export function FtuxPage({
       {passkeyOpen ? (
         <PasskeyFlow
           initialStep={passkeyOpen}
+          storedPasskey={returningPasskey}
           onDone={(passkey) => {
             setPasskeyOpen(null);
             setJoin((current) => ({ ...current, passkey }));
@@ -342,8 +361,12 @@ export function FtuxPage({
           onClose={(reason) => {
             setPasskeyOpen(null);
             if (reason === "signed-out") {
+              // Signing out undoes every sign-in on this screen, not only the
+              // passkey, so no card claims an account that is not linked.
+              setJoin(SIGNED_OUT);
+              setInviteDraft("");
               setNotice(
-                "Passkey not verified, so you were signed out. Create one again whenever you like.",
+                "Passkey not verified, so you were signed out. Join again whenever you like.",
               );
             }
           }}

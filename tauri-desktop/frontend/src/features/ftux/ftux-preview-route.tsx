@@ -13,7 +13,7 @@ export function FtuxPreviewRoute() {
     <FtuxPage
       initialPath={params.get("path") === "customize" ? "customize" : "connect"}
       returningPasskey={
-        params.get("returning") === "1" ? MOCK_STORED_PASSKEY.name : null
+        params.get("returning") === "1" ? MOCK_STORED_PASSKEY : null
       }
       onComplete={() => navigate("/", { replace: true })}
     />

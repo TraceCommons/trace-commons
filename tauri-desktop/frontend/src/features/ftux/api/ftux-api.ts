@@ -19,18 +19,14 @@ import {
   pickDirectory,
 } from "../../../lib/tauri/platform-api";
 import { resolveInvite } from "../../onboarding/api/invite-link";
+import { automaticChoices } from "../ftux-model";
 import type {
   DetectedTool,
   FtuxSettings,
   PasskeyStore,
   RepoCandidate,
 } from "../types";
-import {
-  MOCK_DEFAULT_SELECTION,
-  MOCK_ISSUER,
-  MOCK_REPOS,
-  MOCK_TOOLS,
-} from "./ftux-mock-data";
+import { MOCK_ISSUER, MOCK_REPOS, MOCK_TOOLS } from "./ftux-mock-data";
 
 const MOCK_LATENCY_MS = 450;
 
@@ -53,11 +49,8 @@ export function detectTools(): Promise<DetectedTool[]> {
   return later(MOCK_TOOLS);
 }
 
-export function listRepoCandidates(): Promise<{
-  repos: RepoCandidate[];
-  defaultSelection: Record<string, number[]>;
-}> {
-  return later({ repos: MOCK_REPOS, defaultSelection: MOCK_DEFAULT_SELECTION });
+export function listRepoCandidates(): Promise<RepoCandidate[]> {
+  return later(MOCK_REPOS);
 }
 
 export async function chooseFolder(): Promise<string | null> {
@@ -99,6 +92,15 @@ export function signInWithNearAi(): Promise<void> {
   return later(undefined, 600);
 }
 
-export function finishSetup(_settings: FtuxSettings): Promise<void> {
-  return later(undefined, 600);
+// Fail closed: setup may not arm automatic contribution until the FTUX
+// spec's first open question is settled. The real implementation keeps this
+// check in front of the calls that save the choices.
+export async function finishSetup(settings: FtuxSettings): Promise<void> {
+  const armed = automaticChoices(settings);
+  if (armed.length > 0) {
+    throw new Error(
+      `Setup can't turn on automatic sharing yet (${armed.join(", ")}). Choose "Ask me" instead; you can change it later.`,
+    );
+  }
+  await later(undefined, 600);
 }

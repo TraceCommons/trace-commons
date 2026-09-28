@@ -28,6 +28,11 @@ const STORE_LABELS: Record<PasskeyStore, string> = {
   passwords: "Passwords",
 };
 
+const FOCUSABLE =
+  'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+// A modal layer: everything beside it is made inert while it is open, Tab
+// cycles inside it, and focus goes back where it came from when it closes.
 // Remounted per step (see `key` below), so focus moves to each new popup.
 function Overlay({
   label,
@@ -40,9 +45,30 @@ function Overlay({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    ref.current
-      ?.querySelector<HTMLElement>("input, button:not([data-skip-focus])")
+    const layer = ref.current;
+    if (!layer) return;
+    const opener =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const madeInert = Array.from(layer.parentElement?.children ?? []).filter(
+      (sibling): sibling is HTMLElement =>
+        sibling !== layer &&
+        sibling instanceof HTMLElement &&
+        !sibling.hasAttribute("inert"),
+    );
+    for (const sibling of madeInert) sibling.setAttribute("inert", "");
+    layer
+      .querySelector<HTMLElement>("input, button:not([data-skip-focus])")
       ?.focus();
+    return () => {
+      for (const sibling of madeInert) sibling.removeAttribute("inert");
+      if (opener?.isConnected) opener.focus();
+      else
+        layer.parentElement
+          ?.querySelector<HTMLElement>(".ftux-window")
+          ?.focus();
+    };
   }, []);
   return (
     <div
@@ -55,6 +81,21 @@ function Overlay({
         if (event.key === "Escape") {
           event.stopPropagation();
           onEscape();
+          return;
+        }
+        if (event.key !== "Tab" || !ref.current) return;
+        const focusable = Array.from(
+          ref.current.querySelectorAll<HTMLElement>(FOCUSABLE),
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
         }
       }}
     >
@@ -83,6 +124,16 @@ function CornerButton({
     >
       {label === "Back" ? <BackIcon /> : <CloseIcon />}
     </button>
+  );
+}
+
+// The imitation macOS sheets say so on their face: a drawn copy of a system
+// sheet must never pass for the real one.
+function SimulatedMark() {
+  return (
+    <span className="ftux-simulated">
+      Simulated · the real sheet is drawn by macOS
+    </span>
   );
 }
 
@@ -258,6 +309,7 @@ function SaveSheet({
 }) {
   return (
     <div className="ftux-sheet">
+      <SimulatedMark />
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <h2 className="ftux-sheet-title">Save a passkey?</h2>
         <p className="ftux-sheet-text">
@@ -361,31 +413,46 @@ function VerifyPopup({ send, run, busy, error }: StepProps) {
   );
 }
 
-// P-6. Simulated macOS "Sign In" sheet for a stored passkey.
-function SignInSheet({ send, run, busy, error }: StepProps) {
+// P-6. Simulated macOS "Sign In" sheet. It names a passkey only when one is
+// known to be stored here; otherwise macOS would list what it finds.
+function SignInSheet({
+  send,
+  run,
+  busy,
+  error,
+  stored,
+}: StepProps & { stored: PasskeyResult | null }) {
   return (
     <div className="ftux-sheet">
+      <SimulatedMark />
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <h2 className="ftux-sheet-title">Sign In</h2>
         <p className="ftux-sheet-text">
-          Sign in to “tracecommons.ai” with your passkey for “My trace passkey”
-          saved in “Passwords”?
+          {stored
+            ? `Sign in to “tracecommons.ai” with your passkey for “${stored.name}” saved in “${STORE_LABELS[stored.store]}”?`
+            : "Sign in to “tracecommons.ai” with a saved passkey?"}
         </p>
       </div>
-      <div
-        className="ftux-sheet-group ftux-card-row"
-        style={{ flexDirection: "row", padding: "10px 14px", fontSize: 13 }}
-      >
-        <span className="ftux-muted">Passkey from</span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      {stored ? (
+        <div
+          className="ftux-sheet-group ftux-card-row"
+          style={{ flexDirection: "row", padding: "10px 14px", fontSize: 13 }}
+        >
+          <span className="ftux-muted">Passkey from</span>
           <span
-            className="ftux-app-icon"
-            data-app="passwords"
-            aria-hidden="true"
-          />
-          Passwords
-        </span>
-      </div>
+            style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
+          >
+            <span
+              className="ftux-app-icon"
+              data-app={stored.store}
+              aria-hidden="true"
+            >
+              {stored.store === "1password" ? "1" : null}
+            </span>
+            {STORE_LABELS[stored.store]}
+          </span>
+        </div>
+      ) : null}
       <button
         type="button"
         className="ftux-touch-id"
@@ -438,10 +505,13 @@ const STEP_LABELS: Record<PasskeyStep, string> = {
 // stack runs on mock data until WebAuthn for tracecommons.ai exists.
 export function PasskeyFlow({
   initialStep = "choose",
+  storedPasskey = null,
   onDone,
   onClose,
 }: {
   initialStep?: PasskeyStep;
+  // A passkey known to be stored on this Mac, named on the Sign In sheet.
+  storedPasskey?: PasskeyResult | null;
   onDone: (result: PasskeyResult) => void;
   onClose: (reason: "closed" | "signed-out") => void;
 }) {
@@ -509,7 +579,7 @@ export function PasskeyFlow({
       />
     ),
     verify: <VerifyPopup {...props} />,
-    "sign-in": <SignInSheet {...props} />,
+    "sign-in": <SignInSheet {...props} stored={storedPasskey} />,
   }[step];
 
   return (

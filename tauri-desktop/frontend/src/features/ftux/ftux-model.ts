@@ -285,3 +285,28 @@ export function formatDuration(minutes: number): string {
   const rest = total % 60;
   return `${hours} h ${hours >= 2 ? String(rest).padStart(2, "0") : rest} min`;
 }
+
+// Setup guards -------------------------------------------------------------
+
+// Rules come from sessions recorded by a tool, so a repo is only offered
+// when its tool is being watched.
+export function reposForWatchedTools<T extends { sourceToolId: string }>(
+  repos: T[],
+  answers: Record<string, WatchAnswer | undefined>,
+): T[] {
+  return repos.filter((repo) => answers[repo.sourceToolId] === "watch");
+}
+
+// Whatever in these choices would contribute without asking first. Setup
+// must not arm automatic contribution until the open question in the FTUX
+// spec (and #507 / #991) is settled, so `finishSetup` refuses a non-empty
+// result rather than saving it.
+export function automaticChoices(choices: {
+  sharing: "auto" | "ask";
+  repos: { folder: string; rule: RepoRule }[];
+}): string[] {
+  const armed = choices.repos
+    .filter((repo) => repo.rule === "auto")
+    .map((repo) => repo.folder);
+  return choices.sharing === "auto" ? ["Sharing", ...armed] : armed;
+}

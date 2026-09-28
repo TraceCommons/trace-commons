@@ -28,6 +28,8 @@ export type PastSession = {
 
 export type RepoCandidate = {
   folder: string;
+  // The tool whose sessions this repo was found in.
+  sourceToolId: string;
   note?: string;
   defaultRule: RepoRule;
   sessions: PastSession[];

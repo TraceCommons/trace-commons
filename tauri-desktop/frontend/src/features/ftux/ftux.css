@@ -1135,3 +1135,83 @@
 .ftux .ftux-select select:focus-visible {
   outline: none;
 }
+
+.ftux-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ftux-window:focus {
+  outline: none;
+}
+
+/* The preview tag stays readable above the popup layer. */
+.ftux-preview-tag {
+  z-index: 60;
+}
+
+.ftux-simulated {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--ftux-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ftux-yellow);
+  background: rgba(245, 193, 66, 0.12);
+  border: 0.5px solid rgba(245, 193, 66, 0.45);
+}
+
+/* macOS "Reduce transparency": solid surfaces, no blur. */
+@media (prefers-reduced-transparency: reduce) {
+  .ftux {
+    background: #1f242d;
+  }
+
+  .ftux-window,
+  .ftux-popup,
+  .ftux-sheet,
+  .ftux-card,
+  .ftux-btn-primary,
+  .ftux-overlay {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .ftux-window,
+  .ftux-popup {
+    background: #262b34;
+  }
+
+  .ftux-sheet {
+    background: #2c2c30;
+  }
+
+  .ftux-card {
+    background: #2f353f;
+  }
+
+  .ftux-overlay {
+    background: rgba(10, 12, 16, 0.8);
+  }
+}
+
+/* "Increase contrast": brighter secondary text and firmer edges. */
+@media (prefers-contrast: more) {
+  .ftux {
+    --ftux-text-2: #e4e4ea;
+    --ftux-text-3: #d0d0d6;
+  }
+
+  .ftux-window,
+  .ftux-popup,
+  .ftux-card,
+  .ftux-select,
+  .ftux-btn,
+  .ftux-check,
+  .ftux-switch,
+  .ftux-input,
+  .ftux-name-field {
+    border-color: rgba(255, 255, 255, 0.7);
+  }
+}

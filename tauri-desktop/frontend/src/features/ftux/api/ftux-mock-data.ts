@@ -86,6 +86,7 @@ function repo(
 ): RepoCandidate {
   return {
     folder,
+    sourceToolId: "claude",
     note,
     defaultRule: rule,
     sessions: sessions(folder, count, seeds),
@@ -103,7 +104,7 @@ export const MOCK_REPOS: RepoCandidate[] = [
     ["2026-09-15", "invoice PDF export", 51],
     ["2026-09-15", "nightly reconciliation", 124],
   ]),
-  repo("~/code/portfolio", "auto", 12, [
+  repo("~/code/portfolio", "ask", 12, [
     ["2026-09-16", "contact form", 42],
     ["2026-09-15", "hero animation", 30],
   ]),
@@ -115,13 +116,6 @@ export const MOCK_REPOS: RepoCandidate[] = [
     "client",
   ),
 ];
-
-// Which past sessions start ticked, per folder, matching the design mock.
-export const MOCK_DEFAULT_SELECTION: Record<string, number[]> = {
-  "~/code/orchard-api": [0, 2, 3],
-  "~/code/acme-billing": [0, 1],
-  "~/code/portfolio": [0, 1],
-};
 
 export const MOCK_ISSUER = {
   host: "issuer.tracecommons.ai",

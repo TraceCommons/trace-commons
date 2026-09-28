@@ -160,8 +160,8 @@ export function RulesScreen({
           </p>
         ) : candidates.length === 0 ? (
           <p className="ftux-well">
-            No repos yet. Rules appear here once a watched tool records a
-            session.
+            No repos to set rules for yet. Rules appear for repos found in the
+            sessions of a tool you watch.
           </p>
         ) : (
           <>

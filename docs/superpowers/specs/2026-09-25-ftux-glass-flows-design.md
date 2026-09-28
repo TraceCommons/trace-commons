@@ -1,7 +1,7 @@
 # First-Run Flows in the Glass Style (FTUX) — Design
 
 Date: 2026-09-25
-Status: front end implemented on mock data; backend wiring open
+Status: front end implemented on mock data; backend wiring open (rev 2, 2026-09-28, after review on #1030)
 Source design: claude.ai/design project `0935cc40-8e63-454f-848f-7f4bf5995b26`,
 file `WYSIWYG.dc.html` (Flow 1 · First run, and "f1 · passkey"). Built from a
 local export of that file dated 2026-09-25.
@@ -44,7 +44,25 @@ the screens enforce, and what is still mocked.
 5. **Private AI is off until turned on,** and appears only in Customize and
    tailor.
 6. **Cancelling passkey verification signs out** rather than leaving a
-   half-linked account. Closing the stack earlier returns to Join unchanged.
+   half-linked account. It clears every sign-in on Join (invite, near.ai,
+   passkey), so no card claims an account that is not linked. Closing the
+   stack earlier returns to Join unchanged.
+7. **Every default is off or unanswered.** Sharing starts at *Ask me each
+   time*, the optional uses start off, no repo starts on *Share
+   automatically*, and no past session starts ticked. Including anything is
+   always the person's own choice.
+8. **Setup cannot arm automatic contribution** until open question 1 is
+   settled. `finishSetup` refuses any choice that would share without asking
+   (`automaticChoices` in the model) and says so on the Uses screen, rather
+   than saving it.
+9. **Nothing unseen goes into setup.** Connect and forget never shows Rules,
+   so it sends no repos or past sessions. On Customize and tailor, Rules offers
+   only repos found in the sessions of a tool the person chose to watch.
+10. **Private AI speaks only in the shared copy.** The card renders
+    `private_inference` from `contributor_disclosure_copy`, the same source as
+    the Waiting screen's offer (destination, what it does, what it exposes, and
+    that it does not repoint any tool). The switch stays disabled until that
+    copy has loaded.
 
 ## Screens
 
@@ -77,11 +95,18 @@ returning user starts at P-7, whose *Sign in with passkey* opens P-6.
 
 P-3, P-4 and P-6 are macOS's own sheets in the shipped app, raised by the
 WebAuthn request. Until WebAuthn exists the app draws imitations so the flow
-can be walked end to end.
+can be walked end to end. Each imitation carries its own "Simulated · the
+real sheet is drawn by macOS" mark, because people are trained to trust system
+sheets. P-6 names a passkey only when one is known to be stored on this Mac;
+otherwise it asks generically, as macOS would before listing what it finds.
+
+Popups are modal in fact, not only in `aria-modal`: the window behind is made
+`inert`, Tab cycles inside the popup, Escape acts as Cancel, and focus returns
+to the control that opened it.
 
 ## How to see it
 
-The flow opens at its own address, `#/ftux`, in the Tauri app or `pnpm dev`.
+The flow opens at its own address, `#/ftux`, in the Tauri app (`tauri dev`) or `pnpm dev`. The route exists only in development builds, or in a build made with `VITE_FTUX_PREVIEW=1`; a release build does not contain it or its imitation sheets.
 Two options: `#/ftux?path=customize` starts on Customize and tailor, and
 `#/ftux?returning=1` opens the returning-user "Welcome back" card. The
 existing onboarding is untouched and still decides who sees setup. Finishing
@@ -126,7 +151,7 @@ the real command to swap in for each. The mocked parts are:
 |---|---|---|
 | `lookupInvite` | `enroll_with_invite` | exists |
 | `detectTools` | daemon source detection | not built |
-| `listRepoCandidates` | `list_projects` plus a per-session listing | partly built |
+| `listRepoCandidates` | `list_projects` plus a per-session listing, each repo tagged with the tool it came from | partly built |
 | `createPasskey`, `verifyPasskey`, `signInWithPasskey` | WebAuthn for tracecommons.ai | not built (see the Slice 2 passkeys spec) |
 | `signInWithNearAi` | `account_sign_in` | exists |
 | `finishSetup` | `set_source_declaration`, `set_project_mode`, `set_consent_scopes`, Private AI | exists except per-session selection |
@@ -140,6 +165,13 @@ outside Tauri). The invite link is parsed with the existing `resolveInvite`.
 - **Claude Code starts unanswered** rather than pre-set to *Watch this folder*.
   The design's own rule is that saying no is an answer; a pre-selected Watch
   leans toward sharing.
+- **Defaults are all off** (rule 7). The design shows Sharing on *Share
+  automatically*, all three optional uses on, `~/code/portfolio` on *Share
+  automatically*, and 7 past sessions ticked.
+- **The Private AI card's words** come from the shared copy (rule 10), not the
+  design's "Enable to connect ... from Near.AI" sentence, which contradicted
+  that copy.
+- **An added tool starts unanswered** like every other row.
 - **No traffic-light buttons** in the card. The native window already has them.
 - **A folder with some sessions picked shows a half-filled (mixed) checkbox**
   rather than an empty one.
@@ -149,12 +181,13 @@ outside Tauri). The invite link is parsed with the existing `resolveInvite`.
 
 ## Open questions before wiring the backend
 
-1. **Default sharing mode.** The design defaults Sharing to *Share
-   automatically* and offers *Share automatically* as a per-repo rule during
-   setup. #507 keeps onboarding ask-first and does not offer `auto_upload`
-   there, and #991 gates automatic contribution behind conditions that are
-   still open. The mock saves nothing, so there is no conflict today, but
-   `finishSetup` must not arm automatic contribution until this is settled.
+1. **Whether setup offers automatic sharing at all.** The design offers
+   *Share automatically* for Sharing and as a per-repo rule during setup.
+   #507 keeps onboarding ask-first and does not offer `auto_upload` there, and
+   #991 gates automatic contribution behind conditions that are still open.
+   Until this is settled the defaults are off and `finishSetup` refuses any
+   automatic choice (rules 7 and 8). Settling it means either removing the
+   option from setup or routing it through #991's gate.
 2. **Replacing the current onboarding.** `#/ftux` sits beside the real
    onboarding gate. Swapping it in needs `finishSetup` wired and the
    completion flag (`useOnboardingCompletion`) set only after the real calls
@@ -164,6 +197,8 @@ outside Tauri). The invite link is parsed with the existing `resolveInvite`.
 4. **Other sign-in options** from P-7 and *More Options* from P-6 currently
    return to Join / P-1. Where they should lead (near.ai login, another
    passkey) is not specified beyond the design's flow notes.
-5. **Dropped tools.** A drag-and-drop in a Tauri webview does not expose file
-   paths to the DOM. The mock uses the dropped item's name; the real version
-   needs Tauri's drag-drop event.
+5. **Dropped tools.** With Tauri's drag-drop enabled (the default), a file
+   drop never reaches the page's DOM, and in a browser the DOM gives only a
+   name, not a path. A drop on the "add your tool" box therefore opens the
+   folder picker, like a click. Accepting real drops needs Tauri's webview
+   drag-drop event.

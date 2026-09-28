@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { withQueryClient } from "../../lib/query/storybook-provider";
 import { MOCK_STORED_PASSKEY } from "./api/ftux-mock-data";
 import { PasskeyFlow, WelcomeBack } from "./components/passkey-flow";
 import { FtuxPage } from "./ftux-page";
@@ -8,6 +9,7 @@ const meta = {
   title: "Features/FTUX/FtuxPage",
   component: FtuxPage,
   parameters: { layout: "fullscreen" },
+  decorators: [withQueryClient],
   args: { onComplete: () => {} },
 } satisfies Meta<typeof FtuxPage>;
 export default meta;
@@ -30,7 +32,7 @@ export const CustomizeUses: Story = {
   args: { initialPath: "customize", initialScreen: "uses" },
 };
 export const ReturningUser: Story = {
-  args: { returningPasskey: MOCK_STORED_PASSKEY.name },
+  args: { returningPasskey: MOCK_STORED_PASSKEY },
 };
 
 const passkeyStep = (initialStep: "choose" | "sign-in"): Story => ({

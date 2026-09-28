@@ -214,7 +214,7 @@ export function GlassWindow({
   children: ReactNode;
 }) {
   return (
-    <section className="ftux-window" aria-label={eyebrow}>
+    <section className="ftux-window" aria-label={eyebrow} tabIndex={-1}>
       <div className="ftux-window-bar">
         <span className="ftux-eyebrow">{eyebrow}</span>
       </div>
@@ -366,10 +366,12 @@ export function GlassCheckbox({
 export function GlassSwitch({
   checked,
   label,
+  disabled,
   onToggle,
 }: {
   checked: boolean;
   label: string;
+  disabled?: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -379,6 +381,7 @@ export function GlassSwitch({
       aria-checked={checked}
       aria-label={label}
       className="ftux-switch"
+      disabled={disabled}
       onClick={onToggle}
     />
   );

@@ -98,9 +98,7 @@ export function FoldersScreen(
 }
 
 // Customize and tailor: W-4.
-export function ToolsScreen(
-  props: ToolListProps & { onAddTool: (droppedName?: string) => void },
-) {
+export function ToolsScreen(props: ToolListProps & { onAddTool: () => void }) {
   const [dragging, setDragging] = useState(false);
   return (
     <>
@@ -121,8 +119,7 @@ export function ToolsScreen(
             onDrop={(event) => {
               event.preventDefault();
               setDragging(false);
-              const name = event.dataTransfer.files[0]?.name;
-              props.onAddTool(name || undefined);
+              props.onAddTool();
             }}
           >
             <span className="ftux-badge" aria-hidden="true">

@@ -1,6 +1,6 @@
 # First-run glass flows (FTUX) — implementation report
 
-Date: 2026-09-25
+Date: 2026-09-25 (updated 2026-09-28 after review)
 Branch: `ftux`
 Spec: `docs/superpowers/specs/2026-09-25-ftux-glass-flows-design.md`
 Scope: `tauri-desktop/frontend` only. No daemon, server, Rust or CI change.
@@ -14,7 +14,7 @@ one file. The existing onboarding and its gate are unchanged.
 
 ## How to see it
 
-The flow opens at its own address, `#/ftux`, in the Tauri app or `pnpm dev`.
+The flow opens at its own address, `#/ftux`, in the Tauri app (`tauri dev`) or `pnpm dev`. The route is registered only in development builds or with `VITE_FTUX_PREVIEW=1`, so a release build does not contain it.
 Two options: `#/ftux?path=customize` starts on Customize and tailor, and
 `#/ftux?returning=1` opens the returning-user "Welcome back" card. The
 existing onboarding is untouched and still decides who sees setup. Finishing
@@ -35,7 +35,7 @@ All paths are under `tauri-desktop/frontend/`.
 | File | Role |
 |---|---|
 | `src/features/ftux/ftux-model.ts` | Pure logic: step order per tier, tier switching, the "every tool answered" gate, optional-uses label and group toggles, past-session counts and the Never rule, the passkey popup transition table, name validation, date and duration formatting. No imports, so `node --test` loads it directly. |
-| `src/features/ftux/ftux-model.test.mjs` | 10 tests for the above. Added to the `test` script. |
+| `src/features/ftux/ftux-model.test.mjs` | 12 tests for the above, including the setup guards. Added to the `test` script. |
 | `src/features/ftux/types.ts` | Shapes for detected tools, repos, sessions, join state and the final settings. |
 | `src/features/ftux/api/ftux-api.ts` | The only doorway to the outside world. Mocks with short delays; header lists the real command for each. |
 | `src/features/ftux/api/ftux-mock-data.ts` | Mock tools, repos and sessions, seeded with the design's own examples. |
@@ -45,11 +45,12 @@ All paths are under `tauri-desktop/frontend/`.
 | `src/features/ftux/components/tool-row.tsx`, `tool-screens.tsx` | W-2 Folders and W-4 Tools. |
 | `src/features/ftux/components/rules-screen.tsx` | W-5. |
 | `src/features/ftux/components/uses-screen.tsx` | W-3 and W-6. |
+| `src/features/ftux/components/private-ai-card.tsx` | The Private AI card, rendered from the shared `private_inference` copy. |
 | `src/features/ftux/components/passkey-flow.tsx` | P-1 to P-6 as one component per popup, plus P-7 `WelcomeBack`. |
 | `src/features/ftux/ftux-page.tsx` | Holds the flow state and wires the screens to the API. |
 | `src/features/ftux/ftux-preview-route.tsx`, `index.ts` | The `#/ftux` route and its query options. |
 | `src/features/ftux/ftux-page.stories.tsx` | Storybook stories. |
-| `src/app/main.tsx` | Adds the `/ftux` route beside the app shell. |
+| `src/app/main.tsx` | Adds the `/ftux` route beside the app shell, in development builds or with `VITE_FTUX_PREVIEW=1` only. |
 | `package.json` | Adds the model test to `pnpm test`. |
 
 ## What works
@@ -106,6 +107,24 @@ header lists the real command to swap in for each. The mocked parts are:
   native `<select>` elements. Motion is removed under
   `prefers-reduced-motion`.
 
+## Review fixes (2026-09-28)
+
+Review on #1030 found one failing test and nine other issues. All ten are
+addressed:
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | "Private Inference" on the Uses screen fails `tauri_never_says_private_inference_to_a_contributor` | Sentence removed; the test passes |
+| 2 | Private AI text written in the file and contradicting `OFFER_NO_REPOINT`; `OFFER_EXPOSURE` missing | `PrivateAiCard` renders `destination`, `offer_what`, `offer_exposure`, `offer_no_repoint` from the shared copy; switch disabled until it loads |
+| 3 | Defaults arm automatic contribution | Sharing starts at Ask me, optional uses off, no repo on Share automatically, no session ticked; `finishSetup` refuses `automaticChoices` |
+| 4 | Connect and forget sends unseen repos; repos not filtered by tool answers | Connect and forget sends no repos; `reposForWatchedTools` filters Rules; empty state when nothing is watched |
+| 5 | `aria-modal` without a real modal | Background `inert`, Tab trapped, focus restored to the opener |
+| 6 | Imitation macOS sheets unmarked and shipped in release | Each sheet carries a Simulated mark; preview tag drawn above popups; route dev-only or `VITE_FTUX_PREVIEW=1` |
+| 7 | Verify cancel leaves other sign-ins shown | Sign-out clears invite, near.ai and passkey |
+| 8 | P-6 names a passkey that may not exist | P-6 names the stored passkey when known, otherwise asks generically |
+| 9 | Drop records a bare name and sets it to watch | A drop opens the picker; added tools start unanswered |
+| 10 | No `prefers-reduced-transparency` / `prefers-contrast` | Solid surfaces without blur, and brighter text with firmer edges, respectively |
+
 See the spec for the deliberate differences from the design and the open
 questions, the first of which (the *Share automatically* default against #507
 and #991) must be settled before `finishSetup` is wired.
@@ -115,10 +134,12 @@ and #991) must be settled before `finishSetup` is wired.
 Run in `tauri-desktop/frontend`:
 
 ```
-$ pnpm test
-ℹ tests 28
-ℹ pass 28
+$ pnpm test            # after merging main on 2026-09-28
+ℹ pass 96
 ℹ fail 0
+
+$ cargo test -p trace-commons-contributor-ffi --test tauri_copy_surface_is_central
+test result: ok. 4 passed; 0 failed
 
 $ pnpm build
 ✓ built in 371ms
@@ -138,4 +159,16 @@ Continue gating on Folders and Tools, adding a tool, the Never rule changing the
 count from "7 of 43" to "4 of 21", the Private AI switch, and *Start sharing*
 returning to `#/insights`. No console errors.
 
-The Rust side of the Tauri app is unchanged, so `cargo` checks were not rerun.
+A production `pnpm build` was searched for the preview's strings and does not
+contain them; a build with `VITE_FTUX_PREVIEW=1` does.
+
+After the review fixes, the browser check confirmed:
+- the window is inert while a popup is open;
+- Tab wraps inside the popup;
+- focus returns to "Create passkey";
+- P-6 asks generically, and the Simulated mark is present;
+- Rules shows its empty state when no tool is watched;
+- Uses starts at Ask me with all optional uses off, and the Private AI switch is disabled without the copy;
+- choosing Share automatically is refused with a message.
+
+The Rust side of the Tauri app is unchanged.

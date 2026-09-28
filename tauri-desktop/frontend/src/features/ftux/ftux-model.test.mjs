@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   applyRule,
+  automaticChoices,
   canContinueFromFolders,
   formatDuration,
   formatSessionDate,
@@ -11,6 +12,7 @@ import {
   passkeyNameError,
   passkeyTransition,
   pastSessionSummary,
+  reposForWatchedTools,
   stepsFor,
   switchPath,
   toggleAt,
@@ -172,4 +174,44 @@ test("session dates and durations read the way the design writes them", () => {
   assert.equal(formatDuration(52), "52 min");
   assert.equal(formatDuration(78), "1 h 18 min");
   assert.equal(formatDuration(124), "2 h 04 min");
+});
+
+test("only repos from watched tools are offered", () => {
+  const repos = [
+    { folder: "a", sourceToolId: "claude" },
+    { folder: "b", sourceToolId: "antigravity" },
+  ];
+  assert.deepEqual(
+    reposForWatchedTools(repos, { claude: "watch", antigravity: "ignore" }).map(
+      (repo) => repo.folder,
+    ),
+    ["a"],
+  );
+  assert.deepEqual(
+    reposForWatchedTools(repos, { claude: "ignore", antigravity: "ignore" }),
+    [],
+  );
+});
+
+test("automatic choices name everything that would share without asking", () => {
+  assert.deepEqual(
+    automaticChoices({
+      sharing: "ask",
+      repos: [
+        { folder: "a", rule: "ask" },
+        { folder: "b", rule: "never" },
+      ],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    automaticChoices({
+      sharing: "auto",
+      repos: [
+        { folder: "a", rule: "auto" },
+        { folder: "b", rule: "ask" },
+      ],
+    }),
+    ["Sharing", "a"],
+  );
 });
