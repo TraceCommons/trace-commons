@@ -3069,7 +3069,11 @@ fn witness_write(
         .witness
         .as_ref()
         .is_some_and(|previous| previous.admission_evidence);
-    cfg.witness = Some(settings);
+    // Recorded as entered in Settings, for the disclosure screens (K11).
+    cfg.set_witness(
+        settings,
+        trace_commons_contributor::config::WitnessOrigin::Settings,
+    );
     store
         .save_config(&cfg)
         .map_err(|_| WITNESS_CONFIG_WRITE_FAILED)
@@ -3093,7 +3097,7 @@ fn witness_clear(dir: &std::path::Path) -> Result<bool, &'static str> {
     if cfg.witness.is_none() {
         return Ok(false);
     }
-    cfg.witness = None;
+    cfg.clear_witness();
     store
         .save_config(&cfg)
         .map_err(|_| WITNESS_CONFIG_WRITE_FAILED)?;
@@ -3575,6 +3579,8 @@ mod witness_tests {
                 public_since: None,
                 witness,
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
             })
             .unwrap();
@@ -3772,8 +3778,26 @@ mod witness_tests {
         assert_eq!(status.url.as_deref(), Some("https://witness.example"));
         assert_eq!(status.signing_address.as_deref(), Some("0xabc"));
         assert_eq!(status.pinned_measurement_count, 1);
+        // K11: recorded as entered in Settings, for the disclosure screens.
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            store.load_config().unwrap().unwrap().witness_origin_view(),
+            Some(
+                trace_commons_contributor::config::WitnessOriginView::Recorded(
+                    trace_commons_contributor::config::WitnessOrigin::Settings
+                )
+            )
+        );
 
         assert_eq!(witness_clear(dir.path()), Ok(true));
+        assert!(
+            store
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .witness_origin
+                .is_none()
+        );
         assert_eq!(witness_read(dir.path()).state, WitnessTrustState::Absent);
         // Idempotent: clearing what is not there is not a failure.
         assert_eq!(witness_clear(dir.path()), Ok(false));

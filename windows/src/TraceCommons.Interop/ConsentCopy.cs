@@ -36,8 +36,27 @@ public sealed record ConsentCopy
     /// </summary>
     [JsonPropertyName("not_pinned_help")] public string NotPinnedHelp { get; init; } = string.Empty;
 
+    /// <summary>
+    /// What runs on every automatically contributed session, for the Flow 1
+    /// grant screen. Not rendered yet; decoded so this shell has it before
+    /// that screen exists, rather than writing its own.
+    /// </summary>
+    [JsonPropertyName("auto_scrub_scope")] public string AutoScrubScope { get; init; } = string.Empty;
+
+    /// <summary>The limit of both halves of the scrubbing.</summary>
+    [JsonPropertyName("auto_scrub_limit")] public string AutoScrubLimit { get; init; } = string.Empty;
+
+    /// <summary>
+    /// That no one reviews a session before it is sent. The sentence the
+    /// product will most want to soften; this shell never rewrites it.
+    /// </summary>
+    [JsonPropertyName("auto_no_review")] public string AutoNoReview { get; init; } = string.Empty;
+
     /// <summary>Every sentence, for the refuse-on-any-empty-field check.</summary>
-    public string[] Sentences => new[] { GateStatement, ReadyHelp, NotPinnedHelp };
+    public string[] Sentences => new[]
+    {
+        GateStatement, ReadyHelp, NotPinnedHelp, AutoScrubScope, AutoScrubLimit, AutoNoReview,
+    };
 
     /// <summary>
     /// The payload fields this shell decodes, by wire name.
@@ -50,5 +69,9 @@ public sealed record ConsentCopy
     /// </para>
     /// </summary>
     public static IReadOnlyList<string> ConsumedFields { get; } =
-        new[] { "gate_statement", "ready_help", "not_pinned_help" };
+        new[]
+        {
+            "gate_statement", "ready_help", "not_pinned_help",
+            "auto_scrub_scope", "auto_scrub_limit", "auto_no_review",
+        };
 }

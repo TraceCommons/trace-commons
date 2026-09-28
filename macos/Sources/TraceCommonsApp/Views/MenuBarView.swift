@@ -349,6 +349,14 @@ struct MenuBarContent: View {
             Text(budget.title)
             Text(budget.detail.replacingOccurrences(of: "\n", with: " "))
         }
+        if let witness = model.witnessCapacityHealth {
+            Text(witness.title)
+            Text(witness.detail.replacingOccurrences(of: "\n", with: " "))
+        }
+        if let held = model.gateHeldNotice {
+            Text(held.title)
+            Text(held.body)
+        }
     }
 
     @ViewBuilder

@@ -33,7 +33,7 @@ export const Held: Story = {
         attestation: "attested",
         attestation_copy: {
           state_line:
-            "This session carries a checkable copy of the model call it came from.",
+            "This session carries a checkable copy of its last model call.",
           reason_line: null,
           tone: "clear",
         },
@@ -67,7 +67,7 @@ export const Empty: Story = {
         attestation: "unattested_configuration",
         attestation_copy: {
           state_line:
-            "This session carries no copy of the model call it came from. A setting decides whether the ones you record from now on will.",
+            "This session carries no copy of its last model call. A setting decides whether the ones you record from now on will.",
           reason_line: null,
           tone: "attention",
         },

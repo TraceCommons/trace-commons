@@ -90,6 +90,8 @@ fn configured_shared(
             public_since: None,
             witness: None,
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
         })
         .expect("save synthetic contributor config");
@@ -301,6 +303,7 @@ fn envelope(submission_id: Uuid) -> TraceContributionEnvelope {
         embedding_analysis: None,
         value: ValueMetadata::default(),
         conversation_id: None,
+        source_session: None,
         trace_card: TraceCard::default(),
         value_card: TraceValueCard::default(),
         hindsight: None,

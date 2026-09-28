@@ -35,6 +35,24 @@ export const coreStatusSchema = z.object({
       last_error_label: z.string().nullable(),
       since: z.string().nullable(),
     }),
+    // Grants the core voided and no shell has shown yet. Read by
+    // `parseGrantVoids`, which refuses a malformed list rather than letting
+    // it fail the whole status payload.
+    grant_voids: z.unknown().optional(),
+    // Approved sessions held on a busy privacy witness. Read by
+    // `parseWitnessCapacity`, which refuses a malformed object rather than
+    // letting it fail the whole status payload.
+    witness_capacity: z.unknown().optional(),
+    // Whether the move to a NEAR AI account is offered, and its notice. Read
+    // by `parseLegacyMigrationStatus`, which refuses a malformed object
+    // rather than letting it fail the whole status payload.
+    legacy_invite_migration: z.unknown().optional(),
+    // Armed folders whose arming wording no longer claims a model scrubs
+    // them, and what the automatic-contribution gate holds. Read by
+    // `parseArmingRewordings` and `parseGateHeld`, which refuse a malformed
+    // value rather than letting it fail the whole status payload.
+    arming_rewordings: z.unknown().optional(),
+    automatic_contribution_held: z.unknown().optional(),
   }),
 });
 

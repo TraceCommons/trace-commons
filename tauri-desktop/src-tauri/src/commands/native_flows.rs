@@ -126,6 +126,8 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
             "offer_decline": inference.offer_decline,
             "offer_asked_once": inference.offer_asked_once,
         },
+        "project_automatic_unavailable":
+            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
         "credential_cost": trace_commons_contributor::private_inference_copy::CREDENTIAL_COST,
         "credential_wallet_notice": trace_commons_contributor::private_inference_copy::CREDENTIAL_WALLET_NOTICE,
         "near_ai_enroll_title": inference.near_ai_enroll_title,
@@ -138,6 +140,57 @@ pub(crate) fn contributor_disclosure_copy() -> Value {
 #[tauri::command]
 pub(crate) fn witness_review_copy() -> Value {
     json!(trace_commons_contributor::witness_copy::witness_copy().review)
+}
+
+/// The sentences a contributor reads on the Flow 1 grant screens.
+///
+/// Both the words and the choice between them come from the contributor
+/// core: `automatic_gate::disclosure` picks the disclosure (R1), and
+/// `consent_copy::automatic_grant_copy` carries only the scrub wording that
+/// answer allows.
+///
+/// `disclosure(cfg)` reads configuration only, so it answers
+/// `PatternsOnly`, and that is the right answer for a screen shown before
+/// the grant. Configuration is not evidence that a model ran: the model-scrub
+/// wording is earned only by `automatic_gate::folder_disclosure`, over the
+/// certificates of sessions the witness has already redacted, and before the
+/// grant there are none. So the model-scrub sentences never reach this
+/// screen.
+#[tauri::command]
+pub(crate) async fn automatic_contribution_copy(
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let config = crate::commands::consent::load_config(&state)?;
+    Ok(automatic_contribution_value(config.as_ref()))
+}
+
+fn automatic_contribution_value(
+    config: Option<&trace_commons_contributor::config::ContributorConfig>,
+) -> Value {
+    let disclosure = trace_commons_contributor::daemon::automatic_gate::disclosure(config);
+    json!(trace_commons_contributor::consent_copy::automatic_grant_copy(disclosure))
+}
+
+/// What an armed project is told about its sessions (K6).
+///
+/// The same words as the grant screens, but the choice between them is made
+/// by the contributor core over that project's own sessions:
+/// `automatic_gate::project_disclosure`, which earns the model-scrub wording
+/// only when every session the project has sent unattended since it was
+/// armed carried a certificate naming an allowlisted full pipeline. This
+/// wrapper forwards the core's answer and never chooses.
+#[tauri::command]
+pub(crate) async fn project_automatic_contribution_copy(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Value, String> {
+    let project_id = required(&project_id, "project-id-required")?;
+    call_result_or_view(
+        shared_state(&state)?,
+        "project_automatic_copy",
+        json!({ "project_id": project_id }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -223,7 +276,38 @@ pub(crate) async fn witness_preview_request(
 mod tests {
     use serde_json::Value;
 
-    use super::{contributor_disclosure_copy, near_ai_error_view, wallet_action};
+    use super::{
+        automatic_contribution_value, contributor_disclosure_copy, near_ai_error_view,
+        wallet_action,
+    };
+
+    /// No configuration earns the model-scrub wording today, so the grant
+    /// screen's payload never carries it, enrolled or not.
+    #[test]
+    fn the_grant_copy_is_patterns_only_and_carries_no_model_scrub_wording() {
+        use trace_commons_contributor::consent_copy::{
+            AUTO_NO_REVIEW, AUTO_PATTERNS_ONLY_SCOPE, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE,
+        };
+        let value = automatic_contribution_value(None);
+        assert_eq!(value["disclosure"], "patterns_only");
+        assert!(value["model_scrubbed"].is_null());
+        assert_eq!(value["patterns_only"]["scope"], AUTO_PATTERNS_ONLY_SCOPE);
+        assert_eq!(value["no_review"], AUTO_NO_REVIEW);
+        let wire = value.to_string();
+        for sentence in [AUTO_SCRUB_SCOPE, AUTO_SCRUB_LIMIT] {
+            let escaped = serde_json::to_string(sentence).unwrap();
+            assert!(!wire.contains(escaped.trim_matches('"')));
+        }
+    }
+
+    /// K6: an armed project's failure line reaches the shell from the core.
+    #[test]
+    fn the_shared_copy_carries_the_project_disclosure_failure_line() {
+        assert_eq!(
+            contributor_disclosure_copy()["project_automatic_unavailable"],
+            trace_commons_contributor::consent_copy::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE
+        );
+    }
 
     #[test]
     fn private_ai_copy_carries_the_shared_destination_and_its_surrounding_lines() {

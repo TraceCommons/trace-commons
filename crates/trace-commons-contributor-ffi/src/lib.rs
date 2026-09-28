@@ -2424,10 +2424,11 @@ pub unsafe extern "C" fn tc_routing_last_checked(when: *const c_char) -> *mut c_
 /// Returns an owned JSON object whose keys are `ConsentCopy`'s fields; free
 /// it with [`tc_string_free`].
 ///
-/// ONE CALL, NOT ONE PER SENTENCE. Three sentences is not three exports: a
-/// per-sentence export would let a shell take two of them and hand-write the
-/// third, and one of the three is the claim about what leaves this machine
-/// that a contributor reads immediately above an irreversible button.
+/// ONE CALL, NOT ONE PER SENTENCE. Six sentences is not six exports: a
+/// per-sentence export would let a shell take some of them and hand-write the
+/// rest, and `gate_statement` and the `auto_*` three are claims about what
+/// leaves this machine that a contributor reads immediately above an
+/// irreversible button.
 ///
 /// Returns NULL only on a caught panic.
 #[unsafe(no_mangle)]
@@ -3035,6 +3036,227 @@ pub extern "C" fn tc_consent_gate_help(pinned: i32) -> *mut c_char {
     })
 }
 
+/// The notice for one void R6 made, from one element of `status`'s
+/// `grant_voids` list, passed as the JSON object the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `VoidNoticeCopy`'s fields --
+/// `title`, `body`, `reasons_heading`, `reasons` (a list of sentences),
+/// `rearm`, `acknowledge`, and `rearm_action` / `rearm_failed`, which are
+/// `null` except on a project void carrying a `project_id` -- free it with
+/// [`tc_string_free`].
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS. The choice between the project
+/// and the automatic-grant wording, and each reason label's sentence, are
+/// made in `consent_copy`; a shell passes the wire object through and does
+/// not read `kind` or `reasons` to pick words itself.
+///
+/// A `kind` this build does not know, or a project void without a label,
+/// gets a notice that says automatic contributing stopped without saying for
+/// what, so no shell writes its own fallback. Returns NULL only for a NULL,
+/// non-UTF-8 or unparseable argument, one that is not a JSON object, and on
+/// a caught panic.
+///
+/// # Safety
+/// `void_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_grant_void_notice(void_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if void_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(void_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) = trace_commons_contributor::consent_copy::void_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The notice for approved sessions held because the privacy witness is
+/// busy, from `status`'s `witness_capacity` object, passed as the JSON the
+/// daemon sent.
+///
+/// Returns an owned JSON object whose keys are `WitnessCapacityCopy`'s
+/// fields -- `title`, `body` (counted, and agreeing in number), and
+/// `next_check`, the label a shell puts beside `next_retry_at` rendered in
+/// local time -- free it with [`tc_string_free`].
+///
+/// NULL when nothing is waiting (`waiting_sessions` absent, not a
+/// non-negative integer, or zero), for a NULL, non-UTF-8 or unparseable
+/// argument, and on a caught panic: a shell shows nothing then, and never
+/// writes its own sentence.
+///
+/// # Safety
+/// `capacity_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_witness_capacity_notice(capacity_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if capacity_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(capacity_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(notice) =
+            trace_commons_contributor::consent_copy::witness_capacity_notice_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// K11: what leaves this machine, to whom, and what this client checked.
+///
+/// `facts_json` is the daemon's `route_disclosure` result, passed through as
+/// sent. Returns an owned JSON object `{"facts": .., "copy": ..}`: the facts,
+/// canonicalised, and `RouteDisclosureCopy`'s words for exactly those facts
+/// -- `title`, `route`, `witness` (with `check`, `classifier`, `origin` and
+/// labels, or null), `local_filter`, `receipts`, `attested_bodies` (each a
+/// sentence or null) and `session` (the per-session labels and lines). Free
+/// it with [`tc_string_free`].
+///
+/// THE BRANCH CROSSES: a block is present only when it is true of the route,
+/// so a shell renders what is there and decides nothing.
+///
+/// NULL for a NULL, non-UTF-8 or unparseable argument, for a shape this build
+/// cannot read (an unknown `route` or `origin` is a newer daemon's answer,
+/// never rendered as the nearest one), and on a caught panic. A shell shows
+/// that it could not be read then, and writes no sentence of its own.
+///
+/// # Safety
+/// `facts_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_route_disclosure_copy(facts_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if facts_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(facts_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(payload) =
+            trace_commons_contributor::consent_copy::route_disclosure_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&payload.to_string()))
+    })
+}
+
+/// What a disclosure surface says when [`tc_route_disclosure_copy`] answers
+/// NULL: `panel` and `session`. Owned JSON; free it with [`tc_string_free`].
+/// NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_route_disclosure_unreadable_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::disclosure_unreadable_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// The labels for the daemon's `certificate_detail`: `heading`,
+/// `measurement_label`, `signer_label` and `verified_at_review` (the sentence
+/// for the one verification the daemon reports). Owned JSON; free it with
+/// [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_certificate_detail_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::certificate_detail_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Parse `arg` as JSON and hand it to `build`, returning its answer as an
+/// owned JSON string, or NULL for a NULL, non-UTF-8 or unparseable argument
+/// and whenever `build` answers `None`.
+///
+/// # Safety
+/// `arg`, if non-null, must point to a valid, NUL-terminated C string.
+unsafe fn notice_from_wire(
+    arg: *const c_char,
+    build: impl FnOnce(&serde_json::Value) -> Option<serde_json::Value>,
+) -> *mut c_char {
+    if arg.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Ok(text) = (unsafe { borrow_str(arg) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return std::ptr::null_mut();
+    };
+    let Some(notice) = build(&value) else {
+        return std::ptr::null_mut();
+    };
+    let json = serde_json::to_string(&notice).unwrap_or_else(|_| "{}".to_string());
+    to_owned_cstring(&json)
+}
+
+/// The notice for one armed folder whose arming wording no longer claims a
+/// model scrubs its sessions (K5), from one element of `status`'s
+/// `arming_rewordings` list, passed as the JSON object the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `ArmingRewordedNoticeCopy`'s
+/// fields; free it with [`tc_string_free`]. NULL only for a NULL, non-UTF-8
+/// or unparseable argument, one that is not a JSON object, and on a caught
+/// panic.
+///
+/// # Safety
+/// `rewording_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_arming_reworded_notice(rewording_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(unsafe {
+            notice_from_wire(rewording_json, |v| {
+                trace_commons_contributor::consent_copy::arming_reworded_notice_for_wire(v)
+                    .and_then(|n| serde_json::to_value(n).ok())
+            })
+        })
+    })
+}
+
+/// The notice for armed folders the automatic-contribution gate is holding,
+/// from `status`'s `automatic_contribution_held` object, passed as the JSON
+/// the daemon sent.
+///
+/// Returns an owned JSON object whose keys are `GateHeldNoticeCopy`'s
+/// fields; free it with [`tc_string_free`]. NULL when nothing is held, for a
+/// NULL, non-UTF-8 or unparseable argument, and on a caught panic: a shell
+/// shows nothing then, and never writes its own sentence.
+///
+/// # Safety
+/// `held_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_gate_held_notice(held_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(unsafe {
+            notice_from_wire(held_json, |v| {
+                trace_commons_contributor::consent_copy::gate_held_notice_for_wire(v)
+                    .and_then(|n| serde_json::to_value(n).ok())
+            })
+        })
+    })
+}
+
 /// The sentence for one `private_inference_state` label.
 ///
 /// `state` is the `state` field of `get_settings`/`status`'s
@@ -3572,7 +3794,7 @@ pub unsafe extern "C" fn tc_contribution_eligibility_reason_line(
 /// wire carried no `eligibility` field. That field answers whether this
 /// contributor may send this session -- a question only an evidence-admitted
 /// contributor has. This one answers whether the session carries a checkable
-/// copy of the model call that produced it, which is a fact about the trace,
+/// copy of its last model call, which is a fact about the trace,
 /// and the field is always present.
 ///
 /// **The positive case is the interesting one here.** A session that IS
@@ -4479,7 +4701,11 @@ pub unsafe extern "C" fn tc_witness_configure(
             }
         }
 
-        cfg.witness = Some(settings);
+        // Recorded as entered in Settings, for the disclosure screens (K11).
+        cfg.set_witness(
+            settings,
+            trace_commons_contributor::config::WitnessOrigin::Settings,
+        );
         if store.save_config(&cfg).is_err() {
             witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
             return Ok(-1);
@@ -4520,7 +4746,7 @@ pub unsafe extern "C" fn tc_witness_clear(config_dir: *const c_char, err: *mut *
         if cfg.witness.is_none() {
             return Ok(0);
         }
-        cfg.witness = None;
+        cfg.clear_witness();
         if store.save_config(&cfg).is_err() {
             witness_fail(ERR_WITNESS_CONFIG_WRITE_FAILED, err);
             return Ok(-1);

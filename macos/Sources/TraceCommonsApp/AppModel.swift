@@ -717,6 +717,51 @@ final class AppModel: ObservableObject {
         // just asked for, so it wins over a refused read.
         if case .refused(let writeLabel) = wrote { label = writeLabel }
         publishIfChanged(\.witnessLabel, label)
+        // The disclosure names the witness, so it moves with it.
+        refreshRouteDisclosure()
+    }
+
+    // MARK: - What leaves this machine (K11)
+
+    /// The daemon's facts in the shared crate's words, or nil when they
+    /// could not be read -- `routeDisclosureUnreadable` then says so, and
+    /// nothing is drawn in its place.
+    @Published private(set) var routeDisclosure: RouteDisclosure?
+    @Published private(set) var routeDisclosureUnreadable = false
+    /// The Rust's words for that case, read once: they do not change.
+    let routeDisclosureUnreadableCopy: RouteDisclosureUnreadable? =
+        TCConsentCopy.routeDisclosureUnreadableJSON().flatMap {
+            RouteDisclosureUnreadable.decode(fromJSON: $0)
+        }
+    /// Held certificates' claims, by entry id, for the review sheet.
+    @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
+
+    func refreshRouteDisclosure() {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let facts = try? client.routeDisclosureFactsJSON()
+            let disclosure = facts
+                .flatMap { TCConsentCopy.routeDisclosureJSON(forFacts: $0) }
+                .flatMap { RouteDisclosure.decode(fromJSON: $0) }
+            await MainActor.run {
+                self.publishIfChanged(\.routeDisclosure, disclosure)
+                self.publishIfChanged(\.routeDisclosureUnreadable, disclosure == nil)
+            }
+        }
+    }
+
+    /// Ask for the certificate one entry holds. Only for an entry whose
+    /// `holdsCertificate` is true; anything unreadable leaves nothing shown.
+    func loadCertificateDetail(entryID: String) {
+        guard let client else { return }
+        Task.detached(priority: .userInitiated) {
+            let detail = (try? client.certificateDetailJSON(entryID: entryID)).flatMap { json in
+                TCConsentCopy.certificateDetailCopyJSON().flatMap {
+                    CertificateDetail.decode(detailJSON: json, copyJSON: $0)
+                }
+            }
+            await MainActor.run { self.certificateDetails[entryID] = detail }
+        }
     }
 
     @Published private(set) var outcomeCounts: [String: Int] = [:]
@@ -842,7 +887,32 @@ final class AppModel: ObservableObject {
         // The budget banner says the same thing with real numbers, so the
         // bare label is suppressed when it is going to be drawn.
         if label == "daily-cap-reached" && status.dailyBudget.blocked { return nil }
+        // Likewise the witness banner, with the count -- only when it is
+        // actually going to be drawn.
+        if label == "witness-saturated" && witnessCapacityHealth != nil { return nil }
+        // And the held-folder notice, which names the folders and says why --
+        // again only when it is going to be drawn.
+        if label == GateHeld.label && gateHeldNotice != nil { return nil }
         return HealthCopy.forLabel(label)
+    }
+
+    /// The notice for armed folders the automatic-contribution gate is
+    /// holding, in the Rust's words, when there are any. Independent of
+    /// `health` for the reason `witnessCapacityHealth` is. Nil when nothing
+    /// is held or the notice cannot be read; the label, if it holds the
+    /// slot, then falls back to `forLabel`'s on-hold line.
+    var gateHeldNotice: GateHeldNotice? {
+        guard status.gateHeld.held else { return nil }
+        return TCConsentCopy.gateHeldNoticeJSON(forHeld: status.gateHeld.json)
+            .flatMap(GateHeldNotice.decode(fromJSON:))
+    }
+
+    /// The banner for approved sessions held on a busy privacy witness, when
+    /// there are any. Independent of `health` for the reason `budgetHealth`
+    /// is: another label can hold the daemon's one health slot while these
+    /// sessions are still waiting.
+    var witnessCapacityHealth: HealthCopy? {
+        HealthCopy.forWitnessCapacity(status.witnessCapacity)
     }
 
     /// The spent-budget banner, when there is one.
@@ -1466,6 +1536,79 @@ final class AppModel: ObservableObject {
     /// Refreshes settings and status afterward so `nearAIConfigured` /
     /// `health` reflect the daemon's own post-acknowledgment state rather
     /// than an assumption made here.
+    /// Records that one void notice was shown, then re-reads status so the
+    /// daemon's own list, not an assumption made here, decides what stays.
+    func acknowledgeGrantVoid(id: UInt64) {
+        perform(
+            "acknowledge_grant_voids",
+            work: { try $0.acknowledgeGrantVoids(ids: [id]) }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// Records that one rewording notice was shown (K5), then re-reads
+    /// status so the daemon's own list decides what stays.
+    func acknowledgeArmingRewording(id: UInt64) {
+        perform(
+            "acknowledge_arming_rewordings",
+            work: { try $0.acknowledgeArmingRewordings(ids: [id]) }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// Projects whose "Ask me first" the daemon refused, by project id, so
+    /// the notice can show the Rust's refusal line. Cleared on a retry.
+    @Published private(set) var askFirstRefused: Set<String> = []
+
+    /// "Ask me first" on a rewording or held-folder notice. The same call as
+    /// Settings -- `set_project_mode` with the project's id and
+    /// `notify_only` -- which also answers a rewording notice. A refusal
+    /// changes nothing; the notice stays and says so.
+    func askFirst(projectID: String) {
+        guard let client else { return }
+        askFirstRefused.remove(projectID)
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.setProjectMode(projectID: projectID, mode: .ask) }
+            await MainActor.run {
+                if case .failure = outcome {
+                    self.askFirstRefused.insert(projectID)
+                }
+                self.refreshStatus()
+                self.refreshProjects()
+                self.refreshAudit()
+            }
+        }
+    }
+
+    /// Void notices whose "Turn back on" the daemon refused, by notice id,
+    /// so the card can show the Rust's refusal line. Cleared on a retry.
+    @Published private(set) var grantVoidRearmRefused: Set<UInt64> = []
+
+    /// "Turn back on" on a project's void notice. The same call as arming a
+    /// project in Settings -- `set_project_mode` with the project's id and
+    /// `auto_upload` -- so the daemon applies the same refusals, writes the
+    /// same `armed-auto-upload` row, and clears the notice itself. A refusal
+    /// changes nothing; the notice stays and says so.
+    func rearmGrantVoid(id: UInt64, projectID: String) {
+        guard let client else { return }
+        grantVoidRearmRefused.remove(id)
+        Task.detached(priority: .userInitiated) {
+            let outcome = Result { try client.setProjectMode(projectID: projectID, mode: .autoUpload) }
+            await MainActor.run {
+                if case .failure = outcome {
+                    self.grantVoidRearmRefused.insert(id)
+                }
+                self.refreshStatus()
+                self.refreshProjects()
+                self.refreshAudit()
+            }
+        }
+    }
+
     func acknowledgeNearAINotice() {
         perform(
             "acknowledge_near_ai_notice",
@@ -2369,7 +2512,8 @@ final class AppModel: ObservableObject {
             } catch {
                 return WitnessReviewOutcome(
                     succeeded: false,
-                    sentence: DaemonClient.refusalSentence(from: error)
+                    sentence: DaemonClient.refusalSentence(from: error),
+                    retryLine: DaemonClient.busyRetryLine(from: error)
                 )
             }
         }.value
@@ -2490,6 +2634,10 @@ final class AppModel: ObservableObject {
         /// The daemon's classified sentence, or `nil` when it sent none and
         /// the caller should keep its own fallback.
         let sentence: String?
+        /// Set only when the witness was busy: when the person may try the
+        /// review again. A busy witness judged nothing, so it is not a
+        /// refusal.
+        var retryLine: String? = nil
     }
 
     enum PreviewOutcome {

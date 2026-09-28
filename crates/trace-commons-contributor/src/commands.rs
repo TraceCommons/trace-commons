@@ -78,6 +78,8 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // receipt fetch would disclose an exchange to the provider for a
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
     }
 }
@@ -169,6 +171,7 @@ pub(crate) async fn enroll_core(
     let client = IssuerClient::new(allowlist).context("building issuer client")?;
     let response = client.enroll(&grant.issuer_url, &req).await?;
 
+    let env_witness = crate::config::witness_settings_from_env();
     let cfg = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
         issuer_url: grant.issuer_url.clone(),
@@ -187,11 +190,13 @@ pub(crate) async fn enroll_core(
         // Enrollment never turns the witness on. It is opt-in, from config or
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
-        witness: crate::config::witness_settings_from_env(),
+        witness: env_witness.clone(),
         // Same rule, same reason: the receipt endpoint is opt-in from the
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
+        witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -1570,6 +1575,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");
             }
+            // Only the daemon asks for a hold; listed so a CLI run that ever
+            // got one says so rather than failing to compile it away.
+            SubmitOutcome::HeldForReview { reason_label, .. } => {
+                println!("{preview_prefix}held ({reason_label})");
+            }
         }
     }
 
@@ -2168,6 +2178,8 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2313,6 +2325,8 @@ mod tests {
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2805,6 +2819,7 @@ async fn enroll_with_invite_core(
         IssuerClient::new(allowlist_for(allowed_hosts)).context("building issuer client")?;
     let response = client.onboard(&parsed.issuer_url, &req).await?;
 
+    let env_witness = crate::config::witness_settings_from_env();
     let cfg = ContributorConfig {
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
         issuer_url: parsed.issuer_url.clone(),
@@ -2828,17 +2843,23 @@ async fn enroll_with_invite_core(
         // Enrollment never turns the witness on. It is opt-in, from config or
         // the environment, and a server-supplied enablement is exactly the
         // "no server-pushed enablement" rule this field exists under.
-        witness: crate::config::witness_settings_from_env(),
+        witness: env_witness.clone(),
         // Same rule, same reason: the receipt endpoint is opt-in from the
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
+        consent_scopes_chosen: false,
+        witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
+    // The invite's subject hash -- never the code -- so a later move to a
+    // NEAR AI account can name the invite without asking anyone for it.
+    // Best effort: the migration asks the issuer when it is missing.
+    crate::daemon::legacy_migration::remember_invite_subject(store, &parsed.code);
     Ok(cfg)
 }
 
@@ -4056,6 +4077,8 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
+        // Arming records the terms in force, so it needs a config.
+        store.save_config(&unenrolled_preview_config()).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false).unwrap();
         let key = std::fs::canonicalize(project.path())

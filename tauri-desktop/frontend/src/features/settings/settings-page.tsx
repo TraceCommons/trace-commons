@@ -1,18 +1,22 @@
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "../../components/page-header";
+import { RouteDisclosurePanel } from "../../components/route-disclosure";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
 import { AuditPanel } from "./components/audit-panel";
+import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
 import { BehaviorSettingsPanel } from "./components/behavior-settings-panel";
 import { ConnectionPanel } from "./components/connection-panel";
 import { ConsentSettingsPanel } from "./components/consent-settings-panel";
-import { PrivacyControlsPanel } from "./components/privacy-controls-panel";
+import { LegacyMigrationPanel } from "./components/legacy-migration-panel";
 import { PlatformPanel } from "./components/platform-panel";
+import { PrivacyControlsPanel } from "./components/privacy-controls-panel";
 import { ProjectsPanel } from "./components/projects-panel";
 import { RoutingPanel } from "./components/routing-panel";
 import { SettingRow } from "./components/setting-row";
 import { SourceRootsPanel } from "./components/source-roots-panel";
 import { WitnessPanel } from "./components/witness-panel";
 import { useAudit } from "./hooks/use-audit";
+import { useAutomaticGrant } from "./hooks/use-automatic-grant";
 import { useBehaviorSettings } from "./hooks/use-behavior-settings";
 import { useConsentSettings } from "./hooks/use-consent-settings";
 import { useDaemonControl } from "./hooks/use-daemon-control";
@@ -32,7 +36,12 @@ function settingValue(
   return value === undefined || value === null ? fallback : String(value);
 }
 
-export function SettingsPage() {
+export function SettingsPage({
+  onTurnOnAutomaticContributing,
+}: {
+  /** Opens the Flow 1 grant screens again (K10). */
+  onTurnOnAutomaticContributing?: () => void;
+} = {}) {
   const settings = useSettings();
   const core = useCoreStatus();
   const daemon = useDaemonControl();
@@ -44,6 +53,7 @@ export function SettingsPage() {
   const witness = useWitness();
   const consent = useConsentSettings();
   const routing = useRouting();
+  const automaticGrant = useAutomaticGrant();
   const snapshot = settings.data;
   return (
     <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
@@ -54,6 +64,9 @@ export function SettingsPage() {
         phase="PHASE 4"
       />
       <ConnectionPanel status={core.data} settings={settings.data} />
+      <LegacyMigrationPanel
+        status={core.data?.daemon.legacy_invite_migration}
+      />
       <PlatformPanel />
       {settings.state === "loading" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
@@ -157,6 +170,15 @@ export function SettingsPage() {
             onRefresh={consent.refresh}
             onToggle={consent.toggle}
           />
+          <AutomaticGrantPanel
+            grant={automaticGrant.grant}
+            state={automaticGrant.state}
+            error={automaticGrant.error}
+            withdrawn={automaticGrant.withdrawn}
+            onRefresh={automaticGrant.refresh}
+            onWithdraw={automaticGrant.withdraw}
+            onTurnOn={onTurnOnAutomaticContributing}
+          />
           <ProjectsPanel
             projects={projects.projects}
             state={projects.state}
@@ -188,6 +210,7 @@ export function SettingsPage() {
             onRefresh={settings.refresh}
             onSave={(setting, value) => behavior.save(setting, value)}
           />
+          <RouteDisclosurePanel />
           <WitnessPanel
             data={witness.data}
             state={witness.state}

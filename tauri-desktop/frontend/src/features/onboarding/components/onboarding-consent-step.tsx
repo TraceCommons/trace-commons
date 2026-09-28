@@ -1,12 +1,14 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useMemo } from "react";
-import { useController, useForm } from "react-hook-form";
-import { FormFieldError } from "../../../components/form-field-error";
-import { type ConsentFormValues, consentFormSchema } from "../forms";
+import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
+import { useCoreStatus } from "../../../lib/tauri/use-core-status";
+import { initialScopeSelection, scopeChoice } from "../flow1";
 import type { OnboardingStepProps } from "./onboarding-step-types";
 
+// R7's scope picker: immediately after connect, before the path question,
+// with nothing selected -- the floor scope included -- so no grant ships at
+// a scope nobody chose. Declining lands on Flow 2 with no grant.
 export function OnboardingConsentStep({
   onboarding,
   settings,
@@ -17,40 +19,53 @@ export function OnboardingConsentStep({
   OnboardingStepProps,
   "onboarding" | "settings" | "alreadyEnrolled" | "busy" | "showPrivacy"
 >) {
-  const alwaysOn = useMemo(
-    () =>
-      onboarding.options
-        .filter((option) => option.always_on)
-        .map((option) => option.name),
-    [onboarding.options],
-  );
-  const form = useForm<ConsentFormValues>({
-    resolver: zodResolver(consentFormSchema(alwaysOn)),
-    defaultValues: { scopes: alwaysOn },
-  });
-  const scopes = useController({ control: form.control, name: "scopes" });
-  useEffect(() => {
-    if (!form.formState.isDirty) form.reset({ scopes: alwaysOn });
-  }, [alwaysOn, form]);
-  const scopeError = scopes.fieldState.error?.message;
+  const core = useCoreStatus();
+  const grantCopy = useAutomaticGrantCopy(core.scope, core.isSuccess);
+  const copy = grantCopy.data;
+  const [selected, setSelected] = useState<string[]>(initialScopeSelection);
+  const choice = scopeChoice(onboarding.options, selected);
+  // Nothing is marked invalid until the contributor tries to continue: an
+  // unticked required scope is the starting state, not a mistake.
+  const [attempted, setAttempted] = useState(false);
+  const showMissing = attempted && choice.missingRequired.length > 0;
   const toggle = (name: string) => {
-    const current = scopes.field.value ?? [];
-    scopes.field.onChange(
+    setSelected((current) =>
       current.includes(name)
         ? current.filter((value) => value !== name)
         : [...current, name],
     );
   };
+  const privacyKnown = showPrivacy !== null;
   return (
     <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
       <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
         CONSENT
       </span>
       <h2>How may your traces be used?</h2>
+      {copy ? (
+        <p
+          className="m-0 text-[12px] leading-[1.55] text-muted-foreground"
+          id="onboarding-scope-required"
+        >
+          {copy.scope_required}
+        </p>
+      ) : (
+        <p
+          className={`m-0 text-[12px] ${grantCopy.isError ? "text-destructive" : "text-muted-foreground"}`}
+          role={grantCopy.isError ? "alert" : "status"}
+        >
+          {grantCopy.isError
+            ? "Consent copy unavailable. Continue is disabled."
+            : "Loading consent copy…"}
+        </p>
+      )}
       <form
-        onSubmit={form.handleSubmit(
-          (values) => void onboarding.saveConsent(values.scopes, showPrivacy === true),
-        )}
+        onSubmit={(event) => {
+          event.preventDefault();
+          setAttempted(true);
+          if (choice.canContinue && copy && privacyKnown)
+            void onboarding.saveConsent(selected);
+        }}
       >
         <div className="my-[18px] grid gap-px border-t border-border">
           {onboarding.options.map((option) => (
@@ -59,12 +74,16 @@ export function OnboardingConsentStep({
               key={option.name}
             >
               <Checkbox
-                checked={scopes.field.value.includes(option.name)}
+                checked={selected.includes(option.name)}
                 onCheckedChange={() => toggle(option.name)}
-                disabled={busy || option.always_on}
-                aria-invalid={Boolean(scopeError)}
+                disabled={busy}
+                aria-invalid={
+                  showMissing && choice.missingRequired.includes(option.name)
+                }
                 aria-describedby={
-                  scopeError ? "consent-scopes-error" : undefined
+                  showMissing
+                    ? "onboarding-scope-required onboarding-scope-missing"
+                    : "onboarding-scope-required"
                 }
               />
               <span>
@@ -81,9 +100,20 @@ export function OnboardingConsentStep({
             </label>
           ))}
         </div>
-        <FormFieldError id="consent-scopes-error" message={scopeError} />
+        {showMissing && (
+          <p
+            className="m-0 text-xs text-destructive"
+            id="onboarding-scope-missing"
+            role="alert"
+          >
+            Tick every required scope to continue, or choose Decide later.
+          </p>
+        )}
         {onboarding.state === "loading" && (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p
+            className="mt-[30px] mb-1 text-[13px] text-muted-foreground"
+            role="status"
+          >
             Loading consent options…
           </p>
         )}
@@ -112,13 +142,18 @@ export function OnboardingConsentStep({
             </Button>
           )}
           <Button
+            type="button"
+            variant="outline"
+            onClick={() => onboarding.declineScopes(showPrivacy === true)}
+            disabled={busy || !privacyKnown}
+          >
+            Decide later
+          </Button>
+          <Button
             className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
             type="submit"
             disabled={
-              busy ||
-              onboarding.options.length === 0 ||
-              settings.state === "loading" ||
-              showPrivacy === null
+              busy || !copy || settings.state === "loading" || !privacyKnown
             }
           >
             Continue

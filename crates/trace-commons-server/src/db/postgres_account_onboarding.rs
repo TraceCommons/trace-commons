@@ -13,6 +13,142 @@ fn refused() -> DatabaseError {
     DatabaseError::Pool("near_provisioning_refused".into())
 }
 
+/// The device key is already registered under a different tenant.
+///
+/// `device_keys.device_key_id` is a global primary key, so the provisioning
+/// insert cannot place the key under this tenant, and the key would go on
+/// authenticating into the tenant that holds it. Named, so it is not one more
+/// `near_provisioning_refused`; label-only, because which tenant holds the key
+/// is exactly what this path must not disclose.
+const DEVICE_KEY_REGISTERED_ELSEWHERE: &str = "near_provisioning_device_key_registered_elsewhere";
+
+/// The wallet public key is already bound to a different tenant or account.
+const WALLET_KEY_REGISTERED_ELSEWHERE: &str = "near_provisioning_wallet_key_registered_elsewhere";
+
+/// The device's principal is already linked to a different account in this
+/// tenant.
+const DEVICE_PRINCIPAL_BOUND_TO_OTHER_ACCOUNT: &str =
+    "near_provisioning_device_bound_to_other_account";
+
+fn named_refusal(label: &str) -> DatabaseError {
+    DatabaseError::Pool(label.into())
+}
+
+/// Register a provisioned device key under `tenant`, or accept the identical
+/// live row a previous attempt left there.
+///
+/// The insert is `ON CONFLICT DO NOTHING` so a retry is not an error, which
+/// means a no-op is ambiguous on its own: it is either our own earlier row or a
+/// row under another tenant, which forced RLS hides from this transaction. The
+/// re-read is scoped to `tenant` explicitly, so a key it cannot find here is
+/// held elsewhere whatever role the pool connects as.
+async fn claim_provisioned_device_key(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    device: &str,
+    public_key: &str,
+    origin: &str,
+) -> Result<(), DatabaseError> {
+    let inserted = tx
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,$4) ON CONFLICT(device_key_id) DO NOTHING",
+            &[&device, &tenant, &public_key, &origin],
+        )
+        .await?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    let Some(row) = tx
+        .query_opt(
+            "SELECT public_key, onboarding_origin, revoked_at IS NULL FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2",
+            &[&tenant, &device],
+        )
+        .await?
+    else {
+        return Err(named_refusal(DEVICE_KEY_REGISTERED_ELSEWHERE));
+    };
+    // Same tenant, but revoked or recorded differently: never revive or
+    // rewrite it from here.
+    let same = row.get::<_, String>(0) == public_key
+        && row.get::<_, String>(1) == origin
+        && row.get::<_, bool>(2);
+    if same { Ok(()) } else { Err(refused()) }
+}
+
+/// Bind the proved wallet key to `account`, or accept the identical live
+/// binding a previous attempt left. `public_key` is globally unique, so a key
+/// this tenant cannot see, or one bound to another account here, is refused by
+/// name and never moved.
+async fn claim_wallet_identity(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: &Uuid,
+    wallet_public_key: &str,
+    near_account_id: &str,
+) -> Result<(), DatabaseError> {
+    let inserted = tx
+        .execute(
+            "INSERT INTO trace_near_identities(tenant_id,public_key,near_account_id,account_id) VALUES($1,$2,$3,$4) ON CONFLICT(public_key) DO NOTHING",
+            &[&tenant, &wallet_public_key, &near_account_id, account],
+        )
+        .await?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    let Some(row) = tx
+        .query_opt(
+            "SELECT account_id, near_account_id, revoked_at IS NULL FROM trace_near_identities WHERE tenant_id=$1 AND public_key=$2",
+            &[&tenant, &wallet_public_key],
+        )
+        .await?
+    else {
+        return Err(named_refusal(WALLET_KEY_REGISTERED_ELSEWHERE));
+    };
+    if row.get::<_, Uuid>(0) != *account {
+        return Err(named_refusal(WALLET_KEY_REGISTERED_ELSEWHERE));
+    }
+    if row.get::<_, String>(1) == near_account_id && row.get::<_, bool>(2) {
+        Ok(())
+    } else {
+        Err(refused())
+    }
+}
+
+/// Link the device principal to `account`, or accept the identical live link
+/// a previous attempt left. A link to a different account is refused by name
+/// rather than kept silently.
+async fn link_provisioned_principal(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: &Uuid,
+    principal: &str,
+) -> Result<(), DatabaseError> {
+    let inserted = tx
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3) ON CONFLICT(tenant_id,principal_ref) DO NOTHING",
+            &[&tenant, account, &principal],
+        )
+        .await?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    let row = tx
+        .query_opt(
+            "SELECT account_id, unlinked_at IS NULL FROM trace_account_principals WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&tenant, &principal],
+        )
+        .await?
+        .ok_or_else(refused)?;
+    if row.get::<_, Uuid>(0) != *account {
+        return Err(named_refusal(DEVICE_PRINCIPAL_BOUND_TO_OTHER_ACCOUNT));
+    }
+    if row.get::<_, bool>(1) {
+        Ok(())
+    } else {
+        Err(refused())
+    }
+}
+
 impl PgBackend {
     pub(super) async fn near_store_ceremony(
         &self,
@@ -294,12 +430,16 @@ impl PgBackend {
         };
         // Never move an existing key from another account, revive revocations,
         // or create an invite/grant as a side effect of identity provisioning.
-        tx.execute("INSERT INTO trace_near_identities(tenant_id,public_key,near_account_id,account_id) VALUES($1,$2,$3,$4) ON CONFLICT(public_key) DO NOTHING", &[&tenant,&proof.wallet_public_key(),&proof.account_id(),&account]).await?;
-        if tx.query_opt("SELECT 1 FROM trace_near_identities WHERE tenant_id=$1 AND public_key=$2 AND account_id=$3 AND revoked_at IS NULL AND near_account_id=$4", &[&tenant,&proof.wallet_public_key(),&account,&proof.account_id()]).await?.is_none() { return Err(refused()); }
-        tx.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near') ON CONFLICT(device_key_id) DO NOTHING", &[&device,&tenant,&public_key]).await?;
-        if tx.query_opt("SELECT 1 FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2 AND public_key=$3 AND onboarding_origin='near' AND revoked_at IS NULL", &[&tenant,&device,&public_key]).await?.is_none() { return Err(refused()); }
-        tx.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&account,&principal]).await?;
-        if tx.query_opt("SELECT 1 FROM trace_account_principals WHERE tenant_id=$1 AND account_id=$2 AND principal_ref=$3 AND unlinked_at IS NULL", &[&tenant,&account,&principal]).await?.is_none() { return Err(refused()); }
+        claim_wallet_identity(
+            &tx,
+            &tenant,
+            &account,
+            proof.wallet_public_key(),
+            proof.account_id(),
+        )
+        .await?;
+        claim_provisioned_device_key(&tx, &tenant, &device, &public_key, "near").await?;
+        link_provisioned_principal(&tx, &tenant, &account, &principal).await?;
         tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
         tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
         tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_account_provisioned',$2,'success',$3)", &[&tenant,&principal,&serde_json::json!({"identity":"near","admission":"not_granted"})]).await?;
@@ -423,10 +563,8 @@ impl PgBackend {
         // No `trace_near_identities` row: that table binds a wallet public key
         // to a NEAR account name, and this path has neither. A login proves an
         // account, not a key.
-        tx.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near_ai') ON CONFLICT(device_key_id) DO NOTHING", &[&device,&tenant,&public_key]).await?;
-        if tx.query_opt("SELECT 1 FROM device_keys WHERE tenant_id=$1 AND device_key_id=$2 AND public_key=$3 AND onboarding_origin='near_ai' AND revoked_at IS NULL", &[&tenant,&device,&public_key]).await?.is_none() { return Err(refused()); }
-        tx.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&account,&principal]).await?;
-        if tx.query_opt("SELECT 1 FROM trace_account_principals WHERE tenant_id=$1 AND account_id=$2 AND principal_ref=$3 AND unlinked_at IS NULL", &[&tenant,&account,&principal]).await?.is_none() { return Err(refused()); }
+        claim_provisioned_device_key(&tx, &tenant, &device, &public_key, "near_ai").await?;
+        link_provisioned_principal(&tx, &tenant, &account, &principal).await?;
         tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,&account,&device,&anchor_hash]).await?;
         tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at) VALUES($1,$2,$3,$4,'native',$5)", &[&tenant,&Uuid::new_v4(),&account,&session.token_hash,&session.expires_at]).await?;
         // Hash-only, like its wallet sibling: the audit row names the identity
@@ -450,15 +588,40 @@ impl PgBackend {
     /// this reads either. The caller's tenant prefix already decided which
     /// namespace the request is on, and a row is only ever written under the
     /// matching one.
+    async fn near_provisioned_row_for_principal(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<(String, uuid::Uuid)>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx.query("SELECT n.anchor_hash, n.account_id FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id WHERE n.tenant_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL AND a.closed_at IS NULL LIMIT 2", &[&tenant,&principal]).await?;
+        tx.commit().await?;
+        if rows.len() > 1 {
+            return Err(DatabaseError::Query("near_provisioning_ambiguous".into()));
+        }
+        Ok(rows.into_iter().next().map(|r| (r.get(0), r.get(1))))
+    }
+
     pub(super) async fn near_anchor_for_principal(
         &self,
         tenant: &str,
         principal: &str,
     ) -> Result<Option<String>, DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let row = tx.query_opt("SELECT n.anchor_hash FROM trace_near_provisioned_devices n JOIN device_keys d ON d.tenant_id=n.tenant_id AND d.device_key_id=n.device_key_id JOIN trace_account_principals p ON p.tenant_id=n.tenant_id AND p.account_id=n.account_id AND p.principal_ref=n.principal_ref JOIN trace_accounts a ON a.tenant_id=n.tenant_id AND a.account_id=n.account_id WHERE n.tenant_id=$1 AND n.principal_ref=$2 AND d.revoked_at IS NULL AND d.onboarding_origin IN ('near','near_ai') AND p.unlinked_at IS NULL AND a.closed_at IS NULL", &[&tenant,&principal]).await?;
-        tx.commit().await?;
-        Ok(row.map(|r| r.get(0)))
+        Ok(self
+            .near_provisioned_row_for_principal(tenant, principal)
+            .await?
+            .map(|(anchor, _)| anchor))
+    }
+
+    pub(super) async fn near_account_for_principal(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Ok(self
+            .near_provisioned_row_for_principal(tenant, principal)
+            .await?
+            .map(|(_, account)| account))
     }
 }

@@ -3,6 +3,15 @@ import {
   invokeTauriDiscardResult,
   invokeTauriVoid,
 } from "../../../lib/tauri/core-api";
+import {
+  type CurrentConnection,
+  type InferenceOffer,
+  type InstallTarget,
+  parseCurrentConnection,
+  parseOffers,
+  parseSelectResult,
+  type SelectResult,
+} from "../inference-connection";
 import type { ConsentOption } from "../types";
 
 export type NativeWalletView = {
@@ -148,4 +157,125 @@ export async function getScrubberPatternNames(): Promise<string[]> {
   )
     throw new Error("Invalid scrubber names");
   return response.names as string[];
+}
+
+export type AutomaticGrant = {
+  granted: boolean;
+  granted_at: string | null;
+  on_disk_recorded: boolean;
+};
+
+function parseAutomaticGrant(value: unknown): AutomaticGrant {
+  const response = record(value, "automatic grant response");
+  const granted = boolean(response, "granted");
+  if (!granted) {
+    return { granted: false, granted_at: null, on_disk_recorded: false };
+  }
+  return {
+    granted: true,
+    granted_at: nullableString(response, "granted_at"),
+    on_disk_recorded: boolean(response, "on_disk_recorded"),
+  };
+}
+
+export async function getAutomaticGrant(): Promise<AutomaticGrant> {
+  return parseAutomaticGrant(await invokeTauri("automatic_grant"));
+}
+
+/**
+ * The Flow 1 grant. Reached only through `requestGrant` in `flow1.ts`, which
+ * refuses until every step before it is done; Rust refuses again without
+ * the confirmation, an enrollment, or scopes chosen in the picker, and the
+ * daemon refuses when the configured witness is not `witnessSigningAddress`,
+ * the one the witness screen showed (`null` for none).
+ */
+export async function grantAutomatic(
+  witnessSigningAddress: string | null,
+): Promise<AutomaticGrant> {
+  return parseAutomaticGrant(
+    await invokeTauri("grant_automatic", {
+      confirmed: true,
+      witnessSigningAddress,
+    }),
+  );
+}
+
+export async function withdrawAutomaticGrant(): Promise<boolean> {
+  const response = record(
+    await invokeTauri("withdraw_automatic_grant"),
+    "automatic grant withdrawal response",
+  );
+  return boolean(response, "withdrawn");
+}
+
+// Connecting inference (K12). Each call is the daemon's
+// `inference_connection_*` method through a named Tauri command; see
+// `inference-connection.ts` for the parsers and the step's view.
+
+export async function getInferenceOffers(): Promise<InferenceOffer[]> {
+  return parseOffers(await invokeTauri("inference_connection_offers"));
+}
+
+export async function getCurrentInferenceConnection(): Promise<CurrentConnection> {
+  return parseCurrentConnection(
+    await invokeTauri("inference_connection_current"),
+  );
+}
+
+/**
+ * Record the contributor's choice on their account, with the offer exactly
+ * as it was listed and shown. Installs nothing. Rust refuses without the
+ * confirmation, or for an offer the core has no disclosure for.
+ */
+export async function selectInferenceConnection(
+  offer: InferenceOffer,
+  expectedCurrentVersion: number | null,
+): Promise<SelectResult> {
+  return parseSelectResult(
+    await invokeTauri("inference_connection_select", {
+      confirmed: true,
+      offer: {
+        offer_id: offer.offer_id,
+        provider_id: offer.provider_id,
+        revision: offer.revision,
+        config_digest: offer.config_digest,
+        disclosure_version: offer.disclosure_version,
+      },
+      expectedCurrentVersion,
+    }),
+  );
+}
+
+/** The separate, confirmed step that writes the witness on this device. */
+export async function installInferenceConnection(
+  target: InstallTarget,
+): Promise<void> {
+  const response = record(
+    await invokeTauri("inference_connection_install", {
+      confirmed: true,
+      connectionId: target.connection_id,
+      configDigest: target.config_digest,
+    }),
+    "inference install response",
+  );
+  if (response.installed !== true) {
+    throw new Error("Invalid inference install response");
+  }
+}
+
+/**
+ * Remove this connection's witness from this device, then end it on the
+ * account. `pending` when the local half is done and the account's is owed.
+ */
+export async function disconnectInferenceConnection(
+  connectionId: string,
+): Promise<"disconnected" | "pending"> {
+  const response = record(
+    await invokeTauri("inference_connection_disconnect", { connectionId }),
+    "inference disconnect response",
+  );
+  const server = string(response, "server_disconnect");
+  if (server === "pending") return "pending";
+  if (server === "revoked" || server === "not-found") return "disconnected";
+  throw new Error("Invalid inference disconnect response");
 }

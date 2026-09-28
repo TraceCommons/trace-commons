@@ -280,6 +280,7 @@ fn sample_credit_event(
         actor_principal_ref: format!("principal:{tenant_id}"),
         actor_role: "system".to_string(),
         settlement_state: TraceCreditSettlementState::Pending,
+        witness_provenance_class: None,
     }
 }
 
@@ -1550,6 +1551,28 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V71__reward_participant_access.sql"
     ));
+    sql.push_str(include_str!("../../../migrations/V75__account_trust.sql"));
+    sql.push_str(include_str!(
+        "../../../migrations/V76__trace_witness_certificate_evidence.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V77__account_admission.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V78__trace_source_sessions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V79__inference_connection.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V81__legacy_invite_link.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V86__account_trust_evaluations.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V91__legacy_invite_link_devices.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1637,18 +1660,50 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V71__reward_participant_access.sql"
     ));
+    sql.push_str(include_str!("../../../migrations/V75__account_trust.sql"));
+    sql.push_str(include_str!(
+        "../../../migrations/V76__trace_witness_certificate_evidence.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V77__account_admission.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V78__trace_source_sessions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V79__inference_connection.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V81__legacy_invite_link.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V86__account_trust_evaluations.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V91__legacy_invite_link_devices.sql"
+    ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
     for table in expected_trace_rls_tables()
         .into_iter()
         .chain(["trace_pii_backstop"])
     {
-        assert!(
-            sql.contains(&format!(
-                "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
-            )),
-            "central tenant predicate migration must drop stale policy on {table}"
-        );
+        if ![
+            "trace_account_admission_budget",
+            "trace_account_admission_submissions",
+            "trace_account_trust_facts",
+            "trace_source_sessions",
+            "trace_submission_sessions",
+        ]
+        .contains(&table)
+        {
+            assert!(
+                sql.contains(&format!(
+                    "DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON {table};"
+                )),
+                "central tenant predicate migration must drop stale policy on {table}"
+            );
+        }
         assert!(
             sql.contains(&format!(
                 "CREATE POLICY trace_corpus_tenant_isolation ON {table}"

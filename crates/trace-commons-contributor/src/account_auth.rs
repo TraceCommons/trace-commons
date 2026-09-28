@@ -74,6 +74,7 @@ pub struct AccountSession {
     pub account_id: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct LoadedAccountSession {
     pub session: AccountSession,
     pub snapshot: crate::daemon::commons_credentials::Snapshot,
@@ -114,10 +115,17 @@ pub(crate) fn try_load_session_with_snapshot(
     let Ok(session) = serde_json::from_slice::<AccountSession>(&raw) else {
         return Ok(None);
     };
-    if session.expires_at <= Utc::now() + EXPIRY_SKEW {
+    if !session_is_usable(&session) {
         return Ok(None);
     }
     Ok(Some(LoadedAccountSession { session, snapshot }))
+}
+
+/// Whether a session is still worth presenting: not expired, and not about
+/// to be. The same test [`try_load_session_with_snapshot`] applies on load,
+/// for a caller that holds a loaded session across time.
+pub(crate) fn session_is_usable(session: &AccountSession) -> bool {
+    session.expires_at > Utc::now() + EXPIRY_SKEW
 }
 
 pub(crate) fn store_rotated_token(
@@ -361,12 +369,7 @@ where
     // endpoint. This is an authority the device key ALREADY has; the flow adds
     // none.
     let login_path = crate::submit::mint_account_login_link(store, cfg).await?;
-    let separator = if login_path.contains('?') { '&' } else { '?' };
-    let browser_url = format!(
-        "{}{login_path}{separator}native={}",
-        cfg.ingest_url.trim_end_matches('/'),
-        start.request_id
-    );
+    let browser_url = browser_url(&cfg.ingest_url, &login_path, &start.request_id)?;
 
     if open_browser {
         try_open_browser(&browser_url);
@@ -413,6 +416,18 @@ where
     })
 }
 
+/// The URL the human opens: the server's root-relative login path on the
+/// ingest ORIGIN, plus this flow's `native` request id.
+///
+/// Not `ingest_url + login_path`: `ingest_url` is the upload endpoint and
+/// carries `/v1/traces`, which is how 0.12.6 printed a login URL that 404s.
+fn browser_url(ingest_url: &str, login_path: &str, request_id: &str) -> Result<String> {
+    let mut url = crate::config::ingest_origin_url(ingest_url, login_path)
+        .context("building the sign-in URL")?;
+    url.query_pairs_mut().append_pair("native", request_id);
+    Ok(url.into())
+}
+
 /// Revoke the stored token server-side, then forget it locally.
 ///
 /// The local file is removed even when the server call fails: a caller that
@@ -457,6 +472,59 @@ pub async fn sign_out(store: &ConfigStore, cfg: &ContributorConfig) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ingest_url` is the upload endpoint and carries a path (`/v1/traces`),
+    /// so the browser URL is built on its origin. 0.12.6 appended the login
+    /// path to the whole string and printed `/v1/traces/account/login`, a 404.
+    #[test]
+    fn the_browser_url_is_built_on_the_ingest_origin_not_its_path() {
+        for ingest in [
+            "https://commons.example/v1/traces",
+            "https://commons.example/v1/traces/",
+            "https://commons.example/",
+            "https://commons.example",
+        ] {
+            assert_eq!(
+                browser_url(ingest, "/account/login?code=abc", "req-1").unwrap(),
+                "https://commons.example/account/login?code=abc&native=req-1",
+                "ingest_url = {ingest}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_browser_url_keeps_the_ingest_port_and_scheme() {
+        for ingest in [
+            "http://127.0.0.1:8443/v1/traces",
+            "http://127.0.0.1:8443/v1/traces/",
+            "http://127.0.0.1:8443",
+        ] {
+            assert_eq!(
+                browser_url(ingest, "/account/login", "req-1").unwrap(),
+                "http://127.0.0.1:8443/account/login?native=req-1",
+                "ingest_url = {ingest}"
+            );
+        }
+    }
+
+    /// The login path comes from the server. Only a root-relative path is
+    /// joined: anything that could name another host is refused rather than
+    /// handed to the browser.
+    #[test]
+    fn a_login_path_that_could_leave_the_ingest_origin_is_refused() {
+        for login_path in [
+            "https://elsewhere.example/account/login?code=abc",
+            "//elsewhere.example/account/login?code=abc",
+            "/\\elsewhere.example/account/login?code=abc",
+            "account/login?code=abc",
+            "",
+        ] {
+            assert!(
+                browser_url("https://commons.example/v1/traces", login_path, "req-1").is_err(),
+                "login_path = {login_path:?}"
+            );
+        }
+    }
 
     /// The client's copy of the wire constants must equal the server's. Both
     /// are in this workspace, and `trace-commons-server` is a dev-dependency

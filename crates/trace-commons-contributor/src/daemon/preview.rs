@@ -239,7 +239,35 @@ pub const REDACTION_RULESET_VERSION: &str = "2";
 /// `every_config_field_is_a_deliberate_fingerprint_decision` pins the whole
 /// field set, so the addition fails that test until someone says which side
 /// of this line the new field falls on.
-const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "public_since"];
+///
+/// `consent_scopes_chosen` is on this list too. It records only that the
+/// contributor picked `consent_scopes` through the picker, for the Flow 1
+/// grant (R7); the scopes themselves are fingerprinted, so a choice that
+/// changes them still moves the fingerprint. Confirming the scopes already
+/// saved changes no byte of any envelope, and re-asking the approved backlog
+/// for it would be a prompt with no consent content.
+///
+/// `witness_origin` records how the witness arrived, for the disclosure
+/// screens. The witness itself is fingerprinted; where it came from changes
+/// no byte of any envelope.
+///
+/// **Order matters, and `witness_origin` must stay first.** `serde_json`'s
+/// `preserve_order` feature is on in this crate's build, so the map is an
+/// `IndexMap` and `remove` is a swap-remove: removing a key moves the LAST
+/// key into its slot. `witness_origin` is the last field and is present only
+/// when a witness has a recorded origin, so if it were removed after another
+/// field, its presence would decide which key got swapped and move the
+/// fingerprint. Removed first, it is popped from the end and the remaining
+/// order is exactly that of a config without it --
+/// `the_witness_origin_does_not_move_the_fingerprint` holds this. The other
+/// entries keep their order so that no existing fingerprint moves.
+const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &[
+    "witness_origin",
+    "consent_scopes_chosen",
+    "display_handle",
+    "public_bio",
+    "public_since",
+];
 
 /// The contributor config reduced to its envelope-determining fields, as
 /// canonical bytes for [`input_fingerprint`].
@@ -249,9 +277,12 @@ const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &["display_handle", "public_bio", "p
 /// anyone remembering to come back here, and dropping one out of the
 /// fingerprint takes a deliberate entry in `NON_ENVELOPE_CONFIG_FIELDS`.
 ///
-/// `serde_json::Value`'s map is a `BTreeMap` under this crate's feature set,
-/// so the re-serialization is key-ordered and these bytes are stable for a
-/// given config.
+/// `serde_json`'s `preserve_order` feature is enabled in this crate's build
+/// (through feature unification), so `Value`'s map is an `IndexMap`: the
+/// bytes follow struct field order, with each removal swapping the last key
+/// into the removed slot. That is deterministic for a given config, which is
+/// all a fingerprint needs, but it is not key-sorted -- see the ordering note
+/// on `NON_ENVELOPE_CONFIG_FIELDS`.
 fn envelope_determining_config_bytes(cfg: &ContributorConfig) -> Vec<u8> {
     let Ok(mut value) = serde_json::to_value(cfg) else {
         return Vec::new();
@@ -297,6 +328,24 @@ pub fn input_fingerprint(
     near_ai: Option<&NearAiSettings>,
     attested_bodies: bool,
 ) -> String {
+    input_fingerprint_with_env_filter(
+        cfg,
+        near_ai,
+        attested_bodies,
+        &super::grant_terms::env_filter_backend(),
+    )
+}
+
+/// `input_fingerprint`, with the environment's privacy filter passed in
+/// (as `grant_terms::env_filter_backend` gives it) rather than read from
+/// the process environment, so a test can vary it without mutating process
+/// state.
+pub(crate) fn input_fingerprint_with_env_filter(
+    cfg: &ContributorConfig,
+    near_ai: Option<&NearAiSettings>,
+    attested_bodies: bool,
+    env_backend: &str,
+) -> String {
     let mut h = Sha256::new();
     h.update(envelope_determining_config_bytes(cfg).as_slice());
     h.update(b"\x00redactor\x00");
@@ -328,6 +377,16 @@ pub fn input_fingerprint(
     // is about. The switch is the consent-relevant fact.
     h.update(b"\x00attested_bodies\x00");
     h.update(if attested_bodies { "on" } else { "off" }.as_bytes());
+    // A privacy filter the environment attaches (`TRACE_PRIVACY_FILTER_BACKEND`)
+    // whatever the config says. Adding, changing or removing one changes who
+    // reads the prose, so an approval taken under one setting must not be
+    // sent under another. Hashed only when one is attached: a daemon without
+    // one keeps the fingerprints it already had, so an upgrade re-offers
+    // nothing.
+    if env_backend != "none" {
+        h.update(b"\x00env_filter\x00");
+        h.update(env_backend.as_bytes());
+    }
     format!("sha256:{:x}", h.finalize())
 }
 
@@ -820,13 +879,33 @@ pub async fn build_witnessed_preview(
             .await?;
         (response, record, Some(bundle))
     } else {
-        let (response, record) = context
+        let (response, record) = match context
             .prepare_witnessed_review(
                 &transcript,
                 options.correction,
                 options.include_inference_bodies,
             )
-            .await?;
+            .await
+        {
+            Ok(reviewed) => reviewed,
+            // This route reports witness refusals as labels. A busy witness
+            // is restored to its typed error, with the delay the witness
+            // asked for, so the handler can tell the person when to try
+            // again rather than reporting a refusal.
+            Err(error)
+                if error.to_string()
+                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR =>
+            {
+                return Err(anyhow::Error::new(
+                    crate::witness::WitnessTrustError::WitnessSaturated {
+                        retry_after_secs: context.last_witness_retry_after().unwrap_or(
+                            trace_commons_protocol::witness_pacing::WITNESS_SATURATED_RETRY_AFTER_SECS,
+                        ),
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         (response, record, None)
     };
     let mut pin_guard =
@@ -1239,6 +1318,8 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
             inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -2227,7 +2308,17 @@ mod tests {
         // safe answer -- and the default if they simply drop it into the
         // list below -- is that it does.
         let (_sd, store) = crate::config::tests_support::temp_store();
-        let cfg = sample_cfg(&store);
+        let mut cfg = sample_cfg(&store);
+        // With a witness, so the optional origin record is serialized too.
+        cfg.set_witness(
+            crate::config::WitnessSettings {
+                admission_evidence: false,
+                url: "https://witness.invalid".into(),
+                signing_address: "0xab".into(),
+                expected_measurements: vec!["mrtd=aa".into()],
+            },
+            crate::config::WitnessOrigin::Settings,
+        );
         let value = serde_json::to_value(&cfg).unwrap();
         let mut all: Vec<&str> = value
             .as_object()
@@ -2242,6 +2333,8 @@ mod tests {
                 "allowed_hosts",
                 "audience",
                 "consent_scopes",
+                // Not fingerprinted: see NON_ENVELOPE_CONFIG_FIELDS.
+                "consent_scopes_chosen",
                 "device_key_id",
                 "display_handle",
                 // Fingerprinted, deliberately, for the same reason as
@@ -2279,6 +2372,8 @@ mod tests {
                 // invalidating re-asks; under-invalidating sends something
                 // the contributor did not approve.
                 "witness",
+                // Not fingerprinted: see NON_ENVELOPE_CONFIG_FIELDS.
+                "witness_origin",
             ],
             "a new ContributorConfig field must be classified: leave it out of \
              NON_ENVELOPE_CONFIG_FIELDS to fingerprint it, or add it there with a reason"
@@ -2292,6 +2387,27 @@ mod tests {
                 "NON_ENVELOPE_CONFIG_FIELDS names {field}, which is not a config field"
             );
         }
+    }
+
+    /// Where a witness came from is disclosure, not an input: recording it
+    /// changes no byte of an envelope and must not re-ask an approval.
+    #[test]
+    fn the_witness_origin_does_not_move_the_fingerprint() {
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let witness = crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: "https://witness.invalid".into(),
+            signing_address: "0xab".into(),
+            expected_measurements: vec!["mrtd=aa".into()],
+        };
+        let mut unrecorded = sample_cfg(&store);
+        unrecorded.witness = Some(witness.clone());
+        let mut recorded = unrecorded.clone();
+        recorded.set_witness(witness, crate::config::WitnessOrigin::PublishedAtJoin);
+        assert_eq!(
+            input_fingerprint_with_env_filter(&unrecorded, None, false, "none"),
+            input_fingerprint_with_env_filter(&recorded, None, false, "none")
+        );
     }
 
     #[tokio::test]

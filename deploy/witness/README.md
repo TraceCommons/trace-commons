@@ -1353,3 +1353,49 @@ deploy, and read the manifest back afterwards.
 Note that toggling either flag changes `compose_hash`, and therefore the
 measurement. Re-read the measurement after any such change before publishing
 it.
+
+## V2 final-call inference provenance
+
+The v2 certificate signs a closed `inference_provenance` field. An attested
+value covers the final declared inference call's original request and response
+body bytes plus the verified, pinned receipt signer. `provider_tee_final_call`
+and `gateway_final_call` remain distinct; an unbound model stays absent.
+`unattested` is an explicit v2 value. Legacy v1 remains verifiable for its old
+redaction claim, but carries no inference provenance. No certificate establishes
+whole-session authenticity, receipt replay prevention, or model correctness.
+
+### Rolling out v2: verifiers first
+
+Issuance defaults to v1, and this deployment issues v1: neither
+`docker-compose.yml` nor `app-compose.json` sets
+`TRACE_COMMONS_WITNESS_CERTIFICATE_VERSION`. A verifier that predates v2 reads
+only the five v1 fields, rebuilds v1 signing bytes, and so refuses every v2
+certificate as a signature that does not recover the pinned signer. The order
+is therefore:
+
+1. Ingest with a v2-accepting verifier and V76 storage.
+2. Contributor clients that verify both profiles, released and adopted. The
+   client carries the certificate and signature headers and the response body
+   unchanged; it never re-serialises them.
+3. A witness image built from a commit that can issue v2. It still issues v1
+   until told otherwise, so it can roll out at any point before step 4. As
+   with any image change, re-read and re-pin its signing address and
+   measurement.
+4. Switch issuance to v2.
+
+**On this deployment, step 4 is a redeploy, not a restart.** The variable is
+not in `app-compose.json`'s `allowed_envs`, so it can only be set in
+`docker-compose.yml` and carried into `app-compose.json` by
+`./build-app-compose.sh`. That puts the certificate profile inside the
+measurement, like every other value in the file: switching to v2 moves
+`mrconfigid`, and the new measurement must be re-pinned in ingest and in every
+client before they accept the switched witness. Rolling back to v1 moves it
+again. Keep both-profile verifiers deployed after a rollback so certificates
+already issued as v2 remain verifiable.
+
+Keep the ingest PII-backstop bypass decision separate: a configured
+verification pin can capture provenance while the bypass stays off. A
+rescrubbed server artifact is linked to the original certificate but is not
+itself signed by that certificate. See
+[`docs/operator/attested-inference.md`](../../docs/operator/attested-inference.md)
+for the storage read contract and operator checks.

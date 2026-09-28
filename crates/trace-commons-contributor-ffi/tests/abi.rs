@@ -27,23 +27,23 @@ use trace_commons_contributor_ffi::{
     tc_contribution_attestation_tone, tc_contribution_eligibility_control,
     tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
     tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources, tc_handle,
-    tc_handle_free, tc_invite_issuer_host, tc_last_error, tc_near_ai_credential_action,
-    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
-    tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
-    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
-    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
-    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
-    tc_skill_draft_validate, tc_skill_learning_copy, tc_skill_learning_error_line,
-    tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear,
-    tc_witness_configure, tc_witness_copy, tc_witness_last_result_json,
-    tc_witness_last_result_line, tc_witness_last_result_tone, tc_witness_state_line,
-    tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
+    tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
+    tc_near_ai_credential_action, tc_near_ai_credential_state_line,
+    tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
+    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
+    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
+    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
+    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
+    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
+    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
+    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -2552,6 +2552,8 @@ fn write_enrolled_config(
     let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
+        consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -2785,6 +2787,19 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
     assert_eq!(json["url"], serde_json::json!("https://witness.example"));
     assert_eq!(json["signing_address"], serde_json::json!("0xfeed"));
     assert_eq!(json["pinned_measurement_count"], serde_json::json!(1));
+    // K11: a witness configured through the ABI is one typed into a shell's
+    // Settings, and the config says so for the disclosure screens.
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+    let cfg = store.load_config().unwrap().unwrap();
+    assert_eq!(
+        cfg.witness_origin_view(),
+        Some(
+            trace_commons_contributor::config::WitnessOriginView::Recorded(
+                trace_commons_contributor::config::WitnessOrigin::Settings
+            )
+        )
+    );
 
     // Clearing is 1 the first time and 0 the second: idempotent, and the
     // return distinguishes "removed one" from "there was none".
@@ -2796,6 +2811,8 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
         unsafe { tc_witness_trust_state(path.as_ptr()) },
         TC_WITNESS_STATE_ABSENT
     );
+    let cfg = store.load_config().unwrap().unwrap();
+    assert!(cfg.witness_origin.is_none(), "cleared with its witness");
 }
 
 /// The ABI refuses to create the refusing state it can report.
@@ -4862,5 +4879,205 @@ fn queue_outcome_abi_preserves_known_and_unknown_send_state() {
             "Status unavailable"
         );
         trace_commons_contributor_ffi::tc_string_free(output);
+    }
+}
+
+#[test]
+fn a_void_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 3, "kind": "project", "project_id": "abc", "project_label": "api",
+        "reasons": ["witness-measurement-admitted"], "voided_at": "2026-09-26T00:00:00Z",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe { tc_grant_void_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::void_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+#[test]
+fn an_unreadable_void_gets_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_grant_void_notice(std::ptr::null()) }.is_null());
+    for text in ["not json", "\"project\"", "[]"] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_grant_void_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_witness_capacity_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "waiting_sessions": 2, "next_retry_at": "2030-01-01T00:01:00Z",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_witness_capacity_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::witness_capacity_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+/// K11: the daemon's `route_disclosure` answer goes in as sent, and the facts
+/// come back beside the core's words for them, byte for byte what the core
+/// builds.
+#[test]
+fn the_route_disclosure_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "route": "witness",
+        "witness": {
+            "state": "pinned",
+            "url": "https://witness.example",
+            "signing_address": "0xab",
+            "pinned_measurements": ["mrtd=aa"],
+            "origin": "published_at_join",
+        },
+        "local_filter": null,
+        "receipts": {"endpoint_configured": true, "check_attestation": false},
+        "attested_bodies": false,
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_route_disclosure_copy(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        copy::route_disclosure_for_wire(&wire).expect("readable")
+    );
+    assert_eq!(
+        parsed["copy"]["witness"]["origin"],
+        serde_json::json!(copy::DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN)
+    );
+}
+
+/// A shape this build cannot read is NULL, never the nearest route.
+#[test]
+fn an_unreadable_route_disclosure_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor_ffi::tc_route_disclosure_copy;
+    assert!(unsafe { tc_route_disclosure_copy(std::ptr::null()) }.is_null());
+    for text in ["not json", "[]", r#"{"route":"somewhere_new"}"#] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_route_disclosure_copy(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_unreadable_disclosure_lines_are_the_cores() {
+    let json = take_owned(trace_commons_contributor_ffi::tc_route_disclosure_unreadable_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(trace_commons_contributor::consent_copy::disclosure_unreadable_copy())
+            .unwrap()
+    );
+}
+
+#[test]
+fn the_certificate_detail_labels_are_the_cores() {
+    let json = take_owned(trace_commons_contributor_ffi::tc_certificate_detail_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(trace_commons_contributor::consent_copy::certificate_detail_copy())
+            .unwrap()
+    );
+}
+
+#[test]
+fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 4, "project_id": "p-1", "project_label": "api",
+        "was": "model_scrubbed", "now": "patterns_only",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for text in ["not json", "[]", "\"x\""] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr()) }
+                .is_null(),
+            "{text}"
+        );
+    }
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
+fn a_gate_held_notice_crosses_the_abi_and_nothing_held_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "held_sessions": 2,
+        "reasons": ["admission-evidence-is-per-session"],
+        "projects": [{ "project_id": "p-1", "project_label": "api", "held_sessions": 2 }],
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json =
+        take_owned(unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::gate_held_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(std::ptr::null()) }.is_null()
+    );
+    for text in [
+        "not json",
+        "[]",
+        r#"{"held_sessions":0,"reasons":[],"projects":[]}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn nothing_waiting_on_the_witness_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor_ffi::tc_witness_capacity_notice;
+    assert!(unsafe { tc_witness_capacity_notice(std::ptr::null()) }.is_null());
+    for text in [
+        "not json",
+        "[]",
+        r#"{"waiting_sessions":0,"next_retry_at":null}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_witness_capacity_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
     }
 }

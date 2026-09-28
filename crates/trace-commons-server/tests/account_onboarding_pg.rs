@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use trace_commons_server::account_onboarding::{
     NativeProvisioningPending, PendingNearProvisioning, ProvisioningAssertion,
 };
+use trace_commons_server::account_trust::resolve_contribution_account;
 use trace_commons_server::config::{DatabaseConfig, NearConfig, SslMode};
 use trace_commons_server::db::{Database, NewSession, postgres::PgBackend};
 use trace_commons_server::near_account_identity::NearAccountIdentity;
@@ -92,8 +93,18 @@ fn hash(text: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())))
 }
 
+/// Serialises this file's tests against each other. The cross-tenant tests
+/// assert that a refusal changes no row anywhere, with table-wide counts --
+/// a refused attempt has no tenant or account to scope them by -- so a sibling
+/// provisioning concurrently would read as a refusal that wrote rows.
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIAL.get_or_init(Default::default)
+}
+
 #[tokio::test]
 async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
+    let _serial = serial().lock().await;
     let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
         eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
         return;
@@ -253,6 +264,27 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
             .unwrap(),
         Some(result.anchor_hash.clone())
     );
+    let trust_account = resolve_contribution_account(&db, &result.tenant_id, &principal)
+        .await
+        .expect("live authenticated principal resolves");
+    assert_eq!(trust_account.account_id(), result.account_id);
+    assert_eq!(trust_account.tenant_id(), result.tenant_id);
+    assert_eq!(
+        db.get_near_provisioned_account(&result.tenant_id, &principal)
+            .await
+            .unwrap(),
+        Some(result.account_id)
+    );
+    assert!(
+        resolve_contribution_account(&db, "other-tenant", &principal)
+            .await
+            .is_err()
+    );
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &hash("spoofed-principal"))
+            .await
+            .is_err()
+    );
     assert!(
         db.get_near_provisioned_anchor("other-tenant", &principal)
             .await
@@ -335,6 +367,117 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
     );
     assert_eq!(one.unwrap().account_id, result.account_id);
     assert_eq!(two.unwrap().account_id, result.account_id);
+    let second_device = Ed25519KeyPair::from_pkcs8(
+        Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap()
+            .as_ref(),
+    )
+    .unwrap();
+    let second_bytes: [u8; 32] = second_device.public_key().as_ref().try_into().unwrap();
+    let second_pending = PendingNearProvisioning::issue(
+        &cfg,
+        &account,
+        second_bytes,
+        [8; 32],
+        Utc::now().timestamp(),
+    )
+    .unwrap();
+    let second_wallet_sig = signature(&second_pending, &wallet);
+    let second_device_sig = base64::engine::general_purpose::STANDARD.encode(
+        second_device
+            .sign(&second_pending.device_signing_bytes())
+            .as_ref(),
+    );
+    let second_proof = second_pending
+        .verify(
+            &cfg,
+            ProvisioningAssertion {
+                wallet_public_key: &key,
+                wallet_signature: &second_wallet_sig,
+                device_signature: &second_device_sig,
+            },
+            &[8; 32],
+            Utc::now().timestamp(),
+        )
+        .await
+        .unwrap();
+    let second = db
+        .provision_verified_near_account(
+            second_proof,
+            NewSession {
+                token_hash: &hash(&uuid::Uuid::new_v4().to_string()),
+                client_kind: "native",
+                expires_at: Utc::now() + Duration::hours(12),
+            },
+            &identity(),
+        )
+        .await
+        .unwrap();
+    let second_principal = format!(
+        "principal_sha256:{}",
+        hex::encode(Sha256::digest(format!(
+            "device:{}:{}",
+            second.tenant_id, second.device_key_id
+        )))
+    );
+    assert_eq!(second.account_id, trust_account.account_id());
+    assert_ne!(
+        identity().index_label("testnet", &account),
+        identity().login_index_label(&account),
+        "equal wallet and login identifiers must occupy distinct domains"
+    );
+    assert_eq!(
+        resolve_contribution_account(&db, &second.tenant_id, &second_principal)
+            .await
+            .unwrap()
+            .account_id(),
+        trust_account.account_id()
+    );
+    assert_eq!(
+        resolve_contribution_account(&db2, &result.tenant_id, &principal)
+            .await
+            .unwrap()
+            .account_id(),
+        trust_account.account_id()
+    );
+    admin_client
+        .execute(
+            "UPDATE trace_accounts SET closed_at=now() WHERE tenant_id=$1 AND account_id=$2",
+            &[&result.tenant_id, &result.account_id],
+        )
+        .await
+        .unwrap();
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &principal)
+            .await
+            .is_err()
+    );
+    admin_client
+        .execute(
+            "UPDATE trace_accounts SET closed_at=NULL WHERE tenant_id=$1 AND account_id=$2",
+            &[&result.tenant_id, &result.account_id],
+        )
+        .await
+        .unwrap();
+    admin_client
+        .execute(
+            "UPDATE trace_account_principals SET unlinked_at=now() WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&result.tenant_id, &principal],
+        )
+        .await
+        .unwrap();
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &principal)
+            .await
+            .is_err()
+    );
+    admin_client
+        .execute(
+            "UPDATE trace_account_principals SET unlinked_at=NULL WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&result.tenant_id, &principal],
+        )
+        .await
+        .unwrap();
     admin_client
         .execute(
             "UPDATE device_keys SET revoked_at=now() WHERE device_key_id=$1",
@@ -360,6 +503,11 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
             .unwrap()
             .is_none()
     );
+    assert!(
+        resolve_contribution_account(&db, &result.tenant_id, &principal)
+            .await
+            .is_err()
+    );
     let sessions: i64 = admin_client
         .query_one(
             "SELECT count(*) FROM trace_sessions WHERE token_hash=$1",
@@ -369,5 +517,431 @@ async fn durable_provisioning_is_atomic_replay_safe_and_tenant_scoped() {
         .unwrap()
         .get(0);
     assert_eq!(sessions, 0, "rollback leaves no session");
+    task.abort();
+}
+
+/// A migrated database, a non-superuser runtime pool, and a superuser handle
+/// for seeding rows the runtime role could never write for another tenant.
+async fn provisioning_fixture(url: &str) -> (PgBackend, deadpool_postgres::Object) {
+    let admin = PgBackend::new(&config(url.to_owned())).await.unwrap();
+    admin.run_migrations().await.unwrap();
+    let admin_client = admin
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    admin_client.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='tc_near_runtime') THEN CREATE ROLE tc_near_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT USAGE ON SCHEMA public TO tc_near_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO tc_near_runtime; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO tc_near_runtime;").await.unwrap();
+    admin_client.batch_execute("ALTER ROLE trace_login_resolver LOGIN; GRANT USAGE ON SCHEMA public TO trace_login_resolver; GRANT SELECT (tenant_id, anchor_hash) ON trace_near_account_anchors TO trace_login_resolver;").await.unwrap();
+    let mut runtime = reqwest::Url::parse(url).unwrap();
+    runtime.set_username("tc_near_runtime").unwrap();
+    let mut resolver = reqwest::Url::parse(url).unwrap();
+    resolver.set_username("trace_login_resolver").unwrap();
+    let db = PgBackend::new(&config_with_resolver(runtime.into(), resolver.into()))
+        .await
+        .unwrap();
+    (db, admin_client)
+}
+
+fn fresh_keypair() -> Ed25519KeyPair {
+    Ed25519KeyPair::from_pkcs8(
+        Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap()
+            .as_ref(),
+    )
+    .unwrap()
+}
+
+/// Register `device` the way a legacy invite redemption did: under a
+/// `tenant-...` tenant, origin `invite`. Returns that tenant.
+async fn seed_legacy_device(admin: &deadpool_postgres::Object, device: &Ed25519KeyPair) -> String {
+    let tenant = format!("tenant-legacy-{}", uuid::Uuid::new_v4().simple());
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        device.public_key().as_ref(),
+    );
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,$4,'invite')",
+            &[
+                &device_key_id,
+                &tenant,
+                &base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref()),
+                &hash(&format!("legacy-invite-{tenant}")),
+            ],
+        )
+        .await
+        .unwrap();
+    tenant
+}
+
+/// Every row provisioning writes, table-wide, plus the tenant(s) holding the
+/// device key.
+async fn provisioning_snapshot(
+    admin: &deadpool_postgres::Object,
+    device: &Ed25519KeyPair,
+) -> (Vec<i64>, Vec<String>) {
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        device.public_key().as_ref(),
+    );
+    let row = admin
+        .query_one(
+            "SELECT (SELECT count(*) FROM trace_near_account_anchors), \
+                    (SELECT count(*) FROM trace_accounts), \
+                    (SELECT count(*) FROM trace_near_identities), \
+                    (SELECT count(*) FROM device_keys), \
+                    (SELECT count(*) FROM trace_account_principals), \
+                    (SELECT count(*) FROM trace_near_provisioned_devices), \
+                    (SELECT count(*) FROM trace_sessions), \
+                    (SELECT count(*) FROM trace_account_audit), \
+                    (SELECT count(*) FROM trace_tenants)",
+            &[],
+        )
+        .await
+        .unwrap();
+    let counts = (0..9).map(|i| row.get::<_, i64>(i)).collect();
+    let tenants = admin
+        .query(
+            "SELECT tenant_id FROM device_keys WHERE device_key_id=$1",
+            &[&device_key_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.get(0))
+        .collect();
+    (counts, tenants)
+}
+
+fn refusal_label<T: std::fmt::Debug>(
+    result: Result<T, trace_commons_server::error::DatabaseError>,
+) -> String {
+    match result {
+        Err(trace_commons_server::error::DatabaseError::Pool(label)) => label,
+        other => panic!("expected a named Pool refusal, got {other:?}"),
+    }
+}
+
+fn native_session(token_hash: &str) -> NewSession<'_> {
+    NewSession {
+        token_hash,
+        client_kind: "native",
+        expires_at: Utc::now() + Duration::hours(12),
+    }
+}
+
+/// **A device key already registered to another tenant must not be quietly
+/// kept there by NEAR wallet provisioning.**
+///
+/// `device_keys.device_key_id` is a global primary key. Provisioning inserts
+/// the device `ON CONFLICT DO NOTHING`, so a key that a legacy invite already
+/// registered under `tenant-...` is never inserted under the NEAR tenant. Had
+/// provisioning then reported success, the contributor would hold a NEAR
+/// session while every upload their device signs kept authenticating into the
+/// legacy tenant. The refusal must be named -- so "this device belongs to
+/// another tenant" is distinguishable from every other refusal -- carry no
+/// identifier, and leave every row as it was.
+#[tokio::test]
+async fn wallet_provisioning_refuses_a_device_key_registered_to_another_tenant() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let wallet = fresh_keypair();
+    let device = fresh_keypair();
+    let legacy_tenant = seed_legacy_device(&admin, &device).await;
+
+    let public = wallet_key(&wallet);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let rpc=axum::Router::new().route("/",axum::routing::post(move || {let public=public.clone();async move {axum::Json(serde_json::json!({"result":{"keys":[{"public_key":public,"access_key":{"permission":"FullAccess"}}]}}))}}));
+    let task = tokio::spawn(async move { axum::serve(listener, rpc).await.unwrap() });
+    let cfg = NearConfig {
+        rpc_url: format!("http://{address}/"),
+        network: "testnet".into(),
+        recipient: "trace.test".into(),
+    };
+    let account = format!("p{}.testnet", uuid::Uuid::new_v4().simple());
+    let key = wallet_key(&wallet);
+    let proof_for = async |device: &Ed25519KeyPair| {
+        let device_bytes: [u8; 32] = device.public_key().as_ref().try_into().unwrap();
+        let pending = PendingNearProvisioning::issue(
+            &cfg,
+            &account,
+            device_bytes,
+            [8; 32],
+            Utc::now().timestamp(),
+        )
+        .unwrap();
+        let wallet_signature = signature(&pending, &wallet);
+        let device_signature = base64::engine::general_purpose::STANDARD
+            .encode(device.sign(&pending.device_signing_bytes()).as_ref());
+        pending
+            .verify(
+                &cfg,
+                ProvisioningAssertion {
+                    wallet_public_key: &key,
+                    wallet_signature: &wallet_signature,
+                    device_signature: &device_signature,
+                },
+                &[8; 32],
+                Utc::now().timestamp(),
+            )
+            .await
+            .unwrap()
+    };
+    let token = |label: &str| hash(&format!("{label}-{}", uuid::Uuid::new_v4()));
+
+    // First contact: the account has no tenant yet, so one is minted.
+    let before = provisioning_snapshot(&admin, &device).await;
+    assert_eq!(before.1, vec![legacy_tenant.clone()]);
+    let t = token("wallet-cross-tenant");
+    let refused = db
+        .provision_verified_near_account(proof_for(&device).await, native_session(&t), &identity())
+        .await;
+    let after = provisioning_snapshot(&admin, &device).await;
+    assert_eq!(
+        after.1,
+        vec![legacy_tenant.clone()],
+        "the device key must still belong to exactly the legacy tenant"
+    );
+    assert_eq!(
+        refusal_label(refused),
+        "near_provisioning_device_key_registered_elsewhere",
+        "a device registered to another tenant must be refused by name"
+    );
+    assert_eq!(after.0, before.0, "a refused provisioning changes no rows");
+
+    // The same account provisions normally from a device nobody else holds,
+    // and a retry with that device is the idempotent success it always was.
+    let fresh_device = fresh_keypair();
+    let t = token("wallet-fresh");
+    let first = db
+        .provision_verified_near_account(
+            proof_for(&fresh_device).await,
+            native_session(&t),
+            &identity(),
+        )
+        .await
+        .expect("a device registered nowhere provisions");
+    let t = token("wallet-retry");
+    let retry = db
+        .provision_verified_near_account(
+            proof_for(&fresh_device).await,
+            native_session(&t),
+            &identity(),
+        )
+        .await
+        .expect("a retry from the same device and account is idempotent");
+    assert_eq!(retry.tenant_id, first.tenant_id);
+    assert_eq!(retry.account_id, first.account_id);
+    assert_eq!(retry.device_key_id, first.device_key_id);
+
+    // Same tenant, different account: the device's principal is re-pointed at
+    // another account in the contributor's own tenant. A retry must neither
+    // keep that link silently nor move it back.
+    let principal = format!(
+        "principal_sha256:{}",
+        hex::encode(Sha256::digest(format!(
+            "device:{}:{}",
+            first.tenant_id, first.device_key_id
+        )))
+    );
+    let other_account = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&first.tenant_id, &other_account],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "UPDATE trace_account_principals SET account_id=$3 WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&first.tenant_id, &principal, &other_account],
+        )
+        .await
+        .unwrap();
+    let before = provisioning_snapshot(&admin, &fresh_device).await;
+    let t = token("wallet-principal-elsewhere");
+    let refused = db
+        .provision_verified_near_account(
+            proof_for(&fresh_device).await,
+            native_session(&t),
+            &identity(),
+        )
+        .await;
+    assert_eq!(
+        refusal_label(refused),
+        "near_provisioning_device_bound_to_other_account"
+    );
+    assert_eq!(provisioning_snapshot(&admin, &fresh_device).await, before);
+    let linked: uuid::Uuid = admin
+        .query_one(
+            "SELECT account_id FROM trace_account_principals WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&first.tenant_id, &principal],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(linked, other_account, "the refused retry moved nothing");
+    admin
+        .execute(
+            "UPDATE trace_account_principals SET account_id=$3 WHERE tenant_id=$1 AND principal_ref=$2",
+            &[&first.tenant_id, &principal, &first.account_id],
+        )
+        .await
+        .unwrap();
+
+    // The same wallet key proving a second NEAR account: the key is bound to
+    // the first account's tenant, so the second is refused by name.
+    let second_account = format!("q{}.testnet", uuid::Uuid::new_v4().simple());
+    let second_device = fresh_keypair();
+    let second_bytes: [u8; 32] = second_device.public_key().as_ref().try_into().unwrap();
+    let pending = PendingNearProvisioning::issue(
+        &cfg,
+        &second_account,
+        second_bytes,
+        [8; 32],
+        Utc::now().timestamp(),
+    )
+    .unwrap();
+    let wallet_signature = signature(&pending, &wallet);
+    let device_signature = base64::engine::general_purpose::STANDARD
+        .encode(second_device.sign(&pending.device_signing_bytes()).as_ref());
+    let second_proof = pending
+        .verify(
+            &cfg,
+            ProvisioningAssertion {
+                wallet_public_key: &key,
+                wallet_signature: &wallet_signature,
+                device_signature: &device_signature,
+            },
+            &[8; 32],
+            Utc::now().timestamp(),
+        )
+        .await
+        .unwrap();
+    let before = provisioning_snapshot(&admin, &second_device).await;
+    let t = token("wallet-key-elsewhere");
+    let refused = db
+        .provision_verified_near_account(second_proof, native_session(&t), &identity())
+        .await;
+    assert_eq!(
+        refusal_label(refused),
+        "near_provisioning_wallet_key_registered_elsewhere"
+    );
+    assert_eq!(provisioning_snapshot(&admin, &second_device).await, before);
+
+    // Returning contributor: the account now has a tenant, and the legacy
+    // device is still refused through the same insert.
+    let before = provisioning_snapshot(&admin, &device).await;
+    let t = token("wallet-cross-tenant-returning");
+    let refused = db
+        .provision_verified_near_account(proof_for(&device).await, native_session(&t), &identity())
+        .await;
+    assert_eq!(
+        refusal_label(refused),
+        "near_provisioning_device_key_registered_elsewhere"
+    );
+    assert_eq!(provisioning_snapshot(&admin, &device).await, before);
+    task.abort();
+}
+
+/// The NEAR AI login sibling of the wallet test above: same insert, same
+/// global key, same named refusal.
+#[tokio::test]
+async fn near_ai_login_provisioning_refuses_a_device_key_registered_to_another_tenant() {
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let device = fresh_keypair();
+    let legacy_tenant = seed_legacy_device(&admin, &device).await;
+
+    let subject = format!("auth0|cross-tenant-{}", uuid::Uuid::new_v4().simple());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = axum::Router::new().route(
+        "/users/me",
+        axum::routing::get(move || {
+            let subject = subject.clone();
+            async move { axum::Json(serde_json::json!({"id": subject, "auth_provider": "github"})) }
+        }),
+    );
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let login = trace_commons_server::near_ai_login::introspect_login(
+        &base,
+        &SecretString::from("stub-token".to_string()),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("stub introspection");
+    let token = |label: &str| hash(&format!("{label}-{}", uuid::Uuid::new_v4()));
+    let bytes =
+        |device: &Ed25519KeyPair| -> [u8; 32] { device.public_key().as_ref().try_into().unwrap() };
+
+    let before = provisioning_snapshot(&admin, &device).await;
+    let t = token("login-cross-tenant");
+    let refused = db
+        .provision_near_ai_login(&login, &bytes(&device), native_session(&t), &identity())
+        .await;
+    let after = provisioning_snapshot(&admin, &device).await;
+    assert_eq!(
+        after.1,
+        vec![legacy_tenant.clone()],
+        "the device key must still belong to exactly the legacy tenant"
+    );
+    assert_eq!(
+        refusal_label(refused),
+        "near_provisioning_device_key_registered_elsewhere"
+    );
+    assert_eq!(after.0, before.0, "a refused provisioning changes no rows");
+
+    let fresh_device = fresh_keypair();
+    let t = token("login-fresh");
+    let first = db
+        .provision_near_ai_login(
+            &login,
+            &bytes(&fresh_device),
+            native_session(&t),
+            &identity(),
+        )
+        .await
+        .expect("a device registered nowhere provisions");
+    let t = token("login-retry");
+    let retry = db
+        .provision_near_ai_login(
+            &login,
+            &bytes(&fresh_device),
+            native_session(&t),
+            &identity(),
+        )
+        .await
+        .expect("a retry from the same device and account is idempotent");
+    assert_eq!(retry.tenant_id, first.tenant_id);
+    assert_eq!(retry.account_id, first.account_id);
+
+    let before = provisioning_snapshot(&admin, &device).await;
+    let t = token("login-cross-tenant-returning");
+    let refused = db
+        .provision_near_ai_login(&login, &bytes(&device), native_session(&t), &identity())
+        .await;
+    assert_eq!(
+        refusal_label(refused),
+        "near_provisioning_device_key_registered_elsewhere"
+    );
+    assert_eq!(provisioning_snapshot(&admin, &device).await, before);
     task.abort();
 }

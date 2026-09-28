@@ -8,11 +8,14 @@ import { privateAiKeys } from "../features/private-ai/public";
 import { usePublicProfile } from "../features/profile/public";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 import { AppRoutes } from "./app-routes";
+import { DaemonStartupNotice } from "./daemon-startup-notice";
+import { GrantVoidNotices } from "./grant-void-notices";
 import { useAccountQueryLifecycle } from "./hooks/use-account-query-lifecycle";
 import { useDaemonQueryEvents } from "./hooks/use-daemon-query-events";
 import { useDesktopEvents } from "./hooks/use-desktop-events";
+import { LegacyMigrationNotice } from "./legacy-migration-notice";
 import { QuitConfirmation } from "./quit-confirmation";
-import { DaemonStartupNotice } from "./daemon-startup-notice";
+import { ArmingRewordingNotices, GateHeldNotice } from "./switch-on-notices";
 import { routeIdFromPath } from "./routes";
 
 export function AppShell() {
@@ -61,6 +64,14 @@ export function AppShell() {
             </p>
           ))}
           <DaemonStartupNotice startup={core.data?.startup} />
+          <GrantVoidNotices grantVoids={core.data?.daemon.grant_voids} />
+          <LegacyMigrationNotice
+            status={core.data?.daemon.legacy_invite_migration}
+          />
+          <ArmingRewordingNotices
+            rewordings={core.data?.daemon.arming_rewordings}
+          />
+          <GateHeldNotice held={core.data?.daemon.automatic_contribution_held} />
           <AppRoutes
             requiresOnboarding={requiresOnboarding}
             core={core}

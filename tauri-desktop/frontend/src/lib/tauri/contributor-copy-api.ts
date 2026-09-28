@@ -1,8 +1,40 @@
+import {
+  type AutomaticGrantCopy,
+  parseAutomaticGrantCopy,
+} from "./automatic-grant-copy";
 import { invokeTauri } from "./core-api";
+import {
+  type ArmingRewordedNotice,
+  type GateHeldNotice,
+  parseArmingRewordedNotice,
+  parseGateHeldNotice,
+} from "./switch-on-notices";
+
+export type { AutomaticGrantCopy } from "./automatic-grant-copy";
+import {
+  type InferenceConnectionCopy,
+  parseInferenceConnectionCopy,
+} from "./inference-connection-copy";
+import {
+  type GrantVoidNotice,
+  parseGrantVoidNotice,
+} from "./grant-void-notice";
 import {
   parseQuitConfirmationCopy,
   type QuitConfirmationCopy,
 } from "./quit-confirmation-copy";
+import {
+  type CertificateDetail,
+  parseCertificateDetail,
+  parseRouteDisclosure,
+  type RouteDisclosure,
+} from "./route-disclosure";
+import {
+  parseWitnessCapacityNotice,
+  type WitnessCapacityNotice,
+} from "./witness-capacity";
+
+export type { CertificateDetail, RouteDisclosure } from "./route-disclosure";
 
 export type { QuitConfirmationCopy } from "./quit-confirmation-copy";
 
@@ -38,6 +70,8 @@ export type WitnessReviewCopy = {
   failed_too_large: string;
   failed_not_connected: string;
   failed_receipt_declined: string;
+  failed_busy: string;
+  busy_retry_at: string;
   immutable: string;
 };
 
@@ -127,6 +161,8 @@ export type ContributorDisclosureCopy = {
   };
   credential_cost: string;
   credential_wallet_notice: string;
+  /** Under an armed project whose disclosure could not be read (K6). */
+  project_automatic_unavailable: string;
   near_ai_enroll: {
     title: string;
     what: string;
@@ -238,12 +274,35 @@ function parseWitnessReview(value: unknown): WitnessReviewCopy {
     failed_too_large: string(item, "failed_too_large"),
     failed_not_connected: string(item, "failed_not_connected"),
     failed_receipt_declined: string(item, "failed_receipt_declined"),
+    failed_busy: string(item, "failed_busy"),
+    busy_retry_at: string(item, "busy_retry_at"),
     immutable: string(item, "immutable"),
   };
 }
 
 export async function getWitnessReviewCopy(): Promise<WitnessReviewCopy> {
   return parseWitnessReview(await invokeTauri("witness_review_copy"));
+}
+
+/**
+ * What a contributor is told on the Flow 1 grant screens. The core chooses
+ * the scrub wording for this configuration; see `automatic-grant-copy.ts`.
+ */
+export async function getAutomaticGrantCopy(): Promise<AutomaticGrantCopy> {
+  return parseAutomaticGrantCopy(await invokeTauri("automatic_contribution_copy"));
+}
+
+/**
+ * What an armed project is told about its sessions. The core chooses the
+ * scrub wording from that project's own certificates (K6); this parses the
+ * one shape it sends, and refuses anything else.
+ */
+export async function getProjectAutomaticCopy(
+  projectId: string,
+): Promise<AutomaticGrantCopy> {
+  return parseAutomaticGrantCopy(
+    await invokeTauri("project_automatic_contribution_copy", { projectId }),
+  );
 }
 
 export async function getContributorDisclosureCopy(): Promise<ContributorDisclosureCopy> {
@@ -300,6 +359,7 @@ export async function getContributorDisclosureCopy(): Promise<ContributorDisclos
       offer_asked_once: string(privateInference, "offer_asked_once"),
     },
     credential_cost: string(value, "credential_cost"),
+    project_automatic_unavailable: string(value, "project_automatic_unavailable"),
     credential_wallet_notice: string(value, "credential_wallet_notice"),
     near_ai_enroll: {
       title: string(value, "near_ai_enroll_title"),
@@ -552,6 +612,73 @@ export async function getEligibilityGroupCopy(
 }
 
 /** The quit prompt that is true for this process right now. */
+/** The core's notice for one `status.grant_voids` element, passed through. */
+/**
+ * The connect-inference step's sentences (K12), from `consent_copy`. An
+ * offer's own disclosure arrives with the offer; see `inference-connection.ts`.
+ */
+export async function getInferenceConnectionCopy(): Promise<InferenceConnectionCopy> {
+  return parseInferenceConnectionCopy(
+    await invokeTauri("inference_connection_copy"),
+  );
+}
+
+export async function getGrantVoidNotice(
+  wire: Record<string, unknown>,
+): Promise<GrantVoidNotice> {
+  return parseGrantVoidNotice(await invokeTauri("grant_void_notice", { void: wire }));
+}
+
+/**
+ * The core's notice for sessions waiting on a busy privacy witness, from
+ * `status.witness_capacity` passed through. Only asked while sessions are
+ * waiting, so the core answering `null` is a payload out of step, refused.
+ */
+export async function getWitnessCapacityNotice(
+  wire: Record<string, unknown>,
+): Promise<WitnessCapacityNotice> {
+  return parseWitnessCapacityNotice(
+    await invokeTauri("witness_capacity_notice", { capacity: wire }),
+  );
+}
+
+/** The core's notice for one `status.arming_rewordings` element, passed through. */
+export async function getArmingRewordedNotice(
+  wire: Record<string, unknown>,
+): Promise<ArmingRewordedNotice> {
+  return parseArmingRewordedNotice(
+    await invokeTauri("arming_reworded_notice", { rewording: wire }),
+  );
+}
+
+/**
+ * The core's notice for armed folders the gate holds, from
+ * `status.automatic_contribution_held` passed through. Only asked while
+ * something is held, so the core answering `null` is refused.
+ */
+export async function getGateHeldNotice(
+  wire: Record<string, unknown>,
+): Promise<GateHeldNotice> {
+  return parseGateHeldNotice(await invokeTauri("gate_held_notice", { held: wire }));
+}
+
+/**
+ * K11: the daemon's `route_disclosure` facts and the core's words for them.
+ * Throws on a payload whose words do not match its facts.
+ */
+export async function getRouteDisclosure(): Promise<RouteDisclosure> {
+  return parseRouteDisclosure(await invokeTauri("route_disclosure"));
+}
+
+/** The certificate a pending entry holds, as checked at review. */
+export async function getCertificateDetail(
+  entryId: string,
+): Promise<CertificateDetail> {
+  return parseCertificateDetail(
+    await invokeTauri("certificate_detail", { entryId }),
+  );
+}
+
 export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy> {
   return parseQuitConfirmationCopy(await invokeTauri("quit_confirmation_copy"));
 }

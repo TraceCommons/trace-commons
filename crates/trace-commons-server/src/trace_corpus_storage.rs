@@ -11,10 +11,179 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use trace_commons_protocol::trace_contribution::ResidualRiskCondition;
+use trace_commons_protocol::witness_provenance::{AttestationClass, InferenceProvenance};
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
+use crate::redaction_witness::request::{CERTIFICATE_HEADER, SIGNATURE_HEADER};
+use crate::redaction_witness::verification::VerifiedWitnessCertificate;
+
+/// Private exact-byte evidence. The only constructor requires the completed
+/// signature, freshness, pin and raw-body verification result. The original
+/// headers are compared to that result before they can be persisted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TraceWitnessCertificateEvidenceWrite {
+    pub(crate) tenant_id: String,
+    pub(crate) submission_id: Uuid,
+    pub(crate) certificate_json: Vec<u8>,
+    pub(crate) signature_header: Vec<u8>,
+    pub(crate) raw_body_sha256: String,
+    pub(crate) artifact_sha256: String,
+    pub(crate) certificate_version: i16,
+    pub(crate) inference_class: AttestationClass,
+    pub(crate) bound_model: Option<String>,
+    pub(crate) receipt_signer: Option<String>,
+    pub(crate) issued_at: DateTime<Utc>,
+}
+
+impl TraceWitnessCertificateEvidenceWrite {
+    pub fn from_verified(
+        tenant_id: &str,
+        submission_id: Uuid,
+        verified: &VerifiedWitnessCertificate,
+        headers: &axum::http::HeaderMap,
+        raw_body: &[u8],
+        artifact_sha256: &str,
+    ) -> Result<Self, DatabaseError> {
+        let raw_body_sha256 = hex::encode(Sha256::digest(raw_body));
+        if !verified.matches_received_headers(headers)
+            || !verified
+                .redacted_sha256()
+                .eq_ignore_ascii_case(&raw_body_sha256)
+            || artifact_sha256.len() != 64
+            || !artifact_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceBindingMismatch".into(),
+            ));
+        }
+        let issued_at = DateTime::<Utc>::from_timestamp(verified.issued_at_unix_seconds(), 0)
+            .ok_or_else(|| DatabaseError::Query("WitnessEvidenceTimestampInvalid".into()))?;
+        let certificate_json = headers
+            .get(CERTIFICATE_HEADER)
+            .expect("matched verified headers have certificate")
+            .as_bytes()
+            .to_vec();
+        let signature_header = headers
+            .get(SIGNATURE_HEADER)
+            .expect("matched verified headers have signature")
+            .as_bytes()
+            .to_vec();
+        // A v1 certificate carries no provenance claim (`None`); it is stored
+        // as unattested and `certificate_version = 1` keeps it distinguishable
+        // from a signed v2 unattested statement.
+        let (inference_class, bound_model, receipt_signer) = match verified.inference_provenance() {
+            None | Some(InferenceProvenance::Unattested) => {
+                (AttestationClass::Unattested, None, None)
+            }
+            Some(InferenceProvenance::Attested(call)) => (
+                call.class(),
+                call.model().map(str::to_string),
+                Some(call.receipt_signer().to_string()),
+            ),
+        };
+        Ok(Self {
+            tenant_id: tenant_id.to_string(),
+            submission_id,
+            certificate_json,
+            signature_header,
+            raw_body_sha256,
+            artifact_sha256: artifact_sha256.to_string(),
+            certificate_version: verified.certificate_version(),
+            inference_class,
+            bound_model,
+            receipt_signer,
+            issued_at,
+        })
+    }
+
+    pub fn raw_body_sha256(&self) -> &str {
+        &self.raw_body_sha256
+    }
+
+    pub fn certificate_version(&self) -> i16 {
+        self.certificate_version
+    }
+}
+
+/// A policy-facing read never carries private certificate or signature bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceWitnessEvidenceCoverage {
+    Missing,
+    LegacyV1,
+    ExplicitUnattested,
+    Inactive,
+    ArtifactMismatch,
+    VerifiedV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceWitnessEvidenceClaim {
+    pub class: AttestationClass,
+    pub coverage: TraceWitnessEvidenceCoverage,
+    pub raw_body_sha256: Option<String>,
+}
+
+/// Verified witness provenance reduced to a label, for the surfaces that
+/// report it: exports, the reviewer trace list and credit events (#1059).
+///
+/// A label, never a weight. In v1 provenance earns no account trust and
+/// multiplies no volume or amount (#1061, earned-trust decision 5), so nothing
+/// that gates, scores or prices a trace may read this.
+///
+/// Derived only from a current-object claim, so it names an attested class
+/// only where a verified v2 certificate still covers the current accepted
+/// artifact (R4). Every other state -- no evidence, an explicit unattested
+/// statement, an inactive submission, a changed artifact -- is `Unattested`.
+/// `LegacyV1` is a v1 certificate, which carries no provenance statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceWitnessProvenanceClass {
+    ProviderTeeFinalCall,
+    GatewayFinalCall,
+    Unattested,
+    LegacyV1,
+}
+
+impl TraceWitnessProvenanceClass {
+    pub fn from_claim(claim: &TraceWitnessEvidenceClaim) -> Self {
+        match claim.coverage {
+            TraceWitnessEvidenceCoverage::VerifiedV2 => match claim.class {
+                AttestationClass::ProviderTeeFinalCall => Self::ProviderTeeFinalCall,
+                AttestationClass::GatewayFinalCall => Self::GatewayFinalCall,
+                AttestationClass::Unattested => Self::Unattested,
+            },
+            TraceWitnessEvidenceCoverage::LegacyV1 => Self::LegacyV1,
+            TraceWitnessEvidenceCoverage::Missing
+            | TraceWitnessEvidenceCoverage::ExplicitUnattested
+            | TraceWitnessEvidenceCoverage::Inactive
+            | TraceWitnessEvidenceCoverage::ArtifactMismatch => Self::Unattested,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderTeeFinalCall => "provider_tee_final_call",
+            Self::GatewayFinalCall => "gateway_final_call",
+            Self::Unattested => "unattested",
+            Self::LegacyV1 => "legacy_v1",
+        }
+    }
+
+    pub fn from_storage(label: &str) -> Option<Self> {
+        match label {
+            "provider_tee_final_call" => Some(Self::ProviderTeeFinalCall),
+            "gateway_final_call" => Some(Self::GatewayFinalCall),
+            "unattested" => Some(Self::Unattested),
+            "legacy_v1" => Some(Self::LegacyV1),
+            _ => None,
+        }
+    }
+}
 
 fn default_trace_ranking_min_label_source_count() -> u32 {
     1
@@ -1468,6 +1637,11 @@ pub struct TraceCreditEventWrite {
     pub actor_principal_ref: String,
     pub actor_role: String,
     pub settlement_state: TraceCreditSettlementState,
+    /// Witness provenance of the credited trace when the event was written, a
+    /// label for later analysis only (#1059). It never changes `points_delta`.
+    /// `None` is "not recorded": events written before V89, or where the
+    /// lookup was unavailable.
+    pub witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1485,6 +1659,8 @@ pub struct TraceCreditEventRecord {
     pub actor_role: String,
     pub settlement_state: TraceCreditSettlementState,
     pub occurred_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2218,6 +2394,19 @@ pub struct TraceGateCreditDecisionRow {
 /// degrade.
 pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceSourceSessionStatus {
+    Active,
+    Withdrawn,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceSourceSessionWithdrawal {
+    pub withdrawn_at: DateTime<Utc>,
+    pub affected_submission_ids: Vec<Uuid>,
+    pub requested_tombstone: TraceWithdrawalRecord,
+}
+
 /// The retained withdrawal tombstone (migration V43). Hash-only/label-only by
 /// construction: there is no content, no object path, and no contributor
 /// identity here, and there are no columns in the table to carry them.
@@ -2242,6 +2431,40 @@ pub struct TraceArtifactInvalidationCounts {
 
 #[async_trait]
 pub trait TraceCorpusStore: Send + Sync {
+    async fn claim_trace_source_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _session_digest: &[u8; 32],
+        _submission_id: Uuid,
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.into(),
+        ))
+    }
+
+    async fn get_trace_source_session_status(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _session_digest: &[u8; 32],
+    ) -> Result<TraceSourceSessionStatus, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_WITHDRAWAL_BACKEND_MISSING.into(),
+        ))
+    }
+
+    async fn withdraw_trace_source_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+        _submission_id: Uuid,
+        _withdrawn_at: DateTime<Utc>,
+    ) -> Result<Option<TraceSourceSessionWithdrawal>, DatabaseError> {
+        // A legacy-only backend has no source mappings. New-account ingest
+        // still fails closed because `claim_trace_source_session` refuses.
+        Ok(None)
+    }
     fn supports_token_bundles(&self) -> bool {
         false
     }
@@ -2345,6 +2568,96 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         submission: TraceSubmissionWrite,
     ) -> Result<TraceSubmissionRecord, DatabaseError>;
+
+    /// Commit submission metadata and its optional verified witness evidence
+    /// together. Stores lacking this transaction must refuse evidence writes.
+    async fn upsert_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        if evidence.is_some() {
+            return Err(DatabaseError::Query(
+                "WitnessEvidenceStorageUnavailable".into(),
+            ));
+        }
+        self.upsert_trace_submission(submission).await
+    }
+
+    /// Quarantine remediation: a re-POST replaces a quarantined submission's
+    /// body under the same id, so any evidence for the prior body no longer
+    /// describes the submission. In the same transaction as the submission
+    /// update, a store removes the prior evidence of a submission whose stored
+    /// status is `quarantined` and records `evidence` (if any) for the new
+    /// body. Evidence of a submission in any other state is never removed, so
+    /// offering different evidence for it conflicts exactly as
+    /// [`Self::upsert_trace_submission_with_witness`] does.
+    async fn remediate_trace_submission_with_witness(
+        &self,
+        submission: TraceSubmissionWrite,
+        evidence: Option<TraceWitnessCertificateEvidenceWrite>,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        // Stores without evidence storage hold no prior evidence to replace.
+        self.upsert_trace_submission_with_witness(submission, evidence)
+            .await
+    }
+
+    /// Low-level diagnostic lookup. Its caller-provided digest is not an
+    /// authorization boundary; policy consumers use the current-object read
+    /// below, which obtains the object reference from the database itself.
+    async fn get_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _current_artifact_sha256: &str,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Policy read with the current submitted object selected by the database
+    /// in the same tenant transaction as evidence and active submission state.
+    async fn get_current_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<TraceWitnessEvidenceClaim, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// [`Self::get_current_verified_witness_evidence`] for many submissions of
+    /// one tenant, in one tenant transaction, for the surfaces that label a
+    /// page of traces (#1059). A submission the tenant does not hold has no
+    /// entry.
+    async fn list_current_verified_witness_evidence(
+        &self,
+        _tenant_id: &str,
+        _submission_ids: &[Uuid],
+    ) -> Result<BTreeMap<Uuid, TraceWitnessEvidenceClaim>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
+
+    /// Compare an idempotent retry to exact signed-source bytes already stored.
+    /// `None` means no durable evidence exists for this submission; `Some(false)`
+    /// is a conflict. Both witness headers may be omitted for an exact-body
+    /// receipt read, but a partial pair or changed offered evidence conflicts.
+    async fn witness_retry_identity_matches(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _certificate_json: Option<&[u8]>,
+        _signature_header: Option<&[u8]>,
+        _raw_body: &[u8],
+    ) -> Result<Option<bool>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "WitnessEvidenceStorageUnavailable".into(),
+        ))
+    }
 
     async fn get_trace_submission(
         &self,
@@ -2472,6 +2785,29 @@ pub trait TraceCorpusStore: Send + Sync {
         reason: Option<&str>,
     ) -> Result<(), DatabaseError>;
 
+    /// As [`Self::update_trace_submission_status`], without the store's own
+    /// audit row. For a caller that mirrors the file audit log's event for
+    /// this change itself, so the DB audit table holds that event and no row
+    /// the file log lacks. The default delegates, which suits stores that
+    /// keep no audit rows of their own.
+    async fn update_trace_submission_status_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.update_trace_submission_status(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+        )
+        .await
+    }
+
     async fn claim_trace_review_lease(
         &self,
         tenant_id: &str,
@@ -2563,6 +2899,29 @@ pub trait TraceCorpusStore: Send + Sync {
             tenant_id,
             submission_id,
             TraceObjectArtifactKind::SubmittedEnvelope,
+        )
+        .await
+    }
+
+    /// As [`Self::release_pii_backstop_hold`], without the store's own audit
+    /// row: the status flip and the invalidation stay one all-or-nothing
+    /// operation, and the caller mirrors the file audit log's event for the
+    /// change itself. The default delegates, which suits stores that keep no
+    /// audit rows of their own.
+    async fn release_pii_backstop_hold_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.release_pii_backstop_hold(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
         )
         .await
     }
@@ -3628,5 +3987,87 @@ mod dedup_signal_version_tests {
             row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
             row(None).effective_signal_version()
         );
+    }
+}
+
+#[cfg(test)]
+mod witness_provenance_class_tests {
+    use super::{
+        TraceWitnessEvidenceClaim, TraceWitnessEvidenceCoverage as Coverage,
+        TraceWitnessProvenanceClass as Class,
+    };
+    use trace_commons_protocol::witness_provenance::AttestationClass;
+
+    fn claim(class: AttestationClass, coverage: Coverage) -> TraceWitnessEvidenceClaim {
+        TraceWitnessEvidenceClaim {
+            class,
+            coverage,
+            raw_body_sha256: None,
+        }
+    }
+
+    #[test]
+    fn only_a_verified_v2_claim_carries_an_attested_class() {
+        assert_eq!(
+            Class::from_claim(&claim(
+                AttestationClass::ProviderTeeFinalCall,
+                Coverage::VerifiedV2
+            )),
+            Class::ProviderTeeFinalCall
+        );
+        assert_eq!(
+            Class::from_claim(&claim(
+                AttestationClass::GatewayFinalCall,
+                Coverage::VerifiedV2
+            )),
+            Class::GatewayFinalCall
+        );
+        assert_eq!(
+            Class::from_claim(&claim(AttestationClass::Unattested, Coverage::VerifiedV2)),
+            Class::Unattested
+        );
+        // Every other coverage says nothing is currently supported, whatever
+        // class a stale row names.
+        for coverage in [
+            Coverage::Missing,
+            Coverage::ExplicitUnattested,
+            Coverage::Inactive,
+            Coverage::ArtifactMismatch,
+        ] {
+            for class in [
+                AttestationClass::ProviderTeeFinalCall,
+                AttestationClass::GatewayFinalCall,
+                AttestationClass::Unattested,
+            ] {
+                assert_eq!(
+                    Class::from_claim(&claim(class, coverage)),
+                    Class::Unattested,
+                    "{coverage:?} {class:?}"
+                );
+            }
+        }
+        assert_eq!(
+            Class::from_claim(&claim(AttestationClass::Unattested, Coverage::LegacyV1)),
+            Class::LegacyV1
+        );
+    }
+
+    #[test]
+    fn labels_round_trip_through_storage_and_serde() {
+        for (class, label) in [
+            (Class::ProviderTeeFinalCall, "provider_tee_final_call"),
+            (Class::GatewayFinalCall, "gateway_final_call"),
+            (Class::Unattested, "unattested"),
+            (Class::LegacyV1, "legacy_v1"),
+        ] {
+            assert_eq!(class.as_str(), label);
+            assert_eq!(Class::from_storage(label), Some(class));
+            assert_eq!(
+                serde_json::to_value(class).unwrap(),
+                serde_json::json!(label)
+            );
+        }
+        assert_eq!(Class::from_storage("verified"), None);
+        assert_eq!(Class::from_storage(""), None);
     }
 }

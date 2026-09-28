@@ -24,7 +24,7 @@ namespace TraceCommons.Interop;
 /// </para>
 /// <para>
 /// Not <see cref="AttestationMarkSurface"/>. That answers whether a session
-/// carries a copy of the model call that produced it; this answers whether a
+/// carries a copy of its last model call; this answers whether a
 /// certificate is held over the reviewed bytes.
 /// </para>
 /// </remarks>

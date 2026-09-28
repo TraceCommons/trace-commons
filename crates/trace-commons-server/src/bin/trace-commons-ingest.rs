@@ -1,8 +1,16 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
+mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/file_witness.rs"]
+mod file_witness;
+#[path = "trace_commons_ingest_internal/inference_connection.rs"]
+mod inference_connection_routes;
+#[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
+mod legacy_invite_link_routes;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
@@ -51,11 +59,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
-    TraceSubmissionReceipt, TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate,
-    TraceValueScorecard, apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
-    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
+    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
+    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -71,12 +80,13 @@ use trace_commons_server::audit_chain::{
     AUDIT_CHAIN_DRIFT_REJECTED_CLASS, audit_event_matches_writeback,
 };
 use trace_commons_server::redaction_witness::config::{
-    WitnessBypassConfig, witness_bypass_config_from_env,
+    WitnessBypassConfig, witness_bypass_config_from_env, witness_capture_pin_from_env,
 };
 use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
-    VerifiedWitnessCertificate, verify_witness_certificate,
+    VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
+use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -211,7 +221,8 @@ use trace_commons_server::trace_corpus_storage::{
     TraceRevocationPropagationItemStatusUpdate as StorageTraceRevocationPropagationItemStatusUpdate,
     TraceRevocationPropagationItemWrite as StorageTraceRevocationPropagationItemWrite,
     TraceRevocationPropagationTarget as StorageTraceRevocationPropagationTarget,
-    TraceSubmissionKeysetCursor, TraceSubmissionRecord as StorageTraceSubmissionRecord,
+    TraceSourceSessionStatus as StorageTraceSourceSessionStatus, TraceSubmissionKeysetCursor,
+    TraceSubmissionRecord as StorageTraceSubmissionRecord,
     TraceSubmissionWrite as StorageTraceSubmissionWrite,
     TraceTenantAccessGrantRecord as StorageTraceTenantAccessGrantRecord,
     TraceTenantAccessGrantRole as StorageTraceTenantAccessGrantRole,
@@ -227,7 +238,7 @@ use trace_commons_server::trace_corpus_storage::{
     TraceVectorEntrySourceProjection as StorageTraceVectorEntrySourceProjection,
     TraceVectorEntryStatus as StorageTraceVectorEntryStatus,
     TraceVectorEntryWrite as StorageTraceVectorEntryWrite,
-    TraceWithdrawalRecord as StorageTraceWithdrawalRecord,
+    TraceWithdrawalRecord as StorageTraceWithdrawalRecord, TraceWitnessProvenanceClass,
     TraceWorkerKind as StorageTraceWorkerKind, WITNESS_ADMITTED_STATUS_REASON,
     safe_residual_risk_basis_labels, safe_status_reason_label,
 };
@@ -1531,6 +1542,8 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    inference_connection_catalog:
+        Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
     near_provisioning_admission_ready: bool,
     near_provisioning_public_origin: Option<String>,
@@ -1703,7 +1716,13 @@ struct AppState {
     /// verifying against all three keeps a submission out of the hold. It
     /// lifts no quarantine and never means the trace is clean.
     witness_bypass: Option<WitnessBypassConfig>,
+    witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
+    account_admission: Option<admission::AccountAdmissionConfig>,
+    /// A candidate earned-trust growth policy for the shadow evaluator. Never
+    /// read by admission; see `account_trust_growth_routes`.
+    account_trust_shadow_policy:
+        Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -1780,6 +1799,12 @@ struct AppState {
     /// `attestation_signing_key_unconfigured`) rather than ever return an
     /// unsigned document. See `trace_score_attestation`.
     attestation_signing: Option<Arc<AttestationSigningState>>,
+    /// Legacy invite -> NEAR account linking (V81): the countersigning key,
+    /// present only when `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED` is on.
+    /// `None` keeps both link routes closed (503
+    /// `legacy_invite_link_not_enabled`).
+    legacy_invite_link:
+        Option<Arc<trace_commons_server::legacy_invite_link::LegacyInviteLinkSigner>>,
     /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
     /// instance from the novelty index — sharing the novelty index would
     /// pollute its nearest-neighbor results and silently change novelty
@@ -2661,6 +2686,21 @@ impl ConfiguredTraceArtifactStore {
     ) -> anyhow::Result<bool> {
         self.store
             .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        self.store.artifact_present_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
     }
 
     fn restore_deleted_artifact(
@@ -3894,10 +3934,43 @@ impl AppState {
         // which is not an acceptance of anything.
         let witness_bypass = witness_bypass_config_from_env()
             .map_err(|err| anyhow::anyhow!("witness bypass configuration refused: {err}"))?;
+        let witness_capture_pin = witness_capture_pin_from_env()
+            .map_err(|err| anyhow::anyhow!("witness capture configuration refused: {err}"))?;
         let admission = admission::config_from_env(
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let account_admission = admission::account_config_from_env(
+            db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
+        )?;
+        let account_trust_shadow_policy =
+            account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
+        if account_admission.is_some() {
+            let db = db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("account_admission_database_unavailable"))?;
+            if !db
+                .account_admission_runtime_ready()
+                .await
+                .map_err(|_| anyhow::anyhow!("account_admission_readiness_unavailable"))?
+            {
+                anyhow::bail!("account_admission_permissions_or_linkage_not_ready");
+            }
+            // Static contributor credentials are not necessarily represented
+            // by a device row. Validate the local replica's inventory as well.
+            for auth in tokens
+                .values()
+                .filter(|auth| auth.role == TokenRole::Contributor)
+            {
+                trace_commons_server::account_trust::resolve_contribution_account(
+                    db.as_ref(),
+                    &auth.tenant_id,
+                    &auth.principal_ref,
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("account_identity_unlinked"))?;
+            }
+        }
         if admission.is_some()
             && !db_mirror
                 .as_ref()
@@ -4085,6 +4158,10 @@ impl AppState {
             Some(config) => Some(Arc::new(AttestationSigningState::build(&config)?)),
             None => None,
         };
+        // Off unless the operator switches it on; on without the attestation
+        // key fails startup rather than serve unsigned link records.
+        let legacy_invite_link =
+            trace_commons_server::legacy_invite_link::signer_from_env()?.map(Arc::new);
 
         // One client, two seams, and deliberately two hosts inside it: the
         // ECDSA drill proves the completions endpoint we score against is an
@@ -4207,8 +4284,11 @@ impl AppState {
             perplexity_score_driver,
             pii_backstop_driver,
             witness_bypass,
-            near_provisioning_admission_ready: admission.is_some(),
+            witness_capture_pin,
+            near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
+            account_admission,
+            account_trust_shadow_policy,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -4248,7 +4328,9 @@ impl AppState {
             account_native_requests,
             account_native_codes,
             account_near_config,
+            inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             attestation_signing,
+            legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index: build_dedup_vector_index_from_env(),
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -4407,16 +4489,15 @@ fn enforce_db_mirror_write_result(
     operation: &str,
     result: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let required = state.require_db_mirror_writes || state.account_admission.is_some();
     match result {
         Ok(()) => {
-            if state.require_db_mirror_writes && state.db_mirror.is_none() {
-                anyhow::bail!(
-                    "TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES requires TRACE_COMMONS_DB_DUAL_WRITE for {operation}"
-                );
+            if required && state.db_mirror.is_none() {
+                anyhow::bail!("required Trace Commons DB mirror unavailable for {operation}");
             }
             Ok(())
         }
-        Err(error) if state.require_db_mirror_writes => Err(error.context(format!(
+        Err(error) if required => Err(error.context(format!(
             "required Trace Commons DB mirror write failed: {operation}"
         ))),
         Err(_) => Ok(()),
@@ -7479,7 +7560,21 @@ fn community_routes() -> Router<Arc<AppState>> {
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let reward_routes = rewards::account_routes(state.clone());
     Router::new()
+        .route(
+            "/v1/account/contribution-status",
+            get(admission::account_status_handler),
+        )
+        .route(
+            "/v1/account/invites/redeem",
+            post(account_invite_redeem_handler),
+        )
+        .merge(legacy_invite_link_routes::routes())
+        .merge(inference_connection_routes::routes())
         .route("/v1/account/traces", get(account_traces_list_handler))
+        .route(
+            "/v1/account/source-sessions/status",
+            post(account_source_session_status_handler),
+        )
         .route(
             "/v1/account/credit-summary",
             get(account_credit_summary_handler),
@@ -7693,8 +7788,16 @@ fn app(state: Arc<AppState>) -> Router {
             get(near_provisioning::capabilities),
         )
         .route(
+            "/v1/account/near/provision/capabilities/v2",
+            get(near_provisioning::capabilities_v2),
+        )
+        .route(
             "/v1/account/near/provision/start",
             post(near_provision_start_handler),
+        )
+        .route(
+            "/v1/account/near/provision/start/v2",
+            post(near_provisioning::near_provision_start_v2_handler),
         )
         .route(
             "/account/near/provision/wallet",
@@ -7703,6 +7806,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/account/near/provision/finish",
             post(near_provision_finish_handler),
+        )
+        .route(
+            "/v1/account/near/provision/finish/v2",
+            post(near_provisioning::near_provision_finish_v2_handler),
         )
         // The NEAR AI login ceremony (#836). A sibling of the wallet pair
         // above, not a mode of it: it proves possession of a NEAR AI session
@@ -7713,8 +7820,16 @@ fn app(state: Arc<AppState>) -> Router {
             post(near_ai_provision_start_handler),
         )
         .route(
+            "/v1/account/near-ai/provision/start/v2",
+            post(near_provisioning::near_ai_provision_start_v2_handler),
+        )
+        .route(
             "/v1/account/near-ai/provision/finish",
             post(near_ai_provision_finish_handler),
+        )
+        .route(
+            "/v1/account/near-ai/provision/finish/v2",
+            post(near_provisioning::near_ai_provision_finish_v2_handler),
         )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
@@ -7917,6 +8032,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(audit_chain_drill_handler),
         )
         .route(
+            "/v1/admin/audit-chain-repair",
+            post(audit_chain_repair_handler),
+        )
+        .route(
             "/v1/admin/db-reconciliation-drill",
             post(db_reconciliation_drill_handler),
         )
@@ -7991,6 +8110,22 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
+        )
+        .route(
+            "/v1/admin/record-account-trust-facts",
+            post(account_trust_growth_routes::record_account_trust_facts_handler),
+        )
+        .route(
+            "/v1/admin/evaluate-account-trust",
+            post(account_trust_growth_routes::evaluate_account_trust_handler),
+        )
+        .route(
+            "/v1/admin/account-trust/explain",
+            get(account_trust_growth_routes::explain_account_trust_handler),
+        )
+        .route(
+            "/v1/admin/account-trust-drill",
+            post(account_trust_growth_routes::account_trust_drill_handler),
         )
         .route(
             "/v1/admin/scores-by-submission",
@@ -13222,7 +13357,10 @@ fn verified_witness_for_submission(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Option<VerifiedWitnessCertificate> {
-    let bypass = state.witness_bypass.as_ref()?;
+    let pin = state
+        .witness_capture_pin
+        .as_ref()
+        .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))?;
     let (certificate, signature) = match witness_headers(headers) {
         Ok(Some(pair)) => pair,
         Ok(None) => return None,
@@ -13231,13 +13369,50 @@ fn verified_witness_for_submission(
             return None;
         }
     };
-    match verify_witness_certificate(certificate, &signature, Some(bypass.pin()), body) {
+    match verify_witness_certificate(certificate, &signature, Some(pin), body) {
         Ok(verified) => Some(verified),
         Err(err) => {
             tracing::debug!(?err, "witness certificate did not verify; holding as usual");
             None
         }
     }
+}
+
+async fn reject_conflicting_witness_retry(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+    headers: &HeaderMap,
+    raw_body: &[u8],
+) -> ApiResult<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        if let Some(record) =
+            read_submission_record(&state.root, tenant_id, submission_id).map_err(internal_error)?
+            && let Some(evidence) = record.witness_evidence.as_ref()
+            && !evidence.retry_matches(headers, raw_body)
+        {
+            return Err(api_error(StatusCode::CONFLICT, "witness evidence conflict"));
+        }
+        return Ok(());
+    };
+    let result = db
+        .witness_retry_identity_matches(
+            tenant_id,
+            submission_id,
+            headers
+                .get(trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER)
+                .map(HeaderValue::as_bytes),
+            headers
+                .get(trace_commons_server::redaction_witness::request::SIGNATURE_HEADER)
+                .map(HeaderValue::as_bytes),
+            raw_body,
+        )
+        .await
+        .map_err(internal_error)?;
+    if result == Some(false) {
+        return Err(api_error(StatusCode::CONFLICT, "witness evidence conflict"));
+    }
+    Ok(())
 }
 
 async fn submit_trace_handler(
@@ -13273,18 +13448,42 @@ async fn submit_trace_handler(
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
+    if state.account_admission.is_some() {
+        validate_envelope(&envelope)?;
+    }
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
         &headers,
         &raw_body,
-        envelope.submission_id,
+        &envelope,
     )
     .await?;
+    let source_claim = admission.as_ref().and_then(|attempt| attempt.source_claim);
     let tenant = if admission.is_some() {
         authenticated_tenant
     } else {
         authorize_tenant_access_grant_ctx(state.as_ref(), authenticated_tenant).await?
+    };
+    // File-only ownership spans read, rescrub, artifact creation and durable
+    // metadata commit. DB admission keeps its existing transactional ownership.
+    let _file_submit_lock = if state.db_mirror.is_none() {
+        Some(
+            file_witness::lock(
+                &state.root,
+                tenant.tenant_id(),
+                envelope.submission_id,
+                "submission-locks",
+            )
+            .map_err(|_| {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "submission file ownership unavailable",
+                )
+            })?,
+        )
+    } else {
+        None
     };
     // A completed admission is an idempotent read, including quarantined
     // records. Re-running remediation here would bypass the processing ledger.
@@ -13292,6 +13491,14 @@ async fn submit_trace_handler(
         .as_ref()
         .is_some_and(admission::Attempt::is_completed)
     {
+        reject_conflicting_witness_retry(
+            state.as_ref(),
+            tenant.tenant_id(),
+            envelope.submission_id,
+            &headers,
+            &raw_body,
+        )
+        .await?;
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
             .map_err(internal_error)?
@@ -13312,7 +13519,9 @@ async fn submit_trace_handler(
         )));
     }
     let result = async {
-        validate_envelope(&envelope)?;
+        if state.account_admission.is_none() {
+            validate_envelope(&envelope)?;
+        }
 
         // Idempotency: same submission_id always addresses the same record.
         // Owned quarantined rows are the exception — a re-POST supersedes the
@@ -13330,8 +13539,22 @@ async fn submit_trace_handler(
                 ));
             }
             if principal_can_remediate_quarantined(tenant.auth(), &existing) {
+                // Remediation may change the body, and a witnessing client
+                // re-signs what it re-posts. As in DB mode, the new headers are
+                // verified against the new body for this request only; the
+                // stored proof stays the first, historical one, and
+                // `file_witness::for_submission` never binds it to the
+                // changed object.
                 Some(existing)
             } else {
+                reject_conflicting_witness_retry(
+                    state.as_ref(),
+                    tenant.tenant_id(),
+                    envelope.submission_id,
+                    &headers,
+                    &raw_body,
+                )
+                .await?;
                 let gate_decision = gate_credit_decision_for_record(state.as_ref(), &existing)
                     .await
                     .map_err(internal_error)?;
@@ -13340,11 +13563,22 @@ async fn submit_trace_handler(
                     state.near_settlement_mode,
                     gate_decision.as_ref(),
                 );
-                append_audit_event(
-                    &state.root,
-                    tenant.tenant_id(),
+                // Mirrored like every other audit event: a file-only event
+                // would advance the file chain past the DB's, and the next
+                // mirrored append would be refused as stale.
+                append_audit_event_mirrored(
+                    state.as_ref(),
+                    tenant.auth(),
                     tenant.idempotent_submit_audit_event(envelope.submission_id),
+                    AuditRowMirror {
+                        action: StorageTraceAuditAction::Submit,
+                        metadata: StorageTraceAuditSafeMetadata::Empty,
+                        object_ref_id: None,
+                        actor_role_label: None,
+                    },
+                    "idempotent submit audit event",
                 )
+                .await
                 .map_err(internal_error)?;
                 return Ok(Json(receipt));
             }
@@ -13491,6 +13725,7 @@ async fn submit_trace_handler(
             .map(|prior| prior.auth_principal_ref.clone())
             .unwrap_or_else(|| tenant.principal_ref().to_string());
         let mut record = TraceCommonsSubmissionRecord {
+            witness_evidence: None,
             tenant_id: tenant.tenant_id().to_string(),
             tenant_storage_ref: tenant.tenant_storage_ref(),
             auth_principal_ref,
@@ -13524,18 +13759,51 @@ async fn submit_trace_handler(
             artifact_receipt: stored_envelope.artifact_receipt,
             artifact_object_store: stored_envelope.artifact_object_store,
         };
+        if state.db_mirror.is_none() {
+            record.witness_evidence = file_witness::for_submission(
+                &envelope,
+                &record,
+                remediating_prior.as_ref(),
+                witness.as_ref(),
+                &headers,
+                &raw_body,
+            )
+            .map_err(internal_error)?;
+        }
         // Remediating a quarantined row always clears any outstanding review lease;
         // the prior assessment is obsolete.
         clear_review_lease_metadata(&mut record);
-        let audit_event = if remediating_prior.is_some() {
+        // A remediation replaced the submitted body, so evidence for the prior
+        // body must not outlive it: the mirror replaces it (or removes it, when
+        // this re-POST is unwitnessed) in the submission's own transaction.
+        let mirror_kind = if remediating_prior.is_some() {
+            SubmissionMirrorKind::QuarantineRemediation
+        } else {
+            SubmissionMirrorKind::Submission
+        };
+        let mut audit_event = if remediating_prior.is_some() {
             tenant.quarantine_remediated_audit_event(&record)
         } else {
             tenant.submitted_audit_event(&record)
         };
-        if state.require_db_mirror_writes {
-            let mirror_result =
-                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
-                    .await;
+        audit_event.decision_inputs_hash = Some(derived_record.canonical_summary_hash.clone());
+        // The file audit log is canonical; the DB submit row mirrors this event
+        // (same id, same chain fields), appended once both submission writes
+        // below are done.
+        let audit_row = submission_audit_row_mirror(&record).map_err(internal_error)?;
+        if state.require_db_mirror_writes || state.account_admission.is_some() {
+            let mirror_result = mirror_submission_to_db_with_options(
+                &state,
+                tenant.auth(),
+                &record,
+                &derived_record,
+                &envelope,
+                witness
+                    .as_ref()
+                    .map(|verified| (verified, &headers, raw_body.as_ref())),
+                mirror_kind,
+            )
+            .await;
             if let Err(error) = &mirror_result {
                 tracing::warn!(
                     error_hash = %safe_runtime_error_hash(error),
@@ -13549,16 +13817,21 @@ async fn submit_trace_handler(
                 .map_err(internal_error)?;
             write_submission_record(&state.root, &record).map_err(internal_error)?;
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
-                .map_err(internal_error)?;
         } else {
             write_submission_record(&state.root, &record).map_err(internal_error)?;
             write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-            append_audit_event(&state.root, tenant.tenant_id(), audit_event)
-                .map_err(internal_error)?;
-            let mirror_result =
-                mirror_submission_to_db(&state, tenant.auth(), &record, &derived_record, &envelope)
-                    .await;
+            let mirror_result = mirror_submission_to_db_with_options(
+                &state,
+                tenant.auth(),
+                &record,
+                &derived_record,
+                &envelope,
+                witness
+                    .as_ref()
+                    .map(|verified| (verified, &headers, raw_body.as_ref())),
+                mirror_kind,
+            )
+            .await;
             if let Err(error) = &mirror_result {
                 tracing::warn!(
                     error_hash = %safe_runtime_error_hash(error),
@@ -13568,6 +13841,31 @@ async fn submit_trace_handler(
             }
             enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
                 .map_err(internal_error)?;
+        }
+        append_audit_event_mirrored(
+            state.as_ref(),
+            tenant.auth(),
+            audit_event,
+            audit_row,
+            "submission audit event",
+        )
+        .await
+        .map_err(internal_error)?;
+
+        if let Some((account_id, digest)) = source_claim {
+            let db = state
+                .db_mirror
+                .as_ref()
+                .ok_or_else(|| internal_error("source_session_unavailable"))?;
+            let status = db
+                .get_trace_source_session_status(tenant.tenant_id(), account_id, &digest)
+                .await
+                .map_err(internal_error)?;
+            if status == StorageTraceSourceSessionStatus::Withdrawn {
+                cleanup_submission_file_side_writes(state.as_ref(), &record)
+                    .map_err(internal_error)?;
+                return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
+            }
         }
 
         // Best-effort cleanup of the pre-remediation artifact once the new
@@ -13754,21 +14052,23 @@ async fn revoke_submission(
     });
     let audit_event = tenant.revoked_audit_event(submission_id, &revocation_reason);
     let audit_metadata = trace_revocation_audit_metadata(&revocation_reason);
+    // The DB audit rows for a revocation are the file log's own events --
+    // `revoked`, then `revocation_artifact_invalidation` when anything was
+    // invalidated -- mirrored through `append_audit_event_mirrored`. The
+    // store writes no audit rows of its own for this change.
+    let mirror_input = || TraceRevocationDbMirrorInput {
+        tenant: tenant.auth(),
+        submission_id,
+        record: mirrored_record.as_ref(),
+        db_record: db_record.as_ref(),
+        revocation_reason: &revocation_reason,
+        retention_ledger: None,
+        prepared_tombstone: Some(&tombstone),
+    };
 
+    let mut invalidation_counts = BTreeMap::new();
     if state.require_db_mirror_writes {
-        let mirror_result = mirror_revocation_to_db(
-            state,
-            TraceRevocationDbMirrorInput {
-                tenant: tenant.auth(),
-                submission_id,
-                record: mirrored_record.as_ref(),
-                db_record: db_record.as_ref(),
-                revocation_reason: &revocation_reason,
-                retention_ledger: None,
-                prepared_tombstone: Some(&tombstone),
-            },
-        )
-        .await;
+        let mirror_result = mirror_revocation_to_db_for_file_audit(state, mirror_input()).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -13776,25 +14076,8 @@ async fn revoke_submission(
                 "Trace Commons DB dual-write revocation mirror failed"
             );
         }
+        let mirror_result = mirror_result.map(|counts| invalidation_counts = counts);
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
-            .map_err(internal_error)?;
-
-        let audit_mirror_result = mirror_audit_event_to_db(
-            state,
-            tenant.auth(),
-            &audit_event,
-            StorageTraceAuditAction::Revoke,
-            audit_metadata.clone(),
-        )
-        .await;
-        if let Err(error) = &audit_mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                %submission_id,
-                "Trace Commons DB dual-write revocation audit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "revocation audit event", audit_mirror_result)
             .map_err(internal_error)?;
     }
 
@@ -13824,31 +14107,22 @@ async fn revoke_submission(
     .await
     .map_err(internal_error)?;
 
-    if state.require_db_mirror_writes {
-        append_audit_event(&state.root, tenant.tenant_id(), audit_event).map_err(internal_error)?;
-    } else {
-        append_audit_event_with_db_mirror(
-            state,
-            tenant.auth(),
-            audit_event,
-            StorageTraceAuditAction::Revoke,
-            audit_metadata,
-        )
-        .await
-        .map_err(internal_error)?;
-        let mirror_result = mirror_revocation_to_db(
-            state,
-            TraceRevocationDbMirrorInput {
-                tenant: tenant.auth(),
-                submission_id,
-                record: mirrored_record.as_ref(),
-                db_record: db_record.as_ref(),
-                revocation_reason: &revocation_reason,
-                retention_ledger: None,
-                prepared_tombstone: Some(&tombstone),
-            },
-        )
-        .await;
+    append_audit_event_mirrored(
+        state,
+        tenant.auth(),
+        audit_event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Revoke,
+            metadata: audit_metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+        "revocation audit event",
+    )
+    .await
+    .map_err(internal_error)?;
+    if !state.require_db_mirror_writes {
+        let mirror_result = mirror_revocation_to_db_for_file_audit(state, mirror_input()).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -13856,8 +14130,36 @@ async fn revoke_submission(
                 "Trace Commons DB dual-write revocation mirror failed"
             );
         }
+        let mirror_result = mirror_result.map(|counts| invalidation_counts = counts);
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
+    }
+    if !invalidation_counts.is_empty() {
+        let purpose_hash = sha256_prefixed(&revocation_reason);
+        append_audit_event_mirrored(
+            state,
+            tenant.auth(),
+            TraceCommonsAuditEvent::revocation_artifact_invalidation(
+                tenant.auth(),
+                submission_id,
+                &purpose_hash,
+                &invalidation_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Revoke,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash),
+                    dry_run: false,
+                    action_counts: invalidation_counts,
+                },
+                object_ref_id: None,
+                actor_role_label: None,
+            },
+            "revocation artifact invalidation audit event",
+        )
+        .await
+        .map_err(internal_error)?;
     }
 
     // Revoked means the content is gone, not merely relabelled. This runs last,
@@ -13869,9 +14171,118 @@ async fn revoke_submission(
     // than leaving the payload behind under a revoked label. Deleting an object
     // that is already gone is a no-op, so re-revoking is idempotent.
     if let Some(record) = mirrored_record.as_ref() {
-        delete_trace_objects_for_record(state, record).map_err(internal_error)?;
+        let deletion = delete_trace_objects_for_record(state, record).map_err(internal_error)?;
+        // The objects just deleted were queued for the revocation worker by
+        // the mirror above. Record them as deleted now, so the worker does not
+        // try to verify objects that are gone.
+        let completion_result = complete_revocation_object_deletes(
+            state,
+            tenant.auth(),
+            submission_id,
+            &deletion.deleted_targets,
+        )
+        .await;
+        if let Err(error) = &completion_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                %submission_id,
+                "Trace Commons revocation object delete completion failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, "revocation object delete", completion_result)
+            .map_err(internal_error)?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Marks the object refs of objects a revocation deleted as deleted, and
+/// completes each one's queued `DeleteObjectPayload` item with a
+/// physical-delete receipt, as the revocation worker would had it deleted
+/// them itself.
+async fn complete_revocation_object_deletes(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    deleted_targets: &[TraceObjectDeletionTarget],
+) -> anyhow::Result<()> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(());
+    };
+    if deleted_targets.is_empty() {
+        return Ok(());
+    }
+    for target in deleted_targets {
+        db.mark_trace_object_ref_deleted(
+            &tenant.tenant_id,
+            submission_id,
+            &target.object_store,
+            &target.object_key,
+        )
+        .await
+        .context("failed to mark revoked trace object ref deleted")?;
+    }
+    let deleted_refs = db
+        .list_trace_object_refs(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to read trace object refs after revocation delete")?
+        .into_iter()
+        .filter(|object_ref| {
+            object_ref.deleted_at.is_some()
+                && deleted_targets.iter().any(|target| {
+                    target.object_store == object_ref.object_store
+                        && target.object_key == object_ref.object_key
+                })
+        })
+        .map(|object_ref| (object_ref.object_ref_id, object_ref))
+        .collect::<BTreeMap<_, _>>();
+    let items = db
+        .list_trace_revocation_propagation_items(&tenant.tenant_id, submission_id)
+        .await
+        .context("failed to read revocation propagation items after revocation delete")?;
+    for item in items {
+        if item.action != StorageTraceRevocationPropagationAction::DeleteObjectPayload
+            || matches!(
+                item.status,
+                StorageTraceRevocationPropagationItemStatus::Done
+                    | StorageTraceRevocationPropagationItemStatus::Skipped
+            )
+        {
+            continue;
+        }
+        let StorageTraceRevocationPropagationTarget::ObjectRef { object_ref_id } = &item.target
+        else {
+            continue;
+        };
+        let Some(object_ref) = deleted_refs.get(object_ref_id) else {
+            continue;
+        };
+        record_physical_delete_receipt_for_revocation_propagation(db.as_ref(), &item, object_ref)
+            .await?;
+        let TraceRevocationPropagationItemOutcome::Done { evidence_hash } =
+            done_revocation_propagation_object_payload_item(
+                &item,
+                object_ref,
+                "delete_object_payload_by_revocation",
+            )
+        else {
+            unreachable!("a done object payload outcome is Done");
+        };
+        db.update_trace_revocation_propagation_item_status(
+            &tenant.tenant_id,
+            item.propagation_item_id,
+            StorageTraceRevocationPropagationItemStatusUpdate {
+                status: StorageTraceRevocationPropagationItemStatus::Done,
+                attempt_count: item.attempt_count,
+                last_error: None,
+                next_attempt_at: None,
+                completed_at: Some(Utc::now()),
+                evidence_hash: Some(evidence_hash),
+            },
+        )
+        .await
+        .context("failed to complete revocation object delete item")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -14863,7 +15274,13 @@ async fn credit_events_handler(
     )
     .await
     .map_err(internal_error)?;
-    Ok(Json(credit_view.credit_events))
+    // The provenance label is recorded for analysis, not shown to the
+    // contributor: this view is unchanged by #1059.
+    let mut credit_events = credit_view.credit_events;
+    for event in &mut credit_events {
+        event.witness_provenance_class = None;
+    }
+    Ok(Json(credit_events))
 }
 
 async fn submission_status_handler(
@@ -15247,6 +15664,83 @@ fn account_db(state: &AppState) -> ApiResult<Arc<dyn Database>> {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountInviteRedeemRequest {
+    invite_code: String,
+    idempotency_key: uuid::Uuid,
+}
+
+#[derive(Serialize)]
+struct AccountInviteRedeemResponse {
+    authority: &'static str,
+    trust_version: i64,
+}
+
+/// Elevate the authenticated account in place. Neither a tenant nor an
+/// account identifier is accepted from the request body.
+async fn account_invite_redeem_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    headers: HeaderMap,
+    Json(body): Json<AccountInviteRedeemRequest>,
+) -> ApiResult<(HeaderMap, Json<AccountInviteRedeemResponse>)> {
+    if matches!(ctx.auth_method, AccountAuthMethod::DeviceBearer) {
+        return Err(api_error(StatusCode::FORBIDDEN, "account session required"));
+    }
+    if matches!(ctx.auth_method, AccountAuthMethod::SessionCookie)
+        && !confirm_is_same_origin(&headers)
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "cross-origin account mutation",
+        ));
+    }
+    // Match the issuer: trim pasted whitespace, require exactly 16 uppercase
+    // ASCII letters/digits, and never case-fold a secret.
+    let invite_code = body.invite_code.trim();
+    if !trace_commons_server::trace_upload_claim_issuer::valid_onboard_invite_code(invite_code) {
+        return Err(api_error(StatusCode::BAD_REQUEST, "invalid invite"));
+    }
+    let invite_hash =
+        trace_commons_server::trace_upload_claim_allowlist::hash_invite_code(invite_code);
+    let outcome = account_db(state.as_ref())?
+        .redeem_account_invite(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &invite_hash,
+            body.idempotency_key,
+        )
+        .await
+        .map_err(internal_error)?;
+    let trust_version = match outcome {
+        trace_commons_server::db::AccountInviteRedemption::Invited { trust_version } => {
+            trust_version
+        }
+        trace_commons_server::db::AccountInviteRedemption::InvalidInvite => {
+            return Err(api_error(StatusCode::BAD_REQUEST, "invalid invite"));
+        }
+        trace_commons_server::db::AccountInviteRedemption::AccountIneligible => {
+            return Err(api_error(StatusCode::FORBIDDEN, "account is not eligible"));
+        }
+        trace_commons_server::db::AccountInviteRedemption::IdempotencyConflict => {
+            return Err(api_error(StatusCode::CONFLICT, "idempotency key reused"));
+        }
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Ok((
+        response_headers,
+        Json(AccountInviteRedeemResponse {
+            authority: "invited",
+            trust_version,
+        }),
+    ))
+}
+
 /// Resolve the configured WebAuthn relying party for the passkey ceremonies.
 ///
 /// Fails closed exactly like `account_db`: when the relying party is not
@@ -15368,7 +15862,14 @@ async fn account_auth_middleware(
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
-            Err(err) => return err.into_response(),
+            Err(err) => {
+                let mut response = err.into_response();
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+                return response;
+            }
         };
 
     // A native token rotates exactly like a cookie session, but a native client
@@ -16494,6 +16995,46 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
 /// * Fail-closed: any deletion or eviction failure is a generic label-only
 ///   `500`. The withdrawal is not reported as complete while content or a
 ///   derived copy may survive.
+#[derive(Serialize)]
+struct AccountSourceSessionStatusResponse {
+    status: &'static str,
+}
+
+async fn account_source_session_status_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Json(source): Json<SourceSessionIdentity>,
+) -> ApiResult<impl IntoResponse> {
+    let source = match canonical_source_session(&source) {
+        Ok(source) => source,
+        Err(_) => {
+            return Ok((
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(AccountSourceSessionStatusResponse {
+                    status: "unsupported",
+                }),
+            ));
+        }
+    };
+    let status = account_db(state.as_ref())?
+        .get_trace_source_session_status(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &session_digest(&source),
+        )
+        .await
+        .map_err(internal_error)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(AccountSourceSessionStatusResponse {
+            status: match status {
+                StorageTraceSourceSessionStatus::Active => "active",
+                StorageTraceSourceSessionStatus::Withdrawn => "withdrawn",
+            },
+        }),
+    ))
+}
+
 async fn account_trace_withdraw_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -16567,72 +17108,114 @@ async fn account_trace_withdraw_handler(
         read_credit_settlement_batches_for_admin(state.as_ref(), &credit_tenant)
             .await
             .map_err(|error| withdrawal_failed(&error))?;
-    let credit_retained = withdrawal_retains_all_credit(
-        submission_id,
-        &credit_events,
-        &finalized_settlement_credit_event_ids(&settlement_batches),
-    );
+    let finalized_credit_event_ids = finalized_settlement_credit_event_ids(&settlement_batches);
 
     // Tombstone + status FIRST, bytes second: a crash between the two leaves a
     // tombstone whose retry deletes the content, never content with no record
     // that it was withdrawn.
-    let tombstone = db
-        .record_trace_withdrawal(
+    let mapped = db
+        .withdraw_trace_source_session(
             &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
             submission_id,
             Utc::now(),
-            &prior_status,
-            &distribution_reach,
         )
         .await
         .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+    let (tombstone, affected_ids) = if let Some(mapped) = mapped {
+        (mapped.requested_tombstone, mapped.affected_submission_ids)
+    } else {
+        let tombstone = db
+            .record_trace_withdrawal(
+                &ctx.tenant_id,
+                submission_id,
+                Utc::now(),
+                &prior_status,
+                &distribution_reach,
+            )
+            .await
+            .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
+        (tombstone, vec![submission_id])
+    };
 
-    evict_withdrawn_trace_from_derived_surfaces(state.as_ref(), &db, &ctx.tenant_id, submission_id)
+    // Credit is retained only if it is retained for every withdrawn version.
+    let credit_retained = affected_ids.iter().all(|affected_id| {
+        withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+    });
+
+    // Retained mappings make this list stable across retries. Complete the
+    // external deletion for every content version before reporting success.
+    for affected_id in affected_ids.iter().copied() {
+        evict_withdrawn_trace_from_derived_surfaces(
+            state.as_ref(),
+            &db,
+            &ctx.tenant_id,
+            affected_id,
+        )
         .await
         .map_err(|error| withdrawal_failed(&error))?;
-    delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, submission_id)
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
+        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
+            .await
+            .map_err(|error| withdrawal_failed(&error))?;
+    }
 
-    // Hash-only audit. The reason is a fixed label; the actor is the synthetic
-    // account-actor ref, never contributor identity.
+    // Hash-only audit, one event per withdrawn version. The reason is a fixed
+    // label; the actor is the synthetic account-actor ref, never contributor
+    // identity.
     let audit_tenant = account_audit_tenant(&ctx);
-    let audit_event =
-        TraceCommonsAuditEvent::revoked(&audit_tenant, submission_id, TRACE_WITHDRAWAL_REASON);
-    if let Err(error) = append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &audit_tenant,
-        audit_event,
-        StorageTraceAuditAction::Revoke,
-        trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
-    )
-    .await
-    {
-        // The content is already gone and the tombstone is durable; a failed
-        // audit append must not resurrect either. Log hash-only and continue.
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(&error),
-            %submission_id,
-            "Trace Commons withdrawal audit append failed"
-        );
+    for affected_id in affected_ids.iter().copied() {
+        let audit_event =
+            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
+        if let Err(error) = append_audit_event_with_db_mirror(
+            state.as_ref(),
+            &audit_tenant,
+            audit_event,
+            StorageTraceAuditAction::Revoke,
+            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+        )
+        .await
+        {
+            // The content is already gone and the tombstone is durable; a
+            // failed audit append must not resurrect either. Log hash-only
+            // and continue.
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                submission_id = %affected_id,
+                "Trace Commons withdrawal audit append failed"
+            );
+        }
     }
 
     let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
-        let pending = db
-            .pending_token_bundle_deletions(&ctx.tenant_id, Some(submission_id))
-            .await
-            .map_err(internal_error)?;
-        response.token_deletion_state = Some(if pending.is_empty() {
-            "completed"
-        } else if state
-            .legal_hold_retention_policy_ids
-            .contains(&record.retention_policy_id)
-        {
-            "held"
-        } else {
-            "pending"
-        });
+        // Report the least-finished state across every withdrawn version:
+        // any legal hold is "held", any other outstanding deletion "pending".
+        let mut state_label = "completed";
+        for affected_id in affected_ids.iter().copied() {
+            let pending = db
+                .pending_token_bundle_deletions(&ctx.tenant_id, Some(affected_id))
+                .await
+                .map_err(internal_error)?;
+            if pending.is_empty() {
+                continue;
+            }
+            let retention_policy_id = if affected_id == submission_id {
+                Some(record.retention_policy_id.clone())
+            } else {
+                db.get_trace_submission(&ctx.tenant_id, affected_id)
+                    .await
+                    .map_err(internal_error)?
+                    .map(|sibling| sibling.retention_policy_id)
+            };
+            if retention_policy_id
+                .is_some_and(|policy| state.legal_hold_retention_policy_ids.contains(&policy))
+            {
+                state_label = "held";
+            } else if state_label == "completed" {
+                state_label = "pending";
+            }
+        }
+        response.token_deletion_state = Some(state_label);
     }
     Ok(Json(response))
 }
@@ -19996,7 +20579,7 @@ async fn list_traces_handler(
             .await
             .map_err(internal_error)?;
 
-    let items: Vec<_> = records
+    let mut items: Vec<_> = records
         .into_iter()
         .rev()
         .filter(|record| query.status == Some(TraceCorpusStatus::Revoked) || !record.is_revoked())
@@ -20022,6 +20605,15 @@ async fn list_traces_handler(
         .take(limit)
         .map(|record| TraceCommonsTraceListItem::from_record(record, &derived_by_submission))
         .collect();
+    label_witness_provenance(
+        state.as_ref(),
+        tenant.auth(),
+        items
+            .iter_mut()
+            .map(|item| (item.submission_id, &mut item.witness_provenance_class)),
+    )
+    .await
+    .map_err(internal_error)?;
     append_control_plane_read_audit(state.as_ref(), tenant.auth(), "trace_list", items.len())
         .await
         .map_err(internal_error)?;
@@ -20361,7 +20953,7 @@ async fn operator_rescrub_quarantined_submission(
 
     if state.require_db_mirror_writes {
         let mirror_result =
-            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope, None).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -20382,21 +20974,10 @@ async fn operator_rescrub_quarantined_submission(
 
     write_submission_record(&state.root, &record).map_err(internal_error)?;
     write_derived_record(&state.root, &derived_record).map_err(internal_error)?;
-    append_audit_event(
-        &state.root,
-        &auth.tenant_id,
-        TraceCommonsAuditEvent::quarantine_operator_rescrub(
-            auth,
-            submission_id,
-            record.status,
-            Some(reason),
-        ),
-    )
-    .map_err(internal_error)?;
 
     if !state.require_db_mirror_writes {
         let mirror_result =
-            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope).await;
+            mirror_submission_to_db(state, auth, &record, &derived_record, &envelope, None).await;
         if let Err(error) = &mirror_result {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(error),
@@ -20407,6 +20988,27 @@ async fn operator_rescrub_quarantined_submission(
         enforce_db_mirror_write_result(state, "quarantine operator rescrub", mirror_result)
             .map_err(internal_error)?;
     }
+
+    // Mirrored by its own file event, so a second re-scrub of the same
+    // submission records a row of its own. The operator's reason is free
+    // text; the event carries only its hash, in the file log and so in the
+    // DB row and its canonical payload.
+    let mut audit_event = TraceCommonsAuditEvent::quarantine_operator_rescrub(
+        auth,
+        submission_id,
+        record.status,
+        Some(&trace_free_text_audit_reason(reason)),
+    );
+    audit_event.decision_inputs_hash = Some(derived_record.canonical_summary_hash.clone());
+    append_audit_event_mirrored(
+        state,
+        auth,
+        audit_event,
+        submission_audit_row_mirror(&record).map_err(internal_error)?,
+        "quarantine operator rescrub audit event",
+    )
+    .await
+    .map_err(internal_error)?;
 
     let object_moved = prior_object_key != record.object_key
         || prior_artifact.as_ref().map(|r| &r.object_key)
@@ -20587,10 +21189,44 @@ fn trace_maintenance_audit_metadata_from_reason(
     })
 }
 
+/// File audit kinds besides `submitted` that are mirrored as `Submit` rows.
+const SUBMIT_FAMILY_AUDIT_KINDS: [&str; 3] = [
+    "quarantine_remediated",
+    "quarantine_operator_rescrub",
+    "idempotent_submit",
+];
+
+/// The file audit event recording a contributor revocation's artifact
+/// invalidation counts.
+const REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND: &str = "revocation_artifact_invalidation";
+
+/// The file audit event for a submission status change a lifecycle path
+/// makes: retention's expiry, purge and revocation replay, and the PII
+/// backstop's exhaustion quarantine, re-queue, release and stale-prior-risk
+/// re-hold. Its DB row has the shape the store used to write for itself --
+/// the status's action and `ReviewDecision` metadata -- so readers of those
+/// rows (the PII re-queue's exhaustion join among them) are unchanged.
+const LIFECYCLE_STATUS_CHANGE_AUDIT_KIND: &str = "lifecycle_status_change";
+
+/// The file audit events recording what retention expiry and purge
+/// invalidated, by count.
+const RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND: &str =
+    "retention_expired_artifact_invalidation";
+const RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND: &str =
+    "retention_purged_artifact_invalidation";
+
+/// The file audit event recording an operator audit-chain repair: how many
+/// file lines it restored from the DB. Hash-only.
+const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str = "audit_chain_repair";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "maintenance"
+        REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND
+            | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
+            | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
+            | AUDIT_CHAIN_REPAIR_AUDIT_KIND
+            | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
             | "benchmark_registry_outbox_submit"
@@ -20598,6 +21234,12 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | "revocation_propagation"
             | "vector_index"
     )
+}
+
+/// An audit reason for operator- or reviewer-supplied free text: its hash,
+/// never the text.
+fn trace_free_text_audit_reason(reason: &str) -> String {
+    format!("reason_hash={}", sha256_prefixed(reason))
 }
 
 fn trace_maintenance_audit_reason(
@@ -22229,7 +22871,9 @@ fn default_near_credit_outbox_submit_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceNearCreditOutboxSubmitWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     submitted: usize,
@@ -22254,7 +22898,9 @@ fn default_near_credit_outbox_confirm_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceNearCreditOutboxConfirmWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     confirmed: usize,
@@ -22279,7 +22925,9 @@ fn default_benchmark_registry_outbox_submit_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     submitted: usize,
@@ -22304,7 +22952,9 @@ fn default_benchmark_registry_outbox_confirm_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     confirmed: usize,
@@ -22378,7 +23028,9 @@ struct TraceCreditSettlementDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     require_pending: bool,
@@ -23486,6 +24138,12 @@ async fn append_credit_event_handler(
         actor_role: tenant.role,
         actor_principal_ref: tenant.principal_ref.clone(),
         created_at: Utc::now(),
+        witness_provenance_class: credit_witness_provenance_class(
+            state.as_ref(),
+            &tenant,
+            submission_id,
+        )
+        .await,
     };
     if state.require_db_mirror_writes {
         let mirror_result = mirror_credit_event_to_db(&state, &event).await;
@@ -24910,7 +25568,7 @@ async fn run_credit_settlement_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         require_pending: readiness.require_pending,
@@ -27633,7 +28291,7 @@ async fn run_benchmark_registry_outbox_submit_worker(
         .take(limit)
         .collect();
     let mut response = TraceBenchmarkRegistryOutboxSubmitWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: candidates.len(),
         submitted: 0,
@@ -27765,7 +28423,7 @@ async fn run_benchmark_registry_outbox_confirm_worker(
         .take(limit)
         .collect();
     let mut response = TraceBenchmarkRegistryOutboxConfirmWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: candidates.len(),
         confirmed: 0,
@@ -28011,7 +28669,7 @@ fn benchmark_registry_outbox_submit_worker_log_fields(
 ) -> TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
     TraceBenchmarkRegistryOutboxSubmitWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         submitted: response.submitted,
@@ -28057,7 +28715,7 @@ fn benchmark_registry_outbox_confirm_worker_log_fields(
 ) -> TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
     TraceBenchmarkRegistryOutboxConfirmWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         confirmed: response.confirmed,
@@ -28164,7 +28822,7 @@ async fn run_near_credit_outbox_submit_worker(
         .take(limit)
         .count();
     let mut response = TraceNearCreditOutboxSubmitWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: preview_candidate_count,
         submitted: 0,
@@ -28368,7 +29026,7 @@ async fn run_near_credit_outbox_confirm_worker(
         .take(limit)
         .collect();
     let mut response = TraceNearCreditOutboxConfirmWorkerResponse {
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: candidates.len(),
         confirmed: 0,
@@ -28592,7 +29250,7 @@ fn near_credit_outbox_submit_worker_log_fields(
 ) -> TraceNearCreditOutboxSubmitWorkerLogFields {
     TraceNearCreditOutboxSubmitWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         submitted: response.submitted,
@@ -28638,7 +29296,7 @@ fn near_credit_outbox_confirm_worker_log_fields(
 ) -> TraceNearCreditOutboxConfirmWorkerLogFields {
     TraceNearCreditOutboxConfirmWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         confirmed: response.confirmed,
@@ -28862,7 +29520,7 @@ async fn append_near_credit_outbox_submit_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -28923,7 +29581,7 @@ async fn append_near_credit_outbox_confirm_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -28984,7 +29642,7 @@ async fn append_benchmark_registry_outbox_submit_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -29045,7 +29703,7 @@ async fn append_benchmark_registry_outbox_confirm_audit(
         "pending".to_string(),
         response.pending.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -38557,6 +39215,12 @@ async fn append_automatic_utility_credit_events_once_with_counts(
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
+            witness_provenance_class: credit_witness_provenance_class(
+                state,
+                tenant,
+                source.submission_id,
+            )
+            .await,
         };
         append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
         let mirror_result = mirror_credit_event_to_db(state, &event).await;
@@ -38709,7 +39373,7 @@ async fn apply_review_decision(
         privileged_policy.as_ref(),
         "review decision",
     )?;
-    if state.require_db_mirror_writes {
+    if state.require_db_mirror_writes || state.account_admission.is_some() {
         enforce_db_mirror_write_result(state, "review decision", Ok(())).map_err(internal_error)?;
     }
     let mut envelope = read_envelope_for_review_decision(
@@ -38781,10 +39445,15 @@ async fn apply_review_decision(
     } else {
         None
     };
-    let audit_event =
-        TraceCommonsAuditEvent::review_decision(tenant, submission_id, record.status, Some(reason));
+    // The reviewer's reason is free text; the audit event carries its hash.
+    let audit_event = TraceCommonsAuditEvent::review_decision(
+        tenant,
+        submission_id,
+        record.status,
+        Some(&trace_free_text_audit_reason(reason)),
+    );
 
-    if state.require_db_mirror_writes {
+    if state.require_db_mirror_writes || state.account_admission.is_some() {
         let mirror_result = mirror_review_decision_to_db(
             state,
             tenant,
@@ -38817,9 +39486,27 @@ async fn apply_review_decision(
     if let Some(derived) = reviewed_derived.as_ref() {
         write_derived_record(&state.root, derived).map_err(internal_error)?;
     }
-    append_audit_event(&state.root, &tenant.tenant_id, audit_event).map_err(internal_error)?;
+    let review_status = storage_corpus_status(record.status);
+    append_audit_event_mirrored(
+        state,
+        tenant,
+        audit_event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Review,
+            metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
+                decision: serde_storage_string(&review_status).map_err(internal_error)?,
+                resulting_status: review_status,
+                reason_code: None,
+            },
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+        "review decision audit event",
+    )
+    .await
+    .map_err(internal_error)?;
 
-    if !state.require_db_mirror_writes {
+    if !state.require_db_mirror_writes && state.account_admission.is_none() {
         let mirror_result =
             mirror_review_decision_to_db(state, tenant, &record, &envelope, canonical_summary_hash)
                 .await;
@@ -39512,6 +40199,23 @@ async fn run_dataset_replay_export_job(
             &body_read.envelope,
             body_read.object_ref_id,
         ));
+    }
+    if let Err(error) = label_witness_provenance(
+        state,
+        tenant,
+        items
+            .iter_mut()
+            .map(|item| (item.submission_id, &mut item.witness_provenance_class)),
+    )
+    .await
+    {
+        return fail_export_job_with_internal_error(
+            state,
+            &job,
+            "replay export job failure",
+            error,
+        )
+        .await;
     }
     let source_submission_ids = items
         .iter()
@@ -40625,7 +41329,7 @@ fn all_attempts_failed_outcome(
 /// The message is never logged: `spawn_driver_loop` hashes the error, and
 /// only the hash and the class reach the log line.
 fn worker_route_error(driver: &'static str, error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    let (status, Json(ApiError { error })) = error;
+    let (status, Json(ApiError { error, .. })) = error;
     DriverTickError::WorkerRouteRejected {
         driver,
         status,
@@ -41272,14 +41976,16 @@ async fn run_pii_backstop_driver_tick(
 /// and no `RescrubbedEnvelope` ref is written; the pre-backstop
 /// `SubmittedEnvelope` ref deliberately stays active because `Quarantined` is
 /// not a consumer-visible status (the object-ref read path gates on
-/// `Accepted`). The DB transition is authoritative and writes the audit row
-/// itself; the on-disk record is mirrored afterwards so the two agree.
+/// `Accepted`). The DB transition is authoritative; its audit event is a
+/// file event mirrored to the DB, whose row the re-queue pass later finds by
+/// its reason code. The on-disk record is mirrored afterwards so the two
+/// agree.
 async fn quarantine_exhausted_pii_backstop(
     state: &AppState,
     db: &Arc<dyn Database>,
     item: &GateWorkItem,
 ) -> anyhow::Result<()> {
-    db.update_trace_submission_status(
+    db.update_trace_submission_status_without_audit(
         &item.tenant_id,
         item.submission_id,
         storage_corpus_status(TraceCorpusStatus::Quarantined),
@@ -41288,6 +41994,15 @@ async fn quarantine_exhausted_pii_backstop(
     )
     .await
     .context("failed to quarantine PII backstop submission after retry exhaustion")?;
+    append_lifecycle_status_audit(
+        state,
+        &system_audit_tenant(&item.tenant_id, PII_BACKSTOP_DRIVER_ACTOR_REF),
+        LifecycleAuditActor::System,
+        item.submission_id,
+        TraceCorpusStatus::Quarantined,
+        PII_BACKSTOP_EXHAUSTED_REASON,
+    )
+    .await?;
 
     if let Some(mut record) =
         read_submission_record(&state.root, &item.tenant_id, item.submission_id)?
@@ -41373,65 +42088,123 @@ async fn process_one_pii_backstop(
     // held (`record.status == AwaitingPiiBackstop`). This is a no-op on the
     // status column (it already reads `awaiting_pii_backstop`) but refreshes the
     // redaction hash / counts / privacy risk / canonical summary pointers.
-    db.upsert_trace_submission(storage_submission_write_from_record(
-        &record,
-        &envelope,
-        envelope
-            .embedding_analysis
-            .as_ref()
-            .map(|analysis| analysis.canonical_summary_hash.clone()),
-    )?)
-    .await
-    .context("failed to mirror rescrubbed trace submission metadata")?;
-
-    // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
-    // release, so it is already active the instant the status becomes
-    // Accepted/Quarantined below.
-    let (object_ref, _) = trace_object_ref_write_from_record(
-        state,
-        "rescrubbed-envelope",
-        StorageTraceObjectArtifactKind::RescrubbedEnvelope,
-        &record,
-        &envelope,
-    )?;
-    db.append_trace_object_ref(object_ref)
+    let mut staged_ref_target = None;
+    let release_result: anyhow::Result<()> = async {
+        db.upsert_trace_submission(storage_submission_write_from_record(
+            &record,
+            &envelope,
+            envelope
+                .embedding_analysis
+                .as_ref()
+                .map(|analysis| analysis.canonical_summary_hash.clone()),
+        )?)
         .await
-        .context("failed to mirror rescrubbed trace object ref")?;
+        .context("failed to mirror rescrubbed trace submission metadata")?;
 
-    // Step 3: now flip the on-disk record and release the DB hold. The file
-    // record's object_key was already repointed to the rescrubbed artifact
-    // above, so the file-record read path is safe regardless of ordering here;
-    // the DB release is the single authoritative status write to the target
-    // (the earlier upsert wrote the still-held status).
-    //
-    // The status flip and the invalidation of the pre-backstop
-    // `submitted_envelope` ref(s) happen ATOMICALLY via
-    // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
-    // commit without the other: envelope readers go through
-    // `get_latest_active_envelope_object_ref` (rescrubbed first, then
-    // submitted), and the object-primary read drill selects
-    // `SubmittedEnvelope` explicitly, so a status release with a still-active
-    // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
-    // on an ordinary transient DB failure with no re-enumeration path to heal
-    // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
-    // driver's own re-enumeration
-    // INNER JOINs an active `submitted_envelope` ref, so invalidating it
-    // without also releasing the status would strand the submission forever.
-    // Atomicity resolves both hazards: on any failure the transaction rolls
-    // back, the on-disk record write below is skipped, and the submission
-    // stays held and re-enumerable for the next tick to retry.
-    db.release_pii_backstop_hold(
-        &item.tenant_id,
-        item.submission_id,
-        storage_corpus_status(target_status),
-        PII_BACKSTOP_DRIVER_ACTOR_REF,
-        Some(PII_BACKSTOP_REDACTION_LABEL),
-    )
-    .await
-    .context("failed to atomically release PII backstop hold")?;
+        // Step 2: append the `RescrubbedEnvelope` object ref BEFORE any status
+        // release, so it is already active the instant the status becomes
+        // Accepted/Quarantined below.
+        let (mut object_ref, _) = trace_object_ref_write_from_record(
+            state,
+            "rescrubbed-envelope",
+            StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            &record,
+            &envelope,
+        )?;
+        // A failed release tombstones this attempt's ref. A retry must use a
+        // fresh ID rather than upserting into that tombstoned row.
+        object_ref.object_ref_id = Uuid::new_v4();
+        staged_ref_target = Some((
+            object_ref.object_store.clone(),
+            object_ref.object_key.clone(),
+        ));
+        db.append_trace_object_ref(object_ref)
+            .await
+            .context("failed to mirror rescrubbed trace object ref")?;
+
+        // Step 3: now flip the on-disk record and release the DB hold. The file
+        // record's object_key was already repointed to the rescrubbed artifact
+        // above, so the file-record read path is safe regardless of ordering here;
+        // the DB release is the single authoritative status write to the target
+        // (the earlier upsert wrote the still-held status).
+        //
+        // The status flip and the invalidation of the pre-backstop
+        // `submitted_envelope` ref(s) happen ATOMICALLY via
+        // `release_pii_backstop_hold` (one tenant-scoped transaction). Neither may
+        // commit without the other: envelope readers go through
+        // `get_latest_active_envelope_object_ref` (rescrubbed first, then
+        // submitted), and the object-primary read drill selects
+        // `SubmittedEnvelope` explicitly, so a status release with a still-active
+        // pre-backstop ref would leave un-scrubbed, PII-bearing bytes reachable
+        // on an ordinary transient DB failure with no re-enumeration path to heal
+        // it (enumeration only selects `awaiting_pii_backstop`). Conversely the
+        // driver's own re-enumeration
+        // INNER JOINs an active `submitted_envelope` ref, so invalidating it
+        // without also releasing the status would strand the submission forever.
+        // Atomicity resolves both hazards: on any failure the transaction rolls
+        // back, the on-disk record write below is skipped, and the submission
+        // stays held and re-enumerable for the next tick to retry.
+        db.release_pii_backstop_hold_without_audit(
+            &item.tenant_id,
+            item.submission_id,
+            storage_corpus_status(target_status),
+            PII_BACKSTOP_DRIVER_ACTOR_REF,
+            Some(PII_BACKSTOP_REDACTION_LABEL),
+        )
+        .await
+        .context("failed to atomically release PII backstop hold")?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = release_result {
+        // A withdrawal can win between the staged write and any one of the
+        // three DB calls. Retire the newly staged ref and bytes; retain the
+        // original held submission/ref so an ordinary transient DB failure
+        // remains re-enumerable on the next tick.
+        let ref_cleanup = if let Some((object_store, object_key)) = staged_ref_target {
+            db.mark_trace_object_ref_deleted(
+                &item.tenant_id,
+                item.submission_id,
+                &object_store,
+                &object_key,
+            )
+            .await
+            .map(|_| ())
+            .context("failed to retire rejected rescrubbed object ref")
+        } else {
+            Ok(())
+        };
+        let object_cleanup = delete_trace_objects_for_record(state, &record)
+            .context("failed to remove rejected rescrubbed object");
+        ref_cleanup?;
+        object_cleanup?;
+        return Err(error);
+    }
 
     record.status = target_status;
     write_submission_record(&state.root, &record)?;
+
+    // The release has committed. Its audit event is appended after it, and a
+    // failure here must not reach the driver's failure path: that would
+    // charge an attempt to a released trace, and on exhaustion quarantine it.
+    // It is logged hash-only instead. In required-mirror mode a DB row whose
+    // file append failed is restored by the audit-chain repair.
+    if let Err(error) = append_lifecycle_status_audit(
+        state,
+        &system_audit_tenant(&item.tenant_id, PII_BACKSTOP_DRIVER_ACTOR_REF),
+        LifecycleAuditActor::System,
+        item.submission_id,
+        target_status,
+        PII_BACKSTOP_REDACTION_LABEL,
+    )
+    .await
+    {
+        tracing::error!(
+            error_hash = %safe_runtime_error_hash(&error),
+            submission_id = %item.submission_id,
+            "Trace Commons PII backstop release audit event failed after the release committed"
+        );
+    }
 
     Ok(())
 }
@@ -42588,7 +43361,9 @@ struct TraceRollbackDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     active_rollout_flags: Vec<String>,
@@ -42598,6 +43373,9 @@ struct TraceRollbackDrillResponse {
     db_audit_event_count: usize,
     file_tombstone_count: usize,
     db_tombstone_count: usize,
+    /// Submit audit rows in the pre-file-event shape, left out of the audit
+    /// gap counts. Not blocking.
+    legacy_submit_audit_row_count: usize,
     blocking_gaps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_evidence: Option<TraceRolloutSmokeEvidenceResponse>,
@@ -42616,7 +43394,9 @@ struct TraceKeyRotationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     signed_token_auth_enabled: bool,
@@ -42787,7 +43567,9 @@ struct TraceAuditChainDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     file_verified: bool,
@@ -42802,6 +43584,10 @@ struct TraceAuditChainDrillResponse {
     db_event_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_legacy_event_count: Option<usize>,
+    /// The legacy rows before the DB's first hashed row: a deployment's
+    /// history from before the DB carried the chain. Not a gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db_legacy_prefix_event_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     db_payload_verified_event_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42821,7 +43607,9 @@ struct TracePostgresRlsDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     rls_ready: bool,
@@ -42852,7 +43640,9 @@ struct TraceRetentionDryRunDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     dry_run: bool,
@@ -42882,7 +43672,9 @@ struct TraceVectorIndexDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     dry_run: bool,
@@ -42910,7 +43702,9 @@ struct TraceAnalyticsReleaseDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     min_cell_count: usize,
@@ -42944,7 +43738,9 @@ struct TraceBenchmarkReadinessDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     require_artifacts: bool,
@@ -42985,7 +43781,9 @@ struct TraceRankingModelReadinessDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     require_active_model: bool,
@@ -43022,7 +43820,9 @@ struct TraceRevocationPropagationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     dry_run: bool,
@@ -43042,7 +43842,9 @@ struct TraceRevocationEffectsDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     submission_ref_hash: String,
@@ -43070,7 +43872,9 @@ struct TraceCanaryReadDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     submission_ref_hash: String,
@@ -43093,7 +43897,9 @@ struct TraceObjectPrimaryReadDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     submission_ref_hash: String,
@@ -43120,7 +43926,9 @@ struct TraceObjectStoreMigrationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     migration_manifest_hash: String,
     evidence_hash: String,
@@ -43236,7 +44044,7 @@ async fn run_canary_read_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         submission_ref_hash,
@@ -43393,7 +44201,7 @@ async fn run_object_primary_read_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         submission_ref_hash,
@@ -43584,7 +44392,7 @@ async fn run_object_store_migration_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_ref,
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         migration_manifest_hash: String::new(),
         evidence_hash: String::new(),
@@ -43670,7 +44478,7 @@ async fn run_revocation_propagation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: worker.purpose,
+        purpose_hash: worker.purpose_hash.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         dry_run: worker.dry_run,
@@ -43916,7 +44724,7 @@ async fn run_revocation_effects_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         submission_ref_hash,
@@ -44014,7 +44822,7 @@ async fn run_retention_dry_run_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: maintenance.purpose,
+        purpose_hash: maintenance.purpose_hash.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         dry_run: maintenance.dry_run,
@@ -44112,7 +44920,7 @@ async fn run_vector_index_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: worker.purpose,
+        purpose_hash: worker.purpose_hash.clone(),
         ready: blocking_gaps.is_empty(),
         evidence_hash: String::new(),
         dry_run: worker.dry_run,
@@ -44239,7 +45047,7 @@ async fn run_analytics_release_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         min_cell_count: state.analytics_min_cell_count,
@@ -44319,7 +45127,7 @@ async fn run_benchmark_readiness_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         require_artifacts: request.require_artifacts,
@@ -44466,7 +45274,7 @@ async fn run_ranking_model_readiness_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: false,
         evidence_hash: String::new(),
         require_active_model: request.require_active_model,
@@ -44566,7 +45374,7 @@ async fn run_postgres_rls_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: production_ready_with_expected_runtime_role && blocking_gaps.is_empty(),
         evidence_hash,
         rls_ready: diagnostics.rls_ready(),
@@ -44626,7 +45434,9 @@ struct TraceDbReconciliationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     file_submission_count: usize,
@@ -44663,6 +45473,9 @@ struct TraceDbReconciliationDrillResponse {
     db_ranking_worker_run_count: usize,
     file_audit_event_count: usize,
     db_audit_event_count: usize,
+    /// DB audit rows before the first hashed row, mirrored by a build from
+    /// before the DB carried the chain. Not blocking.
+    db_audit_legacy_prefix_row_count: usize,
     file_replay_export_manifest_count: usize,
     db_export_manifest_count: usize,
     db_export_manifest_item_count: usize,
@@ -44704,7 +45517,7 @@ async fn run_db_reconciliation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: report.blocking_gaps.is_empty(),
         evidence_hash,
         file_submission_count: report.file_submission_count,
@@ -44741,6 +45554,7 @@ async fn run_db_reconciliation_drill(
         db_ranking_worker_run_count: report.db_ranking_worker_run_count,
         file_audit_event_count: report.file_audit_event_count,
         db_audit_event_count: report.db_audit_event_count,
+        db_audit_legacy_prefix_row_count: report.db_audit_legacy_prefix_row_count,
         file_replay_export_manifest_count: report.file_replay_export_manifest_count,
         db_export_manifest_count: report.db_export_manifest_count,
         db_export_manifest_item_count: report.db_export_manifest_item_count,
@@ -44866,12 +45680,13 @@ async fn run_audit_chain_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         file_verified: report.verified,
         file_event_count: report.event_count,
         file_legacy_event_count: report.legacy_event_count,
+        db_legacy_prefix_event_count: db_report.map(|report| report.legacy_prefix_event_count),
         file_mismatch_count: report.mismatch_count,
         file_last_event_hash: report.last_event_hash,
         db_verified,
@@ -45058,7 +45873,7 @@ async fn run_key_rotation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         signed_token_auth_enabled,
@@ -45151,13 +45966,18 @@ async fn run_rollback_drill(
         .iter()
         .map(|record| record.submission_id)
         .collect::<BTreeSet<_>>();
+    // Legacy submit rows and the file events they stand for are counted
+    // apart, not as rollback gaps; see `legacy_submit_audit_rows`.
+    let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
     let file_audit_event_ids = file_audit_events
         .iter()
         .map(|event| event.event_id)
+        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
         .collect::<BTreeSet<_>>();
     let db_audit_event_ids = db_audit_events
         .iter()
         .map(|event| event.audit_event_id)
+        .filter(|event_id| !legacy_submit_audit.db_row_ids.contains(event_id))
         .collect::<BTreeSet<_>>();
     let file_tombstone_submission_ids = file_tombstones
         .iter()
@@ -45220,7 +46040,7 @@ async fn run_rollback_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready: blocking_gaps.is_empty(),
         evidence_hash,
         active_rollout_flags,
@@ -45230,6 +46050,7 @@ async fn run_rollback_drill(
         db_audit_event_count: db_audit_events.len(),
         file_tombstone_count: file_tombstones.len(),
         db_tombstone_count: db_tombstones.len(),
+        legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
         blocking_gaps,
         recorded_evidence: None,
     };
@@ -46378,7 +47199,7 @@ fn object_store_migration_manifest_hash(
         "tenant_storage_ref": tenant_storage_ref(&tenant.tenant_id),
         "actor_principal_ref": tenant.principal_ref,
         "generated_at": response.generated_at,
-        "purpose_hash": sha256_prefixed(&response.purpose),
+        "purpose_hash": response.purpose_hash,
         "object_store_configured": response.object_store_configured,
         "object_store_name": response.object_store_name,
         "object_store_eligible": response.object_store_eligible,
@@ -49254,6 +50075,23 @@ async fn run_benchmark_conversion_job(
     }
     let mut candidates = dedupe_benchmark_candidates_by_summary_hash(candidates);
     candidates.truncate(limit);
+    fail_export_job_on_error(
+        state,
+        &job,
+        "benchmark export job failure",
+        label_witness_provenance(
+            state,
+            tenant,
+            candidates.iter_mut().map(|candidate| {
+                (
+                    candidate.submission_id,
+                    &mut candidate.witness_provenance_class,
+                )
+            }),
+        )
+        .await,
+    )
+    .await?;
     let conversion_id = Uuid::new_v4();
     let source_submission_ids = candidates
         .iter()
@@ -50637,7 +51475,9 @@ fn default_revocation_propagation_limit() -> u32 {
 
 #[derive(Debug, Serialize)]
 struct TraceRevocationPropagationWorkerResponse {
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     checked: usize,
     completed: usize,
@@ -50945,7 +51785,9 @@ struct TraceVectorIndexRequest {
 struct TraceVectorIndexResponse {
     tenant_id: String,
     tenant_storage_ref: String,
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     audit_event_id: Uuid,
     checked_count: usize,
@@ -51681,7 +52523,7 @@ async fn run_requeue_pii_backstop_pass(
         }
 
         match db
-            .update_trace_submission_status(
+            .update_trace_submission_status_without_audit(
                 &tenant_id,
                 submission_id,
                 storage_corpus_status(TraceCorpusStatus::AwaitingPiiBackstop),
@@ -51697,7 +52539,28 @@ async fn run_requeue_pii_backstop_pass(
                     record.status = TraceCorpusStatus::AwaitingPiiBackstop;
                     write_submission_record(&state.root, &record)?;
                 }
-                summary.requeued += 1;
+                // The transition has committed; a failed audit append is
+                // counted as a failure and logged hash-only.
+                match append_lifecycle_status_audit(
+                    &state,
+                    &system_audit_tenant(&tenant_id, PII_BACKSTOP_REQUEUE_ACTOR_REF),
+                    LifecycleAuditActor::System,
+                    submission_id,
+                    TraceCorpusStatus::AwaitingPiiBackstop,
+                    PII_BACKSTOP_REQUEUED_REASON,
+                )
+                .await
+                {
+                    Ok(()) => summary.requeued += 1,
+                    Err(error) => {
+                        tracing::warn!(
+                            error_hash = %safe_runtime_error_hash(&error),
+                            submission_id = %submission_id,
+                            "Trace Commons PII backstop re-queue audit event failed"
+                        );
+                        summary.failed += 1;
+                    }
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -52548,12 +53411,21 @@ async fn clear_one_stale_prior_risk(
         &record, &envelope, None,
     )?)
     .await?;
-    db.update_trace_submission_status(
+    db.update_trace_submission_status_without_audit(
         tenant_id,
         submission_id,
         storage_corpus_status(TraceCorpusStatus::AwaitingPiiBackstop),
         PII_BACKSTOP_DRIVER_ACTOR_REF,
         Some(PII_BACKSTOP_REDACTION_LABEL),
+    )
+    .await?;
+    append_lifecycle_status_audit(
+        state,
+        &system_audit_tenant(tenant_id, PII_BACKSTOP_DRIVER_ACTOR_REF),
+        LifecycleAuditActor::System,
+        submission_id,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        PII_BACKSTOP_REDACTION_LABEL,
     )
     .await?;
     Ok(())
@@ -54346,6 +55218,17 @@ async fn collect_ranker_training_candidates(
             .then_with(|| left.received_at.cmp(&right.received_at))
     });
     candidates.truncate(limit);
+    label_witness_provenance(
+        state,
+        tenant,
+        candidates.iter_mut().map(|candidate| {
+            (
+                candidate.submission_id,
+                &mut candidate.witness_provenance_class,
+            )
+        }),
+    )
+    .await?;
     Ok(candidates)
 }
 
@@ -57174,6 +58057,7 @@ fn trace_commons_record_from_storage_submission(
     Some((|| {
         let object_key = trace_envelope_object_key(&record.tenant_id, status, record.submission_id);
         Ok(TraceCommonsSubmissionRecord {
+            witness_evidence: None,
             tenant_storage_ref: tenant_storage_ref(&record.tenant_id),
             tenant_id: record.tenant_id,
             auth_principal_ref: record.auth_principal_ref,
@@ -57223,6 +58107,15 @@ fn trace_commons_audit_event_from_storage(
         "DB audit event tenant mismatch"
     );
     ensure_db_audit_canonical_projection_matches(&event)?;
+    // A row mirrored from the file log carries the file event as its
+    // canonical payload, and the projection check above has tied every row
+    // column to it: that payload is the event, exactly as the file holds it.
+    if let Some(canonical_event_json) = event.canonical_event_json.as_deref() {
+        let mut canonical: TraceCommonsAuditEvent = serde_json::from_str(canonical_event_json)
+            .context("failed to parse canonical audit payload")?;
+        canonical.event_hash = event.event_hash.clone();
+        return Ok(canonical);
+    }
     let mut kind = storage_audit_event_kind(event.action, &event.metadata);
     if event.action == StorageTraceAuditAction::Read
         && event.submission_id.is_some()
@@ -57600,17 +58493,152 @@ fn collect_db_audit_submission_metadata_mismatches(
         .collect()
 }
 
+/// Submit audit rows written before the DB row mirrored the file event, and
+/// the file events they stood for.
+#[derive(Debug, Default)]
+struct LegacySubmitAuditRows {
+    db_row_ids: BTreeSet<Uuid>,
+    file_event_ids: BTreeSet<Uuid>,
+}
+
+/// Finds submit audit rows in the old shape -- action `submit`, no canonical
+/// payload, and the id `deterministic_trace_uuid_for("submit-audit", ..)`
+/// derives from the submission -- and pairs each with its submission's first
+/// file `submitted` event that has no DB row. The audit table is insert-only,
+/// so these rows stay; reconciliation counts them rather than reporting the
+/// pair as drift.
+fn legacy_submit_audit_rows(
+    file_events: &[TraceCommonsAuditEvent],
+    db_events: &[StorageTraceAuditEventRecord],
+) -> LegacySubmitAuditRows {
+    let db_ids = db_events
+        .iter()
+        .map(|event| event.audit_event_id)
+        .collect::<BTreeSet<_>>();
+    let legacy_by_submission = db_events
+        .iter()
+        .filter(|event| {
+            event.action == StorageTraceAuditAction::Submit
+                && event.canonical_event_json.is_none()
+                && event.submission_id.is_some_and(|submission_id| {
+                    event.audit_event_id
+                        == deterministic_trace_uuid_for(
+                            "submit-audit",
+                            &event.tenant_id,
+                            submission_id,
+                        )
+                })
+        })
+        .filter_map(|event| Some((event.submission_id?, event.audit_event_id)))
+        .collect::<BTreeMap<_, _>>();
+    let mut legacy = LegacySubmitAuditRows {
+        db_row_ids: legacy_by_submission.values().copied().collect(),
+        file_event_ids: BTreeSet::new(),
+    };
+    let mut paired = BTreeSet::new();
+    for event in file_events {
+        if event.kind == "submitted"
+            && legacy_by_submission.contains_key(&event.submission_id)
+            && !db_ids.contains(&event.event_id)
+            && paired.insert(event.submission_id)
+        {
+            legacy.file_event_ids.insert(event.event_id);
+        }
+    }
+    legacy
+}
+
+/// The DB audit rows before the first hashed row. A deployment upgraded
+/// across #1043 has these: its builds before then mirrored rows without the
+/// file log's chain fields. They are history, not drift.
+fn db_audit_legacy_prefix_row_count(events: &[StorageTraceAuditEventRecord]) -> usize {
+    events
+        .iter()
+        .take_while(|event| event.event_hash.is_none())
+        .count()
+}
+
+/// Where the DB audit hash chain may start.
+///
+/// The DB row carries the file event's chain fields (#1043), and the file
+/// chain is older than that: the first event a new build mirrors chains from
+/// the file log's head at that moment, which is genesis only for a tenant with
+/// no file history. The append-time check agrees -- it compares against the
+/// latest hashed row, and before there is one it accepts any previous hash.
+///
+/// So the first hashed row may chain from genesis, or carry exactly the chain
+/// fields of the file event with its id, when that event's previous hash is
+/// itself a file event's hash. Anything else chains from nothing. Every later
+/// hashed row must chain from the hashed row before it.
+struct DbAuditChainFileAnchors<'a> {
+    by_id: BTreeMap<Uuid, &'a TraceCommonsAuditEvent>,
+    event_hashes: BTreeSet<&'a str>,
+}
+
+impl<'a> DbAuditChainFileAnchors<'a> {
+    fn new(file_events: &'a [TraceCommonsAuditEvent]) -> Self {
+        Self {
+            by_id: file_events
+                .iter()
+                .map(|event| (event.event_id, event))
+                .collect(),
+            event_hashes: file_events
+                .iter()
+                .filter_map(|event| event.event_hash.as_deref())
+                .collect(),
+        }
+    }
+
+    fn accepts_chain_start(
+        &self,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
+        if previous_event_hash == TRACE_AUDIT_EVENT_GENESIS_HASH {
+            return true;
+        }
+        let Some(file_event) = self.by_id.get(&row.audit_event_id) else {
+            return false;
+        };
+        file_event.previous_event_hash.as_deref() == Some(previous_event_hash)
+            && file_event.event_hash.as_deref() == Some(event_hash)
+            && self.event_hashes.contains(previous_event_hash)
+    }
+
+    /// Whether a hashed row chains: from the hashed row before it, or, for
+    /// the first hashed row (`expected_previous_hash` is `None`), from a
+    /// start [`Self::accepts_chain_start`] allows.
+    fn chains(
+        &self,
+        expected_previous_hash: Option<&str>,
+        row: &StorageTraceAuditEventRecord,
+        previous_event_hash: &str,
+        event_hash: &str,
+    ) -> bool {
+        match expected_previous_hash {
+            Some(expected) => previous_event_hash == expected,
+            None => self.accepts_chain_start(row, previous_event_hash, event_hash),
+        }
+    }
+}
+
 fn collect_db_audit_hash_chain_failures(
     events: &[StorageTraceAuditEventRecord],
+    file_events: &[TraceCommonsAuditEvent],
 ) -> Vec<TraceDbAuditHashChainFailure> {
+    let anchors = DbAuditChainFileAnchors::new(file_events);
     let mut failures = Vec::new();
-    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    let mut expected_previous_hash: Option<String> = None;
     for (index, event) in events.iter().enumerate() {
         let row_number = index + 1;
         let Some(event_hash) = event.event_hash.as_deref() else {
-            // Legacy unhashed rows break the verifiable chain; restart from genesis
-            // so the next hashed row must prove its own chain root.
-            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+            // A row without chain fields is not part of the chain: rows the
+            // store writes for itself, and rows mirrored before the DB carried
+            // the file log's chain. The chain is the hashed rows, in order --
+            // the same rule the append-time stale-previous-hash check applies
+            // -- so an unhashed row neither breaks nor restarts it. Where the
+            // chain starts is `DbAuditChainFileAnchors`'s rule.
             continue;
         };
         let mut event_failures = Vec::new();
@@ -57630,7 +58658,12 @@ fn collect_db_audit_hash_chain_failures(
                 event.audit_event_id
             ));
         }
-        if previous_event_hash != expected_previous_hash {
+        if !anchors.chains(
+            expected_previous_hash.as_deref(),
+            event,
+            previous_event_hash,
+            event_hash,
+        ) {
             event_failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
                 event.audit_event_id
@@ -57653,7 +58686,7 @@ fn collect_db_audit_hash_chain_failures(
                 first_failure: first_failure.clone(),
             });
         }
-        expected_previous_hash = event_hash.to_string();
+        expected_previous_hash = Some(event_hash.to_string());
     }
     failures
 }
@@ -57909,6 +58942,7 @@ fn trace_commons_credit_event_from_storage(
         actor_role: TokenRole::parse(&event.actor_role)?,
         actor_principal_ref: event.actor_principal_ref,
         created_at: event.occurred_at,
+        witness_provenance_class: event.witness_provenance_class,
     }))
 }
 
@@ -58848,24 +59882,70 @@ fn deterministic_trace_vector_payload_object_ref_uuid(
     Uuid::new_v5(&Uuid::NAMESPACE_URL, input.as_bytes())
 }
 
+/// Which submit-path write the submission mirror is recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionMirrorKind {
+    /// A first landing, or a retry of one. Offered witness evidence is
+    /// recorded, and stored evidence must match it.
+    Submission,
+    /// Quarantine remediation (#214) replaced the submitted body under the
+    /// same submission id. Evidence stored for the prior body of a quarantined
+    /// submission is replaced by the offered evidence, or removed when the
+    /// remediation is unwitnessed.
+    QuarantineRemediation,
+    /// Replays an already-stored file submission into the database. It
+    /// appends no submit audit row here: the backfill's audit pass mirrors the
+    /// file log's own `submitted` event, with its id and hash-chain fields.
+    Backfill,
+}
+
+/// The DB row a submit-path audit event mirrors as: `Submit`, with the
+/// submission's status and risk, pointing at its submitted-envelope object ref.
+fn submission_audit_row_mirror(
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<AuditRowMirror> {
+    Ok(AuditRowMirror {
+        action: StorageTraceAuditAction::Submit,
+        metadata: StorageTraceAuditSafeMetadata::Submission {
+            status: storage_corpus_status(record.status),
+            privacy_risk: serde_storage_string(&record.privacy_risk)?,
+        },
+        object_ref_id: Some(deterministic_trace_uuid("submitted-envelope", record)),
+        actor_role_label: None,
+    })
+}
+
+/// Operator re-scrub's submission mirror.
 async fn mirror_submission_to_db(
     state: &AppState,
     tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
     derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
+    witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
 ) -> anyhow::Result<()> {
-    mirror_submission_to_db_with_options(state, tenant, record, derived_record, envelope, true)
-        .await
+    mirror_submission_to_db_with_options(
+        state,
+        tenant,
+        record,
+        derived_record,
+        envelope,
+        witness_input,
+        SubmissionMirrorKind::Submission,
+    )
+    .await
 }
 
+/// Mirrors a submission's rows. The audit event for the write is appended
+/// separately, through [`append_audit_event_mirrored`].
 async fn mirror_submission_to_db_with_options(
     state: &AppState,
-    tenant: &TenantAuth,
+    _tenant: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
     derived_record: &TraceCommonsDerivedRecord,
     envelope: &TraceContributionEnvelope,
-    append_submit_audit: bool,
+    witness_input: Option<(&VerifiedWitnessCertificate, &HeaderMap, &[u8])>,
+    mirror_kind: SubmissionMirrorKind,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
@@ -58887,12 +59967,33 @@ async fn mirror_submission_to_db_with_options(
         .or_else(|| record.contributor_pseudonym.clone())
         .unwrap_or_else(|| record.auth_principal_ref.clone());
 
-    db.upsert_trace_submission(storage_submission_write_from_record(
+    let witness_evidence = witness_input
+        .map(|(verified, headers, raw_body)| {
+            trace_commons_server::trace_corpus_storage::TraceWitnessCertificateEvidenceWrite::from_verified(
+                &record.tenant_id,
+                record.submission_id,
+                verified,
+                headers,
+                raw_body,
+                content_sha256.strip_prefix("sha256:").unwrap_or(&content_sha256),
+            )
+        })
+        .transpose()?;
+    let submission_write = storage_submission_write_from_record(
         record,
         envelope,
         Some(derived_record.canonical_summary_hash.clone()),
-    )?)
-    .await
+    )?;
+    match mirror_kind {
+        SubmissionMirrorKind::Submission | SubmissionMirrorKind::Backfill => {
+            db.upsert_trace_submission_with_witness(submission_write, witness_evidence)
+                .await
+        }
+        SubmissionMirrorKind::QuarantineRemediation => {
+            db.remediate_trace_submission_with_witness(submission_write, witness_evidence)
+                .await
+        }
+    }
     .context("failed to mirror trace submission metadata")?;
 
     db.append_trace_object_ref(object_ref)
@@ -58937,32 +60038,23 @@ async fn mirror_submission_to_db_with_options(
     .await
     .context("failed to mirror trace derived metadata")?;
 
-    if append_submit_audit {
-        db.append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id: deterministic_trace_uuid("submit-audit", record),
-            tenant_id: record.tenant_id.clone(),
-            actor_principal_ref: record.auth_principal_ref.clone(),
-            actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
-            action: StorageTraceAuditAction::Submit,
-            reason: Some(format!("auth_method={}", tenant.auth_method.storage_name())),
-            request_id: None,
-            submission_id: Some(record.submission_id),
-            object_ref_id: Some(object_ref_id),
-            export_manifest_id: None,
-            decision_inputs_hash: Some(derived_record.canonical_summary_hash.clone()),
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Submission {
-                status: storage_corpus_status(record.status),
-                privacy_risk: privacy_risk.clone(),
-            },
-        })
-        .await
-        .context("failed to mirror trace audit event")?;
-    }
-
     if record.status == TraceCorpusStatus::Accepted && record.credit_points_pending > 0.0 {
+        // Read after the evidence and the object ref above are written, so the
+        // current-object claim covers this submission's own artifact. A label
+        // only: `points_delta` below is the same with or without it.
+        let witness_provenance_class = match db
+            .get_current_verified_witness_evidence(&record.tenant_id, record.submission_id)
+            .await
+        {
+            Ok(claim) => Some(TraceWitnessProvenanceClass::from_claim(&claim)),
+            Err(error) => {
+                tracing::warn!(
+                    error_hash = %safe_runtime_error_hash(&anyhow::Error::from(error)),
+                    "Trace Commons accepted credit witness provenance label unavailable"
+                );
+                None
+            }
+        };
         db.append_trace_credit_event(StorageTraceCreditEventWrite {
             credit_event_id: deterministic_trace_uuid("accepted-credit", record),
             tenant_id: record.tenant_id.clone(),
@@ -58976,6 +60068,7 @@ async fn mirror_submission_to_db_with_options(
             actor_principal_ref: record.auth_principal_ref.clone(),
             actor_role: "system".to_string(),
             settlement_state: StorageTraceCreditSettlementState::Pending,
+            witness_provenance_class,
         })
         .await
         .context("failed to mirror trace credit event")?;
@@ -58994,10 +60087,36 @@ struct TraceRevocationDbMirrorInput<'a> {
     prepared_tombstone: Option<&'a TraceCommonsRevocation>,
 }
 
+/// Mirrors a revocation replayed by retention or backfill, and records it in
+/// the file audit log, mirrored: a `lifecycle_status_change` event when the
+/// DB status actually moved to revoked, and a `revocation_artifact_invalidation`
+/// event when anything was invalidated. A replay over a submission already
+/// revoked in the DB that invalidates nothing records nothing.
 async fn mirror_revocation_to_db(
     state: &AppState,
     input: TraceRevocationDbMirrorInput<'_>,
 ) -> anyhow::Result<()> {
+    mirror_revocation_to_db_inner(state, input, false)
+        .await
+        .map(|_| ())
+}
+
+/// Mirrors a revocation whose audit trail is the file log's own events: no
+/// store audit rows. Returns the artifact-invalidation action counts, empty
+/// when nothing was invalidated, for the caller's
+/// `revocation_artifact_invalidation` file event.
+async fn mirror_revocation_to_db_for_file_audit(
+    state: &AppState,
+    input: TraceRevocationDbMirrorInput<'_>,
+) -> anyhow::Result<BTreeMap<String, u32>> {
+    mirror_revocation_to_db_inner(state, input, true).await
+}
+
+async fn mirror_revocation_to_db_inner(
+    state: &AppState,
+    input: TraceRevocationDbMirrorInput<'_>,
+    file_audit: bool,
+) -> anyhow::Result<BTreeMap<String, u32>> {
     let TraceRevocationDbMirrorInput {
         tenant,
         submission_id,
@@ -59008,7 +60127,7 @@ async fn mirror_revocation_to_db(
         prepared_tombstone,
     } = input;
     let Some(db) = state.db_mirror.as_ref() else {
-        return Ok(());
+        return Ok(BTreeMap::new());
     };
 
     if let Some(record) = record {
@@ -59075,7 +60194,18 @@ async fn mirror_revocation_to_db(
         .context("failed to mirror DB-only trace revocation tombstone")?;
     }
 
-    db.update_trace_submission_status(
+    // A replay records the status change only when the DB status moves: every
+    // retention run replays every revoked record, and must not add an event
+    // for each one each time.
+    let replayed_status_change = !file_audit
+        && db
+            .get_trace_submission(&tenant.tenant_id, submission_id)
+            .await
+            .context("failed to read trace submission before revocation mirror")?
+            .is_some_and(|current| current.status != StorageTraceCorpusStatus::Revoked);
+    // Neither caller wants the store's own status row: the audit trail is the
+    // file log's events, mirrored.
+    db.update_trace_submission_status_without_audit(
         &tenant.tenant_id,
         submission_id,
         StorageTraceCorpusStatus::Revoked,
@@ -59084,6 +60214,17 @@ async fn mirror_revocation_to_db(
     )
     .await
     .context("failed to mirror trace revocation status")?;
+    if replayed_status_change {
+        append_lifecycle_status_audit(
+            state,
+            tenant,
+            LifecycleAuditActor::Tenant,
+            submission_id,
+            TraceCorpusStatus::Revoked,
+            "retention_revoked",
+        )
+        .await?;
+    }
 
     let invalidation_counts = db
         .invalidate_trace_submission_artifacts(
@@ -59141,27 +60282,9 @@ async fn mirror_revocation_to_db(
     .context("failed to enqueue vector entry invalidation propagation items")?;
 
     let audit_source = record
-        .map(|record| {
-            (
-                deterministic_trace_uuid("revocation-artifact-invalidation", record),
-                record.tenant_id.clone(),
-                record.submission_id,
-            )
-        })
-        .or_else(|| {
-            db_record.map(|record| {
-                (
-                    deterministic_trace_uuid_for(
-                        "revocation-artifact-invalidation",
-                        &record.tenant_id,
-                        record.submission_id,
-                    ),
-                    record.tenant_id.clone(),
-                    record.submission_id,
-                )
-            })
-        });
-    if let Some((audit_event_id, audit_tenant_id, audit_submission_id)) = audit_source
+        .map(|record| record.submission_id)
+        .or_else(|| db_record.map(|record| record.submission_id));
+    if let Some(audit_submission_id) = audit_source
         && (invalidation_counts.object_refs_invalidated > 0
             || invalidation_counts.derived_records_invalidated > 0
             || vector_entries_invalidated > 0
@@ -59205,36 +60328,26 @@ async fn mirror_revocation_to_db(
                 "records_marked_revoked",
             );
         }
-        db.append_trace_audit_event(StorageTraceAuditEventWrite {
-            audit_event_id,
-            tenant_id: audit_tenant_id,
-            actor_principal_ref: tenant.principal_ref.clone(),
-            actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
-            action: StorageTraceAuditAction::Revoke,
-            reason: Some(format!(
-                "revocation_artifact_invalidation;reason_hash={}",
-                sha256_prefixed(revocation_reason)
-            )),
-            request_id: None,
-            submission_id: Some(audit_submission_id),
-            object_ref_id: None,
-            export_manifest_id: None,
-            decision_inputs_hash: None,
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: StorageTraceAuditSafeMetadata::Maintenance {
-                surface: None,
-                purpose_hash: None,
-                dry_run: false,
-                action_counts,
-            },
-        })
+        if file_audit {
+            // The caller records these in the file log's
+            // `revocation_artifact_invalidation` event, mirrored from there.
+            return Ok(action_counts);
+        }
+        // The same hash-only event a contributor revocation records.
+        append_lifecycle_counts_audit(
+            state,
+            tenant,
+            audit_submission_id,
+            REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND,
+            StorageTraceAuditAction::Revoke,
+            Some(sha256_prefixed(revocation_reason)),
+            action_counts,
+        )
         .await
-        .context("failed to mirror trace artifact invalidation audit")?;
+        .context("failed to append trace artifact invalidation audit")?;
     }
 
-    Ok(())
+    Ok(BTreeMap::new())
 }
 
 fn trace_revocation_worker_queue_invalidation_targets(
@@ -59500,7 +60613,7 @@ async fn run_revocation_propagation_worker(
         .context("failed to list due trace revocation propagation items")?;
 
     let mut response = TraceRevocationPropagationWorkerResponse {
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         checked: due_items.len(),
         completed: 0,
@@ -59668,7 +60781,7 @@ fn revocation_propagation_worker_log_fields(
 ) -> TraceRevocationPropagationWorkerLogFields {
     TraceRevocationPropagationWorkerLogFields {
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose_hash: sha256_prefixed(&response.purpose),
+        purpose_hash: response.purpose_hash.clone(),
         dry_run: response.dry_run,
         checked: response.checked,
         completed: response.completed,
@@ -59982,6 +61095,10 @@ async fn reverse_credit_settlement_for_revocation_propagation(
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
             created_at: Utc::now(),
+            // A reversal describes the event it reverses, so it carries that
+            // event's label. The revoked trace now reads as unattested, which
+            // says nothing about the credit being taken back.
+            witness_provenance_class: source_event.witness_provenance_class,
         };
         let file_credit_event_ids = read_all_credit_events(&state.root, &tenant.tenant_id)?
             .into_iter()
@@ -60161,6 +61278,33 @@ async fn delete_object_payload_for_revocation_propagation(
         TRACE_OBJECT_REF_STORE_MISMATCH
     );
     let tenant_ref = tenant_storage_ref(&tenant.tenant_id);
+    // Backstop: an object that is already gone has been deleted -- by the
+    // revocation that queued this item, or by anything else. Only a store
+    // that can say the object is absent takes this path; an object that is
+    // present is verified below, and one that fails verification stays a
+    // failure, with no receipt.
+    if store.artifact_present_by_object_key(
+        &tenant_ref,
+        artifact_kind.clone(),
+        &object_ref.object_key,
+        &object_ref.content_sha256,
+    )? == Some(false)
+    {
+        db.mark_trace_object_ref_deleted(
+            &tenant.tenant_id,
+            item.source_submission_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+        )
+        .await
+        .context("failed to mark absent trace object ref deleted")?;
+        record_physical_delete_receipt_for_revocation_propagation(db, item, &object_ref).await?;
+        return Ok(done_revocation_propagation_object_payload_item(
+            item,
+            &object_ref,
+            "delete_object_payload_already_absent",
+        ));
+    }
     match artifact_kind.clone() {
         TraceArtifactKind::ContributionEnvelope => {
             store
@@ -60550,7 +61694,7 @@ async fn append_revocation_propagation_audit(
         "next_attempt_scheduled".to_string(),
         response.next_attempt_scheduled.min(u32::MAX as usize) as u32,
     );
-    let purpose_hash = sha256_prefixed(&response.purpose);
+    let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
         tenant,
@@ -60696,7 +61840,7 @@ async fn mirror_expiration_to_db(
     else {
         return Ok(());
     };
-    db.update_trace_submission_status(
+    db.update_trace_submission_status_without_audit(
         &tenant.tenant_id,
         submission_id,
         StorageTraceCorpusStatus::Expired,
@@ -60705,6 +61849,15 @@ async fn mirror_expiration_to_db(
     )
     .await
     .context("failed to mirror trace expiration status")?;
+    append_lifecycle_status_audit(
+        state,
+        tenant,
+        LifecycleAuditActor::Tenant,
+        submission_id,
+        TraceCorpusStatus::Expired,
+        "retention_expired",
+    )
+    .await?;
     let invalidation_counts = db
         .invalidate_trace_submission_artifacts(
             &tenant.tenant_id,
@@ -60744,14 +61897,13 @@ async fn mirror_expiration_to_db(
             "records_marked_expired",
         );
     }
-    append_lifecycle_invalidation_audit_to_db(
-        db.as_ref(),
+    append_lifecycle_invalidation_audit(
+        state,
         tenant,
-        &record,
+        record.submission_id,
         TraceLifecycleInvalidationAuditInput {
             action: StorageTraceAuditAction::Retain,
-            audit_id_label: "retention-expiration-artifact-invalidation",
-            reason: "retention_expired_artifact_invalidation",
+            kind: RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND,
             status_count_label: "records_marked_expired",
             invalidation_counts,
             object_refs_deleted: 0,
@@ -60781,7 +61933,7 @@ async fn mirror_purge_to_db(
     else {
         return Ok(());
     };
-    db.update_trace_submission_status(
+    db.update_trace_submission_status_without_audit(
         &tenant.tenant_id,
         submission_id,
         StorageTraceCorpusStatus::Purged,
@@ -60790,6 +61942,15 @@ async fn mirror_purge_to_db(
     )
     .await
     .context("failed to mirror trace purge status")?;
+    append_lifecycle_status_audit(
+        state,
+        tenant,
+        LifecycleAuditActor::Tenant,
+        submission_id,
+        TraceCorpusStatus::Purged,
+        "retention_purged",
+    )
+    .await?;
     let invalidation_counts = db
         .invalidate_trace_submission_artifacts(
             &tenant.tenant_id,
@@ -60846,14 +62007,13 @@ async fn mirror_purge_to_db(
             "records_marked_purged",
         );
     }
-    append_lifecycle_invalidation_audit_to_db(
-        db.as_ref(),
+    append_lifecycle_invalidation_audit(
+        state,
         tenant,
-        &record,
+        record.submission_id,
         TraceLifecycleInvalidationAuditInput {
             action: StorageTraceAuditAction::Purge,
-            audit_id_label: "retention-purge-artifact-invalidation",
-            reason: "retention_purged_artifact_invalidation",
+            kind: RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND,
             status_count_label: "records_marked_purged",
             invalidation_counts,
             object_refs_deleted,
@@ -60868,8 +62028,7 @@ async fn mirror_purge_to_db(
 
 struct TraceLifecycleInvalidationAuditInput {
     action: StorageTraceAuditAction,
-    audit_id_label: &'static str,
-    reason: &'static str,
+    kind: &'static str,
     status_count_label: &'static str,
     invalidation_counts: StorageTraceArtifactInvalidationCounts,
     object_refs_deleted: u64,
@@ -60910,10 +62069,12 @@ struct TraceMaintenanceLedgerItem {
     action_counts: BTreeMap<String, u32>,
 }
 
-async fn append_lifecycle_invalidation_audit_to_db(
-    db: &dyn Database,
+/// Records what a retention expiry or purge invalidated as a hash-only file
+/// event, mirrored to the DB like every other audit event.
+async fn append_lifecycle_invalidation_audit(
+    state: &AppState,
     tenant: &TenantAuth,
-    record: &StorageTraceSubmissionRecord,
+    submission_id: Uuid,
     input: TraceLifecycleInvalidationAuditInput,
 ) -> anyhow::Result<()> {
     let mut action_counts = lifecycle_invalidation_action_counts(
@@ -60924,35 +62085,150 @@ async fn append_lifecycle_invalidation_audit_to_db(
         input.export_manifest_items_invalidated,
     );
     action_counts.insert(input.status_count_label.to_string(), 1);
-
-    db.append_trace_audit_event(StorageTraceAuditEventWrite {
-        audit_event_id: deterministic_trace_uuid_for(
-            input.audit_id_label,
-            &record.tenant_id,
-            record.submission_id,
-        ),
-        tenant_id: record.tenant_id.clone(),
-        actor_principal_ref: tenant.principal_ref.clone(),
-        actor_role: format!("{:?}", tenant.role).to_ascii_lowercase(),
-        action: input.action,
-        reason: Some(input.reason.to_string()),
-        request_id: None,
-        submission_id: Some(record.submission_id),
-        object_ref_id: None,
-        export_manifest_id: None,
-        decision_inputs_hash: None,
-        previous_event_hash: None,
-        event_hash: None,
-        canonical_event_json: None,
-        metadata: StorageTraceAuditSafeMetadata::Maintenance {
-            surface: None,
-            purpose_hash: None,
-            dry_run: false,
-            action_counts,
-        },
-    })
+    append_lifecycle_counts_audit(
+        state,
+        tenant,
+        submission_id,
+        input.kind,
+        input.action,
+        None,
+        action_counts,
+    )
     .await
-    .context("failed to mirror trace lifecycle artifact invalidation audit")?;
+    .context("failed to append trace lifecycle artifact invalidation audit")
+}
+
+/// Who a lifecycle status change is attributed to.
+#[derive(Clone, Copy)]
+enum LifecycleAuditActor {
+    /// The authenticated caller, with its role.
+    Tenant,
+    /// An in-process driver: the tenant context's `principal_ref` is the
+    /// driver's label (see [`system_audit_tenant`]), and the row's role is
+    /// `system`.
+    System,
+}
+
+/// A tenant context for an in-process driver's audit events and nothing
+/// else. Like `account_audit_tenant` it never reaches an authorization
+/// decision, and its role is pinned to the least-privileged one; the events
+/// it attributes carry [`LifecycleAuditActor::System`].
+fn system_audit_tenant(tenant_id: &str, actor_ref: &'static str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: actor_ref.to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// The audit action the store records for a change to `status`.
+fn lifecycle_status_audit_action(status: TraceCorpusStatus) -> StorageTraceAuditAction {
+    match status {
+        TraceCorpusStatus::Accepted
+        | TraceCorpusStatus::Quarantined
+        | TraceCorpusStatus::AwaitingPiiBackstop
+        | TraceCorpusStatus::Rejected => StorageTraceAuditAction::Review,
+        TraceCorpusStatus::Revoked => StorageTraceAuditAction::Revoke,
+        TraceCorpusStatus::Purged => StorageTraceAuditAction::Purge,
+        TraceCorpusStatus::Expired => StorageTraceAuditAction::Retain,
+    }
+}
+
+/// The `ReviewDecision` metadata of a lifecycle status change's DB row: the
+/// shape the store wrote for its own status rows.
+fn lifecycle_status_audit_metadata(
+    status: TraceCorpusStatus,
+    reason_label: Option<&str>,
+) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
+    let resulting_status = storage_corpus_status(status);
+    Ok(StorageTraceAuditSafeMetadata::ReviewDecision {
+        decision: serde_storage_string(&resulting_status)?,
+        resulting_status,
+        reason_code: reason_label.map(str::to_string),
+    })
+}
+
+/// Records a lifecycle status change as a file event mirrored to the DB, in
+/// place of the unhashed row the store would otherwise write for itself.
+/// `reason_label` is a fixed label, never caller text.
+async fn append_lifecycle_status_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    actor: LifecycleAuditActor,
+    submission_id: Uuid,
+    status: TraceCorpusStatus,
+    reason_label: &'static str,
+) -> anyhow::Result<()> {
+    let event = TraceCommonsAuditEvent::lifecycle_status_change(
+        tenant,
+        actor,
+        submission_id,
+        status,
+        reason_label,
+    );
+    append_audit_event_mirrored(
+        state,
+        tenant,
+        event,
+        AuditRowMirror {
+            action: lifecycle_status_audit_action(status),
+            metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
+            object_ref_id: None,
+            actor_role_label: match actor {
+                LifecycleAuditActor::Tenant => None,
+                LifecycleAuditActor::System => Some("system"),
+            },
+        },
+        "lifecycle status audit event",
+    )
+    .await
+    .context("failed to append trace lifecycle status audit")?;
+    Ok(())
+}
+
+/// Records a lifecycle path's counts as a hash-only `Maintenance`-shaped file
+/// event of `kind`, mirrored to the DB.
+async fn append_lifecycle_counts_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    kind: &'static str,
+    action: StorageTraceAuditAction,
+    purpose_hash: Option<String>,
+    action_counts: BTreeMap<String, u32>,
+) -> anyhow::Result<()> {
+    append_audit_event_mirrored(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::lifecycle_counts(
+            tenant,
+            submission_id,
+            kind,
+            purpose_hash.as_deref(),
+            &action_counts,
+        ),
+        AuditRowMirror {
+            action,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(kind.to_string()),
+                purpose_hash,
+                dry_run: false,
+                action_counts,
+            },
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+        "lifecycle counts audit event",
+    )
+    .await?;
     Ok(())
 }
 
@@ -61101,7 +62377,9 @@ async fn mirror_review_decision_to_db(
     db.append_trace_object_ref(object_ref)
         .await
         .context("failed to mirror reviewed trace object ref")?;
-    db.update_trace_submission_status(
+    // The review's audit row is the file log's `review_decision` event,
+    // mirrored by the caller; the store appends none of its own.
+    db.update_trace_submission_status_without_audit(
         &record.tenant_id,
         record.submission_id,
         storage_corpus_status(record.status),
@@ -61236,6 +62514,89 @@ fn process_evaluation_derived_id(
     )
 }
 
+/// Verified witness provenance labels for submissions of the auth-derived
+/// tenant (#1059), from the current-object read of whichever store holds the
+/// evidence: PostgreSQL when a database is configured (V76), otherwise the
+/// private file store.
+///
+/// Labels only. Exports, the reviewer trace list and credit events report
+/// them; nothing that gates, scores or prices a trace reads them (#1061,
+/// earned-trust decision 5). A submission the tenant does not hold has no
+/// entry.
+async fn witness_provenance_classes(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+) -> anyhow::Result<BTreeMap<Uuid, TraceWitnessProvenanceClass>> {
+    if let Some(db) = state.db_mirror.as_ref() {
+        let claims = db
+            .list_current_verified_witness_evidence(&tenant.tenant_id, submission_ids)
+            .await
+            .context("witness provenance read failed")?;
+        return Ok(claims
+            .iter()
+            .map(|(id, claim)| (*id, TraceWitnessProvenanceClass::from_claim(claim)))
+            .collect());
+    }
+    submission_ids
+        .iter()
+        .map(|id| {
+            let claim = file_witness::current_claim(state, tenant, *id)?;
+            Ok((*id, TraceWitnessProvenanceClass::from_claim(&claim)))
+        })
+        .collect()
+}
+
+/// Fill the provenance label of each `(submission, slot)` pair with one read.
+/// A submission the tenant does not hold is labelled `Unattested`: nothing
+/// supports a claim for it.
+async fn label_witness_provenance<'a>(
+    state: &AppState,
+    tenant: &TenantAuth,
+    slots: impl Iterator<Item = (Uuid, &'a mut Option<TraceWitnessProvenanceClass>)>,
+) -> anyhow::Result<()> {
+    let slots = slots.collect::<Vec<_>>();
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let ids = slots.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let classes = witness_provenance_classes(state, tenant, &ids).await?;
+    for (id, slot) in slots {
+        *slot = Some(
+            classes
+                .get(&id)
+                .copied()
+                .unwrap_or(TraceWitnessProvenanceClass::Unattested),
+        );
+    }
+    Ok(())
+}
+
+/// The label a credit event records. A credit is never refused or delayed for
+/// want of a label, so a failed read records nothing (`None`, "not recorded")
+/// and logs only a hash of the error.
+async fn credit_witness_provenance_class(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+) -> Option<TraceWitnessProvenanceClass> {
+    match witness_provenance_classes(state, tenant, &[submission_id]).await {
+        Ok(classes) => Some(
+            classes
+                .get(&submission_id)
+                .copied()
+                .unwrap_or(TraceWitnessProvenanceClass::Unattested),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                "Trace Commons credit event witness provenance label unavailable"
+            );
+            None
+        }
+    }
+}
+
 async fn mirror_credit_event_to_db(
     state: &AppState,
     event: &TraceCommonsCreditLedgerRecord,
@@ -61272,6 +62633,7 @@ async fn mirror_credit_event_to_db_with_settlement_state(
         actor_principal_ref: event.actor_principal_ref.clone(),
         actor_role: event.actor_role.storage_name().to_string(),
         settlement_state,
+        witness_provenance_class: event.witness_provenance_class,
     })
     .await
     .context("failed to mirror trace credit ledger event")
@@ -61731,8 +63093,7 @@ fn write_submission_record(
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
     ensure_submission_record_tenant(record, &record.tenant_id)?;
-    let path = submission_metadata_path(root, &record.tenant_id, record.submission_id);
-    write_json_file(&path, record, "trace contribution metadata")
+    file_witness::write_record(root, record)
 }
 
 fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
@@ -64532,7 +65893,27 @@ fn read_revocation(
     Ok(Some(revocation))
 }
 
-fn append_audit_event(
+/// The per-tenant audit append lock. Every production audit append holds it
+/// from computing the event's chain fields until the event is in the file log
+/// and, when mirrored, in the DB: one order decides the chain in both logs.
+fn audit_append_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(audit_events_path(root, tenant_id))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Sets `event`'s chain fields from the file log's latest event. The caller
+/// holds [`audit_append_lock`], so the file's latest event is still the
+/// latest when [`write_chained_audit_event`] appends this one.
+fn chain_audit_event(
     root: &Path,
     tenant_id: &str,
     mut event: TraceCommonsAuditEvent,
@@ -64544,6 +65925,31 @@ fn append_audit_event(
     event.previous_event_hash = Some(previous_event_hash.clone());
     event.event_hash = None;
     event.event_hash = Some(compute_audit_event_hash(&previous_event_hash, &event)?);
+    Ok(event)
+}
+
+/// Appends an event [`chain_audit_event`] chained, verbatim. It refuses when
+/// the file's latest event is no longer the one the event chains from, so a
+/// writer outside the lock cannot fork the file chain.
+fn write_chained_audit_event(
+    root: &Path,
+    tenant_id: &str,
+    event: &TraceCommonsAuditEvent,
+) -> anyhow::Result<()> {
+    ensure_audit_event_tenant(event, tenant_id)?;
+    let path = audit_events_path(root, tenant_id);
+    let latest = latest_audit_event_hash(&path, tenant_id)?
+        .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
+    anyhow::ensure!(
+        event.previous_event_hash.as_deref() == Some(latest.as_str()) && event.event_hash.is_some(),
+        "audit event {} does not chain from the file log's latest event",
+        event.event_id
+    );
+    #[cfg(test)]
+    anyhow::ensure!(
+        !audit_file_append_fault::take(&path),
+        "injected audit file append failure"
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create audit dir {}", parent.display()))?;
@@ -64553,9 +65959,382 @@ fn append_audit_event(
         .append(true)
         .open(&path)
         .with_context(|| format!("failed to open audit log {}", path.display()))?;
-    let line = serde_json::to_string(&event).context("failed to serialize audit event")?;
+    let line = serde_json::to_string(event).context("failed to serialize audit event")?;
     writeln!(file, "{line}")
         .with_context(|| format!("failed to append audit log {}", path.display()))?;
+    Ok(())
+}
+
+/// Test fault injection: fail the next file audit append for one tenant's
+/// log, after its chain fields are computed and (in required-mirror mode) its
+/// DB row is committed -- the partial failure the audit-chain repair exists
+/// for.
+#[cfg(test)]
+mod audit_file_append_fault {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn armed() -> &'static Mutex<HashSet<PathBuf>> {
+        static ARMED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        ARMED.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    pub(super) fn arm(path: PathBuf) {
+        armed()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path);
+    }
+
+    pub(super) fn take(path: &Path) -> bool {
+        armed()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(path)
+    }
+}
+
+#[cfg(test)]
+fn fail_next_audit_file_append(root: &Path, tenant_id: &str) {
+    audit_file_append_fault::arm(audit_events_path(root, tenant_id));
+}
+
+/// Plans an audit-chain repair: the hashed DB rows past the file log's
+/// latest event, rebuilt as the file lines they stand for.
+///
+/// With `require_db_mirror_writes` the DB row is written before the file
+/// line, with the same precomputed chain fields, and carries the file event
+/// as its `canonical_event_json`. A file append that fails after the DB
+/// commit therefore leaves the DB one event ahead, and every later append
+/// for the tenant is refused as stale. This plans the lines that restore it.
+///
+/// The plan is only ever a DB-ahead tail. The file's head must be a hashed
+/// DB row (or genesis, for an empty file), and every row after it must carry
+/// its payload, chain from the row before, and reproduce its own
+/// `event_hash` both from the stored payload and from the line that will be
+/// written. Anything else -- a fork, a file ahead of the DB, a tampered or
+/// bare row -- is refused with a safe label, and nothing is restored.
+/// Unhashed rows (store rows and legacy rows) are outside the chain and are
+/// skipped, as the chain verifier skips them.
+fn plan_audit_chain_repair(
+    file_events: &[TraceCommonsAuditEvent],
+    db_rows: &[StorageTraceAuditEventRecord],
+) -> Result<Vec<TraceCommonsAuditEvent>, &'static str> {
+    let file_head = file_events
+        .last()
+        .and_then(|event| event.event_hash.clone())
+        .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
+    let hashed = db_rows
+        .iter()
+        .filter(|row| row.event_hash.is_some())
+        .collect::<Vec<_>>();
+    let start = if file_head == TRACE_AUDIT_EVENT_GENESIS_HASH {
+        0
+    } else {
+        hashed
+            .iter()
+            .position(|row| row.event_hash.as_deref() == Some(file_head.as_str()))
+            .ok_or("file_head_not_in_db")?
+            + 1
+    };
+    let file_event_ids = file_events
+        .iter()
+        .map(|event| event.event_id)
+        .collect::<BTreeSet<_>>();
+    let mut expected_previous = file_head;
+    let mut plan = Vec::new();
+    for row in &hashed[start..] {
+        let event_hash = row.event_hash.as_deref().ok_or("db_row_unhashed")?;
+        let payload = row
+            .canonical_event_json
+            .as_deref()
+            .ok_or("db_row_missing_canonical_payload")?;
+        if row.previous_event_hash.as_deref() != Some(expected_previous.as_str()) {
+            return Err("db_row_chain_mismatch");
+        }
+        if compute_audit_event_hash_from_canonical(&expected_previous, payload) != event_hash {
+            return Err("db_row_hash_mismatch");
+        }
+        let mut event: TraceCommonsAuditEvent =
+            serde_json::from_str(payload).map_err(|_| "db_row_payload_unreadable")?;
+        if event.event_id != row.audit_event_id
+            || event.tenant_id != row.tenant_id
+            || event.previous_event_hash.as_deref() != Some(expected_previous.as_str())
+            || event.event_hash.is_some()
+        {
+            return Err("db_row_payload_mismatch");
+        }
+        // The line written must re-derive the same hash, or the file chain's
+        // own verification would reject what the repair restored.
+        if compute_audit_event_hash(&expected_previous, &event)
+            .map_err(|_| "db_row_payload_unreadable")?
+            != event_hash
+        {
+            return Err("db_row_payload_not_canonical");
+        }
+        if file_event_ids.contains(&event.event_id) {
+            return Err("db_row_already_in_file");
+        }
+        event.event_hash = Some(event_hash.to_string());
+        expected_previous = event_hash.to_string();
+        plan.push(event);
+    }
+    Ok(plan)
+}
+
+fn default_audit_chain_repair_dry_run() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceAuditChainRepairRequest {
+    #[serde(default)]
+    purpose: Option<String>,
+    /// Defaults to true: a repair writes only when asked to.
+    #[serde(default = "default_audit_chain_repair_dry_run")]
+    dry_run: bool,
+}
+
+/// Hash-only: counts, the purpose's hash, and the ids of the audit events
+/// restored (random event ids, not contributor or submission identity).
+#[derive(Debug, Serialize)]
+struct TraceAuditChainRepairResponse {
+    tenant_storage_ref: String,
+    generated_at: DateTime<Utc>,
+    purpose_hash: String,
+    dry_run: bool,
+    /// `clean` when the file log already holds every hashed DB row;
+    /// `db_ahead_of_file` when it lacks a verifiable tail of them.
+    divergence: &'static str,
+    file_events_restorable: usize,
+    file_events_restored: usize,
+    restored_event_ids: Vec<Uuid>,
+    /// The repair's own audit event; absent for a dry run.
+    repair_audit_event_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct TraceAuditChainRepairRequiresDbMirror;
+
+impl std::fmt::Display for TraceAuditChainRepairRequiresDbMirror {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons audit chain repair requires TRACE_COMMONS_DB_DUAL_WRITE"
+        )
+    }
+}
+
+impl std::error::Error for TraceAuditChainRepairRequiresDbMirror {}
+
+/// A divergence the repair will not touch, by safe label.
+#[derive(Debug)]
+struct TraceAuditChainRepairRefused(&'static str);
+
+impl std::fmt::Display for TraceAuditChainRepairRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Trace Commons audit chain repair refused: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for TraceAuditChainRepairRefused {}
+
+async fn audit_chain_repair_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<TraceAuditChainRepairRequest>,
+) -> ApiResult<Json<TraceAuditChainRepairResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let response = run_audit_chain_repair(state.as_ref(), tenant.auth(), request)
+        .await
+        .map_err(maintenance_error)?;
+    Ok(Json(response))
+}
+
+/// Restores the file lines a required-mirror append committed to the DB but
+/// failed to write, for the caller's tenant. Holds the tenant's audit append
+/// lock while it compares and writes, so no append interleaves. Idempotent: a
+/// second run finds nothing to restore. A non-dry run is itself audited, as a
+/// hash-only `audit_chain_repair` event appended after the chain is whole.
+async fn run_audit_chain_repair(
+    state: &AppState,
+    tenant: &TenantAuth,
+    request: TraceAuditChainRepairRequest,
+) -> anyhow::Result<TraceAuditChainRepairResponse> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or(TraceAuditChainRepairRequiresDbMirror)?;
+    let purpose = request
+        .purpose
+        .as_deref()
+        .map(str::trim)
+        .filter(|purpose| !purpose.is_empty())
+        .unwrap_or("trace_commons_audit_chain_repair");
+    let purpose_hash = sha256_prefixed(purpose);
+
+    let (restorable, restored_event_ids) = {
+        let lock = audit_append_lock(&state.root, &tenant.tenant_id);
+        let _guard = lock.lock().await;
+        let file_events = read_all_audit_events(&state.root, &tenant.tenant_id)?;
+        let db_rows = db
+            .list_trace_audit_events(&tenant.tenant_id)
+            .await
+            .context("failed to list DB audit rows for audit chain repair")?;
+        let plan = plan_audit_chain_repair(&file_events, &db_rows).map_err(|label| {
+            tracing::warn!(
+                refusal = label,
+                "Trace Commons audit chain repair refused a divergence it cannot restore"
+            );
+            anyhow::Error::new(TraceAuditChainRepairRefused(label))
+        })?;
+        let mut restored = Vec::new();
+        if !request.dry_run {
+            for event in &plan {
+                write_chained_audit_event(&state.root, &tenant.tenant_id, event)?;
+                restored.push(event.event_id);
+            }
+        }
+        (plan.len(), restored)
+    };
+
+    let repair_audit_event_id = if request.dry_run {
+        None
+    } else {
+        let mut action_counts = BTreeMap::new();
+        action_counts.insert(
+            "file_events_restorable".to_string(),
+            restorable.min(u32::MAX as usize) as u32,
+        );
+        action_counts.insert(
+            "file_events_restored".to_string(),
+            restored_event_ids.len().min(u32::MAX as usize) as u32,
+        );
+        let event = append_audit_event_mirrored(
+            state,
+            tenant,
+            TraceCommonsAuditEvent::lifecycle_counts(
+                tenant,
+                Uuid::nil(),
+                AUDIT_CHAIN_REPAIR_AUDIT_KIND,
+                Some(&purpose_hash),
+                &action_counts,
+            ),
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Retain,
+                metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                    surface: Some(AUDIT_CHAIN_REPAIR_AUDIT_KIND.to_string()),
+                    purpose_hash: Some(purpose_hash.clone()),
+                    dry_run: false,
+                    action_counts,
+                },
+                object_ref_id: None,
+                actor_role_label: None,
+            },
+            "audit chain repair audit event",
+        )
+        .await?;
+        Some(event.event_id)
+    };
+
+    Ok(TraceAuditChainRepairResponse {
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        generated_at: Utc::now(),
+        purpose_hash,
+        dry_run: request.dry_run,
+        divergence: if restorable == 0 {
+            "clean"
+        } else {
+            "db_ahead_of_file"
+        },
+        file_events_restorable: restorable,
+        file_events_restored: restored_event_ids.len(),
+        restored_event_ids,
+        repair_audit_event_id,
+    })
+}
+
+/// Chains and appends a file-only event: for a deployment without a DB
+/// mirror, and for tests. Production paths go through
+/// [`append_audit_event_mirrored`], which holds the append lock.
+#[cfg(test)]
+fn append_audit_event(
+    root: &Path,
+    tenant_id: &str,
+    event: TraceCommonsAuditEvent,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let event = chain_audit_event(root, tenant_id, event)?;
+    write_chained_audit_event(root, tenant_id, &event)?;
+    Ok(event)
+}
+
+/// The DB row an audit event is mirrored as.
+struct AuditRowMirror {
+    action: StorageTraceAuditAction,
+    metadata: StorageTraceAuditSafeMetadata,
+    object_ref_id: Option<Uuid>,
+    /// The row's `actor_role` when the event names no role and the actor is
+    /// not the tenant credential: an in-process driver, recorded as `system`.
+    actor_role_label: Option<&'static str>,
+}
+
+/// Appends `event` to the file audit log and mirrors it to the DB, with its
+/// chain fields computed once, under [`audit_append_lock`], and carried by
+/// both: the file log is canonical and the DB row is an exact mirror of it.
+///
+/// With `require_db_mirror_writes` the DB row is written first and a DB
+/// failure leaves the file untouched; otherwise the file is appended first
+/// and a mirror failure follows `enforce_db_mirror_write_result`. Either way
+/// the lock is held until both are written, so the DB's stale-previous-hash
+/// check and the file chain see the same order.
+async fn append_audit_event_mirrored(
+    state: &AppState,
+    tenant: &TenantAuth,
+    mut event: TraceCommonsAuditEvent,
+    row: AuditRowMirror,
+    label: &'static str,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let lock = audit_append_lock(&state.root, &tenant.tenant_id);
+    let _guard = lock.lock().await;
+    // Stamped under the lock, so the log's time order is its chain order:
+    // readers sort by `created_at`, and an event built before a concurrent
+    // one could otherwise sort ahead of the event it chains from.
+    event.created_at = Utc::now().max(latest_audit_event_created_at(
+        &audit_events_path(&state.root, &tenant.tenant_id),
+        &tenant.tenant_id,
+    )?);
+    let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
+    if state.require_db_mirror_writes {
+        let mirror_result = mirror_audit_event_row_to_db(state, tenant, &event, row).await;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                event_id = %event.event_id,
+                "Trace Commons DB dual-write audit mirror failed"
+            );
+        }
+        enforce_db_mirror_write_result(state, label, mirror_result)?;
+        write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
+        return Ok(event);
+    }
+
+    write_chained_audit_event(&state.root, &tenant.tenant_id, &event)?;
+    let mirror_result = mirror_audit_event_row_to_db(state, tenant, &event, row).await;
+    if let Err(error) = &mirror_result {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(error),
+            event_id = %event.event_id,
+            "Trace Commons DB dual-write audit mirror failed"
+        );
+    }
+    enforce_db_mirror_write_result(state, label, mirror_result)?;
+    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
     Ok(event)
 }
 
@@ -64575,6 +66354,19 @@ fn is_audit_chain_previous_hash(value: &str) -> bool {
 }
 
 fn latest_audit_event_hash(path: &Path, tenant_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(latest_audit_event(path, tenant_id)?.and_then(|event| event.event_hash))
+}
+
+fn latest_audit_event_created_at(path: &Path, tenant_id: &str) -> anyhow::Result<DateTime<Utc>> {
+    Ok(latest_audit_event(path, tenant_id)?
+        .map(|event| event.created_at)
+        .unwrap_or(DateTime::<Utc>::MIN_UTC))
+}
+
+fn latest_audit_event(
+    path: &Path,
+    tenant_id: &str,
+) -> anyhow::Result<Option<TraceCommonsAuditEvent>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -64595,7 +66387,7 @@ fn latest_audit_event_hash(path: &Path, tenant_id: &str) -> anyhow::Result<Optio
         )
     })?;
     ensure_audit_event_tenant(&event, tenant_id)?;
-    Ok(event.event_hash)
+    Ok(Some(event))
 }
 
 fn compute_audit_event_hash(
@@ -64635,31 +66427,19 @@ async fn append_audit_event_with_db_mirror(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<()> {
-    if state.require_db_mirror_writes {
-        let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_display_error_hash(error),
-                event_id = %event.event_id,
-                "Trace Commons DB dual-write audit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
-        append_audit_event(&state.root, &tenant.tenant_id, event)?;
-        return Ok(());
-    }
-
-    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
-    let mirror_result = mirror_audit_event_to_db(state, tenant, &event, action, metadata).await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            event_id = %event.event_id,
-            "Trace Commons DB dual-write audit mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "audit event", mirror_result)?;
-    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
+    append_audit_event_mirrored(
+        state,
+        tenant,
+        event,
+        AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+        "audit event",
+    )
+    .await?;
     Ok(())
 }
 
@@ -64671,9 +66451,8 @@ async fn verify_mirrored_audit_event_after_file_append(
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
-    // Verification only applies when the file append already produced a
-    // canonical hash. The require_db_mirror_writes=true branch writes DB
-    // before file, so event.event_hash may be None there; skip in that case.
+    // Every appended event carries a canonical hash; an event without one was
+    // never chained and has nothing to verify.
     if event.event_hash.is_none() {
         return Ok(());
     }
@@ -64781,47 +66560,19 @@ async fn append_single_trace_content_read_audit_row(
 ) -> anyhow::Result<()> {
     let event = TraceCommonsAuditEvent::trace_content_read(tenant, submission_id, surface, purpose);
     let metadata = trace_content_read_audit_metadata(surface, purpose);
-    if state.require_db_mirror_writes {
-        let mirror_result = mirror_audit_event_to_db_with_object_ref(
-            state,
-            tenant,
-            &event,
-            StorageTraceAuditAction::Read,
-            metadata,
-            object_ref_id,
-        )
-        .await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_display_error_hash(error),
-                event_id = %event.event_id,
-                "Trace Commons DB dual-write audit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
-        append_audit_event(&state.root, &tenant.tenant_id, event)?;
-        return Ok(());
-    }
-
-    let event = append_audit_event(&state.root, &tenant.tenant_id, event)?;
-    let mirror_result = mirror_audit_event_to_db_with_object_ref(
+    append_audit_event_mirrored(
         state,
         tenant,
-        &event,
-        StorageTraceAuditAction::Read,
-        metadata,
-        object_ref_id,
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Read,
+            metadata,
+            object_ref_id,
+            actor_role_label: None,
+        },
+        "trace content read audit event",
     )
-    .await;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            event_id = %event.event_id,
-            "Trace Commons DB dual-write audit mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "trace content read audit event", mirror_result)?;
-    verify_mirrored_audit_event_after_file_append(state, tenant, &event).await?;
+    .await?;
     Ok(())
 }
 
@@ -64913,20 +66664,35 @@ async fn mirror_audit_event_to_db(
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<()> {
-    mirror_audit_event_to_db_with_object_ref(state, tenant, event, action, metadata, None).await
+    mirror_audit_event_row_to_db(
+        state,
+        tenant,
+        event,
+        AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+        },
+    )
+    .await
 }
 
-async fn mirror_audit_event_to_db_with_object_ref(
+async fn mirror_audit_event_row_to_db(
     state: &AppState,
     tenant: &TenantAuth,
     event: &TraceCommonsAuditEvent,
-    action: StorageTraceAuditAction,
-    metadata: StorageTraceAuditSafeMetadata,
-    object_ref_id: Option<Uuid>,
+    row: AuditRowMirror,
 ) -> anyhow::Result<()> {
     let Some(db) = state.db_mirror.as_ref() else {
         return Ok(());
     };
+    let AuditRowMirror {
+        action,
+        metadata,
+        object_ref_id,
+        actor_role_label,
+    } = row;
     let metadata = normalize_audit_event_metadata(event, action, metadata)?;
     let canonical_event_json = event
         .previous_event_hash
@@ -64940,11 +66706,11 @@ async fn mirror_audit_event_to_db_with_object_ref(
             .actor_principal_ref
             .clone()
             .unwrap_or_else(|| tenant.principal_ref.clone()),
-        actor_role: event
-            .actor_role
-            .unwrap_or(tenant.role)
-            .storage_name()
-            .to_string(),
+        actor_role: match (event.actor_role, actor_role_label) {
+            (Some(role), _) => role.storage_name().to_string(),
+            (None, Some(label)) => label.to_string(),
+            (None, None) => tenant.role.storage_name().to_string(),
+        },
         action,
         reason: event.reason.clone(),
         request_id: None,
@@ -66145,7 +67911,7 @@ async fn run_maintenance(
     Ok(TraceMaintenanceResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         audit_event_id,
         revoked_submission_count: revoked_submission_ids.len(),
@@ -66250,7 +68016,8 @@ async fn verify_audit_chain(
 ) -> anyhow::Result<TraceAuditChainReport> {
     let mut report = verify_file_audit_chain(&state.root, tenant_id)?;
     if let Some(db) = state.db_mirror.as_ref() {
-        report.db_mirror = Some(verify_db_audit_chain(db.as_ref(), tenant_id).await?);
+        let file_events = read_all_audit_events(&state.root, tenant_id)?;
+        report.db_mirror = Some(verify_db_audit_chain(db.as_ref(), tenant_id, &file_events).await?);
     }
     Ok(report)
 }
@@ -66327,25 +68094,34 @@ fn verify_file_audit_chain(root: &Path, tenant_id: &str) -> anyhow::Result<Trace
 async fn verify_db_audit_chain(
     db: &dyn Database,
     tenant_id: &str,
+    file_events: &[TraceCommonsAuditEvent],
 ) -> anyhow::Result<TraceDbAuditChainReport> {
     let events = db
         .list_trace_audit_events(tenant_id)
         .await
         .context("failed to list DB audit events for hash-chain verification")?;
-    verify_db_audit_chain_records(&events)
+    verify_db_audit_chain_records(&events, file_events)
 }
 
+/// Verifies the DB audit hash chain under the rule
+/// [`collect_db_audit_hash_chain_failures`] applies: the chain is the hashed
+/// rows in order, it starts where [`DbAuditChainFileAnchors`] allows, and an
+/// unhashed row neither breaks nor restarts it.
 fn verify_db_audit_chain_records(
     events: &[StorageTraceAuditEventRecord],
+    file_events: &[TraceCommonsAuditEvent],
 ) -> anyhow::Result<TraceDbAuditChainReport> {
+    let anchors = DbAuditChainFileAnchors::new(file_events);
     let mut report = TraceDbAuditChainReport::default();
-    let mut expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+    let mut expected_previous_hash: Option<String> = None;
     for (index, event) in events.iter().enumerate() {
         let row_number = index + 1;
         report.event_count += 1;
         let Some(event_hash) = event.event_hash.as_deref() else {
             report.legacy_event_count += 1;
-            expected_previous_hash = TRACE_AUDIT_EVENT_GENESIS_HASH.to_string();
+            if expected_previous_hash.is_none() {
+                report.legacy_prefix_event_count += 1;
+            }
             continue;
         };
         if !is_canonical_sha256_prefixed_hash(event_hash) {
@@ -66364,7 +68140,12 @@ fn verify_db_audit_chain_records(
                 event.audit_event_id
             ));
         }
-        if previous_event_hash != expected_previous_hash {
+        if !anchors.chains(
+            expected_previous_hash.as_deref(),
+            event,
+            previous_event_hash,
+            event_hash,
+        ) {
             report.failures.push(format!(
                 "db row {row_number} event {}: previous_event_hash mismatch",
                 event.audit_event_id
@@ -66391,7 +68172,7 @@ fn verify_db_audit_chain_records(
         } else {
             report.payload_unverified_event_count += 1;
         }
-        expected_previous_hash = event_hash.to_string();
+        expected_previous_hash = Some(event_hash.to_string());
         report.last_event_hash = Some(event_hash.to_string());
     }
     report.mismatch_count = report.failures.len();
@@ -66421,7 +68202,27 @@ fn verify_db_audit_projection(
             "db row {row_number} event {event_ref}: canonical submission_id mismatch"
         ));
     }
-    if canonical_event.kind != storage_audit_canonical_kind(event) {
+    let projected_kind = storage_audit_canonical_kind(event);
+    // A quarantine remediation re-POST, an operator re-scrub, and an
+    // idempotent retry are mirrored as `Submit` rows, the same row shape as a
+    // first landing; their file events, the canonical payload, keep their own
+    // kinds.
+    let submit_family_row = event.action == StorageTraceAuditAction::Submit
+        && projected_kind == "submitted"
+        && SUBMIT_FAMILY_AUDIT_KINDS.contains(&canonical_event.kind.as_str());
+    // A lifecycle status change is mirrored as the store's own status row --
+    // the status's action and `ReviewDecision` metadata -- which projects to
+    // that action's kind.
+    let lifecycle_status_row = canonical_event.kind == LIFECYCLE_STATUS_CHANGE_AUDIT_KIND
+        && canonical_event.status.is_some_and(|status| {
+            event.action == lifecycle_status_audit_action(status)
+                && matches!(
+                    &event.metadata,
+                    StorageTraceAuditSafeMetadata::ReviewDecision { resulting_status, .. }
+                        if *resulting_status == storage_corpus_status(status)
+                )
+        });
+    if canonical_event.kind != projected_kind && !submit_family_row && !lifecycle_status_row {
         report.failures.push(format!(
             "db row {row_number} event {event_ref}: canonical kind/action mismatch"
         ));
@@ -66786,7 +68587,8 @@ async fn backfill_db_mirror_from_files(
             record,
             derived_record,
             &envelope,
-            false,
+            None,
+            SubmissionMirrorKind::Backfill,
         )
         .await
         {
@@ -67315,7 +69117,10 @@ fn audit_backfill_storage_projection(
     event: &TraceCommonsAuditEvent,
 ) -> (StorageTraceAuditAction, StorageTraceAuditSafeMetadata) {
     let action = match event.kind.as_str() {
-        "submitted" => StorageTraceAuditAction::Submit,
+        "submitted"
+        | "quarantine_remediated"
+        | "quarantine_operator_rescrub"
+        | "idempotent_submit" => StorageTraceAuditAction::Submit,
         "read" | "trace_content_read" => StorageTraceAuditAction::Read,
         "review_decision" | "review_lease" => StorageTraceAuditAction::Review,
         "credit_mutate"
@@ -67324,7 +69129,17 @@ fn audit_backfill_storage_projection(
         | "credit_hold_release"
         | "near_credit_outbox_status" => StorageTraceAuditAction::CreditMutate,
         "benchmark_registry_outbox_status" => StorageTraceAuditAction::BenchmarkConvert,
-        "revoked" | "revocation_propagation" => StorageTraceAuditAction::Revoke,
+        "revoked" | "revocation_propagation" | REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND => {
+            StorageTraceAuditAction::Revoke
+        }
+        LIFECYCLE_STATUS_CHANGE_AUDIT_KIND => event
+            .status
+            .map(lifecycle_status_audit_action)
+            .unwrap_or(StorageTraceAuditAction::Review),
+        RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND | AUDIT_CHAIN_REPAIR_AUDIT_KIND => {
+            StorageTraceAuditAction::Retain
+        }
+        RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND => StorageTraceAuditAction::Purge,
         "dataset_export" | "ranker_training_candidates_export" | "ranker_training_pairs_export" => {
             StorageTraceAuditAction::Export
         }
@@ -67350,7 +69165,7 @@ fn audit_backfill_storage_projection(
         _ => StorageTraceAuditAction::Read,
     };
     let metadata = match event.kind.as_str() {
-        "submitted" => event
+        "submitted" | "quarantine_remediated" | "quarantine_operator_rescrub" => event
             .status
             .map(|status| StorageTraceAuditSafeMetadata::Submission {
                 status: storage_corpus_status(status),
@@ -67444,10 +69259,20 @@ fn audit_backfill_storage_projection(
         | "benchmark_registry_outbox_submit"
         | "benchmark_registry_outbox_confirm"
         | "revocation_propagation"
+        | REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | RETENTION_EXPIRED_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
+        | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
         }
+        LIFECYCLE_STATUS_CHANGE_AUDIT_KIND => event
+            .status
+            .and_then(|status| {
+                lifecycle_status_audit_metadata(status, event.reason.as_deref()).ok()
+            })
+            .unwrap_or(StorageTraceAuditSafeMetadata::Empty),
         _ => StorageTraceAuditSafeMetadata::Empty,
     };
     (action, metadata)
@@ -67458,8 +69283,10 @@ fn audit_backfill_storage_projection_for_records(
     records_by_submission: &BTreeMap<Uuid, &TraceCommonsSubmissionRecord>,
 ) -> (StorageTraceAuditAction, StorageTraceAuditSafeMetadata) {
     let (action, metadata) = audit_backfill_storage_projection(event);
-    if event.kind == "submitted"
-        && let Some(record) = records_by_submission.get(&event.submission_id)
+    if matches!(
+        event.kind.as_str(),
+        "submitted" | "quarantine_remediated" | "quarantine_operator_rescrub"
+    ) && let Some(record) = records_by_submission.get(&event.submission_id)
     {
         return (
             action,
@@ -67706,7 +69533,7 @@ async fn run_vector_index_worker(
     Ok(TraceVectorIndexResponse {
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-        purpose,
+        purpose_hash: sha256_prefixed(&purpose),
         dry_run: request.dry_run,
         audit_event_id,
         checked_count: report.checked_count,
@@ -68672,15 +70499,22 @@ async fn reconcile_db_mirror(
         .filter(|event| event.canonical_event_json.is_some())
         .map(|event| event.audit_event_id)
         .collect::<BTreeSet<_>>();
+    // Submit rows mirrored before the DB row took the file event's id stay (the
+    // table is insert-only). Each is counted as legacy, with its submission's
+    // file `submitted` event, and neither is reported as drift.
+    let legacy_submit_audit = legacy_submit_audit_rows(&file_audit_events, &db_audit_events);
     let missing_audit_event_ids_in_db = file_audit_event_ids
         .difference(&db_audit_event_ids)
+        .filter(|event_id| !legacy_submit_audit.file_event_ids.contains(event_id))
         .copied()
         .collect::<Vec<_>>();
     let missing_audit_event_ids_in_files = db_file_projected_audit_event_ids
         .difference(&file_audit_event_ids)
         .copied()
         .collect::<Vec<_>>();
-    let db_audit_hash_chain_failures = collect_db_audit_hash_chain_failures(&db_audit_events);
+    let db_audit_hash_chain_failures =
+        collect_db_audit_hash_chain_failures(&db_audit_events, &file_audit_events);
+    let db_audit_legacy_prefix_row_count = db_audit_legacy_prefix_row_count(&db_audit_events);
     let db_audit_canonical_projection_failures =
         collect_db_audit_canonical_projection_failures(&db_audit_events);
     let mut db_object_ref_count = 0usize;
@@ -68905,7 +70739,7 @@ async fn reconcile_db_mirror(
         &tenant.tenant_id,
         TRACE_DB_AUDIT_RECONCILIATION_SAMPLE_LIMIT,
     )?;
-    let file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
+    let mut file_audit_sample_projection = audit_event_reader_projection(&file_audit_sample);
     let mut audit_reader_sample_failures = Vec::new();
     let audit_reader_sample_parity_ok = match db
         .list_recent_trace_audit_events(
@@ -68916,8 +70750,15 @@ async fn reconcile_db_mirror(
     {
         Ok(db_sample) => {
             let db_sample_row_count = db_sample.len();
-            let (db_audit_sample_projection, db_projection_error_hashes) =
+            let legacy_event_ids = db_sample
+                .iter()
+                .filter(|row| row.event_hash.is_none())
+                .map(|row| row.audit_event_id)
+                .collect::<BTreeSet<_>>();
+            let (mut db_audit_sample_projection, db_projection_error_hashes) =
                 storage_audit_event_reader_projection(&tenant.tenant_id, db_sample);
+            clear_legacy_audit_chain_fields(&mut file_audit_sample_projection, &legacy_event_ids);
+            clear_legacy_audit_chain_fields(&mut db_audit_sample_projection, &legacy_event_ids);
             if !db_projection_error_hashes.is_empty() {
                 audit_reader_sample_failures.push(format!(
                     "file_sample={} db_sample={} db_projection_error_hashes={}",
@@ -69138,6 +70979,8 @@ async fn reconcile_db_mirror(
         db_audit_event_count: db_audit_events.len(),
         missing_audit_event_ids_in_db,
         missing_audit_event_ids_in_files,
+        legacy_submit_audit_row_count: legacy_submit_audit.db_row_ids.len(),
+        db_audit_legacy_prefix_row_count,
         db_audit_hash_chain_failures,
         db_audit_canonical_projection_failures,
         db_audit_submission_metadata_mismatches,
@@ -69775,6 +71618,8 @@ type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<i64>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -69782,6 +71627,21 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         status,
         Json(ApiError {
             error: message.into(),
+            retry_after_seconds: None,
+        }),
+    )
+}
+
+fn api_error_with_retry(
+    status: StatusCode,
+    message: impl Into<String>,
+    retry_after_seconds: Option<i64>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: message.into(),
+            retry_after_seconds,
         }),
     )
 }
@@ -69798,6 +71658,12 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     }
     if let Some(error) = error.downcast_ref::<TracePostgresRlsDiagnosticsUnavailable>() {
         return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceAuditChainRepairRequiresDbMirror>() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<TraceAuditChainRepairRefused>() {
+        return api_error(StatusCode::CONFLICT, error.to_string());
     }
     internal_error(error)
 }
@@ -69904,6 +71770,9 @@ impl TraceCorpusStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceCommonsSubmissionRecord {
+    /// Private original source proof, never part of an envelope or receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_evidence: Option<file_witness::Evidence>,
     tenant_id: String,
     tenant_storage_ref: String,
     #[serde(default = "legacy_principal_ref")]
@@ -70044,6 +71913,12 @@ struct TraceCommonsCreditLedgerRecord {
     actor_role: TokenRole,
     actor_principal_ref: String,
     created_at: DateTime<Utc>,
+    /// Witness provenance of the credited trace when the event was written: a
+    /// label for later analysis that never changes `credit_points_delta`
+    /// (#1059). `None` means not recorded (older events, or the read failed).
+    /// Stripped from the contributor's own credit-events view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70072,6 +71947,10 @@ struct TraceCommonsTraceListItem {
     duplicate_score: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     novelty_score: Option<f32>,
+    /// Verified witness provenance label (#1059). Filled only by the reviewer
+    /// trace list; the account views that share this item leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 impl TraceCommonsTraceListItem {
@@ -70104,6 +71983,7 @@ impl TraceCommonsTraceListItem {
                 .unwrap_or_default(),
             duplicate_score: derived.map(|record| record.duplicate_score),
             novelty_score: derived.map(|record| record.novelty_score),
+            witness_provenance_class: None,
         }
     }
 }
@@ -70813,6 +72693,11 @@ struct TraceReplayDatasetItem {
     canonical_summary: Option<String>,
     coverage_tags: Vec<String>,
     submission_score: f32,
+    /// Verified witness provenance label (#1059), hash-free and label-only.
+    /// Always present on an export; absent only on items rebuilt internally
+    /// for a manifest backfill, which are never served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
     #[serde(skip)]
     source_status_at_export: TraceCorpusStatus,
     #[serde(skip)]
@@ -70848,6 +72733,7 @@ impl TraceReplayDatasetItem {
                 .map(|record| record.coverage_tags.clone())
                 .unwrap_or_default(),
             submission_score: record.submission_score,
+            witness_provenance_class: None,
             source_status_at_export: record.status,
             source_hash_at_export,
             object_ref_id,
@@ -71228,6 +73114,11 @@ struct TraceBenchmarkCandidate {
     duplicate_score: f32,
     submission_score: f32,
     consent_scopes: Vec<ConsentScope>,
+    /// Verified witness provenance label (#1059). Additive within
+    /// `benchmark_conversion.v1`: artifacts written before it read back as
+    /// `None` and serialize without the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 impl TraceBenchmarkCandidate {
@@ -71254,6 +73145,7 @@ impl TraceBenchmarkCandidate {
             duplicate_score: derived.duplicate_score,
             submission_score: submission.submission_score,
             consent_scopes: submission.consent_scopes.clone(),
+            witness_provenance_class: None,
         }
     }
 }
@@ -71491,6 +73383,10 @@ struct TraceRankerTrainingCandidate {
     novelty_score: f32,
     duplicate_score: f32,
     received_at: DateTime<Utc>,
+    /// Verified witness provenance label (#1059), also carried by each side of
+    /// a training pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness_provenance_class: Option<TraceWitnessProvenanceClass>,
 }
 
 impl TraceRankerTrainingCandidate {
@@ -71525,6 +73421,7 @@ impl TraceRankerTrainingCandidate {
             novelty_score: derived.novelty_score,
             duplicate_score: derived.duplicate_score,
             received_at: submission.received_at,
+            witness_provenance_class: None,
         }
     }
 }
@@ -71784,7 +73681,9 @@ struct TraceExportCachePruneMarker {
 struct TraceMaintenanceResponse {
     tenant_id: String,
     tenant_storage_ref: String,
-    purpose: String,
+    /// Hash of the operator's free-text purpose, as recorded in evidence.
+    /// The text itself is never echoed (hash-only convention).
+    purpose_hash: String,
     dry_run: bool,
     audit_event_id: Uuid,
     revoked_submission_count: usize,
@@ -71828,6 +73727,10 @@ struct TraceDbAuditChainReport {
     verified: bool,
     event_count: usize,
     legacy_event_count: usize,
+    /// The unhashed rows before the first hashed row, a subset of
+    /// `legacy_event_count`: the history of a deployment upgraded from a
+    /// build that mirrored no chain fields. Not a failure.
+    legacy_prefix_event_count: usize,
     payload_verified_event_count: usize,
     payload_unverified_event_count: usize,
     mismatch_count: usize,
@@ -71918,6 +73821,13 @@ struct TraceDbReconciliationReport {
     db_audit_event_count: usize,
     missing_audit_event_ids_in_db: Vec<Uuid>,
     missing_audit_event_ids_in_files: Vec<Uuid>,
+    /// Submit audit rows in the pre-file-event shape: an id derived from the
+    /// submission, no canonical payload. Reported, not blocking.
+    legacy_submit_audit_row_count: usize,
+    /// DB audit rows before the first hashed row: mirrored by a build from
+    /// before the DB carried the file log's chain fields. Reported, not
+    /// blocking.
+    db_audit_legacy_prefix_row_count: usize,
     db_audit_hash_chain_failures: Vec<TraceDbAuditHashChainFailure>,
     db_audit_canonical_projection_failures: Vec<TraceDbAuditProjectionFailure>,
     db_audit_submission_metadata_mismatches: Vec<TraceDbAuditSubmissionMetadataMismatch>,
@@ -72634,6 +74544,22 @@ fn export_manifest_reader_projection(
         .collect()
 }
 
+/// Clears the chain fields of the sampled events whose DB row has none: rows
+/// a build from before #1043 mirrored, which never carried them. Every other
+/// field of those events is still compared, and a hashed row is compared
+/// whole, chain fields included.
+fn clear_legacy_audit_chain_fields(
+    projections: &mut [TraceReaderAuditEventProjection],
+    legacy_event_ids: &BTreeSet<Uuid>,
+) {
+    for projection in projections {
+        if legacy_event_ids.contains(&projection.event_id) {
+            projection.previous_event_hash = None;
+            projection.event_hash = None;
+        }
+    }
+}
+
 fn audit_event_reader_projection(
     events: &[TraceCommonsAuditEvent],
 ) -> Vec<TraceReaderAuditEventProjection> {
@@ -72827,6 +74753,96 @@ impl TraceCommonsAuditEvent {
             actor_role: Some(auth.role),
             actor_principal_ref: Some(auth.principal_ref.clone()),
             reason: Some(reason.to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// What a contributor revocation invalidated and enqueued, by count.
+    /// Hash-only: the revocation reason is carried as `purpose_hash`.
+    fn revocation_artifact_invalidation(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        purpose_hash: &str,
+        action_counts: &BTreeMap<String, u32>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: REVOCATION_ARTIFACT_INVALIDATION_AUDIT_KIND.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(purpose_hash),
+                false,
+                action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// A lifecycle path's counts, by `kind`. Hash-only: a purpose, when there
+    /// is one, is carried as `purpose_hash`.
+    fn lifecycle_counts(
+        auth: &TenantAuth,
+        submission_id: Uuid,
+        kind: &str,
+        purpose_hash: Option<&str>,
+        action_counts: &BTreeMap<String, u32>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: kind.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                purpose_hash,
+                false,
+                action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// A submission status change a lifecycle path made. Label-only reason.
+    fn lifecycle_status_change(
+        auth: &TenantAuth,
+        actor: LifecycleAuditActor,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        reason_label: &str,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: LIFECYCLE_STATUS_CHANGE_AUDIT_KIND.to_string(),
+            created_at: Utc::now(),
+            status: Some(status),
+            actor_role: match actor {
+                LifecycleAuditActor::Tenant => Some(auth.role),
+                LifecycleAuditActor::System => None,
+            },
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(reason_label.to_string()),
             export_count: None,
             export_id: None,
             decision_inputs_hash: None,
@@ -74573,7 +76589,9 @@ struct TraceNearAttestationDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     ready: bool,
     evidence_hash: String,
     /// Named so an operator reading a refusal knows what to set.
@@ -74687,7 +76705,7 @@ async fn run_near_attestation_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready,
         evidence_hash,
         expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,
@@ -74784,7 +76802,9 @@ struct TraceNearAttestationKeyDriftDrillResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     generated_at: DateTime<Utc>,
-    purpose: String,
+    /// `sha256:` digest of the operator-supplied purpose. The purpose is free
+    /// text, so a drill returns it hash-only, as the evidence it records does.
+    purpose_hash: String,
     /// Whether **this run** passed every step. Says nothing about drift.
     ready: bool,
     evidence_hash: String,
@@ -74974,7 +76994,7 @@ async fn run_near_attestation_key_drift_drill(
         tenant_id: tenant.tenant_id.clone(),
         tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
         generated_at,
-        purpose: purpose.clone(),
+        purpose_hash: sha256_prefixed(&purpose),
         ready,
         evidence_hash,
         expected_measurements_env: EXPECTED_MEASUREMENTS_ENV,

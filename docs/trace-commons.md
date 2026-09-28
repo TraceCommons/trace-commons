@@ -473,6 +473,25 @@ Datasets, benchmarks, rankers (export and worker routes):
 - read-only ranker exports: `GET /v1/ranker/training-candidates`,
   `GET /v1/ranker/training-pairs`
 
+**Witness provenance label (#1059).** Replay dataset items, benchmark
+conversion candidates, and ranker training candidates (and so both sides of a
+training pair) carry `witness_provenance_class`, one of:
+
+| Value | Meaning |
+|-------|---------|
+| `provider_tee_final_call` | A verified v2 certificate with a provider-TEE receipt for the last declared call covers the trace's current accepted artifact. |
+| `gateway_final_call` | The same, with a gateway receipt. |
+| `legacy_v1` | A v1 certificate, which makes no provenance statement. |
+| `unattested` | Everything else: no certificate, an explicit unattested v2 statement, an inactive or revoked submission, or a current artifact the certificate no longer covers (including every review-approved trace; see "Final-call inference provenance"). |
+
+The field is additive, and no schema string changed: not
+`trace_export_job_request.v1` (which governs request filters, none of which
+changed) and not `benchmark_conversion.v1`. **Readers must tolerate its
+absence.** Benchmark artifacts written before #1059 do not have it, and a
+reader must treat a missing field as "not recorded", never as a class. The
+label is a label only: in v1 it earns no account trust and weights no gate,
+score or credit amount (#1061, earned-trust decision 5).
+
 Credit, settlement, NEAR:
 
 - `POST /v1/workers/utility-credit`, `POST /v1/workers/utility-attestations`
@@ -1177,6 +1196,21 @@ scoped standing policy and cannot widen capture beyond it.
 
 ## Production hardening roadmap
 
+Account-admission submissions require `source_session: {adapter, native_id}`.
+The server validates this identity, stores only an account-scoped digest, and
+rejects a resumed version after any mapped version is withdrawn. Authenticated
+clients can check `POST /v1/account/source-sessions/status` before witness or
+upload; it returns `active`, `withdrawn`, or `unsupported`. The submit
+transaction is the final gate, since the status read can race withdrawal.
+
+This account-admission mode is default-off. Older submissions without a
+source-session mapping retain submission-ID withdrawal only. Existing V43
+tombstones do not contain a native source ID, and neither a content hash nor
+`conversation_id` can reliably reconstruct it. Previously stored local
+sessions must be held and re-confirmed before a client enables automatic
+contribution; parser-bound IDs and offline hold/re-grant behavior require
+client-side verification before rollout.
+
 The current implementation is a usable MVP for local development and controlled
 internal pilots. A production deployment needs the following before broad tenant
 rollout.
@@ -1295,3 +1329,53 @@ Operators using sidecar witnesses must update the witness and explicitly add
 its new exact version to their operator allowlist before accepting it; no
 operator allowlist is broadened automatically. Existing v1 signatures remain
 historically verifiable but do not satisfy this full-pipeline contract.
+
+### Final-call inference provenance (#991 Z2)
+
+A v2 witness certificate may carry one of three closed inference classes:
+`provider_tee_final_call`, `gateway_final_call`, or explicit `unattested`.
+An attested class means the witness verified a pinned receipt for the **last
+declared inference call** and bound the receipt to that call's original request
+and response body bytes. The model is recorded only when the verified receipt
+bound one. The certificate signs the provenance fields and the SHA-256 of the
+exact redacted request body the contributor submits to ingest (the
+`POST /v1/traces` body), not of any inference request or response. It does not prove
+whole-session authenticity, that earlier calls were included, receipt
+uniqueness or replay prevention, or the correctness of a model's output.
+
+Legacy v1 certificates have no inference claim. Reads label them `legacy_v1`
+and expose the conservative `unattested` policy class; v2 `unattested` is an
+explicit signed claim. The server records a verified certificate's original
+header bytes and the SHA-256 of the received request body in a forced-RLS
+PostgreSQL row. It never stores a transcript in that row or puts the evidence
+bytes in an exported envelope. The PII-backstop bypass is a separate operator
+decision: provenance capture can be enabled by a signing-address and
+measurement pin while that bypass remains off.
+
+The server rescrubs a submission after verification. A matching stored-object
+digest links the active rescrubbed artifact to the historical certificate; it
+does not mean the witness signed the rescrubbed bytes. Policy consumers use the
+tenant-scoped `get_current_verified_witness_evidence` read, which selects the
+current object reference and active submission state in the same database
+transaction without trusting a caller-supplied digest. The object loader must
+verify the selected object's bytes before use. Exact signed-source retries may
+rebind the derived object digest without changing original certificate or body
+evidence. Missing evidence, v1, inactive or revoked submissions, and
+object-digest mismatches do not expose an attested class. File-only ingestion
+reads the same claim from private submission metadata through
+`file_witness::current_claim`, under the same rules.
+
+The claim is surfaced, never weighted (#1059): exports, the reviewer trace
+list (`GET /v1/traces`), and credit events (`trace_credit_ledger`
+`witness_provenance_class`, V89) carry it as a label, and nothing that gates,
+scores or prices a trace reads it. The contributor's own credit-events view
+omits it.
+
+**Review-approved traces read `unattested`.** Approval stores a new reviewed
+artifact under a new object key. The original certificate covers the bytes
+the contributor submitted, not that reviewed artifact, so the current-object
+claim is an artifact mismatch and the label is `unattested`, even when the
+submission arrived with a verified provider-TEE or gateway certificate. This
+is deliberate (R4: claim provenance only where the certificate supports it).
+The certificate is kept as history, and is not re-bound to the reviewed
+artifact.

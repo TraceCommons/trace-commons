@@ -147,6 +147,59 @@ fn default_submission_status() -> String {
     "accepted".to_string()
 }
 
+/// Untrusted, adapter-native session identity. The server validates and scopes
+/// this to an authenticated account before using it as an equality key.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSessionIdentity {
+    pub adapter: String,
+    pub native_id: String,
+}
+
+impl std::fmt::Debug for SourceSessionIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceSessionIdentity")
+            .field("adapter", &"[untrusted]")
+            .field("native_id", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSessionIdentityError {
+    UnsupportedAdapter,
+    InvalidNativeId,
+}
+
+/// Validates the bounded shape before a source ID can bypass prose redaction.
+/// This is a syntax contract only; it cannot prove which local file supplied
+/// the adapter-native ID or authorize an account.
+pub fn validate_source_session_identity(
+    identity: &SourceSessionIdentity,
+) -> Result<(), SourceSessionIdentityError> {
+    let requires_uuid = match identity.adapter.as_str() {
+        "codex" | "claude-code" => true,
+        "opencode" | "cline" | "gemini-cli" => false,
+        _ => return Err(SourceSessionIdentityError::UnsupportedAdapter),
+    };
+    let native_id = identity.native_id.as_bytes();
+    if native_id.is_empty()
+        || native_id.len() > 128
+        || !native_id
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+    {
+        return Err(SourceSessionIdentityError::InvalidNativeId);
+    }
+    if requires_uuid {
+        match Uuid::parse_str(&identity.native_id) {
+            Ok(parsed) if parsed.hyphenated().to_string() == identity.native_id => {}
+            _ => return Err(SourceSessionIdentityError::InvalidNativeId),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceContributionEnvelope {
     pub schema_version: String,
@@ -173,6 +226,10 @@ pub struct TraceContributionEnvelope {
     /// never reach a gate, a scoring input, or a tenant-scoping decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Adapter-native equality key for account-scoped session withdrawal.
+    /// This is untrusted and never authorizes access by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<SourceSessionIdentity>,
     #[serde(default)]
     pub trace_card: TraceCard,
     #[serde(default)]
@@ -1612,6 +1669,8 @@ pub struct RawTraceContribution {
     /// redaction after the same privacy checks as other contributed metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session: Option<SourceSessionIdentity>,
 }
 
 /// The pre-redaction event an emitter builds.
@@ -1937,6 +1996,7 @@ impl RawTraceContribution {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
         }
     }
 
@@ -2189,6 +2249,7 @@ impl RawTraceContribution {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
         }
     }
 }
@@ -2873,6 +2934,94 @@ pub fn privacy_filter_backend_from_env() -> Result<PrivacyFilterBackendTag, Priv
         .unwrap_or(PrivacyFilterBackendTag::None))
 }
 
+/// What tells one environment-attached privacy filter from another of the
+/// same kind: the host and model a remote backend sends prose to, or the
+/// program and arguments a sidecar runs. `None` when no backend is named.
+///
+/// Read the way the adapters are built -- trimmed, empty as unset, the
+/// canonical sidecar variable before its legacy name, and a remote backend's
+/// unset host or model as the default it would use -- so two environments
+/// that build the same filter give the same identity. Credentials and limits
+/// are left out: they change nothing about who reads the prose.
+///
+/// `var` reads one environment variable; pass `|k| std::env::var(k).ok()` for
+/// the process environment. Taking it as a parameter keeps this testable
+/// without mutating process state.
+pub fn privacy_filter_backend_identity(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let backend = get("TRACE_PRIVACY_FILTER_BACKEND")?;
+    let parts: Vec<String> = match backend.as_str() {
+        "sidecar" => {
+            let pick = |canonical: &str, legacy: &str| get(canonical).or_else(|| get(legacy));
+            vec![
+                pick(
+                    "TRACE_PRIVACY_FILTER_COMMAND",
+                    "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
+                )
+                .unwrap_or_default(),
+                pick(
+                    "TRACE_PRIVACY_FILTER_ARGS",
+                    "IRONCLAW_TRACE_PRIVACY_FILTER_ARGS",
+                )
+                .map(|raw| raw.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default(),
+            ]
+        }
+        "near-ai" => vec![
+            get("TRACE_NEAR_AI_PRIVACY_BASE_URL")
+                .unwrap_or_else(|| near_ai_default(NearAiDefault::BaseUrl)),
+            get("TRACE_NEAR_AI_PRIVACY_MODEL")
+                .unwrap_or_else(|| near_ai_default(NearAiDefault::Model)),
+        ],
+        "self-hosted" => vec![
+            get("TRACE_PRIVACY_FILTER_SELF_HOSTED_BASE_URL").unwrap_or_default(),
+            get("TRACE_PRIVACY_FILTER_SELF_HOSTED_MODEL").unwrap_or_else(self_hosted_default_model),
+        ],
+        _ => Vec::new(),
+    };
+    let mut identity = backend;
+    for part in parts {
+        identity.push('\n');
+        identity.push_str(&part);
+    }
+    Some(identity)
+}
+
+enum NearAiDefault {
+    BaseUrl,
+    Model,
+}
+
+#[cfg(feature = "near-ai-privacy-filter")]
+fn near_ai_default(which: NearAiDefault) -> String {
+    match which {
+        NearAiDefault::BaseUrl => crate::privacy_filter_near_ai::DEFAULT_BASE_URL,
+        NearAiDefault::Model => crate::privacy_filter_near_ai::DEFAULT_MODEL,
+    }
+    .to_string()
+}
+
+// Without the feature the backend cannot be built at all, so there is no
+// default to resolve to.
+#[cfg(not(feature = "near-ai-privacy-filter"))]
+fn near_ai_default(_which: NearAiDefault) -> String {
+    String::new()
+}
+
+#[cfg(feature = "self-hosted-privacy-filter")]
+fn self_hosted_default_model() -> String {
+    crate::privacy_filter_self_hosted::DEFAULT_MODEL.to_string()
+}
+
+#[cfg(not(feature = "self-hosted-privacy-filter"))]
+fn self_hosted_default_model() -> String {
+    String::new()
+}
+
 fn build_sidecar_adapter() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterConfigError> {
     let command = read_privacy_env(
         "TRACE_PRIVACY_FILTER_COMMAND",
@@ -3100,6 +3249,10 @@ const CUE_WINDOW: usize = 48;
 /// It is paired with the `{8,}` bound in `entropy_candidate_regex`: the
 /// regex decides what is a candidate at all, so raising either one alone
 /// silently disables the band while the other still claims to cover it.
+///
+/// Below 10 characters this floor never binds: `ENTROPY_BITS_MIN` already
+/// requires at least 10 distinct characters, so what is actually redacted
+/// starts at 10. Pinned by `cued_entropy_floor_is_ten_distinct_characters`.
 const ENTROPY_MIN_LEN: usize = 8;
 /// Minimum Shannon entropy (bits/char) for a candidate token to be treated
 /// as opaque high-entropy secret material.
@@ -4653,6 +4806,15 @@ impl DeterministicTraceRedactor {
         trace: RawTraceContribution,
         mut maps: Option<&mut BTreeMap<Uuid, crate::private_edit_map::PrivateRedactionEdits>>,
     ) -> Result<TraceContributionEnvelope, TraceContributionError> {
+        if trace
+            .source_session
+            .as_ref()
+            .is_some_and(|identity| validate_source_session_identity(identity).is_err())
+        {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: "source_session_invalid".into(),
+            });
+        }
         let mut report = RedactionReport::default();
         let mut state = RedactionState::default();
         let mut privacy_filter_summary = None;
@@ -4870,6 +5032,7 @@ impl DeterministicTraceRedactor {
             embedding_analysis: trace.embedding_analysis,
             value: trace.value,
             conversation_id: trace.conversation_id,
+            source_session: trace.source_session,
             trace_card,
             value_card,
             hindsight: None,
@@ -5115,6 +5278,8 @@ pub const METADATA_KEY_COLLISION_REFUSAL: &str = "metadata-redaction-key-collisi
 /// are contributor identity, and identity does not leave the machine for a
 /// third-party classifier. They are opaque identifiers, not prose, so the
 /// deterministic pass is the whole of what they need.
+/// `source_session` is likewise an opaque adapter-native identity. A classifier
+/// rewrite would break the stable key needed to honor withdrawal.
 ///
 /// Consulted only where `redact_keys` is false, i.e. inside fixed-schema
 /// objects. A dynamic map keyed `timestamp` by an importer is still scanned.
@@ -5135,6 +5300,7 @@ const TYPED_METADATA_FIELDS: &[&str] = &[
     "nearest_trace_ids",
     "parent_event_id",
     "scopes",
+    "source_session",
     "submission_id",
     "task_success",
     "timestamp",
@@ -8359,6 +8525,56 @@ mod tests {
         }
     }
 
+    /// The effective floor of the cued-entropy pass is a count of DISTINCT
+    /// characters, not a length: ten of them, whatever the token's length.
+    ///
+    /// Shannon entropy over a token's bytes cannot exceed log2 of the number
+    /// of distinct bytes in it. log2(9) ~= 3.17 is under `ENTROPY_BITS_MIN`
+    /// (3.2) and log2(10) ~= 3.32 is over it, so a token built from nine or
+    /// fewer distinct characters is never redacted by this pass however long
+    /// it is, and a 10-character token is redacted only when all ten
+    /// characters differ. The contributor README states the range in these
+    /// terms; this pins it. It documents current behaviour -- it passed when
+    /// written -- and exists so that a change to `ENTROPY_BITS_MIN` fails
+    /// here and forces the README to be re-derived.
+    #[test]
+    fn cued_entropy_floor_is_ten_distinct_characters() {
+        use super::*;
+        let r = DeterministicTraceRedactor::bare();
+        let redacted = |value: &str| {
+            let (out, rep) = r.redact_text(&format!("api_key={value}"));
+            let gone = !out.contains(value);
+            assert_eq!(
+                gone, rep.blocked_secret_detected,
+                "redaction and blocked_secret_detected disagree for {value}: {out}"
+            );
+            gone
+        };
+
+        // Nine characters, all distinct: the best a 9-char token can do.
+        assert!(!redacted("Q7vM2xP9s"), "9 distinct chars cleared 3.2 bits");
+        // Ten characters, all distinct: just over the floor.
+        assert!(
+            redacted("Q7vM2xP9sL"),
+            "10 distinct chars were not redacted"
+        );
+        // Ten characters with one repeat (nine distinct): under the floor.
+        assert!(
+            !redacted("Q7vM2xP9sQ"),
+            "10 chars with only 9 distinct cleared 3.2 bits"
+        );
+        // Length does not rescue a small alphabet: 27 chars, 9 distinct.
+        assert!(
+            !redacted("Q7vM2xP9sQ7vM2xP9sQ7vM2xP9s"),
+            "a long token over 9 distinct chars cleared 3.2 bits"
+        );
+        // Ten distinct is enough at any length, even repeated.
+        assert!(
+            redacted("Q7vM2xP9sLQ7vM2xP9sLQ7vM2xP9sL"),
+            "a 30-char token over 10 distinct chars was not redacted"
+        );
+    }
+
     /// The other half of #225's bargain: lowering the LENGTH floor must not
     /// lower the ENTROPY floor or bypass the allowlists, or the 8-to-15 band
     /// fills with git shas and ordinary words. This is the FP budget the
@@ -10245,6 +10461,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -10977,6 +11194,78 @@ mod tests {
         assert_eq!(parsed.conversation_id, None);
     }
 
+    #[test]
+    fn source_session_identity_round_trips_without_debug_disclosure() {
+        let identity = super::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_private-123".into(),
+        };
+        let encoded = serde_json::to_value(&identity).unwrap();
+        assert_eq!(encoded["native_id"], "ses_private-123");
+        let decoded: super::SourceSessionIdentity = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, identity);
+        assert!(!format!("{identity:?}").contains("ses_private-123"));
+    }
+
+    #[tokio::test]
+    async fn source_session_survives_raw_redaction_and_legacy_envelopes_parse() {
+        use super::TraceRedactor;
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.source_session = Some(super::SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_stable-123".into(),
+        });
+        let mut legacy_raw = serde_json::to_value(&raw).unwrap();
+        legacy_raw.as_object_mut().unwrap().remove("source_session");
+        let parsed_raw: super::RawTraceContribution = serde_json::from_value(legacy_raw).unwrap();
+        assert!(parsed_raw.source_session.is_none());
+        let redacted = super::DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .unwrap();
+        assert_eq!(
+            redacted.source_session.as_ref().unwrap().native_id,
+            "ses_stable-123"
+        );
+        let mut legacy = serde_json::to_value(&redacted).unwrap();
+        legacy.as_object_mut().unwrap().remove("source_session");
+        let parsed: super::TraceContributionEnvelope = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.source_session.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_source_session_is_refused_before_classifier_bypass() {
+        use super::{TraceContributionError, TraceRedactor};
+        for (adapter, native_id) in [
+            ("unknown", "ses_123".to_string()),
+            (
+                "patient Alice Smith lives at 123 Maple Street",
+                "ses_123".to_string(),
+            ),
+            ("opencode", "../private".to_string()),
+            ("opencode", "private@example.com".to_string()),
+            ("opencode", "é".to_string()),
+            ("opencode", "x".repeat(129)),
+            ("codex", "not-a-uuid".to_string()),
+        ] {
+            let mut raw = raw_contribution_with_content("safe content");
+            raw.source_session = Some(super::SourceSessionIdentity {
+                adapter: adapter.into(),
+                native_id,
+            });
+            let filter = std::sync::Arc::new(RecordingFilter::default());
+            let error = super::DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .with_privacy_filter(filter.clone(), super::PrivacyFilterBackendTag::SelfHosted)
+                .redact_trace(raw)
+                .await
+                .expect_err("invalid identity must be rejected before classifier bypass");
+            assert!(
+                matches!(error, TraceContributionError::RedactionFailed { reason } if reason == "source_session_invalid")
+            );
+            assert!(filter.0.lock().unwrap().is_empty());
+        }
+    }
+
     /// A guard, not a formality: an emitter-declared id that reached a gate
     /// would be a spoofable input to admission.
     #[test]
@@ -11043,6 +11332,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -11366,6 +11656,10 @@ mod tests {
 
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("a note the contributor typed".to_string());
+        raw.source_session = Some(SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_private-123".into(),
+        });
         raw.contributor.pseudonymous_contributor_id = Some("pseudonymous-contributor-0001".into());
         raw.contributor.tenant_scope_ref = Some("tenant-scope-0001".into());
         raw.contributor.credit_account_ref = Some("credit-account-0001".into());
@@ -11386,6 +11680,7 @@ mod tests {
             "pseudonymous-contributor-0001",
             "tenant-scope-0001",
             "credit-account-0001",
+            "ses_private-123",
         ] {
             assert!(
                 !seen.iter().any(|t| t == identity),
@@ -11500,6 +11795,10 @@ mod tests {
         // those are contributor-chosen, not schema.
         let mut raw = raw_contribution_with_content("ran the build");
         raw.conversation_id = Some("note".into());
+        raw.source_session = Some(SourceSessionIdentity {
+            adapter: "opencode".into(),
+            native_id: "ses_abc".into(),
+        });
         raw.ironclaw.engine_version = Some("1".into());
         raw.ironclaw.model_name = Some("model".into());
         raw.ironclaw
@@ -11562,6 +11861,7 @@ mod tests {
         found.remove("DYNAMIC");
 
         let expected: std::collections::BTreeSet<String> = [
+            "adapter",
             "canonical_summary_hash",
             "channel",
             "cluster_id",
@@ -11596,6 +11896,7 @@ mod tests {
             "model_name",
             "nearest_cluster_id",
             "nearest_trace_ids",
+            "native_id",
             "novelty_score",
             // `TraceFailureMode::Other`'s payload key.
             "other",
@@ -11612,6 +11913,7 @@ mod tests {
             "revocation_handle",
             "routing_metadata_included",
             "scopes",
+            "source_session",
             "structured_payload",
             "submission_id",
             "submission_score",
@@ -13045,6 +13347,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,
@@ -13245,6 +13548,7 @@ mod tests {
             embedding_analysis: None,
             value: ValueMetadata::default(),
             conversation_id: None,
+            source_session: None,
             trace_card: TraceCard::default(),
             value_card: TraceValueCard::default(),
             hindsight: None,

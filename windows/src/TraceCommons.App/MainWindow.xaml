@@ -21,6 +21,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:interop="using:TraceCommons.Interop"
     xmlns:controls="using:TraceCommons.App.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -484,6 +485,151 @@
             </Border>
 
             <!--
+                Every grant the daemon voided that no shell has shown yet (R6
+                of the connect and forget design). Beside the health banner
+                rather than in it: the health slot carries one label, and a
+                void must neither hide an outage nor be hidden by one.
+
+                EVERY STRING HERE IS BOUND, and all of it comes from the Rust
+                through tc_grant_void_notice. The button records that the
+                notice was shown and nothing else.
+            -->
+            <!--
+                Every armed folder whose arming wording no longer claims a
+                model scrubs it (K5), not yet shown by any shell. Every string
+                is bound and comes from the Rust through
+                tc_arming_reworded_notice. Got it records that the notice was
+                shown; Ask me first is the Settings call.
+            -->
+            <ItemsControl ItemsSource="{x:Bind ViewModel.ArmingRewordingCards, Mode=OneWay}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="interop:ArmingRewordingCard">
+                        <Border Padding="14,12"
+                                Margin="0,0,0,8"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind Notice.Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Body}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.NowHeading}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Scope}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Limit}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.NoReview}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1"
+                                            Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <Button Visibility="{x:Bind CanAskFirst}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.AskFirstAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAskFirstArmingRewording" />
+                                    <Button Visibility="{x:Bind CanAcknowledge}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.Acknowledge}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAcknowledgeArmingRewording" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <ItemsControl ItemsSource="{x:Bind ViewModel.GrantVoidCards, Mode=OneWay}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="interop:GrantVoidCard">
+                        <Border Padding="14,12"
+                                Margin="0,0,0,8"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                                <Viewbox Grid.Column="0"
+                                         Width="14" Height="14"
+                                         VerticalAlignment="Top"
+                                         Margin="0,2,0,0">
+                                    <Canvas Width="16" Height="16">
+                                        <Path Data="M8 2.2 14.6 13.4H1.4Z"
+                                              Stroke="{ThemeResource TcGoldTextBrush}"
+                                              StrokeThickness="1.4" />
+                                        <Path Data="M8 6.6v3"
+                                              Stroke="{ThemeResource TcGoldTextBrush}"
+                                              StrokeThickness="1.4" />
+                                        <Ellipse Canvas.Left="7.5" Canvas.Top="11.2"
+                                                 Width="1" Height="1"
+                                                 Fill="{ThemeResource TcGoldTextBrush}" />
+                                    </Canvas>
+                                </Viewbox>
+
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Text="{x:Bind Notice.Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.Body}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind Notice.ReasonsHeading}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap" />
+                                    <ItemsControl ItemsSource="{x:Bind Notice.Reasons}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="x:String">
+                                                <TextBlock Text="{x:Bind}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           Margin="12,0,0,0"
+                                                           TextWrapping="Wrap" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Text="{x:Bind Notice.Rearm}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+
+                                <!-- Turn back on sits beside the sentence saying
+                                     that doing so agrees to the new settings.
+                                     It is the Settings arming call. -->
+                                <StackPanel Grid.Column="2"
+                                            Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <Button Visibility="{x:Bind CanRearm}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.RearmAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnRearmGrantVoid" />
+                                    <Button Visibility="{x:Bind CanAcknowledge}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind Notice.Acknowledge}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAcknowledgeGrantVoid" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!--
                 The offer to answer model calls on this computer.
 
                 Shown once, on the screen this window opens on. Both answers
@@ -628,6 +774,109 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                 </Grid>
+            </Border>
+
+            <!--
+                Approved sessions held because the privacy witness is busy,
+                from status.witness_capacity in the Rust's words. A third
+                banner rather than a case of the health one, for the reason
+                the budget banner is: a higher label can hold the health slot
+                while these sessions are still waiting.
+
+                Same clock and no action button as the budget banner: nothing
+                is wrong, nothing was lost, and the daemon retries on its own.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasWitnessBanner, Mode=OneWay}"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                    <Viewbox Grid.Column="0"
+                             Width="14" Height="14"
+                             VerticalAlignment="Top"
+                             Margin="0,2,0,0">
+                        <Canvas Width="16" Height="16">
+                            <Ellipse Canvas.Left="1.4" Canvas.Top="1.4"
+                                     Width="13.2" Height="13.2"
+                                     Stroke="{ThemeResource TcGoldTextBrush}"
+                                     StrokeThickness="1.4" />
+                            <Path Data="M8 4.4V8l2.6 1.8"
+                                  Stroke="{ThemeResource TcGoldTextBrush}"
+                                  StrokeThickness="1.4" />
+                        </Canvas>
+                    </Viewbox>
+
+                    <StackPanel Grid.Column="1" Spacing="2">
+                        <TextBlock Text="{x:Bind ViewModel.WitnessTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.WitnessDetail, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!--
+                Armed folders the automatic contribution gate is holding, from
+                status.automatic_contribution_held in the Rust's words. A
+                banner of its own for the reason the witness banner is: a
+                higher label can hold the health slot while folders are held.
+                No dismiss button: it goes when the hold does. Each folder has
+                an Ask me first button, the Settings call.
+            -->
+            <Border Visibility="{x:Bind ViewModel.HasGateHeldBanner, Mode=OneWay}"
+                    Padding="14,12"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcCardCornerRadius}">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Title, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcTitleCardTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Body, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Reasons, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{x:Bind}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           Margin="12,0,0,0"
+                                           TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Release, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.GateHeld.AskFirst, Mode=OneWay, FallbackValue=''}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Margin="0,6,0,0"
+                               TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Projects, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="interop:GateHeldProjectNotice">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0,4,0,0">
+                                    <TextBlock Grid.Column="0"
+                                               Text="{x:Bind Line}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               VerticalAlignment="Center"
+                                               TextWrapping="Wrap" />
+                                    <Button Grid.Column="1"
+                                            Visibility="{x:Bind CanAskFirst}"
+                                            Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind AskFirstAction}"
+                                            Tag="{x:Bind}"
+                                            Click="OnAskFirstHeldProject" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
             </Border>
 
             </StackPanel>

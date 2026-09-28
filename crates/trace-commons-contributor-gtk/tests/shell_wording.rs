@@ -76,6 +76,30 @@ fn a_migrated_region_of_copy_rs_holds_no_words_of_its_own() {
     }
 }
 
+/// The automatic-contribution sentences reach this shell by re-export.
+///
+/// Before this, a GTK grant screen would have had no shared sentence to
+/// reach for, and the obvious thing to do would have been to write one --
+/// a claim about what leaves the machine that the other two shells do not
+/// make. Asserted against the migrated region, which the sweep above already
+/// holds to `pub use` and nothing else, so a name present here is a
+/// re-export and cannot be a literal copy.
+#[test]
+fn the_automatic_contribution_sentences_are_re_exported_not_written() {
+    let source = std::fs::read_to_string(src_root().join("copy.rs")).expect("copy.rs is readable");
+    let region = source
+        .split("// COPY-MIGRATED-BEGIN")
+        .nth(1)
+        .and_then(|rest| rest.split("// COPY-MIGRATED-END").next())
+        .expect("copy.rs has a migrated region");
+    for name in ["AUTO_SCRUB_SCOPE", "AUTO_SCRUB_LIMIT", "AUTO_NO_REVIEW"] {
+        assert!(
+            region.contains(name),
+            "{name} must be re-exported from consent_copy in the migrated region"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wording authored in this shell, over the whole shell.
 //

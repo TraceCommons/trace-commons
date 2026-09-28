@@ -7,6 +7,12 @@ use std::collections::HashSet;
 
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
+#[path = "postgres_account_trust.rs"]
+mod account_trust;
+#[path = "postgres_account_trust_growth.rs"]
+mod account_trust_growth;
+#[path = "postgres_legacy_invite_link.rs"]
+mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
 #[path = "postgres_public_run.rs"]
@@ -169,6 +175,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_tenant_policies",
     "trace_tenant_access_grants",
     "trace_submissions",
+    "trace_witness_certificate_evidence",
     "trace_object_refs",
     "trace_derived_records",
     "trace_audit_events",
@@ -204,6 +211,23 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "device_keys",
     "onboarding_invites",
     "trace_accounts",
+    "trace_account_trust",
+    "trace_account_invite_grants",
+    "trace_account_trust_events",
+    "trace_legacy_invite_pooled_tenants",
+    "trace_legacy_invite_link_challenges",
+    "trace_legacy_invite_links",
+    "trace_legacy_invite_link_conflicts",
+    "trace_legacy_invite_link_devices",
+    "trace_account_admission_budget",
+    "trace_account_admission_submissions",
+    "trace_account_trust_facts",
+    "trace_account_trust_evaluations",
+    "trace_source_sessions",
+    "trace_submission_sessions",
+    "trace_account_inference_connections",
+    "trace_account_inference_connection_requests",
+    "trace_account_inference_connection_events",
     "trace_account_principals",
     "trace_login_links",
     "trace_sessions",
@@ -929,6 +953,14 @@ fn recorded_migration_state(
     }
 }
 
+/// The `MIGRATIONS` table below, exposed (hidden) so
+/// `tests/migration_atomicity_pg.rs` can stop a database part-way, the way a
+/// deployment sits between two releases, and apply the rest later.
+#[doc(hidden)]
+pub fn registered_migrations() -> &'static [(i32, &'static str, &'static str)] {
+    MIGRATIONS
+}
+
 /// Every migration in `migrations/`, in the order `run_migrations` applies
 /// them: `(version, recorded name, SQL text)`. The recorded name is the file
 /// stem and the SQL is the file itself, embedded at compile time.
@@ -1381,10 +1413,261 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "public_run_function_acl",
         include_str!("../../../../migrations/V74__public_run_function_acl.sql"),
     ),
+    (
+        75,
+        "account_trust",
+        include_str!("../../../../migrations/V75__account_trust.sql"),
+    ),
+    (
+        76,
+        "trace_witness_certificate_evidence",
+        include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+    ),
+    (
+        77,
+        "account_admission",
+        include_str!("../../../../migrations/V77__account_admission.sql"),
+    ),
+    (
+        78,
+        "trace_source_sessions",
+        include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+    ),
+    (
+        79,
+        "inference_connection",
+        include_str!("../../../../migrations/V79__inference_connection.sql"),
+    ),
+    (
+        80,
+        "account_trust_merge",
+        include_str!("../../../../migrations/V80__account_trust_merge.sql"),
+    ),
+    (
+        81,
+        "legacy_invite_link",
+        include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+    ),
+    (
+        82,
+        "near_account_merge",
+        include_str!("../../../../migrations/V82__near_account_merge.sql"),
+    ),
+    (
+        84,
+        "account_trust_fact_kinds",
+        include_str!("../../../../migrations/V84__account_trust_fact_kinds.sql"),
+    ),
+    (
+        85,
+        "account_trust_fact_recorder",
+        include_str!("../../../../migrations/V85__account_trust_fact_recorder.sql"),
+    ),
+    (
+        86,
+        "account_trust_evaluations",
+        include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+    ),
+    (
+        87,
+        "account_trust_facts_merge",
+        include_str!("../../../../migrations/V87__account_trust_facts_merge.sql"),
+    ),
+    (
+        88,
+        "account_admission_earned_tier",
+        include_str!("../../../../migrations/V88__account_admission_earned_tier.sql"),
+    ),
+    // V83 is reserved for work in flight; V89 is additive and depends on none
+    // of the numbers before it.
+    (
+        89,
+        "trace_credit_witness_provenance_class",
+        include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
+    ),
+    (
+        90,
+        "ingest_runtime_grants",
+        include_str!("../../../../migrations/V90__ingest_runtime_grants.sql"),
+    ),
+    // V91 depends only on V81.
+    (
+        91,
+        "legacy_invite_link_devices",
+        include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+    ),
 ];
 
 #[async_trait]
 impl Database for PgBackend {
+    async fn select_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
+        catalog: &crate::inference_connection::OperatorInferenceConnection,
+    ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
+    {
+        PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
+    }
+
+    async fn current_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        catalog: &[crate::inference_connection::OperatorInferenceConnection],
+    ) -> Result<
+        Option<crate::db::postgres_inference_connection::InferenceConnectionStatus>,
+        DatabaseError,
+    > {
+        PgBackend::current_inference_connection(self, tenant, account, catalog).await
+    }
+
+    async fn disconnect_inference_connection(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        connection_id: Uuid,
+    ) -> Result<crate::db::postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError>
+    {
+        PgBackend::disconnect_inference_connection(self, tenant, account, connection_id).await
+    }
+
+    async fn record_account_trust_fact(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        source: crate::account_trust::TrustFactSource,
+    ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
+        PgBackend::record_account_trust_fact(self, account, source).await
+    }
+
+    async fn list_account_trust_worker_accounts(
+        &self,
+        after: Option<&crate::account_trust::TrustAccount>,
+        limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustAccount>, DatabaseError> {
+        PgBackend::list_account_trust_worker_accounts(self, after, limit).await
+    }
+
+    async fn list_account_trust_fact_candidates(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
+        PgBackend::list_account_trust_fact_candidates(self, account, limit).await
+    }
+
+    async fn account_trust_evaluation_inputs(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::account_trust_rule::EvaluationFact>, DatabaseError> {
+        PgBackend::account_trust_evaluation_inputs(self, account).await
+    }
+
+    async fn record_account_trust_evaluation(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        mode: &str,
+        evaluation: &crate::account_trust_rule::Evaluation,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::record_account_trust_evaluation(self, account, mode, evaluation).await
+    }
+
+    async fn latest_account_trust_evaluation(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        policy_version: &str,
+        mode: &str,
+    ) -> Result<Option<crate::account_trust_rule::Evaluation>, DatabaseError> {
+        PgBackend::latest_account_trust_evaluation(self, account, policy_version, mode).await
+    }
+    async fn legacy_admission_record(
+        &self,
+        tenant: &str,
+        submission: Uuid,
+    ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
+        PgBackend::legacy_admission_record(self, tenant, submission).await
+    }
+    async fn resume_legacy_admission(
+        &self,
+        tenant: &str,
+        anchor: &str,
+        submission: Uuid,
+        body_hash: &str,
+        lease: Uuid,
+        lease_seconds: i64,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
+        PgBackend::resume_legacy_admission(
+            self,
+            tenant,
+            anchor,
+            submission,
+            body_hash,
+            lease,
+            lease_seconds,
+        )
+        .await
+    }
+    async fn account_admission_record(
+        &self,
+        tenant: &str,
+        submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionRecord>, DatabaseError> {
+        PgBackend::account_admission_record(self, tenant, submission).await
+    }
+    async fn reserve_account_admission(
+        &self,
+        request: &crate::admission_ledger::AccountAdmissionReservation,
+    ) -> Result<crate::admission_ledger::AccountAdmissionResult, DatabaseError> {
+        PgBackend::reserve_account_admission(self, request).await
+    }
+
+    async fn account_admission_status(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        principal: &str,
+        policy: &crate::account_trust::BoundedPolicy,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionStatus>, DatabaseError> {
+        PgBackend::account_admission_status(self, account, principal, policy).await
+    }
+
+    async fn transition_account_admission(
+        &self,
+        tenant: &str,
+        principal: &str,
+        account: Uuid,
+        submission: Uuid,
+        lease: Uuid,
+        next: &str,
+    ) -> Result<bool, DatabaseError> {
+        PgBackend::transition_account_admission(
+            self, tenant, principal, account, submission, lease, next,
+        )
+        .await
+    }
+    async fn redeem_account_invite(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        invite_hash: &str,
+        idempotency_key: Uuid,
+    ) -> Result<crate::db::AccountInviteRedemption, DatabaseError> {
+        self.redeem_account_invite_in_tx(tenant, account, invite_hash, idempotency_key)
+            .await
+    }
+    async fn store_legacy_invite_link_challenge(
+        &self,
+        challenge: &crate::legacy_invite_link::ChallengeWrite,
+    ) -> Result<bool, DatabaseError> {
+        self.store_legacy_invite_link_challenge_in_tx(challenge)
+            .await
+    }
+    async fn link_legacy_invite(
+        &self,
+        attempt: &crate::legacy_invite_link::LinkDbAttempt,
+    ) -> Result<crate::legacy_invite_link::LinkDbOutcome, DatabaseError> {
+        self.link_legacy_invite_in_tx(attempt).await
+    }
     async fn get_reward_offer(
         &self,
         program: Uuid,
@@ -1448,6 +1731,9 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::account_admission_runtime_ready(self).await
+    }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         self.check_admission_runtime().await
     }
@@ -3319,6 +3605,14 @@ impl Database for PgBackend {
         self.near_anchor_for_principal(tenant, principal).await
     }
 
+    async fn get_near_provisioned_account(
+        &self,
+        tenant: &str,
+        principal: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        self.near_account_for_principal(tenant, principal).await
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         public_key: &str,
@@ -4513,6 +4807,31 @@ impl Database for PgBackend {
         };
         let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
 
+        // B's NEAR anchors and provisioned devices follow the identity, so a
+        // device provisioned to B is a live device of A and a returning NEAR
+        // sign-in resolves to A (V82 states the rule). This runs BEFORE B's
+        // row is locked below: the function takes the per-anchor advisory
+        // lock provisioning holds while it writes rows referencing B, and
+        // taking that lock while holding B's row lock could deadlock with a
+        // sign-in in flight. If B turns out to be closed, the early return
+        // below rolls this back with everything else. Same consumed-proposal
+        // proof as the hooks below, so it too must stay outside a SAVEPOINT.
+        let near_carried = tx
+            .query_one(
+                "SELECT anchors_carried, devices_carried
+                   FROM public.trace_near_account_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let near_anchors_carried: i64 = near_carried.get(0);
+        let near_devices_carried: i64 = near_carried.get(1);
+
         // Re-check B is still open. If B closed between stage and execute, abandon
         // the whole merge: return Ok(None) WITHOUT committing so the consume above
         // (and any reads) roll back and the proposal remains usable.
@@ -4609,6 +4928,48 @@ impl Database for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)? as i64;
 
+        // Source-session withdrawal is account-scoped. Carry B's sessions onto
+        // A so a withdrawal made by either identity reaches every mapped
+        // version, and a session B already withdrew stays withdrawn for
+        // resumed uploads under A (withdrawal wins on overlap); the mappings
+        // follow. This runs through V78's SECURITY DEFINER function, so the
+        // merge-executing login needs no privilege on the session tables. The
+        // function accepts only a proposal consumed by this transaction, like
+        // the reward hook above, so the consume must stay outside a SAVEPOINT.
+        let source_sessions_moved: i64 = tx
+            .query_one(
+                "SELECT public.trace_source_sessions_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
+        // Invite trust follows the identity: B's grant rows (with their
+        // revocations) are copied onto A, and A's authority is re-derived from
+        // its combined unrevoked grants, so an invited B does not come out
+        // uninvited and a revoked grant confers nothing. V80's definer function
+        // does this under the same consumed-proposal proof as the hooks above;
+        // the rule is stated in that migration.
+        let invite_grants_carried: i64 = tx
+            .query_one(
+                "SELECT public.trace_account_trust_merge($1, $2, $3, $4)",
+                &[
+                    &tenant_id,
+                    &surviving_account_id,
+                    &absorbed_account_id,
+                    &proposal_id,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?
+            .get(0);
+
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
         // B's credentials now belong to A, so its old sessions must die.
         tx.execute(
@@ -4642,6 +5003,10 @@ impl Database for PgBackend {
             "principals_moved": principals_moved,
             "authenticators_moved": authenticators_moved,
             "public_runs_moved": public_runs_moved,
+            "source_sessions_moved": source_sessions_moved,
+            "invite_grants_carried": invite_grants_carried,
+            "near_anchors_carried": near_anchors_carried,
+            "near_devices_carried": near_devices_carried,
         });
         tx.execute(
             "INSERT INTO trace_account_audit (
@@ -7101,6 +7466,14 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V75__account_trust.sql"),
+            include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+            include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+            include_str!("../../../../migrations/V79__inference_connection.sql"),
+            include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7123,6 +7496,14 @@ mod tests {
             include_str!("../../../../migrations/V65__token_distribution_bundles.sql"),
             include_str!("../../../../migrations/V64__trace_public_runs.sql"),
             include_str!("../../../../migrations/V69__mission_insight_rewards.sql"),
+            include_str!("../../../../migrations/V75__account_trust.sql"),
+            include_str!("../../../../migrations/V76__trace_witness_certificate_evidence.sql"),
+            include_str!("../../../../migrations/V77__account_admission.sql"),
+            include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
+            include_str!("../../../../migrations/V79__inference_connection.sql"),
+            include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+            include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

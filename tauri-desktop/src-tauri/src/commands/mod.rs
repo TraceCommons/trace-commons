@@ -2,6 +2,7 @@ pub(crate) mod compute;
 pub(crate) mod consent;
 pub(crate) mod daemon;
 pub(crate) mod history;
+pub(crate) mod inference_connection;
 pub(crate) mod insights;
 pub(crate) mod mission_drafts;
 pub(crate) mod native_flows;
@@ -52,6 +53,8 @@ pub(crate) fn handler<R: tauri::Runtime>()
         witness::witness_status,
         witness::configure_witness,
         witness::clear_witness,
+        witness::route_disclosure,
+        witness::certificate_detail,
         routing::discover_routing,
         routing::configure_routing,
         routing::probe_routing,
@@ -61,6 +64,25 @@ pub(crate) fn handler<R: tauri::Runtime>()
         consent::enroll_with_invite,
         consent::set_consent_scopes,
         consent::acknowledge_near_ai_notice,
+        consent::grant_void_notice,
+        consent::witness_capacity_notice,
+        consent::acknowledge_grant_voids,
+        consent::legacy_migration_copy,
+        consent::legacy_migration_notice,
+        consent::migrate_legacy_invite,
+        consent::acknowledge_legacy_invite_migration,
+        consent::arming_reworded_notice,
+        consent::gate_held_notice,
+        consent::acknowledge_arming_rewordings,
+        consent::automatic_grant,
+        consent::grant_automatic,
+        consent::withdraw_automatic_grant,
+        inference_connection::inference_connection_copy,
+        inference_connection::inference_connection_offers,
+        inference_connection::inference_connection_current,
+        inference_connection::inference_connection_select,
+        inference_connection::inference_connection_install,
+        inference_connection::inference_connection_disconnect,
         privacy::set_private_inference,
         privacy::set_inference_evidence,
         privacy::set_token_contribution,
@@ -91,6 +113,8 @@ pub(crate) fn handler<R: tauri::Runtime>()
         native_flows::native_wallet_flow,
         native_flows::contributor_disclosure_copy,
         native_flows::witness_review_copy,
+        native_flows::automatic_contribution_copy,
+        native_flows::project_automatic_contribution_copy,
         native_flows::near_ai_account_enroll,
         native_flows::prepare_admission_session,
         native_flows::witness_preview_support,
