@@ -9,6 +9,8 @@ use std::collections::HashSet;
 mod account_onboarding;
 #[path = "postgres_account_trust.rs"]
 mod account_trust;
+#[path = "postgres_legacy_invite_link.rs"]
+mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
 #[path = "postgres_public_run.rs"]
@@ -210,6 +212,10 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_trust",
     "trace_account_invite_grants",
     "trace_account_trust_events",
+    "trace_legacy_invite_pooled_tenants",
+    "trace_legacy_invite_link_challenges",
+    "trace_legacy_invite_links",
+    "trace_legacy_invite_link_conflicts",
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
@@ -1425,6 +1431,18 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_merge",
         include_str!("../../../../migrations/V80__account_trust_merge.sql"),
     ),
+    (
+        81,
+        "legacy_invite_link",
+        include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
+    ),
+    // V82-V88 are reserved for work in flight; V89 is additive and depends on
+    // none of them.
+    (
+        89,
+        "trace_credit_witness_provenance_class",
+        include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -1542,6 +1560,19 @@ impl Database for PgBackend {
     ) -> Result<crate::db::AccountInviteRedemption, DatabaseError> {
         self.redeem_account_invite_in_tx(tenant, account, invite_hash, idempotency_key)
             .await
+    }
+    async fn store_legacy_invite_link_challenge(
+        &self,
+        challenge: &crate::legacy_invite_link::ChallengeWrite,
+    ) -> Result<bool, DatabaseError> {
+        self.store_legacy_invite_link_challenge_in_tx(challenge)
+            .await
+    }
+    async fn link_legacy_invite(
+        &self,
+        attempt: &crate::legacy_invite_link::LinkDbAttempt,
+    ) -> Result<crate::legacy_invite_link::LinkDbOutcome, DatabaseError> {
+        self.link_legacy_invite_in_tx(attempt).await
     }
     async fn get_reward_offer(
         &self,
@@ -7319,6 +7350,7 @@ mod tests {
             include_str!("../../../../migrations/V77__account_admission.sql"),
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
+            include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
@@ -7346,6 +7378,7 @@ mod tests {
             include_str!("../../../../migrations/V77__account_admission.sql"),
             include_str!("../../../../migrations/V78__trace_source_sessions.sql"),
             include_str!("../../../../migrations/V79__inference_connection.sql"),
+            include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

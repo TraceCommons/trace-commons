@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Text.Json;
 
@@ -36,5 +37,26 @@ public static class NativeWitnessReview
         && view.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String
         && message.GetString() is { Length: > 0 } text
             ? text
+            : null;
+
+    /// <summary>"&lt;label&gt;: &lt;local time&gt;" for a review that met a busy witness.</summary>
+    /// <remarks>
+    /// A busy witness judged nothing, so this is not a refusal: the daemon
+    /// sends <c>view.state = "Busy"</c> with the time the witness asked to be
+    /// tried again (<c>retry_at</c>) and the label to show beside it
+    /// (<c>retry_label</c>). <c>null</c> for any other outcome, or for a
+    /// time or label this shell cannot read -- never a guessed time.
+    /// </remarks>
+    public static string? RetryLine(DaemonResponse response, Func<DateTimeOffset, string>? format = null) =>
+        response.Result is { ValueKind: JsonValueKind.Object } value
+        && value.TryGetProperty("view", out var view) && view.ValueKind == JsonValueKind.Object
+        && view.TryGetProperty("state", out var state) && state.ValueKind == JsonValueKind.String
+        && state.GetString() == "Busy"
+        && view.TryGetProperty("retry_label", out var label) && label.ValueKind == JsonValueKind.String
+        && label.GetString() is { Length: > 0 } labelText
+        && view.TryGetProperty("retry_at", out var at) && at.ValueKind == JsonValueKind.String
+        && DateTimeOffset.TryParse(at.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal, out var when)
+            ? $"{labelText}: {(format ?? (d => d.ToLocalTime().ToString("t")))(when)}"
             : null;
 }

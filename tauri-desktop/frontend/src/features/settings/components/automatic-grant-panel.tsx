@@ -12,6 +12,7 @@ export function AutomaticGrantPanel({
   withdrawn,
   onRefresh,
   onWithdraw,
+  onTurnOn,
 }: {
   grant: AutomaticGrant | null;
   state: "loading" | "ready" | "busy" | "error";
@@ -19,6 +20,8 @@ export function AutomaticGrantPanel({
   withdrawn: boolean;
   onRefresh: () => Promise<void>;
   onWithdraw: () => Promise<void>;
+  /** Opens the grant screens. Omitted where there is nowhere to open them. */
+  onTurnOn?: () => void;
 }) {
   const busy = state === "loading" || state === "busy";
   const granted = grant?.granted === true;
@@ -81,6 +84,20 @@ export function AutomaticGrantPanel({
         Projects it already turned on keep their mode; change each under
         Projects.
       </p>
+      {grant && !granted && onTurnOn && (
+        <div className="mt-6 flex gap-2.5">
+          {/* Opens the grant screens (scope, path, both disclosures); it
+              turns nothing on by itself. */}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onTurnOn}
+            disabled={busy}
+          >
+            Turn on automatic contributing
+          </Button>
+        </div>
+      )}
       {granted && (
         <div className="mt-6 flex gap-2.5">
           <Button
