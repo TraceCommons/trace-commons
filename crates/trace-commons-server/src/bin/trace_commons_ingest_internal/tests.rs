@@ -10651,6 +10651,20 @@ impl trace_commons_gate_api::VectorIndexWriter for QualifiedTestIndex {
             content_hash,
         )
     }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        trace_commons_gate_api::VectorIndexWriter::invalidate_revision(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            revision_id,
+        )
+    }
 }
 
 impl trace_commons_gate_api::IdentifiedIndexReader for QualifiedTestIndex {

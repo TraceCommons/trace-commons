@@ -196,6 +196,40 @@ impl VectorIndexWriter for IsolatedPipelineIndex {
         }
         Ok(result)
     }
+
+    /// Removes every entry of `revision_id` in `index_id` under
+    /// `tenant_storage_ref`, and nothing else: `Ok(true)` when it removed
+    /// entries, `Ok(false)` when there were none, so a repeated call is
+    /// `Ok(false)`. It never reports `ContentConflict`. An injected fault
+    /// applies as it does to `upsert`: `FailBeforeApply` removes nothing and
+    /// is `Failed`, and `LostAfterApply` removes the entries and is
+    /// `Uncertain`, so a failed invalidation never reads as success.
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, IndexWriteError> {
+        let mut state = self.state.lock().expect("index mutex");
+        if state.fault == IndexFault::FailBeforeApply {
+            state.fault = IndexFault::None;
+            return Err(IndexWriteError::Failed);
+        }
+        let before = state.entries.len();
+        state
+            .entries
+            .retain(|(stored_tenant, stored_index, _), entry| {
+                !(stored_tenant == tenant_storage_ref
+                    && stored_index == index_id
+                    && entry.revision_id == revision_id)
+            });
+        let removed = state.entries.len() < before;
+        if state.fault == IndexFault::LostAfterApply {
+            state.fault = IndexFault::None;
+            return Err(IndexWriteError::Uncertain);
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
@@ -314,5 +348,112 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Invalidation removes every entry of one revision in one index under
+    /// one tenant, and nothing else: another revision, another index, and
+    /// another tenant keep their entries. A second call reports that no
+    /// entries remained, and a fault stays visible instead of reading as
+    /// success.
+    #[test]
+    fn invalidate_revision_is_idempotent_and_removes_only_that_revision() {
+        const INDEX: &str = "pipeline-test-index-v1";
+        const OTHER_INDEX: &str = "pipeline-test-index-v2";
+        let index = IsolatedPipelineIndex::new();
+        let other_tenant =
+            TenantStorageRef::new("tenant_sha256:00000000000000000000000000000000").unwrap();
+        let revision = Uuid::from_u128(11);
+        let other_revision = Uuid::from_u128(12);
+        let key = |tenant: &TenantStorageRef, index_id: &str, revision_id: Uuid, chunk: u32| {
+            IndexEntryKey {
+                tenant_storage_ref: tenant.clone(),
+                index_id: index_id.to_string(),
+                revision_id,
+                projection_id: "pipeline-test-projection-v1".to_string(),
+                model_id: "reference-embedder-v1".to_string(),
+                chunk,
+            }
+        };
+        let entries = [
+            key(&tenant(), INDEX, revision, 0),
+            key(&tenant(), INDEX, revision, 1),
+            key(&tenant(), INDEX, other_revision, 0),
+            key(&tenant(), OTHER_INDEX, revision, 0),
+            key(&other_tenant, INDEX, revision, 0),
+        ];
+        for (position, entry) in entries.iter().enumerate() {
+            assert_eq!(
+                index.upsert(
+                    entry,
+                    &[1.0, position as f32],
+                    &format!("sha256:{position:064x}")
+                ),
+                Ok(IndexUpsertResult::Inserted)
+            );
+        }
+        let nearest_ids = |tenant: &TenantStorageRef, index_id: &str| {
+            let mut ids = index
+                .nearest(tenant, index_id, &[1.0, 0.0], 8, None)
+                .unwrap()
+                .into_iter()
+                .map(|neighbor| neighbor.entry_id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(
+            index.invalidate_revision(&tenant(), INDEX, revision),
+            Ok(true)
+        );
+        assert_eq!(index.entry_count(&tenant(), INDEX), 1);
+        assert_eq!(
+            nearest_ids(&tenant(), INDEX),
+            vec![entries[2].entry_id()],
+            "only the other revision remains in the index"
+        );
+        assert_eq!(
+            nearest_ids(&tenant(), OTHER_INDEX),
+            vec![entries[3].entry_id()],
+            "another index keeps the revision's entry"
+        );
+        assert_eq!(
+            nearest_ids(&other_tenant, INDEX),
+            vec![entries[4].entry_id()],
+            "another tenant keeps its entry"
+        );
+
+        assert_eq!(
+            index.invalidate_revision(&tenant(), INDEX, revision),
+            Ok(false),
+            "a repeated call reports that no entries remained"
+        );
+        assert_eq!(index.entry_count(&tenant(), INDEX), 1);
+        assert_eq!(
+            index.invalidate_revision(&tenant(), INDEX, Uuid::from_u128(99)),
+            Ok(false)
+        );
+
+        index.set_fault(IndexFault::FailBeforeApply);
+        assert_eq!(
+            index.invalidate_revision(&other_tenant, INDEX, revision),
+            Err(IndexWriteError::Failed)
+        );
+        assert_eq!(
+            index.entry_count(&other_tenant, INDEX),
+            1,
+            "a failed invalidation removes nothing"
+        );
+        index.set_fault(IndexFault::LostAfterApply);
+        assert_eq!(
+            index.invalidate_revision(&other_tenant, INDEX, revision),
+            Err(IndexWriteError::Uncertain)
+        );
+        assert_eq!(
+            index.invalidate_revision(&other_tenant, INDEX, revision),
+            Ok(false),
+            "a retry after an uncertain result is safe"
+        );
+        assert_eq!(index.entry_count(&other_tenant, INDEX), 0);
     }
 }
