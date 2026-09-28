@@ -14,6 +14,7 @@ import { useDesktopEvents } from "./hooks/use-desktop-events";
 import { QuitConfirmation } from "./quit-confirmation";
 import { DaemonStartupNotice } from "./daemon-startup-notice";
 import { GrantVoidNotices } from "./grant-void-notices";
+import { ArmingRewordingNotices, GateHeldNotice } from "./switch-on-notices";
 import { routeIdFromPath } from "./routes";
 
 export function AppShell() {
@@ -63,6 +64,10 @@ export function AppShell() {
           ))}
           <DaemonStartupNotice startup={core.data?.startup} />
           <GrantVoidNotices grantVoids={core.data?.daemon.grant_voids} />
+          <ArmingRewordingNotices
+            rewordings={core.data?.daemon.arming_rewordings}
+          />
+          <GateHeldNotice held={core.data?.daemon.automatic_contribution_held} />
           <AppRoutes
             requiresOnboarding={requiresOnboarding}
             core={core}

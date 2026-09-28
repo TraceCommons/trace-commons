@@ -45,7 +45,7 @@
 
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ContributorConfig;
 use crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL;
@@ -54,7 +54,7 @@ use crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL;
 ///
 /// One variant per condition, deliberately. See the module docs for why
 /// there is no boolean here and must never be one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WitnessTrustState {
     /// No witness is configured. Local redaction runs, exactly as it does
@@ -454,6 +454,7 @@ mod tests {
         ContributorConfig {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: false,
+            witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),

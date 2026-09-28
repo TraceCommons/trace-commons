@@ -2553,6 +2553,7 @@ fn write_enrolled_config(
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: false,
+        witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -2786,6 +2787,19 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
     assert_eq!(json["url"], serde_json::json!("https://witness.example"));
     assert_eq!(json["signing_address"], serde_json::json!("0xfeed"));
     assert_eq!(json["pinned_measurement_count"], serde_json::json!(1));
+    // K11: a witness configured through the ABI is one typed into a shell's
+    // Settings, and the config says so for the disclosure screens.
+    let store =
+        trace_commons_contributor::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+    let cfg = store.load_config().unwrap().unwrap();
+    assert_eq!(
+        cfg.witness_origin_view(),
+        Some(
+            trace_commons_contributor::config::WitnessOriginView::Recorded(
+                trace_commons_contributor::config::WitnessOrigin::Settings
+            )
+        )
+    );
 
     // Clearing is 1 the first time and 0 the second: idempotent, and the
     // return distinguishes "removed one" from "there was none".
@@ -2797,6 +2811,8 @@ fn configuring_a_witness_round_trips_and_clearing_removes_it() {
         unsafe { tc_witness_trust_state(path.as_ptr()) },
         TC_WITNESS_STATE_ABSENT
     );
+    let cfg = store.load_config().unwrap().unwrap();
+    assert!(cfg.witness_origin.is_none(), "cleared with its witness");
 }
 
 /// The ABI refuses to create the refusing state it can report.
@@ -4911,6 +4927,69 @@ fn a_witness_capacity_notice_crosses_the_abi_as_the_rust_builds_it() {
         serde_json::to_value(copy::witness_capacity_notice_for_wire(&wire).expect("readable"))
             .unwrap();
     assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+}
+
+#[test]
+fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "id": 4, "project_id": "p-1", "project_label": "api",
+        "was": "model_scrubbed", "now": "patterns_only",
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json = take_owned(unsafe {
+        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+    });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+            .unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for text in ["not json", "[]", "\"x\""] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr()) }
+                .is_null(),
+            "{text}"
+        );
+    }
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_arming_reworded_notice(std::ptr::null()) }
+            .is_null()
+    );
+}
+
+#[test]
+fn a_gate_held_notice_crosses_the_abi_and_nothing_held_gets_null() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    let wire = serde_json::json!({
+        "held_sessions": 2,
+        "reasons": ["admission-evidence-is-per-session"],
+        "projects": [{ "project_id": "p-1", "project_label": "api", "held_sessions": 2 }],
+    });
+    let arg = CString::new(wire.to_string()).unwrap();
+    let json =
+        take_owned(unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) });
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let expected =
+        serde_json::to_value(copy::gate_held_notice_for_wire(&wire).expect("readable")).unwrap();
+    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    assert!(
+        unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(std::ptr::null()) }.is_null()
+    );
+    for text in [
+        "not json",
+        "[]",
+        r#"{"held_sessions":0,"reasons":[],"projects":[]}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { trace_commons_contributor_ffi::tc_gate_held_notice(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
 }
 
 #[test]

@@ -68,6 +68,19 @@ pub const LABEL_SESSION_TOO_LARGE: &str = "session-too-large";
 /// The same string as the queue reason those sessions carry,
 /// `submit::REASON_WITNESS_SATURATED`.
 pub const LABEL_WITNESS_SATURATED: &str = crate::submit::REASON_WITNESS_SATURATED;
+/// The automatic-contribution gate is holding sessions in armed folders
+/// instead of approving them, typically because this commons does not yet
+/// accept automatic contributions from the contributor's account (R3).
+/// Nothing from those folders is sent until the gate passes, which happens
+/// on its own on the first full pass that finds it met.
+///
+/// Set and retracted only by a full watcher pass (`TickReport::gate_blocked`
+/// is `Some`), never by a scoped one, which sees only changed paths.
+/// `status.automatic_contribution_held` carries the count, the reasons and
+/// the folders, because this slot holds one label and a higher one can mask
+/// it. Always resolved while `automatic_gate::ENFORCED` is off, since an
+/// unenforced gate holds nothing.
+pub const LABEL_AUTOMATIC_CONTRIBUTION_HELD: &str = "automatic-contribution-held";
 /// A declared export cannot be imported by this build's qualified reader.
 pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-version-unsupported";
 
@@ -79,7 +92,7 @@ pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-ver
 /// same kind of fact as a daily cap, and a refused contribution is a decision
 /// somewhere else that the contributor cannot argue with -- burning the clock
 /// on either would delete traces for a condition they had no move against.
-const EXPIRY_BLOCKING_LABELS: [&str; 10] = [
+const EXPIRY_BLOCKING_LABELS: [&str; 11] = [
     LABEL_NOT_LOGGED_IN,
     LABEL_PII_FILTER_UNAVAILABLE,
     LABEL_CLAIM_MINT_FAILED,
@@ -90,6 +103,9 @@ const EXPIRY_BLOCKING_LABELS: [&str; 10] = [
     LABEL_ADMISSION_REFUSED,
     LABEL_ADMISSION_LIMIT_REACHED,
     LABEL_WITNESS_SATURATED,
+    // Held sessions are waiting on the commons, not on the contributor; the
+    // clock must not delete them for a hold that releases on its own.
+    LABEL_AUTOMATIC_CONTRIBUTION_HELD,
 ];
 
 /// Return the precedence of a health label, where lower values indicate higher
@@ -114,17 +130,23 @@ pub fn precedence(label: &str) -> u8 {
         // window rolls over. `status.witness_capacity` reports it whatever
         // holds this slot.
         LABEL_WITNESS_SATURATED => 8,
+        // Below a busy witness, which concerns sessions already approved,
+        // and above the budgets: it stops a whole armed folder, and the
+        // contributor can act on it by switching the folder to Ask me.
+        // `status.automatic_contribution_held` reports it whatever holds
+        // this slot.
+        LABEL_AUTOMATIC_CONTRIBUTION_HELD => 9,
         // Beside the daily cap, which it is the server-side twin of: both are
         // budgets that come back on their own.
-        LABEL_ADMISSION_LIMIT_REACHED => 9,
-        LABEL_DAILY_CAP_REACHED => 10,
+        LABEL_ADMISSION_LIMIT_REACHED => 10,
+        LABEL_DAILY_CAP_REACHED => 11,
         // Last, below every condition above it, because it is the only one
         // that is not about the daemon: everything else here stops the
         // whole pipeline, while this describes one file the contributor can
         // still work around by leaving it alone. It must never mask an
         // outage.
-        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 11,
-        _ => 12,
+        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 12,
+        _ => 13,
     }
 }
 
@@ -300,6 +322,8 @@ mod tests {
             LABEL_INGEST_UNREACHABLE,
             LABEL_QUEUE_FULL,
             LABEL_WITNESS_SATURATED,
+            LABEL_AUTOMATIC_CONTRIBUTION_HELD,
+            LABEL_ADMISSION_LIMIT_REACHED,
             LABEL_DAILY_CAP_REACHED,
         ];
         let mut seen = std::collections::BTreeSet::new();

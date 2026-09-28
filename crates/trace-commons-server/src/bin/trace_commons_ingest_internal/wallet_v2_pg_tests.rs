@@ -368,10 +368,18 @@ async fn persisted_wallet_device_join(
     .get(0)
 }
 
+/// Serialises this module's tests: both assert on table-wide counts and share
+/// one database and the process-global provisioning environment.
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    SERIAL.get_or_init(Default::default)
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TRACE_COMMONS_WALLET_V2_PG_TEST_URL"]
 async fn wallet_v2_signed_completion_and_refusal_boundaries() {
     use std::sync::atomic::Ordering;
+    let _serial = serial().lock().await;
     let db = fresh_db().await;
     let wallet = keypair();
     let device = keypair();
@@ -545,4 +553,74 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
     assert_eq!(returned["device_key_id"], finished["device_key_id"]);
     assert_eq!(returned["anchor_hash"], finished["anchor_hash"]);
     assert_eq!(row_counts(&db, tenant).await, [1, 1, 1, 1, 1, 0]);
+}
+
+/// A device key a legacy invite already registered under a `tenant-...`
+/// tenant cannot complete wallet v2 over the wire: the finish is refused, the
+/// key stays with the legacy tenant, and no account, session or device row is
+/// written. `device_keys.device_key_id` is a global primary key, so success
+/// here would have meant a NEAR session whose device keeps authenticating
+/// into the legacy tenant.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_WALLET_V2_PG_TEST_URL"]
+async fn wallet_v2_refuses_a_device_key_registered_to_another_tenant() {
+    let _serial = serial().lock().await;
+    let db = fresh_db().await;
+    let wallet = keypair();
+    let device = keypair();
+    let device_public_key =
+        base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        device.public_key().as_ref(),
+    );
+    let legacy_tenant = format!("tenant-legacy-{}", uuid::Uuid::new_v4().simple());
+    let admin = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,$4,'invite')",
+            &[
+                &device_key_id,
+                &legacy_tenant,
+                &device_public_key,
+                &format!("sha256:{}", "ab".repeat(32)),
+            ],
+        )
+        .await
+        .unwrap();
+    let (rpc_url, _rpc_calls) = rpc_fixture(wallet_key(&wallet)).await;
+    let state = state(db.clone(), rpc_url);
+    let (verifier, challenge) = challenge_pair();
+    let before = global_provisioned_counts(&db).await;
+
+    let started = start(&state, WALLET_ACCOUNT, &device_public_key, &challenge).await;
+    let (status, refused) = finish(
+        &state,
+        finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused.get("access_token").is_none(), "{refused}");
+    let holders: Vec<String> = admin
+        .query(
+            "SELECT tenant_id FROM device_keys WHERE device_key_id=$1",
+            &[&device_key_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(holders, vec![legacy_tenant]);
+    assert_eq!(
+        global_provisioned_counts(&db).await,
+        before,
+        "a refused finish writes no account, identity, device, principal or session"
+    );
 }

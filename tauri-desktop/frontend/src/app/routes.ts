@@ -11,6 +11,16 @@ export const routePaths = {
 
 export type RouteId = keyof typeof routePaths;
 
+/**
+ * Flows reached from inside the app, never from the navigation or a deep
+ * link, so they are kept out of `routePaths`. `automatic-contributing` is
+ * the Flow 1 grant screens again (K10), opened from Settings and from the
+ * grant's void notice.
+ */
+export const flowPaths = {
+  "automatic-contributing": "/automatic-contributing",
+} as const;
+
 const routeIds = Object.keys(routePaths) as RouteId[];
 
 export function routeIdFromPath(pathname: string): RouteId | null {

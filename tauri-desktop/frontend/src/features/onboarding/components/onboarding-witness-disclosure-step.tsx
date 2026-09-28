@@ -1,54 +1,49 @@
 import { Button } from "@/components/ui/button";
-import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
+import { RouteDisclosureBody } from "../../../components/route-disclosure";
+import { useRouteDisclosure } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { useWitness } from "../../settings/public";
 import type { OnboardingStepProps } from "./onboarding-step-types";
 
 // K11, second screen: whether a session leaves this machine unredacted, for
-// whom (both enclaves), and where the witness came from. Every fact is read
-// from the contributor core's witness status, not assumed; every sentence is
-// the core's.
+// whom (both enclaves), and where the witness came from. Every fact is the
+// daemon's (`route_disclosure`) or the witness status's, not assumed; every
+// sentence is the core's.
 export function OnboardingWitnessDisclosureStep({
   onboarding,
   busy,
 }: Pick<OnboardingStepProps, "onboarding" | "busy">) {
   const core = useCoreStatus();
-  const grantCopy = useAutomaticGrantCopy(core.scope, core.isSuccess);
-  const copy = grantCopy.data;
+  const disclosure = useRouteDisclosure(core.scope, core.isSuccess);
   const witness = useWitness();
   const status = witness.data;
   // Only a pinned witness is sent sessions; a refusing one sends nothing.
   const rawSend = status?.state === "pinned";
-  const hasWitness = status?.url !== null && status?.url !== undefined;
-  const ready = Boolean(copy && status && witness.state === "ready");
-  const failed = grantCopy.isError || witness.state === "error";
+  // The screen records the witness it showed, so the two reads must agree
+  // on which witness that is before Continue means anything.
+  const agree =
+    (disclosure.data?.facts.witness?.signing_address ?? null) ===
+      (status?.signing_address ?? null) &&
+    (disclosure.data?.facts.route === "witness") === rawSend;
+  const ready = Boolean(
+    status && disclosure.data && witness.state === "ready" && agree,
+  );
+  const failed =
+    witness.state === "error" ||
+    disclosure.isError ||
+    Boolean(disclosure.data && status && !agree);
   return (
     <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
       <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
         WHERE SESSIONS GO
       </span>
       <h2>Redaction witness</h2>
-      {ready && copy && status ? (
+      {ready && status && disclosure.data ? (
         <div className="grid gap-3">
           <p className="m-0" role="status">
             {status.state_line}
           </p>
-          {rawSend && <p className="m-0">{copy.raw_send}</p>}
-          {hasWitness && (
-            <>
-              <dl className="m-0 grid gap-1 rounded-md border border-border p-3 font-mono text-[11px]">
-                <dt className="text-muted-foreground">Address</dt>
-                <dd className="m-0 break-all">{status.url}</dd>
-                {status.signing_address && (
-                  <>
-                    <dt className="text-muted-foreground">Signing key</dt>
-                    <dd className="m-0 break-all">{status.signing_address}</dd>
-                  </>
-                )}
-              </dl>
-              <p className="m-0">{copy.witness_origin}</p>
-            </>
-          )}
+          <RouteDisclosureBody disclosure={disclosure.data} />
         </div>
       ) : (
         <p

@@ -53,7 +53,7 @@ use crate::trace_corpus_storage::{
     TraceUtilityAttestationWrite, TraceVectorEntryRecord, TraceVectorEntrySourceProjection,
     TraceVectorEntryStatus, TraceVectorEntryWrite, TraceWithdrawalRecord,
     TraceWitnessCertificateEvidenceWrite, TraceWitnessEvidenceClaim, TraceWitnessEvidenceCoverage,
-    TraceWorkerKind,
+    TraceWitnessProvenanceClass, TraceWorkerKind,
 };
 
 const TRACE_OBJECT_REF_COLUMNS: &str = "\
@@ -512,6 +512,15 @@ fn row_to_credit_event(row: &Row) -> Result<TraceCreditEventRecord, DatabaseErro
             "TraceCreditSettlementState",
         )?,
         occurred_at: row.get("occurred_at"),
+        witness_provenance_class: row
+            .get::<_, Option<String>>("witness_provenance_class")
+            .as_deref()
+            .map(|label| {
+                TraceWitnessProvenanceClass::from_storage(label).ok_or_else(|| {
+                    DatabaseError::Query("TraceWitnessProvenanceClass unknown label".into())
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -2066,6 +2075,56 @@ impl TraceCorpusStore for PgBackend {
         Ok(claim)
     }
 
+    async fn list_current_verified_witness_evidence(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<BTreeMap<Uuid, TraceWitnessEvidenceClaim>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The same statement as the single read above, positions 0-8
+        // unchanged so `witness_claim_from_row` reads both, with the
+        // submission id appended at 9.
+        let rows = tx
+            .query(
+                "SELECT s.status, s.revoked_at, s.purged_at, s.expires_at,
+                    e.certificate_version, e.inference_class, e.raw_body_sha256,
+                    e.artifact_sha256,
+                    current_object.content_sha256 AS current_object_sha256,
+                    s.submission_id
+             FROM trace_submissions s
+             LEFT JOIN trace_witness_certificate_evidence e
+               ON e.tenant_id = s.tenant_id AND e.submission_id = s.submission_id
+             LEFT JOIN LATERAL (
+                 SELECT content_sha256 FROM trace_object_refs o
+                 WHERE o.tenant_id = s.tenant_id AND o.submission_id = s.submission_id
+                   AND o.artifact_kind = 'submitted_envelope'
+                   AND o.invalidated_at IS NULL AND o.deleted_at IS NULL
+                 ORDER BY o.updated_at DESC, o.created_at DESC LIMIT 1
+             ) current_object ON true
+             WHERE s.tenant_id = $1 AND s.submission_id = ANY($2)",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let mut claims = BTreeMap::new();
+        for row in rows {
+            let submission_id: Uuid = row.get(9);
+            let selected_digest = row
+                .get::<_, Option<String>>(8)
+                .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_string));
+            claims.insert(
+                submission_id,
+                witness_claim_from_row(Some(row), selected_digest.as_deref()),
+            );
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(claims)
+    }
+
     async fn witness_retry_identity_matches(
         &self,
         tenant_id: &str,
@@ -2445,7 +2504,7 @@ impl TraceCorpusStore for PgBackend {
                 "SELECT
                     tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
                     event_type, points_delta, reason, external_ref, actor_principal_ref,
-                    actor_role, settlement_state, occurred_at
+                    actor_role, settlement_state, occurred_at, witness_provenance_class
                  FROM trace_credit_ledger
                  WHERE tenant_id = $1
                  ORDER BY occurred_at ASC",
@@ -2580,111 +2639,34 @@ impl TraceCorpusStore for PgBackend {
         actor_principal_ref: &str,
         reason: Option<&str>,
     ) -> Result<u64, DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        lock_active_source_session_for_submission(&tx, tenant_id, submission_id).await?;
-        let status_value = enum_to_storage(status)?;
-        // Allowlisted label only -- never the caller's text. See
-        // `safe_status_reason_label`.
-        let reason_label = reason.map(crate::trace_corpus_storage::safe_status_reason_label);
-        let updated = tx
-            .execute(
-                "UPDATE trace_submissions
-                 SET status = $3,
-                     updated_at = NOW(),
-                     reviewed_at = CASE
-                         WHEN $3 IN ('accepted', 'quarantined', 'rejected') THEN NOW()
-                         ELSE reviewed_at
-                     END,
-                     review_assigned_to_principal_ref = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_assigned_to_principal_ref
-                     END,
-                     review_assigned_at = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_assigned_at
-                     END,
-                     review_lease_expires_at = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_lease_expires_at
-                     END,
-                     review_due_at = CASE
-                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
-                         THEN NULL
-                         ELSE review_due_at
-                     END,
-                     revoked_at = CASE WHEN $3 = 'revoked' THEN NOW() ELSE revoked_at END,
-                     purged_at = CASE WHEN $3 = 'purged' THEN NOW() ELSE purged_at END,
-                     credit_points_pending = CASE
-                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
-                         ELSE credit_points_pending
-                     END,
-                     credit_points_final = CASE
-                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
-                         ELSE credit_points_final
-                     END,
-                     last_status_reason = $4
-                 WHERE tenant_id = $1 AND submission_id = $2",
-                &[&tenant_id, &submission_id, &status_value, &reason_label],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        if updated == 0 {
-            return Err(DatabaseError::NotFound {
-                entity: "trace_submission".to_string(),
-                id: submission_id.to_string(),
-            });
-        }
+        self.release_pii_backstop_hold_inner(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+            true,
+        )
+        .await
+    }
 
-        // Invalidate the pre-backstop `submitted_envelope` ref(s) in the SAME
-        // transaction as the status flip above. Both must commit together:
-        // see the trait doc comment on `release_pii_backstop_hold` for why a
-        // partial commit either leaks pre-backstop bytes via export-by-ref or
-        // strands the submission on `awaiting_pii_backstop` forever.
-        let submitted_envelope_kind = enum_to_storage(TraceObjectArtifactKind::SubmittedEnvelope)?;
-        let invalidated = tx
-            .execute(
-                "UPDATE trace_object_refs
-                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
-                     updated_at = NOW()
-                 WHERE tenant_id = $1
-                   AND submission_id = $2
-                   AND artifact_kind = $3
-                   AND invalidated_at IS NULL
-                   AND deleted_at IS NULL",
-                &[&tenant_id, &submission_id, &submitted_envelope_kind],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-
-        let audit_event = TraceAuditEventWrite {
-            audit_event_id: Uuid::new_v4(),
-            tenant_id: tenant_id.to_string(),
-            actor_principal_ref: actor_principal_ref.to_string(),
-            actor_role: "system".to_string(),
-            action: audit_action_for_status(status),
-            reason: reason.map(str::to_string),
-            request_id: None,
-            submission_id: Some(submission_id),
-            object_ref_id: None,
-            export_manifest_id: None,
-            decision_inputs_hash: None,
-            previous_event_hash: None,
-            event_hash: None,
-            canonical_event_json: None,
-            metadata: TraceAuditSafeMetadata::ReviewDecision {
-                decision: status_value,
-                resulting_status: status,
-                reason_code: reason.map(str::to_string),
-            },
-        };
-        append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
-
-        Ok(invalidated)
+    async fn release_pii_backstop_hold_without_audit(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+    ) -> Result<u64, DatabaseError> {
+        self.release_pii_backstop_hold_inner(
+            tenant_id,
+            submission_id,
+            status,
+            actor_principal_ref,
+            reason,
+            false,
+        )
+        .await
     }
 
     async fn claim_trace_review_lease(
@@ -4742,8 +4724,8 @@ impl TraceCorpusStore for PgBackend {
             "INSERT INTO trace_credit_ledger (
                     tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
                     event_type, points_delta, reason, external_ref, actor_principal_ref,
-                    actor_role, settlement_state
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    actor_role, settlement_state, witness_provenance_class
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             &[
                 &credit_event.tenant_id,
                 &credit_event.credit_event_id,
@@ -4757,6 +4739,9 @@ impl TraceCorpusStore for PgBackend {
                 &credit_event.actor_principal_ref,
                 &credit_event.actor_role,
                 &settlement_state,
+                &credit_event
+                    .witness_provenance_class
+                    .map(TraceWitnessProvenanceClass::as_str),
             ],
         )
         .await
@@ -7379,6 +7364,126 @@ impl PgBackend {
 }
 
 impl PgBackend {
+    /// `release_pii_backstop_hold`, with the store's own audit row written in
+    /// the same transaction when `append_audit`, and none otherwise.
+    async fn release_pii_backstop_hold_inner(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        status: TraceCorpusStatus,
+        actor_principal_ref: &str,
+        reason: Option<&str>,
+        append_audit: bool,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        lock_active_source_session_for_submission(&tx, tenant_id, submission_id).await?;
+        let status_value = enum_to_storage(status)?;
+        // Allowlisted label only -- never the caller's text. See
+        // `safe_status_reason_label`.
+        let reason_label = reason.map(crate::trace_corpus_storage::safe_status_reason_label);
+        let updated = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET status = $3,
+                     updated_at = NOW(),
+                     reviewed_at = CASE
+                         WHEN $3 IN ('accepted', 'quarantined', 'rejected') THEN NOW()
+                         ELSE reviewed_at
+                     END,
+                     review_assigned_to_principal_ref = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_to_principal_ref
+                     END,
+                     review_assigned_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_assigned_at
+                     END,
+                     review_lease_expires_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_lease_expires_at
+                     END,
+                     review_due_at = CASE
+                         WHEN $3 IN ('accepted', 'rejected', 'revoked', 'expired', 'purged')
+                         THEN NULL
+                         ELSE review_due_at
+                     END,
+                     revoked_at = CASE WHEN $3 = 'revoked' THEN NOW() ELSE revoked_at END,
+                     purged_at = CASE WHEN $3 = 'purged' THEN NOW() ELSE purged_at END,
+                     credit_points_pending = CASE
+                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
+                         ELSE credit_points_pending
+                     END,
+                     credit_points_final = CASE
+                         WHEN $3 IN ('revoked', 'expired', 'purged') THEN 0
+                         ELSE credit_points_final
+                     END,
+                     last_status_reason = $4
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id, &status_value, &reason_label],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "trace_submission".to_string(),
+                id: submission_id.to_string(),
+            });
+        }
+
+        // Invalidate the pre-backstop `submitted_envelope` ref(s) in the SAME
+        // transaction as the status flip above. Both must commit together:
+        // see the trait doc comment on `release_pii_backstop_hold` for why a
+        // partial commit either leaks pre-backstop bytes via export-by-ref or
+        // strands the submission on `awaiting_pii_backstop` forever.
+        let submitted_envelope_kind = enum_to_storage(TraceObjectArtifactKind::SubmittedEnvelope)?;
+        let invalidated = tx
+            .execute(
+                "UPDATE trace_object_refs
+                 SET invalidated_at = COALESCE(invalidated_at, NOW()),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND artifact_kind = $3
+                   AND invalidated_at IS NULL
+                   AND deleted_at IS NULL",
+                &[&tenant_id, &submission_id, &submitted_envelope_kind],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+
+        let audit_event = TraceAuditEventWrite {
+            audit_event_id: Uuid::new_v4(),
+            tenant_id: tenant_id.to_string(),
+            actor_principal_ref: actor_principal_ref.to_string(),
+            actor_role: "system".to_string(),
+            action: audit_action_for_status(status),
+            reason: reason.map(str::to_string),
+            request_id: None,
+            submission_id: Some(submission_id),
+            object_ref_id: None,
+            export_manifest_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+            canonical_event_json: None,
+            metadata: TraceAuditSafeMetadata::ReviewDecision {
+                decision: status_value,
+                resulting_status: status,
+                reason_code: reason.map(str::to_string),
+            },
+        };
+        if append_audit {
+            append_trace_audit_event_in_transaction(&tx, &audit_event).await?;
+        }
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+
+        Ok(invalidated)
+    }
+
     /// `update_trace_submission_status`, with the store's own audit row
     /// appended only when `append_audit` is set.
     async fn update_trace_submission_status_inner(

@@ -18,7 +18,34 @@ struct CredentialSection: View {
     let copy: PrivateInferenceCopy
     var requiresSession = false
     var prominent = false
-    @State private var provider = "github"
+    @State private var ownProvider = "github"
+    /// Where the provider choice lives when the caller holds it. `nil` -- every
+    /// production caller -- keeps it in this view's own state.
+    ///
+    /// A test seam, and the only one: on macOS 27 SwiftUI draws the picker
+    /// itself, with no `NSPopUpButton` beneath it and no accessibility node in
+    /// an offscreen host, so a test cannot reach the control to change it.
+    /// Holding the same binding the picker writes lets it make the same change.
+    var providerSelection: Binding<String>? = nil
+
+    private var selection: Binding<String> { providerSelection ?? $ownProvider }
+    private var provider: String { selection.wrappedValue }
+
+    /// The sign-in providers the picker offers, in the order it offers them.
+    /// The titles are `PrivateInferenceCopy`'s; the tags are the daemon's
+    /// `provider` values.
+    struct ProviderOption: Hashable {
+        let tag: String
+        let title: String
+    }
+
+    static func providerOptions(_ copy: PrivateInferenceCopy) -> [ProviderOption] {
+        [
+            ProviderOption(tag: "github", title: copy.credentialProviderGithub),
+            ProviderOption(tag: "google", title: copy.credentialProviderGoogle),
+            ProviderOption(tag: "near", title: copy.credentialProviderNear),
+        ]
+    }
 
     /// How often a ceremony in flight is re-read.
     ///
@@ -67,10 +94,10 @@ struct CredentialSection: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if action == .obtain || balanceAction == .obtain {
-                Picker(copy.credentialProviderLabel, selection: $provider) {
-                    Text(copy.credentialProviderGithub).tag("github")
-                    Text(copy.credentialProviderGoogle).tag("google")
-                    Text(copy.credentialProviderNear).tag("near")
+                Picker(copy.credentialProviderLabel, selection: selection) {
+                    ForEach(Self.providerOptions(copy), id: \.tag) { option in
+                        Text(option.title).tag(option.tag)
+                    }
                 }
                 .frame(minHeight: 44)
                 .disabled(model.credentialBusy)
