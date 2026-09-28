@@ -1552,6 +1552,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
+    // V98 is claimed by S2 (passkey creation) in flight; V99 depends only on
+    // V30, V32 and V97 and may be renumbered at merge.
+    (
+        99,
+        "unbound_account_reaper",
+        include_str!("../../../../migrations/V99__unbound_account_reaper.sql"),
+    ),
 ];
 
 #[async_trait]
