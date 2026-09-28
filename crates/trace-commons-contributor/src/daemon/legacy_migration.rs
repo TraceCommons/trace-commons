@@ -687,6 +687,17 @@ pub(crate) async fn migrate<P: AccountProvisioner>(
         .filter(|k| k.device_key_id == cfg.device_key_id)
         .ok_or_else(|| anyhow!("legacy_migration_device_key_missing"))?;
     let invite_hash = resolve_invite_subject(store, &cfg, &legacy, pasted_invite).await?;
+    // Read before anything changes, so it can be revoked once the move is
+    // done: the switch replaces it locally, and a local drop alone would
+    // leave it live on the server for the rest of its lifetime.
+    let legacy_session = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || crate::account_auth::try_load_token(&store))
+            .await
+            .map_err(|_| anyhow!("legacy_migration_unavailable"))?
+            .ok()
+            .flatten()
+    };
 
     let staged = {
         let store = store.clone();
@@ -704,6 +715,17 @@ pub(crate) async fn migrate<P: AccountProvisioner>(
         &invite_hash,
     )
     .await;
+    let result = match result {
+        Ok(mut answer) => {
+            let revoked = match legacy_session {
+                Some(token) => revoke_legacy_session(shared, &cfg, &token).await,
+                None => false,
+            };
+            answer["legacy_session_revoked"] = serde_json::Value::Bool(revoked);
+            Ok(answer)
+        }
+        Err(error) => Err(error),
+    };
     if result.is_err() {
         // A staged key that never became the identity is worth nothing.
         // Nothing else local has changed: `commit` put back its own writes.
@@ -775,6 +797,47 @@ async fn migrate_staged<P: AccountProvisioner>(
         "folders_kept": rebaselined.project_labels.len(),
         "automatic_grant_kept": rebaselined.automatic_grant,
     }))
+}
+
+/// Revoke the legacy account session on the server, once the move is
+/// committed. Best effort: the move has already happened and the session is
+/// already gone locally, so a failure is audited, not returned. The token is
+/// never logged; the audit carries a fixed label.
+async fn revoke_legacy_session(
+    shared: &DaemonShared,
+    legacy: &ContributorConfig,
+    token: &str,
+) -> bool {
+    let revoked = match trace_commons_operator_client::Client::builder(
+        &legacy.ingest_url,
+        "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
+    )
+    .bearer_token(token)
+    .host_allowlist(allowlist_for(legacy.allowed_hosts.as_deref()))
+    .timeout(std::time::Duration::from_secs(15))
+    .build()
+    {
+        Ok(client) => client
+            .call_raw::<()>(reqwest::Method::POST, "/v1/account/logout", &[], None)
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+    let entry = super::audit::AuditEntry {
+        at: Utc::now(),
+        action: if revoked {
+            "legacy-account-session-revoked"
+        } else {
+            "legacy-account-session-revocation-failed"
+        }
+        .to_string(),
+        project_label: None,
+        detail: None,
+    };
+    if super::audit::append(&shared.store, &entry).is_err() {
+        tracing::warn!("could not record the legacy session revocation");
+    }
+    revoked
 }
 
 /// `legacy_invite_migrate`: the contributor chose to move. `invite` is

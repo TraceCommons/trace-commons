@@ -507,6 +507,57 @@ GRANT trace_account_invite_runtime TO <ingest runtime login>;
 The invite remains issued by the separate registry role. This grant does not
 allow the ingest login to mint or revoke invites.
 
+### V90: the ingest runtime role
+
+Migrations since V62 created tables on paths every client uses and granted
+the ingest runtime nothing on them. On a deployment whose runtime login owns
+no tables, that fails with `permission denied`:
+
+- every new submission, and every status write, on `trace_submission_sessions`
+  (V78);
+- every idempotent re-POST of an existing submission, on
+  `trace_witness_certificate_evidence` (V76);
+- every withdrawal, on `trace_submission_sessions` and then on
+  `trace_token_bundles`, whose V65-V68 trigger runs as the caller.
+
+V90 names the pilot's runtime group, `trace_ingest_runtime`, as the schema's
+ingest runtime role. It creates the role `NOLOGIN NOBYPASSRLS` if it does not
+exist, and refuses to apply if an existing one is `SUPERUSER` or `BYPASSRLS`.
+It then grants the role exactly this:
+
+| Object | Grant | Why |
+|---|---|---|
+| `trace_submission_sessions` | `SELECT` | the source-session lock on every submission; withdrawal's mapping read |
+| `trace_source_sessions` | `SELECT, UPDATE (withdrawn_at)` | the `FOR UPDATE` row lock; withdrawal's stamp |
+| `trace_witness_evidence_runtime` | membership | V76's role for the evidence table |
+| `trace_token_bundles` | `SELECT, UPDATE (state, processing_state, processing_summary)` | the revocation trigger and withdrawal's pending-deletion sweep |
+| `trace_token_attachments` | `SELECT, UPDATE (deleted, prepared)` | withdrawal marking a bundle's objects deleted |
+| `trace_accounts` | `UPDATE (created_at, closed_at)`, replacing any table-wide `UPDATE` | an account merge closes the absorbed account; `created_at` is the row-lock column |
+
+V90 also grants `INSERT` on both source-session tables to
+`trace_account_admission_runtime`. Claiming a source session is the only
+writer of those rows, and only account admission claims one.
+
+The `trace_accounts` change matters when account admission is switched on.
+Its readiness check refuses a runtime that can update
+`trace_accounts.account_id`, and a table-wide `UPDATE` grant allows that.
+V90 revokes the group's table-wide `UPDATE` and checks that none remains.
+
+Opt-in token-bundle creation (`TRACE_COMMONS_BUNDLE_SERVER_ID`) still needs its
+own grants: `INSERT` on both token tables, and `UPDATE` on the receipt,
+expiry and processing columns. V90 does not grant them.
+
+On the pilot the role already exists and holds the ingest login's grants, so
+V90 fixes the grants itself and nothing is left to do by hand. On any other
+deployment whose ingest login is not the migrator, grant the role once, in the
+same session that applies V90:
+
+```sql
+GRANT trace_ingest_runtime TO <ingest runtime login>;
+```
+
+A deployment that migrates and serves as one role needs nothing.
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and

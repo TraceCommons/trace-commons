@@ -1571,6 +1571,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V86__account_trust_evaluations.sql"
     ));
     sql.push_str(include_str!(
+        "../../../migrations/V91__legacy_invite_link_devices.sql"
+    ));
+    sql.push_str(include_str!(
         "../../../migrations/V92__versioned_pipeline_runs.sql"
     ));
     sql.push_str(include_str!(
@@ -1687,6 +1690,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!(
         "../../../migrations/V86__account_trust_evaluations.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V91__legacy_invite_link_devices.sql"
     ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));

@@ -32,6 +32,13 @@ enum LinkMode {
     ForeignSignature,
     /// 409 `legacy_link_tenant_pooled`, as for a Devfolio shared code.
     Pooled,
+    /// The tenant is already linked to this account by another of its
+    /// devices, and the server predates V91: it returns the first device's
+    /// original record, naming and signed by that device.
+    FirstDeviceRecord,
+    /// The same, on a V91 server: this device's own attestation under the
+    /// existing link, with an attestation id of its own.
+    SecondDeviceAttestation,
 }
 
 struct Ingest {
@@ -47,6 +54,18 @@ struct Ingest {
     linked: Mutex<Option<LegacyInviteLinkRequest>>,
     /// Released by a test to let the link answer.
     gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    /// Bearer tokens presented to `/v1/account/logout`.
+    logouts: Mutex<Vec<String>>,
+}
+
+async fn logout_route(State(ingest): State<Arc<Ingest>>, headers: HeaderMap) -> impl IntoResponse {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    ingest.logouts.lock().unwrap().push(bearer);
+    StatusCode::NO_CONTENT
 }
 
 fn authorized(ingest: &Ingest, headers: &HeaderMap) -> bool {
@@ -145,6 +164,25 @@ async fn link_route(
     };
     match ingest.mode {
         LinkMode::OtherAccount => record.statement.account_id = Uuid::new_v4(),
+        LinkMode::FirstDeviceRecord => {
+            let first = Ed25519KeyPair::from_pkcs8(
+                Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                    .unwrap()
+                    .as_ref(),
+            )
+            .unwrap();
+            use ring::signature::KeyPair as _;
+            record.statement.device_key_id =
+                trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+                    first.public_key().as_ref(),
+                );
+            record.statement.nonce = "e".repeat(64);
+            record.device_signature = engine.encode(
+                first
+                    .sign(&legacy_invite_link_statement_bytes(&record.statement))
+                    .as_ref(),
+            );
+        }
         LinkMode::ForeignSignature => {
             let other = Ed25519KeyPair::from_pkcs8(
                 Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
@@ -198,11 +236,13 @@ async fn spawn_ingest(mode: LinkMode, ready: bool) -> (String, Arc<Ingest>) {
         links: AtomicUsize::new(0),
         linked: Mutex::new(None),
         gate: Mutex::new(None),
+        logouts: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/v1/account/contribution-status", get(status_route))
         .route(CHALLENGE_PATH, post(challenge_route))
         .route(LINK_PATH, post(link_route))
+        .route("/v1/account/logout", post(logout_route))
         .with_state(ingest.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -640,7 +680,11 @@ async fn the_switch_waits_for_a_pass_in_flight() {
     let migration =
         tokio::spawn(async move { migrate(&shared, &p, Some(INVITE_CODE)).await.map(|_| ()) });
     // The link lands, but nothing is switched while the pass holds the lock.
-    for _ in 0..200 {
+    // Waiting for the link is only the precondition, so the bound is loose:
+    // on a loaded machine the ceremony and link took longer than the two
+    // seconds this once allowed, and the test failed without any ordering
+    // being wrong.
+    for _ in 0..6000 {
         if f.ingest.links.load(Ordering::SeqCst) == 1 {
             break;
         }
@@ -917,4 +961,78 @@ async fn the_issuer_is_asked_first_and_an_old_issuer_falls_back_to_the_paste() {
             .unwrap(),
         invite_subject_hash("REMEMBERED000001")
     );
+}
+
+/// Completing the move revokes the legacy account session on the server,
+/// not only locally: the old session can no longer read or withdraw the
+/// invite tenant's traces once the device has left it.
+#[tokio::test(flavor = "multi_thread")]
+async fn completing_the_move_revokes_the_legacy_session_on_the_server() {
+    let f = fixture(LinkMode::Honest, true).await;
+    let answer = f.migrate(&provisioner(&f.ingest)).await.unwrap();
+    assert_eq!(
+        *f.ingest.logouts.lock().unwrap(),
+        ["Bearer tcn1_legacy".to_string()],
+        "the legacy session, and only it, is revoked"
+    );
+    assert_eq!(answer["legacy_session_revoked"], true);
+    let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.action == "legacy-account-session-revoked")
+    );
+}
+
+/// A move that does not complete revokes nothing: the legacy identity,
+/// session included, stays exactly as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_that_does_not_complete_revokes_nothing() {
+    for mode in [LinkMode::Pooled, LinkMode::OtherAccount] {
+        let f = fixture(mode, true).await;
+        f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+        assert!(f.ingest.logouts.lock().unwrap().is_empty());
+        f.assert_legacy_intact();
+    }
+    let f = fixture(LinkMode::Honest, true).await;
+    commons_credentials::fail_switch_after_for_test(&f.shared.store, 3);
+    f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    assert!(f.ingest.logouts.lock().unwrap().is_empty());
+    f.assert_legacy_intact();
+}
+
+/// A legacy identity with no account session has nothing to revoke, and the
+/// move still completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_without_a_legacy_session_revokes_nothing_and_completes() {
+    let f = fixture(LinkMode::Honest, true).await;
+    crate::account_auth::clear_token(&f.shared.store).unwrap();
+    let answer = f.migrate(&provisioner(&f.ingest)).await.unwrap();
+    assert_eq!(answer["migrated"], true);
+    assert_eq!(answer["legacy_session_revoked"], false);
+    assert!(f.ingest.logouts.lock().unwrap().is_empty());
+}
+
+/// A second device of a tenant another of its devices already linked to
+/// this same account gets its own attestation from a V91 server, verifies
+/// it against its own key, and moves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_device_of_a_linked_tenant_moves_on_its_own_attestation() {
+    let f = fixture(LinkMode::SecondDeviceAttestation, true).await;
+    let answer = f.migrate(&provisioner(&f.ingest)).await.unwrap();
+    assert_eq!(answer["migrated"], true);
+    let link = load_link(&f.shared.store).unwrap();
+    assert_eq!(link.record.statement.device_key_id, f.legacy.device_key_id);
+    assert!(f.sweep().voided.is_empty());
+}
+
+/// Against a server that predates V91 the second device is handed the first
+/// device's record. It cannot verify that against its own key, so it
+/// refuses and nothing changes: the reason V91 exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_device_record_is_refused_by_a_second_device() {
+    let f = fixture(LinkMode::FirstDeviceRecord, true).await;
+    let error = f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    assert_eq!(label(&error), "legacy_migration_verification_failed");
+    f.assert_legacy_intact();
 }

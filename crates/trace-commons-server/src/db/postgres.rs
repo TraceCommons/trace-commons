@@ -220,6 +220,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_legacy_invite_link_challenges",
     "trace_legacy_invite_links",
     "trace_legacy_invite_link_conflicts",
+    "trace_legacy_invite_link_devices",
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
@@ -962,6 +963,14 @@ fn recorded_migration_state(
     }
 }
 
+/// The `MIGRATIONS` table below, exposed (hidden) so
+/// `tests/migration_atomicity_pg.rs` can stop a database part-way, the way a
+/// deployment sits between two releases, and apply the rest later.
+#[doc(hidden)]
+pub fn registered_migrations() -> &'static [(i32, &'static str, &'static str)] {
+    MIGRATIONS
+}
+
 /// Every migration in `migrations/`, in the order `run_migrations` applies
 /// them: `(version, recorded name, SQL text)`. The recorded name is the file
 /// stem and the SQL is the file itself, embedded at compile time.
@@ -1486,10 +1495,20 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_credit_witness_provenance_class",
         include_str!("../../../../migrations/V89__trace_credit_witness_provenance_class.sql"),
     ),
-    // V90 and V91 are reserved for work in flight. V92 to V95 add the
-    // versioned pipeline's run queue, fenced leases, retained bundles,
-    // instrument operations, and receipt content. Every table forces RLS;
-    // there is no cross-tenant claim function.
+    (
+        90,
+        "ingest_runtime_grants",
+        include_str!("../../../../migrations/V90__ingest_runtime_grants.sql"),
+    ),
+    // V91 depends only on V81.
+    (
+        91,
+        "legacy_invite_link_devices",
+        include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+    ),
+    // V92 to V95 add the versioned pipeline's run queue, fenced leases,
+    // retained bundles, instrument operations, and receipt content. Every
+    // table forces RLS; there is no cross-tenant claim function.
     (
         92,
         "versioned_pipeline_runs",
@@ -7495,6 +7514,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
@@ -7528,6 +7548,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
