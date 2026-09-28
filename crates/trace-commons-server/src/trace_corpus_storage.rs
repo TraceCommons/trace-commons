@@ -3179,6 +3179,24 @@ pub trait TraceCorpusStore: Send + Sync {
         audit_event: TraceAuditEventWrite,
     ) -> Result<(), DatabaseError>;
 
+    /// Appends a hashed audit row that resumes the tenant's DB audit chain
+    /// across a legacy segment, where the file log ran ahead through rows
+    /// written without chain fields. Unlike
+    /// [`Self::append_trace_audit_event`], the row's `previous_event_hash` is
+    /// the file log's head, not the DB's latest hashed row. The row must name
+    /// that latest row's hash as its `decision_inputs_hash`, and it is
+    /// refused unless `resumes_from_event_hash` is still the latest hashed
+    /// row. Only the operator audit-chain repair calls this.
+    async fn append_trace_audit_chain_resume_event(
+        &self,
+        _audit_event: TraceAuditEventWrite,
+        _resumes_from_event_hash: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "trace audit chain resume is not supported by this backend".to_string(),
+        ))
+    }
+
     async fn list_trace_audit_events(
         &self,
         tenant_id: &str,
