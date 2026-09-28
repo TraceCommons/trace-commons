@@ -35,7 +35,7 @@ use uuid::Uuid;
 use crate::db::postgres::PgBackend;
 use crate::db::{
     insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
-    source_submission_owned_by_account,
+    record_source_submission_withdrawal_on_tx, withdraw_source_session_on_tx,
 };
 use crate::error::DatabaseError;
 use crate::trace_artifact_store::{
@@ -2207,9 +2207,10 @@ impl PgPipelineStore {
     /// Source session (`main`'s #1021 binding): when `account_id` maps the
     /// submission to one of that account's source sessions, the session is
     /// marked withdrawn, so a new upload of it is refused, and every
-    /// submission mapped to the session is withdrawn with this one. Each is
-    /// first checked to belong to the account, the check `main`'s
-    /// `withdraw_trace_source_session` makes. Otherwise only the requested
+    /// submission mapped to the session is withdrawn with this one, each
+    /// first checked to belong to the account. This is the session half
+    /// `main`'s `withdraw_trace_source_session` also calls
+    /// (`withdraw_source_session_on_tx`). Otherwise only the requested
     /// submission is withdrawn.
     ///
     /// Lock order: the session row, then the `pipeline_runs` rows of every
@@ -2219,10 +2220,13 @@ impl PgPipelineStore {
     /// so a withdrawal waits for that write at the run row and never holds a
     /// submission row the dispatch waits for.
     ///
-    /// Every affected submission gets `main`'s rows: a `trace_withdrawals`
+    /// Every affected submission gets `main`'s rows, through the same
+    /// per-submission half `main` calls
+    /// (`record_source_submission_withdrawal_on_tx`): a `trace_withdrawals`
     /// row (first writer wins, so a retry reports the first tier and time)
     /// and the status `revoked` with `withdrawn_at`, `revoked_at` and
-    /// `purged_at` set. One with a pipeline run also gets the pipeline
+    /// `purged_at` set; a delivered pipeline export snapshot counts as an
+    /// export for the tier. One with a pipeline run also gets the pipeline
     /// follow-up (`withdraw_pipeline_content_on_tx`), and each of its runs:
     ///
     /// - an index write that is `pending` may be partly written, so it is
@@ -2268,56 +2272,19 @@ impl PgPipelineStore {
             return Err(not_found());
         }
 
+        // The session half of `main`'s source-session withdrawal: it marks
+        // the session withdrawn (its row is the first lock taken here) and
+        // returns every submission mapped to it, each checked to belong to
+        // the account. Without a mapped session, only this submission.
+        let now: DateTime<Utc> = tx.query_one("SELECT NOW()", &[]).await?.get(0);
         let session = match account_id {
-            Some(account_id) => tx
-                .query_opt(
-                    "SELECT session_digest FROM trace_submission_sessions
-                      WHERE tenant_id = $1 AND account_id = $2 AND submission_id = $3",
-                    &[&tenant_id, &account_id, &submission_id],
-                )
-                .await?
-                .map(|row| (account_id, row.get::<_, Vec<u8>>(0))),
+            Some(account_id) => {
+                withdraw_source_session_on_tx(&tx, tenant_id, account_id, submission_id, now)
+                    .await?
+            }
             None => None,
         };
-        let (withdrawn_at, affected) = match &session {
-            Some((account_id, digest)) => {
-                let withdrawn_at: DateTime<Utc> = tx
-                    .query_one(
-                        "UPDATE trace_source_sessions
-                            SET withdrawn_at = COALESCE(withdrawn_at, NOW())
-                          WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
-                          RETURNING withdrawn_at",
-                        &[&tenant_id, account_id, digest],
-                    )
-                    .await?
-                    .get(0);
-                let mapped = tx
-                    .query(
-                        "SELECT submission_id FROM trace_submission_sessions
-                          WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
-                          ORDER BY submission_id",
-                        &[&tenant_id, account_id, digest],
-                    )
-                    .await?
-                    .iter()
-                    .map(|row| row.get::<_, Uuid>(0))
-                    .collect::<Vec<_>>();
-                for mapped_id in &mapped {
-                    if !source_submission_owned_by_account(&tx, tenant_id, *mapped_id, *account_id)
-                        .await?
-                    {
-                        return Err(DatabaseError::Query(
-                            "TraceSourceSessionConflict".to_string(),
-                        ));
-                    }
-                }
-                (withdrawn_at, mapped)
-            }
-            None => (
-                tx.query_one("SELECT NOW()", &[]).await?.get(0),
-                vec![submission_id],
-            ),
-        };
+        let (withdrawn_at, affected) = session.unwrap_or((now, vec![submission_id]));
 
         let runs = tx
             .query(
@@ -2355,19 +2322,11 @@ impl PgPipelineStore {
         let mut with_runs = Vec::new();
         for affected_id in &affected {
             let submission = submissions.get(affected_id);
-            // `main`'s tier rule (`withdraw_trace_source_session`): an
-            // export ever made -- invalidated or not, legacy or a delivered
-            // pipeline snapshot -- put copies out; otherwise an accepted
-            // submission, or one whose row is gone, was in the commons.
-            let prior_status = submission
-                .map(|row| row.get::<_, String>("status"))
-                .unwrap_or_else(|| "purged".to_string());
-            let exported: bool = tx
+            // `main`'s per-submission rows, with its tier rule; a delivered
+            // pipeline export snapshot also put copies out.
+            let exported_by_a_pipeline_snapshot: bool = tx
                 .query_one(
                     "SELECT EXISTS (
-                        SELECT 1 FROM trace_export_manifest_items
-                         WHERE tenant_id = $1 AND submission_id = $2
-                     ) OR EXISTS (
                         SELECT 1
                           FROM pipeline_export_snapshot_items item
                           JOIN pipeline_export_snapshots snapshot
@@ -2380,36 +2339,14 @@ impl PgPipelineStore {
                 )
                 .await?
                 .get(0);
-            let distribution_reach = if exported {
-                "commons_distributed"
-            } else if prior_status == "accepted" || submission.is_none() {
-                "commons_not_distributed"
-            } else {
-                "not_distributed"
-            };
-            tx.execute(
-                "INSERT INTO trace_withdrawals (
-                    tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
-                 ) VALUES ($1,$2,$3,$4,$5)
-                 ON CONFLICT (tenant_id, submission_id) DO NOTHING",
-                &[
-                    &tenant_id,
-                    affected_id,
-                    &withdrawn_at,
-                    &prior_status,
-                    &distribution_reach,
-                ],
-            )
-            .await?;
-            tx.execute(
-                "UPDATE trace_submissions
-                    SET status = 'revoked',
-                        withdrawn_at = COALESCE(withdrawn_at, $3),
-                        revoked_at = COALESCE(revoked_at, $3),
-                        purged_at = COALESCE(purged_at, $3),
-                        updated_at = NOW()
-                  WHERE tenant_id = $1 AND submission_id = $2",
-                &[&tenant_id, affected_id, &withdrawn_at],
+            let content_status = submission.map(|row| row.get::<_, String>("status"));
+            record_source_submission_withdrawal_on_tx(
+                &tx,
+                tenant_id,
+                *affected_id,
+                content_status.as_deref(),
+                withdrawn_at,
+                exported_by_a_pipeline_snapshot,
             )
             .await?;
             if let Some(submission) = submission
@@ -2505,6 +2442,9 @@ impl PgPipelineStore {
         // Trace Credit leg Settle already forfeited for this reason stays in
         // the count, so a retry after that pass reports the same.
         let trace_credit_forfeited: bool = follow_up.get(3);
+        // `pending` while any queued payload deletion is unfinished, `complete` once all
+        // finished, `not_required` if none was queued; the port said `not_required` once
+        // no live object ref remained, which misreports deletions that finished.
         let revocation_propagation = if unfinished_propagation > 0 {
             PipelineWithdrawalFollowUpState::Pending
         } else if queued_propagation > 0 {

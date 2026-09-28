@@ -1975,16 +1975,131 @@ async fn queued_index_invalidation(
 
 /// Owner ruling T7-8: `main`'s legacy route `POST /v1/account/traces/{id}/withdraw`
 /// uses the pipeline withdrawal when the pipeline runtime is present and the
-/// session of the requested submission has a pipeline run. Here the session
-/// holds a pipeline submission whose index write is `complete` and a legacy
-/// sibling with no run. The legacy route, on the pipeline submission, returns
-/// its own response shape, queues the index invalidation, withdraws the
-/// sibling and the session, and still does `main`'s file-side cleanup (the
-/// pipeline's objects are deleted) and one hash-only revoke audit event per
-/// withdrawn submission. The legacy route on a submission with no pipeline
-/// run is unchanged: the existing legacy withdrawal tests cover that.
+/// withdrawal reaches a pipeline run: the requested submission's own, or one
+/// of another submission of its source session. Here the session holds a
+/// pipeline submission whose index write is `complete` and a legacy sibling
+/// with no run, and the legacy route is called once on each (a fresh tenant
+/// each time). Either way it returns its own response shape, queues the index
+/// invalidation of the pipeline revision, withdraws both submissions and the
+/// session, and still does `main`'s file-side cleanup (the pipeline's objects
+/// are deleted) and one hash-only revoke audit event per withdrawn
+/// submission.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_withdrawal_route_uses_the_pipeline_for_a_session_with_a_run() {
+    for request_the_pipeline_submission in [true, false] {
+        let Some(fixture) = withdrawal_fixture().await else {
+            return;
+        };
+        let state = &fixture.state;
+        let tenant = fixture.tenant.as_str();
+        let principal = static_token_principal_ref(&fixture.token);
+        let session = account_session_headers(state, &fixture.token).await;
+        let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+        let sibling =
+            insert_account_test_submission(fixture.owner.as_ref(), tenant, &principal).await;
+        let ext = account_ctx_ext(state, &session).await;
+        let account_id = ext.0.account_id.as_uuid();
+        let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+            .as_slice()
+            .try_into()
+            .unwrap();
+        for submission_id in [run.submission_id, sibling] {
+            assert_eq!(
+                fixture
+                    .owner
+                    .claim_trace_source_session(tenant, account_id, &digest, submission_id)
+                    .await
+                    .unwrap(),
+                StorageTraceSourceSessionStatus::Active
+            );
+        }
+        let live_pipeline_objects = fixture
+            .owner
+            .list_trace_object_refs(tenant, run.submission_id)
+            .await
+            .unwrap();
+        assert!(!live_pipeline_objects.is_empty());
+        let requested = if request_the_pipeline_submission {
+            run.submission_id
+        } else {
+            sibling
+        };
+
+        let Json(response) =
+            account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(requested))
+                .await
+                .expect("the owner withdraws a submission of the session");
+
+        assert_eq!(response.submission_id, requested);
+        assert_eq!(response.prior_status, "accepted");
+        assert_eq!(response.distribution_reach, "commons_not_distributed");
+        assert!(!response.already_distributed);
+        assert!(response.credit_retained);
+        assert_eq!(
+            queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
+            (1, "pending".to_string()),
+            "the index invalidation is queued (requesting the pipeline submission: \
+             {request_the_pipeline_submission})"
+        );
+        assert_eq!(
+            fixture
+                .owner
+                .get_trace_source_session_status(tenant, account_id, &digest)
+                .await
+                .unwrap(),
+            StorageTraceSourceSessionStatus::Withdrawn
+        );
+        let audit_client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        for submission_id in [run.submission_id, sibling] {
+            assert!(
+                fixture
+                    .owner
+                    .get_trace_withdrawal(tenant, submission_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "every submission of the session is withdrawn"
+            );
+            let revoke_events: i64 = audit_client
+                .query_one(
+                    "SELECT count(*) FROM trace_audit_events
+                      WHERE submission_id = $1 AND action = 'revoke'",
+                    &[&submission_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(
+                revoke_events, 1,
+                "one hash-only revoke event per submission"
+            );
+        }
+        for object_ref in fixture
+            .owner
+            .list_trace_object_refs(tenant, run.submission_id)
+            .await
+            .unwrap()
+        {
+            assert!(
+                object_ref.deleted_at.is_some(),
+                "main's file-side cleanup deleted every pipeline object"
+            );
+        }
+    }
+}
+
+/// Owner ruling T7-8, the other side: with the pipeline runtime present, the
+/// legacy route on a submission whose withdrawal reaches no pipeline run
+/// takes `main`'s path unchanged -- even when the tenant has a pipeline run
+/// of its own on another submission. The submission here has no source
+/// session, is `quarantined`, and has an export membership. `main`'s path
+/// for a submission with no session reports a submission that is not
+/// `accepted` as `not_distributed` whatever its exports; the pipeline
+/// withdrawal applies the session rule, under which any export makes it
+/// `commons_distributed`. So the tier tells the two paths apart, and no
+/// index invalidation is queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_withdrawal_route_keeps_mains_path_without_a_pipeline_run() {
     let Some(fixture) = withdrawal_fixture().await else {
         return;
     };
@@ -1992,90 +2107,91 @@ async fn legacy_withdrawal_route_uses_the_pipeline_for_a_session_with_a_run() {
     let tenant = fixture.tenant.as_str();
     let principal = static_token_principal_ref(&fixture.token);
     let session = account_session_headers(state, &fixture.token).await;
-    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
-    let sibling = insert_account_test_submission(fixture.owner.as_ref(), tenant, &principal).await;
-    let ext = account_ctx_ext(state, &session).await;
-    let account_id = ext.0.account_id.as_uuid();
-    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
-        .as_slice()
-        .try_into()
-        .unwrap();
-    for submission_id in [run.submission_id, sibling] {
-        assert_eq!(
-            fixture
-                .owner
-                .claim_trace_source_session(tenant, account_id, &digest, submission_id)
-                .await
-                .unwrap(),
-            StorageTraceSourceSessionStatus::Active
-        );
-    }
-    let live_pipeline_objects = fixture
+    let unrelated_run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+    let legacy = insert_account_test_submission_with_status(
+        fixture.owner.as_ref(),
+        tenant,
+        &principal,
+        StorageTraceCorpusStatus::Quarantined,
+    )
+    .await;
+    let legacy_record = fixture
         .owner
-        .list_trace_object_refs(tenant, run.submission_id)
-        .await
-        .unwrap();
-    assert!(!live_pipeline_objects.is_empty());
-
-    let Json(response) =
-        account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(run.submission_id))
-            .await
-            .expect("the owner withdraws the pipeline submission");
-
-    assert_eq!(response.submission_id, run.submission_id);
-    assert_eq!(response.prior_status, "accepted");
-    assert_eq!(response.distribution_reach, "commons_not_distributed");
-    assert!(!response.already_distributed);
-    assert!(response.credit_retained);
-    assert_eq!(
-        queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
-        (1, "pending".to_string()),
-        "the index invalidation is queued"
-    );
-    assert_eq!(
-        fixture
-            .owner
-            .get_trace_source_session_status(tenant, account_id, &digest)
-            .await
-            .unwrap(),
-        StorageTraceSourceSessionStatus::Withdrawn
-    );
-    let audit_client = fixture.owner.trace_pool_for_test().get().await.unwrap();
-    for submission_id in [run.submission_id, sibling] {
-        assert!(
-            fixture
-                .owner
-                .get_trace_withdrawal(tenant, submission_id)
-                .await
-                .unwrap()
-                .is_some(),
-            "every submission of the session is withdrawn"
-        );
-        let revoke_events: i64 = audit_client
-            .query_one(
-                "SELECT count(*) FROM trace_audit_events
-                  WHERE submission_id = $1 AND action = 'revoke'",
-                &[&submission_id],
-            )
-            .await
-            .unwrap()
-            .get(0);
-        assert_eq!(
-            revoke_events, 1,
-            "one hash-only revoke event per submission"
-        );
-    }
-    for object_ref in fixture
-        .owner
-        .list_trace_object_refs(tenant, run.submission_id)
+        .get_trace_submission(tenant, legacy)
         .await
         .unwrap()
-    {
-        assert!(
-            object_ref.deleted_at.is_some(),
-            "main's file-side cleanup deleted every pipeline object"
-        );
-    }
+        .expect("the legacy submission exists");
+    let manifest_id = Uuid::new_v4();
+    fixture
+        .owner
+        .upsert_trace_export_manifest(StorageTraceExportManifestWrite {
+            tenant_id: tenant.to_string(),
+            export_manifest_id: manifest_id,
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: None,
+            audit_event_id: None,
+            source_submission_ids: vec![legacy],
+            source_submission_ids_hash: "sha256:manifest".to_string(),
+            item_count: 1,
+            generated_at: Utc::now(),
+        })
+        .await
+        .expect("manifest writes");
+    fixture
+        .owner
+        .upsert_trace_export_manifest_item(StorageTraceExportManifestItemWrite {
+            tenant_id: tenant.to_string(),
+            export_manifest_id: manifest_id,
+            submission_id: legacy,
+            trace_id: legacy_record.trace_id,
+            derived_id: None,
+            object_ref_id: None,
+            vector_entry_id: None,
+            source_status_at_export: StorageTraceCorpusStatus::Quarantined,
+            source_hash_at_export: "sha256:source".to_string(),
+        })
+        .await
+        .expect("manifest item writes");
+    let ext = account_ctx_ext(state, &session).await;
+
+    let Json(response) =
+        account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(legacy))
+            .await
+            .expect("the owner withdraws the legacy submission");
+
+    assert_eq!(response.submission_id, legacy);
+    assert_eq!(response.prior_status, "quarantined");
+    assert_eq!(
+        response.distribution_reach, "not_distributed",
+        "main's rule for a submission with no session"
+    );
+    assert!(!response.already_distributed);
+    let tombstone = fixture
+        .owner
+        .get_trace_withdrawal(tenant, legacy)
+        .await
+        .unwrap()
+        .expect("the withdrawal row is written");
+    assert_eq!(tombstone.prior_status, "quarantined");
+    assert_eq!(tombstone.distribution_reach, "not_distributed");
+    assert_eq!(tombstone.withdrawn_at, response.withdrawn_at);
+    let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let invalidations: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_index_invalidations WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(invalidations, 0, "no pipeline index invalidation is queued");
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, tenant, unrelated_run.run_id).await,
+        (0, "none".to_string()),
+        "the tenant's unrelated pipeline run is untouched"
+    );
 }
 
 /// Ruling T7-4: `POST /v1/contributors/me/pipeline-submissions/{id}/withdraw`
