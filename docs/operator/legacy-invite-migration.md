@@ -72,6 +72,31 @@ minutes, and an account may hold five open at once.
 Instance-enrolled devices are `invite`-origin in `device_keys` but redeemed no
 invite; they have no `onboarding_invites` row and cannot link.
 
+## How a device learns its invite
+
+The statement names the invite the tenant was onboarded under, by its subject
+hash. Clients never stored that hash, and most invitees received their code
+out of band and no longer have it. So the issuer tells a device its own:
+
+```
+POST /v1/device/invite-subject   (issuer)  -> { invite_subject_hash }
+```
+
+The body (`tenant_id`, `device_key_id`, `issued_at`) is signed with the
+device key over its exact bytes and sent with `x-trace-device-key-id` and
+`x-trace-device-signature`, exactly as a device-key upload claim is. The
+issuer answers only for that device, from `device_keys`, and refuses by name:
+`device_key_not_registered`, `device_key_revoked`,
+`device_not_invite_onboarded` (a NEAR or NEAR AI device), and
+`device_invite_subject_request_stale` (`issued_at` more than five minutes
+from the issuer clock). Without the device registry configured it answers 503.
+Each read logs one hash-only line (`device invite subject read`, with the
+device as a storage ref and the outcome label). Types are in
+`crates/trace-commons-protocol/src/device_invite_subject.rs`.
+
+An issuer older than this route answers 404, and the client falls back to
+asking the contributor to paste their invite.
+
 ## Enabling linking
 
 Linking is off until you switch it on, and deploying V81 does not switch it
@@ -222,3 +247,6 @@ nothing is lost. The steps, in order:
   contributes with account admission on.
 - `tests/legacy_invite_link_tests.rs` (ingest bin): route session rules, the
   off switch, and the handler pair end to end.
+- `device_invite_subject_pg` (CI, `database suites against a real
+  PostgreSQL`): a device onboarded through the real `/v1/onboard` reads back
+  its stored invite hash, and the named refusals hold against real rows.
