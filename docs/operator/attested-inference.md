@@ -603,8 +603,10 @@ body bytes unchanged. Deploy ingest with the signing address and measurement
 set pinned before enabling provenance-dependent policy. The pin controls verification even when
 `TRACE_COMMONS_WITNESS_BYPASS_ENABLED=false`; the bypass also requires its
 own explicit policy-version allowlist. A half-configured pin refuses ingest
-startup. Apply V76 and grant the ingest database login membership in
-`trace_witness_evidence_runtime` when it is not the migration owner. The table
+startup. Apply V76. When the ingest database login is not the migration owner,
+it needs membership in `trace_witness_evidence_runtime`: V90 grants that role
+to `trace_ingest_runtime`, the ingest runtime role, so grant the login that
+role (see `deployment.md`, "V90: the ingest runtime role"). The table
 uses forced tenant RLS. Only the derived `artifact_sha256` link may change
 after insert, on an exact signed-source retry. The runtime role's column
 grants allow nothing else, and a `BEFORE UPDATE` trigger

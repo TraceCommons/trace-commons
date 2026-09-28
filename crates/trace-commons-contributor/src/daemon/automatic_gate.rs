@@ -47,7 +47,10 @@
 //! contributor is told: see [`session_redaction`], the per-session check of
 //! the certified pipeline version against the published allowlist (K6), and
 //! [`folder_disclosure`], which may claim a model scrubbed a folder's
-//! sessions only where a certified full pipeline ran on every one.
+//! sessions only where a certified full pipeline ran on every one. The
+//! upload pass records each unattended session's check against its project
+//! (`ProjectEntry::automatic_redaction`), and [`project_disclosure`] reads
+//! that record to choose the armed project's disclosure.
 //!
 //! R4 (provenance) is a property of what is claimed, R5 (the hold) is the
 //! queue's `held_for_review`, and R6 (the void rule) is a property of the
@@ -63,9 +66,12 @@ use crate::witness::transport::{WitnessedEnvelope, certified_redaction_pipeline_
 /// condition, set and cleared only from full passes (where
 /// `TickReport::gate_blocked` is `Some`), with copy in every shell. An
 /// event-driven pass sees only changed paths, so it can neither raise nor
-/// clear it. The count and the log line exist today; without the health
-/// label, an enforced gate would hold armed work with nothing in the app to
-/// say so.
+/// clear it. The count, the log line, the health label
+/// (`health::LABEL_AUTOMATIC_CONTRIBUTION_HELD`) and
+/// `status.automatic_contribution_held` exist in the daemon, as do the K5
+/// rewording notices (`arming_wording`); switching this on still needs every
+/// shell to show them, or an enforced gate would hold armed work with
+/// nothing in the app to say so.
 pub const ENFORCED: bool = false;
 
 /// A requirement the spec names, by its number there.
@@ -318,6 +324,43 @@ where
     } else {
         Disclosure::PatternsOnly
     }
+}
+
+/// R1's disclosure for one project, from what its sessions actually got.
+///
+/// **The rule.** Checked per session, decided per folder: each session sent
+/// from the project on the contributor's behalf is checked on its own
+/// certificate ([`session_redaction`]), and the project gets
+/// [`Disclosure::ModelScrubbed`] only when it is armed, at least one such
+/// session has been sent since it was last armed, and every one of them was
+/// [`SessionRedaction::CertifiedFullPipeline`] -- [`folder_disclosure`]
+/// over that record. One session without a certified full pipeline keeps
+/// the project on [`Disclosure::PatternsOnly`] until it is armed again, and
+/// arming again (or a void, R6) starts the record from nothing.
+///
+/// Per folder because the arming disclosure is one sentence about the
+/// folder's sessions, and the spec's folder rule is "every session in the
+/// folder is certified by the enclave": the model-scrub wording shown over
+/// a folder that sent even one session no model checked would be false for
+/// that session. Sticky until re-arming because a later certified session
+/// does not make that one true.
+///
+/// Sessions a person approved are not counted: they were seen before they
+/// went, and the arming disclosure describes the ones nobody sees.
+pub fn project_disclosure(policy: &super::policy::ProjectPolicy, project_key: &str) -> Disclosure {
+    let Some(entry) = policy.projects.get(project_key) else {
+        return Disclosure::PatternsOnly;
+    };
+    if entry.mode != super::policy::ProjectMode::AutoUpload {
+        return Disclosure::PatternsOnly;
+    }
+    let tally = entry.automatic_redaction;
+    // One of each kind present is all `folder_disclosure` needs to decide,
+    // so the walk is bounded however many sessions were counted.
+    let not_certified = (tally.not_certified > 0).then_some(SessionRedaction::NotCertified);
+    let certified =
+        (tally.certified_full_pipeline > 0).then_some(SessionRedaction::CertifiedFullPipeline);
+    folder_disclosure(not_certified.into_iter().chain(certified))
 }
 
 #[cfg(test)]
@@ -698,5 +741,173 @@ mod tests {
     #[allow(clippy::assertions_on_constants)]
     fn the_gate_ships_unenforced() {
         assert!(!ENFORCED);
+    }
+
+    // ---- K6, per project: what an armed folder is told ----
+
+    const PROJECT: &str = "/Users/testuser/code/k6";
+
+    fn armed() -> super::super::policy::ProjectPolicy {
+        let mut policy = super::super::policy::ProjectPolicy::new();
+        policy
+            .set_mode(
+                PROJECT,
+                super::super::policy::ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy
+    }
+
+    /// One unattended session sent from an armed project, with this
+    /// certificate (or none) under this witness (or none).
+    fn after_one_session(
+        witnessed: Option<&WitnessedEnvelope>,
+        witness: Option<&WitnessSettings>,
+    ) -> Disclosure {
+        let mut policy = armed();
+        policy.record_automatic_redaction(PROJECT, session_redaction(witnessed, witness));
+        project_disclosure(&policy, PROJECT)
+    }
+
+    /// Each allowlisted version, certified by the pinned witness, earns the
+    /// project the model-scrub wording.
+    #[test]
+    fn a_project_whose_session_had_each_allowlisted_pipeline_is_model_scrubbed() {
+        for version in trace_commons_protocol::trace_contribution::FULL_REDACTION_PIPELINE_VERSIONS
+        {
+            let (response, witness) = certified(version);
+            assert_eq!(
+                after_one_session(Some(&response), Some(&witness)),
+                Disclosure::ModelScrubbed,
+                "{version}"
+            );
+        }
+    }
+
+    /// The deterministic-only run, the fail-open sidecar v1, the witness's
+    /// startup mode name `full-pipeline` (which is never a certified value),
+    /// and a session with no witness at all each leave the project on the
+    /// deterministic-only wording.
+    #[test]
+    fn a_project_whose_session_had_anything_else_is_patterns_only() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v1",
+            "full-pipeline",
+        ] {
+            let (response, witness) = certified(version);
+            assert_eq!(
+                after_one_session(Some(&response), Some(&witness)),
+                Disclosure::PatternsOnly,
+                "{version}"
+            );
+        }
+        assert_eq!(after_one_session(None, None), Disclosure::PatternsOnly);
+        let (response, _) = certified(NEAR_AI_FULL);
+        assert_eq!(
+            after_one_session(Some(&response), None),
+            Disclosure::PatternsOnly,
+            "a certificate with no configured witness to check it against"
+        );
+    }
+
+    /// Per folder over per session: one uncertified session among certified
+    /// ones keeps the project off the model-scrub wording, in either order,
+    /// until it is armed again.
+    #[test]
+    fn one_uncertified_session_holds_the_project_until_it_is_re_armed() {
+        let (full, witness) = certified(NEAR_AI_FULL);
+        let (partial, _) = certified("ironclaw-deterministic-secret-path-v3");
+        let full = session_redaction(Some(&full), Some(&witness));
+        let partial = session_redaction(Some(&partial), Some(&witness));
+
+        for order in [[full, partial, full], [partial, full, full]] {
+            let mut policy = armed();
+            for session in order {
+                policy.record_automatic_redaction(PROJECT, session);
+            }
+            assert_eq!(
+                project_disclosure(&policy, PROJECT),
+                Disclosure::PatternsOnly
+            );
+        }
+
+        let mut policy = armed();
+        policy.record_automatic_redaction(PROJECT, partial);
+        // Re-armed: the record covers one arming only.
+        policy
+            .set_mode(
+                PROJECT,
+                super::super::policy::ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            project_disclosure(&policy, PROJECT),
+            Disclosure::PatternsOnly,
+            "nothing sent since re-arming, so nothing earned yet"
+        );
+        policy.record_automatic_redaction(PROJECT, full);
+        assert_eq!(
+            project_disclosure(&policy, PROJECT),
+            Disclosure::ModelScrubbed
+        );
+    }
+
+    /// Nothing sent yet, a project not armed, and an unknown project are
+    /// all deterministic-only; and a session recorded while a project was
+    /// not armed is not carried into its next arming.
+    #[test]
+    fn a_project_with_nothing_certified_since_arming_is_patterns_only() {
+        use super::super::policy::{ProjectMode, ProjectPolicy};
+        let (full, witness) = certified(NEAR_AI_FULL);
+        let full = session_redaction(Some(&full), Some(&witness));
+
+        assert_eq!(
+            project_disclosure(&armed(), PROJECT),
+            Disclosure::PatternsOnly
+        );
+        assert_eq!(
+            project_disclosure(&ProjectPolicy::new(), PROJECT),
+            Disclosure::PatternsOnly
+        );
+
+        let mut policy = armed();
+        policy.record_automatic_redaction(PROJECT, full);
+        policy
+            .set_mode(PROJECT, ProjectMode::NotifyOnly, chrono::Utc::now())
+            .unwrap();
+        assert_eq!(
+            project_disclosure(&policy, PROJECT),
+            Disclosure::PatternsOnly,
+            "an ask-first project gets no automatic disclosure"
+        );
+        policy.record_automatic_redaction(PROJECT, full);
+        policy
+            .set_mode(PROJECT, ProjectMode::AutoUpload, chrono::Utc::now())
+            .unwrap();
+        assert_eq!(
+            project_disclosure(&policy, PROJECT),
+            Disclosure::PatternsOnly,
+            "a session recorded while ask-first is not evidence for the next arming"
+        );
+    }
+
+    /// A policy file written before the record existed loads, as nothing
+    /// recorded.
+    #[test]
+    fn an_older_policy_file_loads_with_nothing_recorded() {
+        let mut value = serde_json::to_value(armed()).unwrap();
+        value["projects"][PROJECT]
+            .as_object_mut()
+            .unwrap()
+            .remove("automatic_redaction")
+            .expect("the field is written");
+        let policy: super::super::policy::ProjectPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            project_disclosure(&policy, PROJECT),
+            Disclosure::PatternsOnly
+        );
     }
 }

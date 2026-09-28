@@ -9,6 +9,8 @@ pub mod account_onboarding;
 pub mod account_passkey;
 pub mod account_session;
 pub mod account_trust;
+pub mod account_trust_growth;
+pub mod account_trust_rule;
 pub mod admission_evidence;
 pub mod admission_ledger;
 pub mod audit_chain;

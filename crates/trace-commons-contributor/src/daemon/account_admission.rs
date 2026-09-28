@@ -304,6 +304,33 @@ impl AccountAdmissionState {
     fn drop_session(&self) {
         *self.session.loaded.lock().expect("session lock") = None;
     }
+
+    /// Ask `cfg`'s ingest now, with `token`, and record the answer for
+    /// `cfg`. For the legacy invite migration, which must read an
+    /// affirmative, ready answer for the identity it is about to switch to
+    /// before it switches -- a config that is not the configured one yet,
+    /// under a session that is not stored yet. Recorded under `cfg`'s own
+    /// key, so it counts for nothing until that config is the one in force,
+    /// and then saves the first pass a read.
+    ///
+    /// A rotated token in the reply is not stored: the session is minutes
+    /// old and not yet published, and it is published whole by the switch.
+    pub(super) async fn read_now(
+        &self,
+        cfg: &ContributorConfig,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> AccountAdmission {
+        let reply = fetch_status(cfg, token).await;
+        self.record(AnswerKey::of(cfg), reply.body, now);
+        self.current(Some(cfg))
+    }
+
+    /// Drop the account session held between passes: the identity it was
+    /// read for has changed.
+    pub(super) fn forget_session(&self) {
+        self.drop_session();
+    }
 }
 
 /// Ask ingest again, before a full pass. Never fails the pass: every error

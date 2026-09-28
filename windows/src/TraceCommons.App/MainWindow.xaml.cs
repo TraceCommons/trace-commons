@@ -950,6 +950,76 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// The acknowledge button on a rewording notice, resolved Tag first as
+    /// for a void notice.
+    /// </summary>
+    private async void OnAcknowledgeArmingRewording(object sender, RoutedEventArgs e)
+    {
+        ArmingRewordingCard? card = sender is FrameworkElement element
+            ? element.Tag as ArmingRewordingCard ?? element.DataContext as ArmingRewordingCard
+            : null;
+        if (card is null)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AcknowledgeArmingRewordingAsync(card);
+    }
+
+    /// <summary>"Ask me first" on a rewording notice.</summary>
+    private async void OnAskFirstArmingRewording(object sender, RoutedEventArgs e)
+    {
+        ArmingRewordingCard? card = sender is FrameworkElement element
+            ? element.Tag as ArmingRewordingCard ?? element.DataContext as ArmingRewordingCard
+            : null;
+        if (card is null || !card.CanAskFirst)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AskFirstAsync(card.AskFirstProjectId!, card.Notice.AskFirstFailed);
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
+    /// <summary>"Ask me first" on one folder of the held notice.</summary>
+    private async void OnAskFirstHeldProject(object sender, RoutedEventArgs e)
+    {
+        GateHeldProjectNotice? project = sender is FrameworkElement element
+            ? element.Tag as GateHeldProjectNotice ?? element.DataContext as GateHeldProjectNotice
+            : null;
+        if (project is null || !project.CanAskFirst)
+        {
+            return;
+        }
+
+        if (sender is Control control)
+        {
+            control.IsEnabled = false;
+        }
+
+        await ViewModel.AskFirstAsync(project.ProjectId!, project.AskFirstFailed);
+
+        if (sender is Control again)
+        {
+            again.IsEnabled = true;
+        }
+    }
+
     private void OnHealthAction(object sender, RoutedEventArgs e)
     {
         var target = ViewModel.HealthDestination;
