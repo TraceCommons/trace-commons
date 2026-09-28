@@ -2057,6 +2057,8 @@ mod tests {
             source: r.source.to_string(),
             submitted_at: chrono::Utc::now(),
             status: "accepted".into(),
+            approved_unattended: false,
+            approved_verdict: None,
         };
         assert_eq!(
             submitted_marker(&src, &r, std::slice::from_ref(&receipt)),
@@ -4619,6 +4621,8 @@ mod logout_tests {
                     source: "claude-code".to_string(),
                     submitted_at: Utc::now(),
                     status: "accepted".to_string(),
+                    approved_unattended: false,
+                    approved_verdict: None,
                 })
                 .unwrap();
         }

@@ -35,6 +35,7 @@ pub(crate) mod cloud_credential_lifecycle;
 mod cloud_credential_lifecycle_tests;
 #[cfg(test)]
 pub(crate) mod cloud_credential_test_support;
+pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
 pub(crate) mod credential_store;

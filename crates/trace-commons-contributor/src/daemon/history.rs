@@ -75,6 +75,25 @@ pub struct HistoryRecord {
     /// written before this field existed still parses.
     #[serde(default)]
     pub withdrawn_at: Option<DateTime<Utc>>,
+    /// Whether this trace reached upload without the contributor deciding --
+    /// an armed (`auto_upload`) folder sent it rather than a person approving
+    /// it. Carried from `Receipt::approved_unattended`, itself set at upload
+    /// time from `QueueEntry::approved_unattended`.
+    ///
+    /// This is what draws the design's "you approved" versus "armed · went
+    /// without asking" distinction on a history row (K7). It is a fixed
+    /// label about how the send happened, never a message body.
+    ///
+    /// `#[serde(default)]` so a cache line written before this field existed
+    /// still parses; an old row reads as `false` ("you approved"), which is
+    /// the safe reading for a row this daemon cannot otherwise account for.
+    #[serde(default)]
+    pub approved_unattended: bool,
+    /// The contributor's verdict at approval time (`worked` / `partly` /
+    /// `failed`), carried from `Receipt::approved_verdict`. `None` when no
+    /// verdict was given, or when this row predates the field.
+    #[serde(default)]
+    pub approved_verdict: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -110,6 +129,15 @@ pub struct HistoryRollup {
     /// Surfaced on its own so a contributor sees held-for-review distinctly
     /// from failure.
     pub quarantined: u32,
+    /// How many records carry a local `withdrawn_at` (K7). Reported
+    /// separately from the status buckets above, the same way `quarantined`
+    /// is: a withdrawn row already carries `STATUS_WITHDRAWN`, which
+    /// `HistoryCounts::count` has no bucket for and would otherwise fold
+    /// into `other`, indistinguishable from a status this client simply does
+    /// not recognize. "2 taken back" needs its own count to be rendered as
+    /// the design's third tile, not folded into a bucket meaning "unknown".
+    #[serde(default)]
+    pub taken_back: u32,
     pub last_refreshed_at: Option<DateTime<Utc>>,
 }
 
@@ -177,6 +205,12 @@ pub fn join(
                     })
                     .unwrap_or_default(),
                 last_refreshed_at: update.map(|_| refreshed_at),
+                // Provenance is the receipt's own: it was set once, at
+                // upload time, from the queue entry that produced this
+                // submission, and the server's status read-back has no
+                // opinion about it.
+                approved_unattended: r.approved_unattended,
+                approved_verdict: r.approved_verdict.clone(),
                 // `join` rebuilds every record from receipts + the server's
                 // own status read-back, which does not yet report a
                 // withdrawn status of its own (the server endpoint that
@@ -256,6 +290,8 @@ pub fn merge_new_receipts(
             explanations: Vec::new(),
             last_refreshed_at: None,
             withdrawn_at: None,
+            approved_unattended: r.approved_unattended,
+            approved_verdict: r.approved_verdict.clone(),
         });
         added = true;
     }
@@ -307,6 +343,9 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
         }
         if rec.status == STATUS_QUARANTINED {
             r.quarantined += 1;
+        }
+        if rec.withdrawn_at.is_some() {
+            r.taken_back += 1;
         }
         r.credit_pending += rec.credit_points_pending;
         if let Some(f) = rec.credit_points_final {
@@ -406,12 +445,25 @@ mod tests {
     use crate::daemon::test_support::at;
 
     fn receipt(id: Uuid, hash: &str, status: &str, when: &str) -> Receipt {
+        receipt_with_provenance(id, hash, status, when, false, None)
+    }
+
+    fn receipt_with_provenance(
+        id: Uuid,
+        hash: &str,
+        status: &str,
+        when: &str,
+        approved_unattended: bool,
+        approved_verdict: Option<&str>,
+    ) -> Receipt {
         Receipt {
             submission_id: id,
             session_hash: hash.into(),
             source: "claude-code".into(),
             submitted_at: at(when),
             status: status.into(),
+            approved_unattended,
+            approved_verdict: approved_verdict.map(str::to_string),
         }
     }
 
@@ -450,6 +502,8 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: Some(at("2026-08-08T12:00:00Z")),
             withdrawn_at: None,
+            approved_unattended: false,
+            approved_verdict: None,
         }
     }
 
@@ -843,6 +897,8 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
+            approved_unattended: false,
+            approved_verdict: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("proj_"), "expected an opaque id: {json}");
@@ -864,5 +920,142 @@ mod tests {
         });
         let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.project_id, "");
+    }
+
+    /// K7: a row written before `approved_unattended` / `approved_verdict`
+    /// existed must still parse -- and must parse as "you approved", the
+    /// safe reading, rather than being silently skipped as a corrupt line.
+    #[test]
+    fn a_history_record_written_before_provenance_existed_still_loads() {
+        let value = serde_json::json!({
+            "submission_id": Uuid::new_v4(),
+            "submitted_at": Utc::now(),
+            "project_id": "proj_aa",
+            "project_label": "repo",
+            "source": "claude_code",
+            "session_hash": "sha256:abc",
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "explanations": [],
+        });
+        let loaded: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert!(!loaded.approved_unattended);
+        assert_eq!(loaded.approved_verdict, None);
+    }
+
+    /// K7: `join` carries the receipt's own provenance onto the history row
+    /// -- both directions, so "you approved · Worked" and "armed · went
+    /// without asking" can be told apart. Removing the assignment in `join`
+    /// makes this fail rather than passing vacuously: both receipts start
+    /// with distinct, non-default provenance.
+    #[test]
+    fn join_carries_provenance_for_a_persons_approval_and_an_unattended_one() {
+        let approved_by_person = Uuid::new_v4();
+        let sent_unattended = Uuid::new_v4();
+        let receipts = vec![
+            receipt_with_provenance(
+                approved_by_person,
+                "sha256:aa",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                false,
+                Some("worked"),
+            ),
+            receipt_with_provenance(
+                sent_unattended,
+                "sha256:bb",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                true,
+                None,
+            ),
+        ];
+        let recs = join(&receipts, &[], &BTreeMap::new(), at("2026-08-08T12:00:00Z"));
+        let person = recs
+            .iter()
+            .find(|r| r.submission_id == approved_by_person)
+            .unwrap();
+        assert!(!person.approved_unattended, "a person approved this one");
+        assert_eq!(person.approved_verdict.as_deref(), Some("worked"));
+
+        let unattended = recs
+            .iter()
+            .find(|r| r.submission_id == sent_unattended)
+            .unwrap();
+        assert!(
+            unattended.approved_unattended,
+            "an armed folder sent this one without asking"
+        );
+        assert_eq!(unattended.approved_verdict, None);
+    }
+
+    /// The same, through the cheap local merge rather than a server
+    /// read-back -- the path an upload pass actually uses the moment a
+    /// receipt lands (see `merge_new_receipts`'s module doc).
+    #[test]
+    fn merge_new_receipts_carries_provenance_for_a_persons_approval_and_an_unattended_one() {
+        let approved_by_person = Uuid::new_v4();
+        let sent_unattended = Uuid::new_v4();
+        let receipts = vec![
+            receipt_with_provenance(
+                approved_by_person,
+                "sha256:aa",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                false,
+                Some("partly"),
+            ),
+            receipt_with_provenance(
+                sent_unattended,
+                "sha256:bb",
+                "submitted",
+                "2026-08-08T10:00:00Z",
+                true,
+                None,
+            ),
+        ];
+        let mut records = Vec::new();
+        merge_new_receipts(&mut records, &receipts, &BTreeMap::new());
+        let person = records
+            .iter()
+            .find(|r| r.submission_id == approved_by_person)
+            .unwrap();
+        assert!(!person.approved_unattended);
+        assert_eq!(person.approved_verdict.as_deref(), Some("partly"));
+        let unattended = records
+            .iter()
+            .find(|r| r.submission_id == sent_unattended)
+            .unwrap();
+        assert!(unattended.approved_unattended);
+    }
+
+    /// K7: the taken-back count in the rollup, alongside the existing
+    /// buckets. A withdrawn row's status is `STATUS_WITHDRAWN`, which
+    /// `HistoryCounts::count` has no bucket for and would otherwise fold
+    /// into `other` -- indistinguishable from a status this client just
+    /// does not recognize. Removing `r.taken_back += 1` in `rollup` makes
+    /// this fail while leaving `all_time.other` looking plausible, which is
+    /// exactly the confusion a separate count exists to prevent.
+    #[test]
+    fn rollup_counts_taken_back_separately_from_other() {
+        let mut withdrawn_one = record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z");
+        withdrawn_one.withdrawn_at = Some(at("2026-08-08T11:00:00Z"));
+        let mut withdrawn_two = record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z");
+        withdrawn_two.withdrawn_at = Some(at("2026-08-08T11:30:00Z"));
+        let recs = vec![
+            withdrawn_one,
+            withdrawn_two,
+            record(STATUS_ACCEPTED, "2026-08-08T10:00:00Z"),
+        ];
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.taken_back, 2);
+        // Not double-counted into `other`: the two withdrawn rows still
+        // carry whatever status they were stamped with (`accepted` here, not
+        // `STATUS_WITHDRAWN`, since this fixture sets `withdrawn_at`
+        // directly rather than going through `mark_withdrawn`), so this
+        // assertion is about `taken_back` staying additive rather than
+        // replacing a bucket.
+        assert_eq!(r.all_time.other, 0);
     }
 }

@@ -680,6 +680,29 @@ pub struct Receipt {
     pub source: String,
     pub submitted_at: DateTime<Utc>,
     pub status: String,
+    /// Whether the queue entry this receipt was minted for reached upload
+    /// without the contributor deciding (`QueueEntry::approved_unattended`),
+    /// i.e. an armed folder sent it rather than a person approving it.
+    ///
+    /// Set once, at upload time, by `daemon::uploader` handing the pipeline
+    /// the entry's own provenance (`SubmitContext::set_upload_provenance`).
+    /// A submission built outside the daemon's queue -- the CLI's own
+    /// `submit` command, run directly by a person -- carries no entry to ask,
+    /// and defaults to `false`: a person typing a command is exactly the
+    /// "you approved" case the design's history rows distinguish.
+    ///
+    /// `#[serde(default)]` so a receipts file written before this field
+    /// existed still parses; an old receipt reads as `false`, the same
+    /// "you approved" default a command-line submission gets.
+    #[serde(default)]
+    pub approved_unattended: bool,
+    /// The contributor's verdict at approval time (`worked` / `partly` /
+    /// `failed`), carried from `QueueEntry::approved_verdict`. `None` when
+    /// no verdict was given, or when this receipt predates the field.
+    ///
+    /// `#[serde(default)]` for the same reason as `approved_unattended`.
+    #[serde(default)]
+    pub approved_verdict: Option<String>,
 }
 
 /// The state directory's name under whichever per-user base the platform uses.
@@ -1586,6 +1609,8 @@ mod tests {
             source: "claude-code".into(),
             submitted_at: chrono::Utc::now(),
             status: "accepted".into(),
+            approved_unattended: false,
+            approved_verdict: None,
         };
         store.append_receipt(&r).unwrap();
         // Simulate a corrupt line.
@@ -1597,6 +1622,31 @@ mod tests {
         let loaded = store.load_receipts().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_hash, "sha256:aa");
+    }
+
+    /// K7: a receipts line written before `approved_unattended` /
+    /// `approved_verdict` existed must still load -- and load as "you
+    /// approved" (`false`, `None`), the safe reading, rather than being
+    /// skipped as garbage.
+    #[test]
+    fn a_receipt_line_written_before_provenance_existed_still_loads() {
+        let (_d, store) = store();
+        let old_line = serde_json::json!({
+            "submission_id": uuid::Uuid::new_v4(),
+            "session_hash": "sha256:aa",
+            "source": "claude-code",
+            "submitted_at": chrono::Utc::now(),
+            "status": "accepted",
+        });
+        std::fs::write(
+            store_path(&store, "receipts.jsonl"),
+            format!("{}\n", serde_json::to_string(&old_line).unwrap()),
+        )
+        .unwrap();
+        let loaded = store.load_receipts().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].approved_unattended);
+        assert_eq!(loaded[0].approved_verdict, None);
     }
 
     #[test]
