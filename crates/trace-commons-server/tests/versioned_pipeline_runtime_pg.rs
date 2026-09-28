@@ -6621,6 +6621,72 @@ async fn a_conflict_leg_forfeited_on_withdrawal_keeps_submission_inoperable() {
     );
 }
 
+/// Ruling RB-6: a `trace_credit` leg that a Settle run forfeits (here, via
+/// the same withdrawal-after-Score path
+/// `withdrawal_after_score_forfeits_pending_operations_and_settle_completes`
+/// above drives) must read as `Forfeited`, not fall through to `Pending`
+/// forever -- it never settles and is never paid. `contributor_credit`'s
+/// `pending_microcredits` must not count it either.
+#[tokio::test]
+async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-forfeit-status-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:test";
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+    withdraw_submission(&backend, &tenant, run.submission_id).await;
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle completes despite the withdrawal");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    let credit_leg = settlements
+        .iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("trace_credit leg present");
+    assert_eq!(credit_leg.operation_state, "forfeited");
+
+    let product = PipelineProductStore::new(backend.clone());
+    let status = product
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        status.credit,
+        PipelineCreditStatus::Forfeited,
+        "a forfeited trace_credit leg must not read as Pending"
+    );
+
+    let credit_summary = product
+        .contributor_credit(&tenant, principal)
+        .await
+        .unwrap();
+    assert_eq!(
+        credit_summary.pending_microcredits, 0,
+        "a forfeited leg must not count toward pending credit"
+    );
+}
+
 /// A withdrawal recorded after a run has already completed leaves the
 /// settled leg, its finalized batch, and the committed Settle outcome
 /// untouched -- there is no reprocessing path that could revisit them, and

@@ -102,6 +102,11 @@ pub enum PipelineCreditStatus {
     /// (`trace_credit_event_type_is_settlement_eligible` excludes it), so it
     /// would otherwise sit at `Pending` forever.
     NotSettlementEligible,
+    /// Ruling RB-6: a `trace_credit` leg a failed Settle run
+    /// (`resolve_open_settlement_legs_on_tx`) or a withdrawal after Score
+    /// forfeits. It never settles and is never paid, so it must not sit at
+    /// `Pending` forever either.
+    Forfeited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -969,6 +974,11 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
             if trace_credit.is_some_and(|instrument| instrument.operation_state == "failed") =>
         {
             PipelineCreditStatus::Failed
+        }
+        (Some(_), Some(_))
+            if trace_credit.is_some_and(|instrument| instrument.operation_state == "forfeited") =>
+        {
+            PipelineCreditStatus::Forfeited
         }
         (Some(_), Some(_))
             if trace_credit
