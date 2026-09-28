@@ -1365,22 +1365,34 @@ mod tests {
     /// older than the field, and no notice, show nothing.
     #[test]
     fn the_legacy_migration_notice_is_the_cores() {
-        let status: Status = serde_json::from_value(serde_json::json!({
-            "logged_in": true,
-            "legacy_invite_migration": {
-                "offered": false,
-                "notice": { "folders_kept": 1, "automatic_grant_kept": false },
-            },
-        }))
-        .expect("status decodes");
-        let notice = status.legacy_migration_notice().expect("a notice");
-        assert_eq!(
-            notice,
-            trace_commons_contributor::consent_copy::legacy_migration_notice_for_wire(
-                &serde_json::json!({ "folders_kept": 1, "automatic_grant_kept": false })
-            )
-            .unwrap()
-        );
+        use trace_commons_contributor::consent_copy as core;
+        let with_notice = |notice: serde_json::Value| -> Status {
+            serde_json::from_value(serde_json::json!({
+                "logged_in": true,
+                "legacy_invite_migration": { "offered": false, "notice": notice },
+            }))
+            .expect("status decodes")
+        };
+        // Compared with the core's constants, not with the function under
+        // test, so a wrong branch in either the plumbing or the core fails.
+        let kept =
+            with_notice(serde_json::json!({ "folders_kept": 1, "automatic_grant_kept": false }))
+                .legacy_migration_notice()
+                .expect("a notice");
+        assert_eq!(kept.title, core::LEGACY_MIGRATION_NOTICE_TITLE);
+        assert_eq!(kept.body, core::LEGACY_MIGRATION_NOTICE_BODY);
+        assert_eq!(kept.folders, core::LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        assert_eq!(kept.acknowledge, core::LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE);
+        let grant_only =
+            with_notice(serde_json::json!({ "folders_kept": 0, "automatic_grant_kept": true }))
+                .legacy_migration_notice()
+                .expect("a notice");
+        assert_eq!(grant_only.folders, core::LEGACY_MIGRATION_NOTICE_ARMED_KEPT);
+        let nothing =
+            with_notice(serde_json::json!({ "folders_kept": 0, "automatic_grant_kept": false }))
+                .legacy_migration_notice()
+                .expect("a notice");
+        assert_eq!(nothing.folders, core::LEGACY_MIGRATION_NOTICE_NOTHING_ARMED);
         let none: Status = serde_json::from_value(serde_json::json!({
             "logged_in": true,
             "legacy_invite_migration": { "offered": true, "notice": null },
