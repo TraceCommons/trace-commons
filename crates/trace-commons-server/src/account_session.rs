@@ -83,7 +83,7 @@ pub fn account_actor_ref(account: &AccountId) -> String {
 /// construction (`AccountCtx` exposes only `account_id` + `principal_set`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountAuthMethod {
-    /// Browser session cookie (`tc_account_session`) — contributor-only.
+    /// Browser session cookie (`__Host-tc_account_session`) — contributor-only.
     SessionCookie,
     /// Device bearer token resolved to its linked account.
     DeviceBearer,

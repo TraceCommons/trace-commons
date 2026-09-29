@@ -677,6 +677,47 @@ missing them, and the pipeline -- like the legacy path -- fails closed with
 pilot's V62-era grants and V90's own, has nothing left to do by hand for the
 pipeline.
 
+### Account cookies take the `__Host-` prefix: a one-time browser sign-out
+
+The browser cookies ingest sets for contributor accounts are bound to the
+exact host that set them:
+
+| Cookie | Was | Now |
+|---|---|---|
+| account session | `tc_account_session` | `__Host-tc_account_session` |
+| passkey ceremony | `tc_passkey_ceremony` | `__Host-tc_passkey_ceremony` |
+| NEAR ceremony | `tc_near_ceremony` | `__Host-tc_near_ceremony` |
+| sign-in link ceremony | `tc_login_ceremony` (`Path=/account/login`) | `__Host-tc_login_ceremony` (`Path=/`) |
+
+A browser accepts a `__Host-` cookie only with `Secure`, `Path=/` and no
+`Domain`, which every one of these already carried except the sign-in link
+ceremony's path. Nothing changes for native clients: the desktop apps
+authenticate with a `tcn1_` bearer, not a cookie.
+
+**The first deploy of this build signs every browser out once.** The server
+does not read the old session cookie name, so a browser that presents only
+`tc_account_session` gets a `401` from `/v1/account/*` and has to sign in
+again. There is deliberately no period in which both names are accepted.
+Server-side, the old sessions stay valid rows until they expire (seven days)
+or are revoked; only the browser's handle to them is dropped.
+
+The old cookie is also cleaned out of browsers. Every response that sets the
+new session cookie (sign-in by link, passkey or NEAR, and session rotation),
+and a browser logout, carries a second `Set-Cookie` that expires
+`tc_account_session` (`Max-Age=0`, `Path=/`, same attributes). The in-flight
+ceremony cookies need no cleanup: they live three to ten minutes, and a
+ceremony started before the deploy simply has to be started again.
+
+Nothing needs configuring. If a contributor reports being signed out after the
+deploy, that is this change; signing in again is the fix.
+
+Signing in again does not end the old session, and the contributor cannot log
+it out: logout identifies the session by the new cookie, and the browser no
+longer presents the old one. That row stays valid until it expires, up to
+seven days. A contributor who wants it gone now should sign in again and call
+`POST /v1/account/sessions/revoke-all`, which revokes every session on the
+account, the old one and the current one alike, and then sign in once more.
+
 ### V97: account bindings
 
 V97 (`trace_account_bindings`, native passkey identity) grants
