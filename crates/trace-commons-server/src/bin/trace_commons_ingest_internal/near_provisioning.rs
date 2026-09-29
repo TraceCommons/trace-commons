@@ -1420,9 +1420,12 @@ async fn near_ai_bind_start(
     body: Result<Json<NearAiStartRequest>, JsonRejection>,
 ) -> Option<axum::response::Response> {
     // A bind has no released clients to stay compatible with, so it takes the
-    // v2 contract's readiness: no witness JSON requirement.
+    // v2 contract's readiness: no witness JSON requirement. It draws on the
+    // NEAR AI provisioning budget, not one of its own: both ceremonies end in
+    // the same NEAR AI introspection, and a second bucket would double what
+    // one address may send there.
     if !ready_for(&state, ProvisionContract::ExplicitSelection, false)
-        || limited(&headers, "near-ai-bind-start")
+        || limited(&headers, "near-ai-start")
     {
         return None;
     }
@@ -1498,7 +1501,8 @@ async fn near_ai_bind_finish(
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
 ) -> Result<axum::response::Response, Option<&'static str>> {
     if !ready_for(state, ProvisionContract::ExplicitSelection, false)
-        || limited(&headers, "near-ai-bind-finish")
+        // The provisioning finish's budget, as at start.
+        || limited(&headers, "near-ai-finish")
     {
         return Err(None);
     }

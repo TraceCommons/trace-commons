@@ -52,6 +52,11 @@ pub(crate) const NATIVE_PASSKEY_GLOBAL_LIMIT: u32 = NATIVE_TOKEN_GLOBAL_LIMIT;
 /// Attempts per window against one ceremony id, IP-independent. A ceremony is
 /// single use, so this bounds replay against one id from rotating sources.
 pub(crate) const NATIVE_PASSKEY_PER_CEREMONY_LIMIT: u32 = NATIVE_TOKEN_PER_CODE_LIMIT;
+/// Authenticated native registration `start`s per account per window. Each
+/// one parks a ceremony in the in-process store for its TTL, and the store has
+/// no size cap of its own, so the unauthenticated routes are bounded by the
+/// limits above and this route by this one.
+pub(crate) const NATIVE_PASSKEY_REGISTER_PER_ACCOUNT_LIMIT: u32 = 10;
 /// Ceremony ids are 27 base64url characters; anything much longer is refused
 /// before it is hashed into a limiter key.
 const NATIVE_PASSKEY_CEREMONY_ID_MAX_LEN: usize = 64;
@@ -453,6 +458,17 @@ pub(crate) async fn account_passkey_native_register_start_handler(
     Extension(ctx): Extension<AccountCtx>,
 ) -> ApiResult<axum::response::Response> {
     require_native_session(&ctx)?;
+    // Before the gate, which reads the database and may write an audit row:
+    // a start that is going to be refused anyway costs nothing past here.
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!(
+            "native-passkey-register-start-account:{}",
+            ctx.account_id.as_uuid()
+        ),
+        NATIVE_PASSKEY_REGISTER_PER_ACCOUNT_LIMIT,
+    ) {
+        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+    }
     require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
 
     let webauthn = account_webauthn(state.as_ref())?;

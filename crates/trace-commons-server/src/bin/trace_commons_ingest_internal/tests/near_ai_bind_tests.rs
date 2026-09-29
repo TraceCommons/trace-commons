@@ -1500,3 +1500,178 @@ async fn pg_bind_works_as_the_runtime_role_and_not_without_v100() {
             .unwrap_or_else(|error| panic!("drop {role}: {error}"));
     }
 }
+
+/// A browser cookie session never reaches the bind ceremony: the device key
+/// lives in the daemon, which holds a native token. Both verbs answer `403
+/// native_session_required` before anything is read or written -- for a
+/// strong `passkey` cookie and for a native session row carried in a cookie
+/// alike -- and a ceremony the native token started is left for the native
+/// token to finish.
+#[tokio::test]
+async fn pg_a_cookie_session_is_refused_by_both_bind_verbs() {
+    use base64::Engine as _;
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    let account = unbound_account(&h.backend).await;
+    let device = Device::new();
+
+    let mut cookies = Vec::new();
+    for client_kind in ["passkey", "native"] {
+        let secret = generate_session_secret();
+        admin
+            .execute(
+                "INSERT INTO trace_sessions
+                    (tenant_id, session_id, account_id, token_hash, client_kind, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, now() + interval '1 hour')",
+                &[
+                    &account.tenant,
+                    &Uuid::new_v4(),
+                    &account.account_id,
+                    &hash_secret(&secret),
+                    &client_kind,
+                ],
+            )
+            .await
+            .expect("cookie session");
+        cookies.push(format!(
+            "{ACCOUNT_SESSION_COOKIE}={}.{secret}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(account.tenant.as_bytes())
+        ));
+    }
+
+    // A ceremony started by the native token, for the finish attempts.
+    let started = start(&h.state, BIND_START, Some(&account.token), &device).await;
+    let signature = device.sign(&started.signing_bytes);
+    let finish_body = serde_json::json!({
+        "ceremony_id": started.ceremony_id,
+        "code_verifier": started.verifier,
+        "device_public_key": device.public_b64(),
+        "device_signature": signature,
+        "access_token": "near-ai-access-token-fixture",
+    });
+    let start_body = serde_json::json!({
+        "device_public_key": device.public_b64(),
+        "code_challenge": pkce().1,
+        "code_challenge_method": "S256",
+    });
+    let started_audits = audit_metadata(&admin, &account.tenant, "account_binding_started")
+        .await
+        .len();
+
+    for cookie in &cookies {
+        for (uri, body) in [(BIND_START, &start_body), (BIND_FINISH, &finish_body)] {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(CONTENT_TYPE, "application/json")
+                .header(axum::http::header::COOKIE, cookie)
+                .body(Body::from(serde_json::to_vec(body).expect("json")))
+                .expect("request");
+            let response = app(h.state.clone())
+                .oneshot(request)
+                .await
+                .expect("router is infallible");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+            assert_eq!(body["error"], "native_session_required", "{uri}");
+        }
+    }
+    assert_eq!(h.hits(), 0, "no cookie request spent a NEAR AI token");
+    assert_eq!(
+        audit_metadata(&admin, &account.tenant, "account_binding_started")
+            .await
+            .len(),
+        started_audits,
+        "no cookie request started a ceremony"
+    );
+    assert!(
+        audit_metadata(&admin, &account.tenant, "account_binding_failed")
+            .await
+            .is_empty(),
+        "no cookie request reached a ceremony"
+    );
+    assert_eq!(
+        binding_row(&admin, &account.tenant, account.account_id).await,
+        ("unbound".to_string(), false)
+    );
+    assert_eq!(linked_rows(&admin, &account.tenant).await, [0; 4]);
+
+    // The cookie finishes consumed nothing: the native token still finishes
+    // its own ceremony.
+    let reply = finish(
+        &h.state,
+        BIND_FINISH,
+        Some(&account.token),
+        &started,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+    assert_eq!(reply.json()["outcome"], "bound");
+
+    drop_tenants(&admin, &[&account.tenant]).await;
+}
+
+/// Bind spends a NEAR AI token exactly as provisioning does, so it draws on
+/// provisioning's per-address budget rather than a second one of its own: a
+/// caller that has used up the NEAR AI provisioning budget cannot start or
+/// finish a bind either, and no NEAR AI token is spent.
+#[tokio::test]
+async fn pg_bind_shares_the_near_ai_provisioning_rate_budget() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    reset_account_rate_limiter_for_test();
+    let account = unbound_account(&h.backend).await;
+    let device = Device::new();
+    // A ceremony started while the budget was open.
+    let started = start(&h.state, BIND_START, Some(&account.token), &device).await;
+    let signature = device.sign(&started.signing_bytes);
+
+    // Provisioning's per-address budget, used up. These requests carry no
+    // forwarded address, so they all share the one fallback key.
+    for action in ["near-ai-start", "near-ai-finish"] {
+        while ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:xff-absent"), 30) {}
+    }
+
+    let reply = send(
+        &h.state,
+        "POST",
+        BIND_START,
+        Some(&serde_json::json!({
+            "device_public_key": device.public_b64(),
+            "code_challenge": pkce().1,
+            "code_challenge_method": "S256",
+        })),
+        Some(&account.token),
+    )
+    .await;
+    assert_uniform_deny(&reply, "bind start over the provisioning budget").await;
+
+    let reply = finish(
+        &h.state,
+        BIND_FINISH,
+        Some(&account.token),
+        &started,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_uniform_deny(&reply, "bind finish over the provisioning budget").await;
+    assert_eq!(h.hits(), 0, "no NEAR AI token was spent");
+    assert_eq!(
+        binding_row(&admin, &account.tenant, account.account_id).await,
+        ("unbound".to_string(), false)
+    );
+
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&account.tenant]).await;
+}
