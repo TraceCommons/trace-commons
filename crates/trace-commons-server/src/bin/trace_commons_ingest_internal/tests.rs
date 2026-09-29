@@ -11,6 +11,8 @@ mod legacy_invite_link_tests;
 mod mission_catalog_tests;
 #[path = "tests/native_passkey_tests.rs"]
 mod native_passkey_tests;
+#[path = "tests/near_ai_bind_tests.rs"]
+mod near_ai_bind_tests;
 #[path = "tests/public_run_lifecycle_tests.rs"]
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]

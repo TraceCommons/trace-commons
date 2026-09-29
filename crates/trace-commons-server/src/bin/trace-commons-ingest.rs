@@ -7711,7 +7711,19 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
         .post("/v1/account/merge/start", account_merge_start_handler)
-        .post("/v1/account/merge/confirm", account_merge_confirm_handler);
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler)
+        // Connect near.ai (Z2 S3): bind this unbound passkey account to a NEAR
+        // AI login through the provisioning ceremony. Behind the account
+        // middleware, unlike the unauthenticated provisioning pair: the account
+        // comes from the session, and the ceremony is bound to it.
+        .post(
+            "/v1/account/near-ai/provision/bind/start",
+            near_ai_bind_start_handler,
+        )
+        .post(
+            "/v1/account/near-ai/provision/bind/finish",
+            near_ai_bind_finish_handler,
+        );
     (general, rewards::account_routes())
 }
 
@@ -17718,8 +17730,8 @@ use native_passkey::{
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
-    near_ai_provision_finish_handler, near_ai_provision_start_handler,
-    near_provision_finish_handler, near_provision_start_handler,
+    near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
+    near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and

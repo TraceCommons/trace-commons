@@ -1512,6 +1512,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "native_passkey_creation",
         include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
     ),
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V99 is claimed
+    // by S5 (the unbound reaper) in flight; V100 depends only on V97 and V90.
+    (
+        100,
+        "near_ai_bind",
+        include_str!("../../../../migrations/V100__near_ai_bind.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -3611,6 +3618,43 @@ impl Database for PgBackend {
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         self.near_ai_login_provision(login, device_public_key, session, identity)
             .await
+    }
+
+    async fn store_near_ai_bind_ceremony(
+        &self,
+        ceremony_hash: &str,
+        pending: &crate::account_onboarding::NearAiBindPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_ai_bind_store_ceremony(ceremony_hash, pending, expires_at)
+            .await
+    }
+
+    async fn take_near_ai_bind_ceremony(
+        &self,
+        ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
+        self.near_ai_bind_take_ceremony(ceremony_hash).await
+    }
+
+    async fn bind_near_ai_login(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        self.near_ai_login_bind(
+            tenant_id,
+            account_id,
+            login,
+            device_public_key,
+            session,
+            identity,
+        )
+        .await
     }
 
     async fn get_near_provisioned_anchor(

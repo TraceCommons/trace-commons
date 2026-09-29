@@ -49,9 +49,9 @@ pub(crate) const ACCOUNT_UNBOUND: &str = "account_unbound";
 ///
 /// The spec's allowlist
 /// (`docs/superpowers/specs/2026-09-28-native-passkey-identity-design.md`,
-/// "The unbound gate") is the `Allowed` rows. Its bind routes
-/// (`POST /v1/account/near-ai/provision/bind/{start,finish}`) do not exist
-/// until S3, which adds them here as `Allowed`. Everything else is `Refused`:
+/// "The unbound gate") is the `Allowed` rows, including the bind routes
+/// (`POST /v1/account/near-ai/provision/bind/{start,finish}`, S3), the only
+/// way forward. Everything else is `Refused`:
 /// invites and the legacy link (an invite must never attach to an account that
 /// may close), inference connections, reward reservations (finite offers),
 /// NEAR wallet enrolment and payout, merge, adding or removing a passkey, and
@@ -64,6 +64,11 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
     &[
         // The app's state machine and the one way forward.
         ("GET", "/v1/account/binding", Allowed),
+        // Z2 S3: connect near.ai. The handlers refuse any account that is not
+        // `unbound` (`account_already_bound`), so a bound or closed account
+        // that reaches them gets nothing.
+        ("POST", "/v1/account/near-ai/provision/bind/start", Allowed),
+        ("POST", "/v1/account/near-ai/provision/bind/finish", Allowed),
         // Answers `account_identity_unlinked` for an unbound account.
         ("GET", "/v1/account/contribution-status", Allowed),
         // Cancel is sign-out.

@@ -1088,6 +1088,65 @@ pub(super) async fn near_ai_provision_start_v2_handler(
     result.unwrap_or_else(native_generic_deny)
 }
 
+/// What a NEAR AI ceremony's `start` draws and commits to. Shared by the
+/// provisioning ceremony (#836) and the bind ceremony (Z2 S3), which differ
+/// only in what they store beside it and which preimage the device signs.
+struct NearAiCeremonyDraw {
+    device: [u8; 32],
+    nonce: [u8; 32],
+    ceremony_id: String,
+    expires_at: i64,
+    code_challenge: String,
+}
+
+impl NearAiCeremonyDraw {
+    /// Validate a start body and draw the server's half: nonce, ceremony id,
+    /// expiry. `None` refuses.
+    fn draw(body: NearAiStartRequest) -> Option<Self> {
+        if body.code_challenge_method != "S256" || !challenge_is_wellformed(&body.code_challenge) {
+            return None;
+        }
+        let device = device_key(&body.device_public_key)?;
+        use rand::RngCore as _;
+        let mut nonce = [0u8; 32];
+        rand::rngs::OsRng.try_fill_bytes(&mut nonce).ok()?;
+        let ceremony_id = generate_login_code();
+        let expires_at = Utc::now()
+            .timestamp()
+            .checked_add(NEAR_AI_LOGIN_CEREMONY_TTL_SECONDS)?;
+        Some(Self {
+            device,
+            nonce,
+            ceremony_id,
+            expires_at,
+            code_challenge: body.code_challenge,
+        })
+    }
+
+    fn nonce_hex(&self) -> String {
+        hex::encode(self.nonce)
+    }
+
+    fn device_public_key(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(self.device)
+    }
+
+    fn ceremony_hash(&self) -> String {
+        hash_secret(&self.ceremony_id)
+    }
+
+    /// The start response, the same shape for both ceremonies. The client
+    /// signs `device_signing_bytes` as given; it never reconstructs them.
+    fn response(&self, signing_bytes: &[u8]) -> axum::response::Response {
+        response(serde_json::json!({
+            "ceremony_id": self.ceremony_id,
+            "nonce": near_ai_nonce_wire(&self.nonce),
+            "expires_at": self.expires_at,
+            "device_signing_bytes": base64::engine::general_purpose::STANDARD.encode(signing_bytes),
+        }))
+    }
+}
+
 async fn near_ai_start(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -1101,23 +1160,13 @@ async fn near_ai_start(
         return None;
     }
     let Json(body) = body.ok()?;
-    if body.code_challenge_method != "S256" || !challenge_is_wellformed(&body.code_challenge) {
-        return None;
-    }
+    let draw = NearAiCeremonyDraw::draw(body)?;
     let db = account_db(&state).ok()?;
-    let device = device_key(&body.device_public_key)?;
-    use rand::RngCore as _;
-    let mut nonce = [0u8; 32];
-    rand::rngs::OsRng.try_fill_bytes(&mut nonce).ok()?;
-    let ceremony_id = generate_login_code();
-    let expires_at = Utc::now()
-        .timestamp()
-        .checked_add(NEAR_AI_LOGIN_CEREMONY_TTL_SECONDS)?;
     let pending = trace_commons_server::account_onboarding::NearAiLoginPending {
-        nonce_hex: hex::encode(nonce),
-        code_challenge: body.code_challenge.clone(),
-        device_public_key: base64::engine::general_purpose::STANDARD.encode(device),
-        expires_at,
+        nonce_hex: draw.nonce_hex(),
+        code_challenge: draw.code_challenge.clone(),
+        device_public_key: draw.device_public_key(),
+        expires_at: draw.expires_at,
     };
     // The bytes the device must sign, from the shared protocol function. The
     // client computes the same preimage from the same function; nothing here
@@ -1125,21 +1174,16 @@ async fn near_ai_start(
     // agree in every test each side writes against itself and diverge in
     // production.
     let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
-        &nonce,
-        &ceremony_id,
-        &device,
-        &body.code_challenge,
-        expires_at,
+        &draw.nonce,
+        &draw.ceremony_id,
+        &draw.device,
+        &draw.code_challenge,
+        draw.expires_at,
     );
-    db.store_near_ai_login_ceremony(&hash_secret(&ceremony_id), &pending, expires_at)
+    db.store_near_ai_login_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
         .await
         .ok()?;
-    Some(response(serde_json::json!({
-        "ceremony_id": ceremony_id,
-        "nonce": near_ai_nonce_wire(&nonce),
-        "expires_at": expires_at,
-        "device_signing_bytes": base64::engine::general_purpose::STANDARD.encode(&signing_bytes),
-    })))
+    Some(draw.response(&signing_bytes))
 }
 
 pub(super) async fn near_ai_provision_finish_handler(
@@ -1163,16 +1207,10 @@ pub(super) async fn near_ai_provision_finish_v2_handler(
     result.unwrap_or_else(native_generic_deny)
 }
 
-async fn near_ai_finish(
-    state: Arc<AppState>,
-    headers: HeaderMap,
-    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
-    contract: ProvisionContract,
-) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-finish") {
-        return None;
-    }
-    let Json(body) = body.ok()?;
+/// The bounds every NEAR AI finish body must meet, the device key it names,
+/// and the per-ceremony attempt ceiling. Returns the device key and the
+/// ceremony hash; `None` refuses.
+fn near_ai_finish_precheck(body: &NearAiFinishRequest) -> Option<([u8; 32], String)> {
     if body.ceremony_id.len() > 64
         || !verifier_is_wellformed(&body.code_verifier)
         || body.device_signature.len() > 128
@@ -1184,29 +1222,74 @@ async fn near_ai_finish(
     {
         return None;
     }
-    let db = account_db(&state).ok()?;
     let device = device_key(&body.device_public_key)?;
     let hash = hash_secret(&body.ceremony_id);
     if !ACCOUNT_RATE_LIMITER.check(&format!("near-ai-provision-ceremony:{hash}"), 5) {
         return None;
     }
-    // Single use: the take deletes the row, so a replayed finish finds nothing.
-    let pending = db.take_near_ai_login_ceremony(&hash).await.ok()??;
-    // Everything below is checked against the ceremony, never against the
-    // request. A finish naming a different device or a different challenge is
-    // refused rather than believed.
-    if !secret_eq(
-        &pending.code_challenge,
-        &challenge_for_verifier(&body.code_verifier),
-    ) {
+    Some((device, hash))
+}
+
+/// Check a finish against what its ceremony committed to at start: the PKCE
+/// verifier, the device key, and the device's signature over `signing_bytes`
+/// (the preimage THIS ceremony calls for). Everything is checked against the
+/// stored ceremony, never against the request.
+fn near_ai_verify_device_proof(
+    body: &NearAiFinishRequest,
+    device: &[u8; 32],
+    code_challenge: &str,
+    device_public_key: &str,
+    signing_bytes: &[u8],
+) -> Option<()> {
+    if !secret_eq(code_challenge, &challenge_for_verifier(&body.code_verifier)) {
         return None;
     }
     if !secret_eq(
-        &pending.device_public_key,
+        device_public_key,
         &base64::engine::general_purpose::STANDARD.encode(device),
     ) {
         return None;
     }
+    let signature: [u8; 64] = base64::engine::general_purpose::STANDARD
+        .decode(&body.device_signature)
+        .ok()?
+        .try_into()
+        .ok()?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, device)
+        .verify(signing_bytes, &signature)
+        .ok()
+}
+
+/// Spend the NEAR AI token: introspect it and drop it. Always the last check
+/// of a finish, because it is the only one that leaves this machine, and a
+/// request that was going to be refused anyway should not reach NEAR AI.
+async fn near_ai_introspect(
+    state: &AppState,
+    access_token: String,
+) -> Option<trace_commons_server::near_ai_login::VerifiedNearAiLogin> {
+    trace_commons_server::near_ai_login::introspect_login(
+        introspection_base_url(state),
+        &secrecy::SecretString::from(access_token),
+        NEAR_AI_INTROSPECTION_TIMEOUT,
+    )
+    .await
+    .ok()
+}
+
+async fn near_ai_finish(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+    contract: ProvisionContract,
+) -> Option<axum::response::Response> {
+    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-finish") {
+        return None;
+    }
+    let Json(body) = body.ok()?;
+    let (device, hash) = near_ai_finish_precheck(&body)?;
+    let db = account_db(&state).ok()?;
+    // Single use: the take deletes the row, so a replayed finish finds nothing.
+    let pending = db.take_near_ai_login_ceremony(&hash).await.ok()??;
     let nonce: [u8; 32] = hex::decode(&pending.nonce_hex).ok()?.try_into().ok()?;
     let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
         &nonce,
@@ -1215,25 +1298,16 @@ async fn near_ai_finish(
         &pending.code_challenge,
         pending.expires_at,
     );
-    let signature: [u8; 64] = base64::engine::general_purpose::STANDARD
-        .decode(&body.device_signature)
-        .ok()?
-        .try_into()
-        .ok()?;
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &device)
-        .verify(&signing_bytes, &signature)
-        .ok()?;
+    near_ai_verify_device_proof(
+        &body,
+        &device,
+        &pending.code_challenge,
+        &pending.device_public_key,
+        &signing_bytes,
+    )?;
     // Only now, with the device proven and the ceremony consumed, is the token
-    // spent. Introspection is the last step because it is the only one that
-    // leaves this machine, and a request that was going to be refused anyway
-    // should not reach NEAR AI.
-    let login = trace_commons_server::near_ai_login::introspect_login(
-        introspection_base_url(&state),
-        &secrecy::SecretString::from(body.access_token),
-        NEAR_AI_INTROSPECTION_TIMEOUT,
-    )
-    .await
-    .ok()?;
+    // spent.
+    let login = near_ai_introspect(&state, body.access_token).await?;
     let identity = state.near_account_identity.as_ref()?;
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
@@ -1254,6 +1328,260 @@ async fn near_ai_finish(
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
         "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
+    })))
+}
+
+// --- Connect near.ai: bind a passkey account (Z2 native passkey identity, S3) --
+//
+// `POST /v1/account/near-ai/provision/bind/{start,finish}`, behind
+// `account_auth_middleware`. The provisioning ceremony above, run by a signed-in
+// UNBOUND passkey account, with two differences: the ceremony is bound to the
+// `(tenant_id, account_id)` of the session that started it, and the device signs
+// `near_ai_bind_device_bytes`, whose domain is not the provisioning one. The
+// anchor then decides between binding in place and the existing-account refuse
+// branch (`PgBackend::near_ai_login_bind`). NEAR AI verifies nothing about the
+// passkey; the commons introspects a NEAR AI token exactly as provisioning does.
+
+/// The label a bind answers with when the caller's account is not an unbound
+/// passkey account: already bound, closed, or legacy (no binding row).
+pub(super) const ACCOUNT_ALREADY_BOUND: &str = "account_already_bound";
+/// The label a bind answers with when the session is not a native one. The
+/// device key the ceremony enrols lives in the daemon, which holds a `tcn1_`
+/// token; a browser cookie session has no device to prove.
+pub(super) const NATIVE_SESSION_REQUIRED: &str = "native_session_required";
+
+/// The two preconditions both bind verbs share. They answer with a label rather
+/// than the uniform deny: the caller is authenticated, and both facts are its
+/// own.
+fn bind_precondition(
+    ctx: &AccountCtx,
+    binding: trace_commons_server::account_binding::AccountBindingState,
+) -> Option<axum::response::Response> {
+    use trace_commons_server::account_binding::AccountBindingState;
+    let refusal = if !matches!(ctx.auth_method, AccountAuthMethod::NativeToken) {
+        api_error(StatusCode::FORBIDDEN, NATIVE_SESSION_REQUIRED)
+    } else if binding != AccountBindingState::Unbound {
+        api_error(StatusCode::CONFLICT, ACCOUNT_ALREADY_BOUND)
+    } else {
+        return None;
+    };
+    let mut response = refusal.into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Some(response)
+}
+
+/// A label-only `account_binding_failed` row in the caller's own tenant.
+/// Best effort: the refusal stands whether or not the row is written.
+async fn bind_failed(state: &AppState, ctx: &AccountCtx, stage: &'static str) {
+    let Ok(db) = account_db(state) else {
+        return;
+    };
+    if db
+        .append_account_audit(
+            &ctx.tenant_id,
+            "account_binding_failed",
+            &ctx.actor_ref,
+            "denied",
+            serde_json::json!({ "stage": stage }),
+        )
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            label = "account_binding_failed_audit_failed",
+            "bind refusal could not be audited"
+        );
+    }
+}
+
+pub(super) async fn near_ai_bind_start_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiStartRequest>, JsonRejection>,
+) -> axum::response::Response {
+    if let Some(refusal) = bind_precondition(&ctx, binding) {
+        return refusal;
+    }
+    let began = std::time::Instant::now();
+    let result = near_ai_bind_start(state, &ctx, headers, body).await;
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+
+async fn near_ai_bind_start(
+    state: Arc<AppState>,
+    ctx: &AccountCtx,
+    headers: HeaderMap,
+    body: Result<Json<NearAiStartRequest>, JsonRejection>,
+) -> Option<axum::response::Response> {
+    // A bind has no released clients to stay compatible with, so it takes the
+    // v2 contract's readiness: no witness JSON requirement.
+    if !ready_for(&state, ProvisionContract::ExplicitSelection, false)
+        || limited(&headers, "near-ai-bind-start")
+    {
+        return None;
+    }
+    let Json(body) = body.ok()?;
+    let draw = NearAiCeremonyDraw::draw(body)?;
+    let db = account_db(&state).ok()?;
+    let account_id = ctx.account_id.as_uuid();
+    // The session's own tenant and account, never the body's: the start body
+    // is `deny_unknown_fields` and carries neither.
+    let pending = trace_commons_server::account_onboarding::NearAiBindPending {
+        purpose: trace_commons_server::account_onboarding::NearAiBindPurpose::Bind,
+        tenant_id: ctx.tenant_id.clone(),
+        account_id,
+        nonce_hex: draw.nonce_hex(),
+        code_challenge: draw.code_challenge.clone(),
+        device_public_key: draw.device_public_key(),
+        expires_at: draw.expires_at,
+    };
+    let signing_bytes = trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
+        &draw.nonce,
+        &draw.ceremony_id,
+        &draw.device,
+        &draw.code_challenge,
+        draw.expires_at,
+        &account_id,
+    );
+    db.store_near_ai_bind_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
+        .await
+        .ok()?;
+    // Required, not best effort: a bind that cannot be audited does not start.
+    db.append_account_audit(
+        &ctx.tenant_id,
+        "account_binding_started",
+        &ctx.actor_ref,
+        "success",
+        serde_json::json!({}),
+    )
+    .await
+    .ok()?;
+    Some(draw.response(&signing_bytes))
+}
+
+pub(super) async fn near_ai_bind_finish_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(ctx): Extension<AccountCtx>,
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
+    headers: HeaderMap,
+    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+) -> axum::response::Response {
+    if let Some(refusal) = bind_precondition(&ctx, binding) {
+        return refusal;
+    }
+    let began = std::time::Instant::now();
+    let result = match near_ai_bind_finish(&state, &ctx, headers, body).await {
+        Ok(response) => Some(response),
+        Err(Some(stage)) => {
+            bind_failed(&state, &ctx, stage).await;
+            None
+        }
+        Err(None) => None,
+    };
+    sleep_to_redeem_floor(began).await;
+    result.unwrap_or_else(native_generic_deny)
+}
+
+/// `Err(Some(stage))` is a refusal worth an `account_binding_failed` row (the
+/// request reached a ceremony); `Err(None)` is one refused before that
+/// (readiness, rate limits, a malformed body), which writes nothing.
+async fn near_ai_bind_finish(
+    state: &Arc<AppState>,
+    ctx: &AccountCtx,
+    headers: HeaderMap,
+    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
+) -> Result<axum::response::Response, Option<&'static str>> {
+    if !ready_for(state, ProvisionContract::ExplicitSelection, false)
+        || limited(&headers, "near-ai-bind-finish")
+    {
+        return Err(None);
+    }
+    let Json(body) = body.map_err(|_| None)?;
+    let (device, hash) = near_ai_finish_precheck(&body).ok_or(None)?;
+    let db = account_db(state).map_err(|_| None)?;
+    // Single use, and only a bind row parses here: a provisioning ceremony id
+    // is consumed and refused.
+    let pending = db
+        .take_near_ai_bind_ceremony(&hash)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(Some("ceremony"))?;
+    // The ceremony belongs to the session that started it. Account B holding
+    // account A's ceremony id, device key and signature still gets nothing.
+    let account_id = ctx.account_id.as_uuid();
+    if pending.tenant_id != ctx.tenant_id || pending.account_id != account_id {
+        return Err(Some("ceremony_account"));
+    }
+    let nonce: [u8; 32] = hex::decode(&pending.nonce_hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(Some("ceremony"))?;
+    let signing_bytes = trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
+        &nonce,
+        &body.ceremony_id,
+        &device,
+        &pending.code_challenge,
+        pending.expires_at,
+        &pending.account_id,
+    );
+    near_ai_verify_device_proof(
+        &body,
+        &device,
+        &pending.code_challenge,
+        &pending.device_public_key,
+        &signing_bytes,
+    )
+    .ok_or(Some("device_proof"))?;
+    let login = near_ai_introspect(state, body.access_token)
+        .await
+        .ok_or(Some("introspection"))?;
+    let identity = state.near_account_identity.as_ref().ok_or(Some("bind"))?;
+    let secret = generate_session_secret();
+    let token_hash = hash_secret(&secret);
+    let outcome = db
+        .bind_near_ai_login(
+            &ctx.tenant_id,
+            account_id,
+            &login,
+            &device,
+            trace_commons_server::db::NewSession {
+                token_hash: &token_hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
+            },
+            identity,
+        )
+        .await
+        .map_err(|_| Some("bind"))?;
+    use trace_commons_server::account_onboarding::NearAiBindOutcome;
+    let (provisioned, outcome, binding_state) = match outcome {
+        NearAiBindOutcome::Bound(provisioned) => (
+            provisioned,
+            "bound",
+            trace_commons_server::account_binding::AccountBindingState::Bound,
+        ),
+        NearAiBindOutcome::ExistingAccount {
+            provisioned,
+            binding_state,
+        } => (provisioned, "existing_account", binding_state),
+    };
+    Ok(response(serde_json::json!({
+        "access_token": native_token_value(&provisioned.tenant_id, &secret),
+        "token_type": "Bearer",
+        "expires_in_secs": NATIVE_SESSION_TTL_HOURS * 3600,
+        "account_id": provisioned.account_id,
+        "tenant_id": provisioned.tenant_id,
+        "device_key_id": provisioned.device_key_id,
+        "anchor_hash": provisioned.anchor_hash,
+        "outcome": outcome,
+        "binding_state": binding_state.label(),
     })))
 }
 

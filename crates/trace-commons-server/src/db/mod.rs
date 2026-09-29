@@ -1114,6 +1114,43 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Store a NEAR AI bind ceremony (Z2 S3) in the provisioning ceremony
+    /// table. Fail-closed by default.
+    async fn store_near_ai_bind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: &crate::account_onboarding::NearAiBindPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Consume a NEAR AI bind ceremony. Single use; a row that is not a bind
+    /// ceremony (a provisioning or wallet row) is consumed and refused.
+    async fn take_near_ai_bind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Bind a verified NEAR AI login to the unbound passkey account
+    /// `(tenant_id, account_id)` (Z2 S3), or, when the login's anchor already
+    /// belongs to another account, provision that account exactly as
+    /// [`Self::provision_near_ai_login`] would and close the passkey account.
+    /// The default refuses.
+    async fn bind_near_ai_login(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         _public_key: &str,
