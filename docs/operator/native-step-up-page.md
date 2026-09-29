@@ -33,6 +33,18 @@ seven days: both the session row's `expires_at` and the cookie's `Max-Age`.
 - Nothing else in this tree calls the browser passkey login; the page is its
   only in-tree caller.
 
+Because the session is short, the page expects it to end under the person. A
+`401` from any call hides the actions, offers the sign-in again, and says the
+session ended; retrying the action is never offered against a dead session.
+Sign-out reports what `POST /v1/account/logout` returned: a failure says the
+browser may still be signed in and keeps the button to retry.
+
+After sign-in, and before any action appears, the page names the account: the
+label of the passkey that signed in (from `GET /v1/account/passkeys`,
+`this_device`) and the public NEAR account names linked to it (from
+`GET /v1/account/near-identities`). It never shows a credential id, a public
+key, the account id or the tenant.
+
 ## URL contract (for the native client, C1)
 
 ```
@@ -138,4 +150,7 @@ It is **proposed** and awaits approval.
   person signs out on the page.
 - Not exercised in a real browser by the tests: the in-process tests drive the
   same HTTP calls the script makes, with a software authenticator reporting the
-  ingest origin.
+  ingest origin. `scripts/ci/test-step-up-page.cjs` (run in CI) drives the
+  script itself against stub elements and a scripted fetch: the finish bodies
+  it builds, a 401 ending the session, sign-out reporting what logout did, and
+  the account line.

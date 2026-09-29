@@ -57,9 +57,28 @@
       ...(extra || {}),
     });
 
-  // A failed call leaves the status line saying so: refused by the
-  // strong-session gate, or anything else.
+  // Nothing left to act on: the actions, the account line and sign-out are
+  // hidden.
+  const hideActions = () => {
+    for (const id of SECTIONS) $(id).hidden = true;
+    $('finish').hidden = true;
+    $('account').hidden = true;
+  };
+
+  // A 401 means the step-up session is over (it lasts minutes, so this is
+  // routine). Retrying the action cannot work, so the page goes back to
+  // offering sign-in and says why.
+  const sessionEnded = () => {
+    hideActions();
+    $('sign-in-section').hidden = false;
+    $('sign-in').disabled = false;
+    say('session_ended');
+  };
+
+  // A failed call leaves the status line saying so: the session ended,
+  // refused by the strong-session gate, or anything else.
   const failed = (response) => {
+    if (response && response.status === 401) return sessionEnded();
     say(response && response.status === 403 ? 'action_refused' : 'action_failed');
   };
 
@@ -97,21 +116,62 @@
         { redirect: 'manual' },
       );
       if (finish.type !== 'opaqueredirect' && finish.status !== 303) throw new Error('finish');
-      signedIn();
+      await signedIn();
     } catch (_) {
       say('status_sign_in_failed');
       button.disabled = false;
     }
   }
 
-  function signedIn() {
+  async function signedIn() {
     $('sign-in-section').hidden = true;
+    say('status_signed_in');
+    // Which account this is goes on screen before any change is offered, so
+    // someone with passkeys for two accounts can see which one they are in.
+    if (!(await showAccount())) return;
     const wanted = action ? [action] : SECTIONS;
     for (const id of wanted) $(id).hidden = false;
     $('finish').hidden = false;
-    say('status_signed_in');
     if (wanted.includes('remove-passkey')) loadPasskeys();
     if (wanted.includes('change-payout')) loadPayout();
+  }
+
+  // Name the signed-in account by what the person can recognise and nothing
+  // else: the label of the passkey that just signed in, and the public NEAR
+  // account names linked to it. Never a credential id, a key, or an internal
+  // id. Returns false when the session has already ended.
+  async function showAccount() {
+    const passkeyLine = $('account-passkey');
+    const nearLine = $('account-near');
+    nearLine.textContent = '';
+    nearLine.hidden = true;
+    $('account').hidden = false;
+    try {
+      const [passkeys, near] = await Promise.all([
+        send('GET', ROUTES.passkeys),
+        send('GET', ROUTES.nearIdentities),
+      ]);
+      if (passkeys.status === 401 || near.status === 401) {
+        sessionEnded();
+        return false;
+      }
+      if (!passkeys.ok) throw new Error('passkeys');
+      const current = ((await passkeys.json()).passkeys || []).find((p) => p.this_device);
+      if (!current) throw new Error('passkey');
+      passkeyLine.textContent = current.label
+        ? t('account_passkey') + ' ' + current.label
+        : t('account_passkey_unnamed');
+      const names = near.ok
+        ? ((await near.json()).near_identities || []).map((n) => n.near_account_id)
+        : [];
+      if (names.length > 0) {
+        nearLine.textContent = t('account_near') + ' ' + names.join(', ');
+        nearLine.hidden = false;
+      }
+    } catch (_) {
+      passkeyLine.textContent = t('account_unknown');
+    }
+    return true;
   }
 
   async function addPasskey() {
@@ -245,14 +305,22 @@
     }
   }
 
+  // Reports what logout actually did. A 401 means the session had already
+  // ended; any other failure may have left it live, so the page says so and
+  // keeps the button to try again.
   async function signOut() {
+    const button = $('sign-out');
+    button.disabled = true;
+    let response;
     try {
-      await send('POST', ROUTES.logout);
+      response = await send('POST', ROUTES.logout);
     } catch (_) {
-      // Signed out or not, the page stops offering changes.
+      response = undefined;
     }
-    for (const id of SECTIONS) $(id).hidden = true;
-    $('finish').hidden = true;
+    button.disabled = false;
+    if (response && response.status === 401) return sessionEnded();
+    if (!response || !response.ok) return say('sign_out_failed');
+    hideActions();
     say('signed_out');
   }
 
