@@ -1389,7 +1389,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// for an unknown / already-revoked / other-account credential. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke a credential
     /// they do not own; the remaining-count lets the caller refuse to remove the
-    /// last passkey.
+    /// last passkey. When a credential is removed, every live NATIVE session it
+    /// minted (`client_kind = 'native'`, `auth_credential_id` = that
+    /// credential) is revoked in the same transaction.
     async fn revoke_account_credential(
         &self,
         _tenant_id: &str,
@@ -1509,6 +1511,44 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Pool(
             "count_active_strong_authenticators not implemented".to_string(),
+        ))
+    }
+
+    /// Count passkey-origin accounts that are still `unbound`, in EVERY tenant
+    /// (Z2 S2, the unbound-account ceiling). A cross-tenant read, so the
+    /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
+    /// never through a runtime-pool query. The default refuses: a backend that
+    /// cannot count cannot enforce the ceiling, so creation stays closed.
+    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "unbound_passkey_account_count_unconfigured".to_string(),
+        ))
+    }
+
+    /// Create a passkey-origin account from a verified native `create/finish`
+    /// (Z2 S2): in ONE transaction under the freshly minted tenant, re-check
+    /// the unbound-account ceiling, then write the tenant, the account and its
+    /// `unbound` binding row, the credential, a native session and the audit
+    /// row. Either every row is written or none is. The default refuses.
+    async fn create_passkey_origin_account(
+        &self,
+        _account: NewPasskeyOriginAccount<'_>,
+    ) -> Result<PasskeyOriginAccountOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "create_passkey_origin_account not implemented".to_string(),
+        ))
+    }
+
+    /// The binding state of one account, read under its tenant's RLS. No
+    /// binding row is `Legacy`. Used by native passkey sign-in to report
+    /// `binding_state`; the unbound gate reads it inside `validate_session`.
+    async fn account_binding_state(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_binding_state not implemented".to_string(),
         ))
     }
 
@@ -1930,6 +1970,38 @@ pub struct AccountCredentialSummary {
 pub struct RevokeCredentialResult {
     pub removed: bool,
     pub remaining: i64,
+}
+
+/// Everything native passkey `create/finish` writes for a new passkey-origin
+/// account (Z2 S2). Every value is server-minted or came out of a verified
+/// attestation: the tenant from the OS RNG, the account id from `start`, the
+/// credential from `finish_passkey_registration`. Nothing here is client
+/// supplied except the optional label, which the start handler bounded.
+#[derive(Debug)]
+pub struct NewPasskeyOriginAccount<'a> {
+    pub tenant_id: &'a str,
+    pub account_id: uuid::Uuid,
+    /// Canonical base64url credential id; globally UNIQUE (V32), so a replayed
+    /// attestation fails the insert and rolls the whole account back.
+    pub credential_id: &'a str,
+    /// The serialized webauthn-rs `Passkey`.
+    pub passkey: &'a serde_json::Value,
+    pub label: Option<&'a str>,
+    /// The weak native session minted with the account. Its `client_kind`
+    /// must be `native`; the backend refuses anything else.
+    pub session: NewSession<'a>,
+    /// The unbound-account ceiling, re-checked inside the transaction.
+    pub ceiling: i64,
+}
+
+/// What `create_passkey_origin_account` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyOriginAccountOutcome {
+    /// Every row was written and committed.
+    Created,
+    /// The ceiling was reached when re-checked inside the transaction; nothing
+    /// was written.
+    CeilingReached,
 }
 
 /// A registered NEAR identity resolved for the LOGIN (wallet-assertion) path.

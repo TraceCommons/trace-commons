@@ -1778,6 +1778,11 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Z2 S2: the cap on unbound passkey-origin accounts, from
+    /// `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`. Unset disables native
+    /// passkey creation.
+    account_unbound_ceiling:
+        Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -4149,6 +4154,12 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        // Z2 S2: unset disables native passkey creation; a malformed value
+        // fails startup rather than guessing either way.
+        let account_unbound_ceiling = Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -4320,6 +4331,7 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_unbound_ceiling,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
@@ -7642,6 +7654,16 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             "/v1/account/passkeys/register/finish",
             account_passkey_register_finish_handler,
         )
+        // The native sibling (Z2 S2): the same registration with the ceremony
+        // id in the body instead of a cookie, native session only.
+        .post(
+            "/v1/account/passkeys/native/register/start",
+            account_passkey_native_register_start_handler,
+        )
+        .post(
+            "/v1/account/passkeys/native/register/finish",
+            account_passkey_native_register_finish_handler,
+        )
         // Passkey credential management (Slice 2 Task 7). list / rename / remove the
         // caller's OWN credentials. `{credential_id}` is the public base64url id.
         .get("/v1/account/passkeys", account_passkeys_list_handler)
@@ -7811,6 +7833,28 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
+        // Native passkey identity (Z2 S2). Unauthenticated for the same reason
+        // as the pair above: create/finish and login/finish CREATE the
+        // session, so they cannot require one. The credential is the verified
+        // WebAuthn ceremony itself; every refusal is `native_generic_deny`.
+        // Outside `AccountRoutes` on purpose, so the unbound gate and its
+        // classification table do not apply to them.
+        .route(
+            "/v1/account/native/passkey/create/start",
+            post(native_passkey_create_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/create/finish",
+            post(native_passkey_create_finish_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/start",
+            post(native_passkey_login_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/finish",
+            post(native_passkey_login_finish_handler),
+        )
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
@@ -16172,7 +16216,10 @@ async fn resolve_account_ctx_native(
             auth_method: AccountAuthMethod::NativeToken,
             tenant_id,
             actor_ref: account_actor_ref(&account),
-            auth_credential_id: None,
+            // The passkey that minted a native session (Z2 S2), so the passkey
+            // list can mark `this_device`. NULL for loopback and NEAR AI
+            // sessions. A public id; it confers no strength (see below).
+            auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
         },
         rotated,
@@ -17655,6 +17702,16 @@ async fn native_authorize_start_handler(
     );
     response
 }
+
+#[path = "trace_commons_ingest_internal/native_passkey.rs"]
+mod native_passkey;
+#[cfg(test)]
+use native_passkey::NATIVE_PASSKEY_PER_IP_LIMIT;
+use native_passkey::{
+    account_passkey_native_register_finish_handler, account_passkey_native_register_start_handler,
+    native_passkey_create_finish_handler, native_passkey_create_start_handler,
+    native_passkey_login_finish_handler, native_passkey_login_start_handler,
+};
 
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
@@ -19983,6 +20040,103 @@ async fn account_passkey_login_start_handler(
     response
 }
 
+/// A discoverable passkey assertion that verified: the tenant the credential
+/// lives in, the account it belongs to, and its canonical credential id.
+struct VerifiedPasskeyAssertion {
+    tenant: String,
+    account_id: uuid::Uuid,
+    credential_id: String,
+}
+
+/// The ONE passkey login verifier, shared by the browser
+/// (`/account/passkey/login/finish`) and native
+/// (`/v1/account/native/passkey/login/finish`) sign-ins. The two differ only in
+/// how the ceremony state was recovered (a cookie or a body-borne id) and what
+/// they issue; every check on the assertion itself lives here, so the surfaces
+/// cannot drift apart. `None` on any failure; the caller answers with its own
+/// uniform deny.
+///
+/// Steps, in order: identify the asserted handle and credential id (no tenant
+/// context yet); the per-credential ceiling; resolve the tenant through the
+/// NARROW resolver pool with NO tenant write; load the active credential under
+/// that tenant's RLS; require the asserted user handle to equal the
+/// credential's account (before verification runs); verify, which enforces the
+/// signature and the sign-counter clone check; persist the advanced counter.
+async fn verify_discoverable_passkey_assertion(
+    webauthn: &webauthn_rs::Webauthn,
+    db: &dyn Database,
+    assertion: &webauthn_rs::prelude::PublicKeyCredential,
+    auth_state: webauthn_rs::prelude::DiscoverableAuthentication,
+) -> Option<VerifiedPasskeyAssertion> {
+    // Extract the asserted user handle + credential id from the assertion (no
+    // tenant context yet). Encode the credential id with the SAME canonical
+    // base64url encoding enrollment used so the lookup agrees byte-for-byte.
+    let (account_handle_uuid, cred_id_bytes) = webauthn
+        .identify_discoverable_authentication(assertion)
+        .ok()?;
+    let credential_id =
+        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
+
+    // Per-credential hard ceiling (replay/brute bound on one specific credential,
+    // IP-independent, and shared by both surfaces).
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-cred:{credential_id}"),
+        PASSKEY_LOGIN_PER_CRED_LIMIT,
+    ) {
+        return None;
+    }
+
+    // Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
+    // ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
+    // -> deny, and critically NO tenant row is written for a forged id.
+    let tenant = db.resolve_credential_tenant(&credential_id).await.ok()??;
+
+    // Under the resolved tenant's RLS, load the active credential. Deserialize
+    // the stored passkey JSON into a webauthn-rs `Passkey`; a corrupt row also
+    // denies.
+    let credential = db
+        .load_webauthn_credential_for_login(&tenant, &credential_id)
+        .await
+        .ok()??;
+    let credential_account_id = credential.account_id;
+    let mut passkey: webauthn_rs::prelude::Passkey =
+        serde_json::from_value(credential.passkey).ok()?;
+
+    // Cross-account / handle binding (checked BEFORE finish so a mismatch never
+    // reaches verification): the user handle the authenticator asserted MUST
+    // equal the account the stored credential belongs to. Defense-in-depth on
+    // top of the credential_id -> account binding.
+    if account_handle_uuid != credential_account_id {
+        return None;
+    }
+
+    // Verify the assertion. The SIGN-COUNTER regression / clone-detection check
+    // is enforced INSIDE finish_discoverable_authentication (a regressed counter
+    // -> Err), as is the allowed-credential / signature check.
+    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
+    let auth_result = webauthn
+        .finish_discoverable_authentication(assertion, auth_state, &[discoverable_key])
+        .ok()?;
+
+    // Persist the advanced sign counter (clone-detection state) when it moved.
+    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
+    // property (counter / backup flags) actually changed. A persistence failure is
+    // NOT fatal to this login (the assertion already verified), but we fail closed
+    // so a stuck counter can't silently accumulate.
+    if matches!(passkey.update_credential(&auth_result), Some(true)) {
+        let updated = serde_json::to_value(&passkey).ok()?;
+        db.update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
+            .await
+            .ok()?;
+    }
+
+    Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    })
+}
+
 /// `POST /account/passkey/login/finish` — complete a discoverable passkey login
 /// and issue a session (Slice 2 Task 6). UNAUTHENTICATED, with full redeem-style
 /// hardening: a fixed timing floor wraps the WHOLE handler so success and every
@@ -20041,93 +20195,18 @@ async fn account_passkey_login_finish_inner(
         None => return passkey_login_generic_deny(),
     };
 
-    // 4. Extract the asserted user handle + credential id from the assertion (no
-    //    tenant context yet). Encode the credential id with the SAME canonical
-    //    base64url encoding enrollment used so the lookup agrees byte-for-byte.
-    let (account_handle_uuid, cred_id_bytes) =
-        match webauthn.identify_discoverable_authentication(&assertion) {
-            Ok(parts) => parts,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-    let credential_id =
-        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
-
-    // Per-credential hard ceiling (replay/brute bound on one specific credential,
-    // IP-independent). Same uniform deny.
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-cred:{credential_id}"),
-        PASSKEY_LOGIN_PER_CRED_LIMIT,
-    ) {
+    // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
+    //    the advanced sign counter: the verification core shared with native
+    //    passkey sign-in. Any failure -> uniform deny.
+    let Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    }) =
+        verify_discoverable_passkey_assertion(&webauthn, db.as_ref(), &assertion, auth_state).await
+    else {
         return passkey_login_generic_deny();
-    }
-
-    // 5. Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
-    //    ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
-    //    -> uniform deny, and critically NO tenant row is written for a forged id.
-    let tenant = match db.resolve_credential_tenant(&credential_id).await {
-        Ok(Some(tenant)) => tenant,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
     };
-
-    // 6. Under the resolved tenant's RLS, load the active credential. None ->
-    //    uniform deny. Deserialize the stored passkey JSON into a webauthn-rs
-    //    `Passkey`; a corrupt row also collapses to the uniform deny.
-    let credential = match db
-        .load_webauthn_credential_for_login(&tenant, &credential_id)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
-    };
-    // Move the owned `passkey` JSON out of the row (no clone) for deserialization;
-    // `account_id` is retained for the handle-binding check below.
-    let credential_account_id = credential.account_id;
-    let mut passkey: webauthn_rs::prelude::Passkey =
-        match serde_json::from_value(credential.passkey) {
-            Ok(passkey) => passkey,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-
-    // 8. Cross-account / handle binding (checked BEFORE finish so a mismatch never
-    //    reaches verification): the user handle the authenticator asserted MUST
-    //    equal the account the stored credential belongs to. Defense-in-depth on
-    //    top of the credential_id -> account binding.
-    if account_handle_uuid != credential_account_id {
-        return passkey_login_generic_deny();
-    }
-
-    // 7. Verify the assertion. The SIGN-COUNTER regression / clone-detection check
-    //    is enforced INSIDE finish_discoverable_authentication (a regressed counter
-    //    -> Err), as is the allowed-credential / signature check. Any Err ->
-    //    uniform deny.
-    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
-    let auth_result = match webauthn.finish_discoverable_authentication(
-        &assertion,
-        auth_state,
-        &[discoverable_key],
-    ) {
-        Ok(auth_result) => auth_result,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    // Persist the advanced sign counter (clone-detection state) when it moved.
-    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
-    // property (counter / backup flags) actually changed. A persistence failure is
-    // NOT fatal to this login (the assertion already verified), but we fail closed
-    // to the uniform deny so a stuck counter can't silently accumulate.
-    if matches!(passkey.update_credential(&auth_result), Some(true)) {
-        let updated = match serde_json::to_value(&passkey) {
-            Ok(value) => value,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-        if db
-            .update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
-            .await
-            .is_err()
-        {
-            return passkey_login_generic_deny();
-        }
-    }
 
     // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
     //    the session (client_kind='passkey', auth_credential_id=credential_id) +
@@ -20140,7 +20219,7 @@ async fn account_passkey_login_finish_inner(
     if db
         .issue_passkey_session(
             &tenant,
-            credential.account_id,
+            credential_account_id,
             trace_commons_server::db::NewSession {
                 token_hash: &token_hash,
                 client_kind: "passkey",

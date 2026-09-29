@@ -75,6 +75,17 @@ pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = 
         // Refused: adding or removing an authenticator.
         ("POST", "/v1/account/passkeys/register/start", Refused),
         ("POST", "/v1/account/passkeys/register/finish", Refused),
+        // Z2 S2: one passkey per unbound account.
+        (
+            "POST",
+            "/v1/account/passkeys/native/register/start",
+            Refused,
+        ),
+        (
+            "POST",
+            "/v1/account/passkeys/native/register/finish",
+            Refused,
+        ),
         ("DELETE", "/v1/account/passkeys/{credential_id}", Refused),
         // Refused: invites and the legacy invite link.
         ("POST", "/v1/account/invites/redeem", Refused),

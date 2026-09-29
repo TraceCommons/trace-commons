@@ -1506,6 +1506,12 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_bindings",
         include_str!("../../../../migrations/V97__account_bindings.sql"),
     ),
+    // Z2 S2: the binding-row INSERT grant and the unbound-account count.
+    (
+        98,
+        "native_passkey_creation",
+        include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
+    ),
 ];
 
 #[async_trait]
@@ -4322,6 +4328,30 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        if removed > 0 {
+            // Z2 S2: a native `tcn1_` session minted by this credential (native
+            // passkey create or sign-in) dies with it, in the same
+            // transaction, so no native token outlives the removal of the
+            // passkey that authenticated it. Browser `passkey` cookie sessions
+            // keep today's behaviour: removal is made FROM a strong browser
+            // session, often the one this credential minted.
+            tx.execute(
+                "UPDATE trace_sessions
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND auth_credential_id = $2
+                    AND client_kind = $3
+                    AND revoked_at IS NULL",
+                &[
+                    &account_id,
+                    &credential_id,
+                    &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
         let remaining_row = tx
             .query_one(
                 "SELECT count(*) AS remaining
@@ -4563,6 +4593,25 @@ impl Database for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(row.get("strong_count"))
+    }
+
+    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
+        self.unbound_passkey_account_count().await
+    }
+
+    async fn create_passkey_origin_account(
+        &self,
+        account: crate::db::NewPasskeyOriginAccount<'_>,
+    ) -> Result<crate::db::PasskeyOriginAccountOutcome, DatabaseError> {
+        self.create_passkey_origin_account_in_tx(account).await
+    }
+
+    async fn account_binding_state(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
+        self.binding_state_for_account(tenant_id, account_id).await
     }
 
     async fn designate_payout_near_identity(

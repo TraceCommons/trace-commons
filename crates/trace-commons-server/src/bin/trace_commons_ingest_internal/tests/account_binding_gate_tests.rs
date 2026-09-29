@@ -559,7 +559,7 @@ async fn pg_passkey_account(backend: &PgBackend, tenant: &str) -> Uuid {
 }
 
 #[tokio::test]
-async fn pg_account_bindings_are_forced_rls_and_read_only_to_the_runtime() {
+async fn pg_account_bindings_are_forced_rls_and_select_insert_only_to_the_runtime() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -590,9 +590,12 @@ async fn pg_account_bindings_are_forced_rls_and_read_only_to_the_runtime() {
         .get(0);
     assert!(policy.contains("trace_current_tenant_id()"), "{policy}");
 
+    // S1 (V97) granted SELECT; S2 (V98) grants INSERT for native passkey
+    // create/finish. Flipping a row to bound is S3's grant, and a row is only
+    // ever removed by the cascade from its account.
     for (privilege, expected) in [
         ("SELECT", true),
-        ("INSERT", false),
+        ("INSERT", true),
         ("UPDATE", false),
         ("DELETE", false),
         ("TRUNCATE", false),
