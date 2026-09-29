@@ -89,6 +89,10 @@ pub struct NearCreditSubmitAdvisoryLockInner {
 }
 
 impl NearCreditSubmitAdvisoryLockInner {
+    pub(crate) fn client_mut(&mut self) -> &mut deadpool_postgres::Object {
+        &mut self.client
+    }
+
     pub(crate) async fn release(self) -> Result<(), DatabaseError> {
         // Best-effort unlock on the SAME connection that took the lock; session
         // advisory locks are connection-scoped, so this must run here before the

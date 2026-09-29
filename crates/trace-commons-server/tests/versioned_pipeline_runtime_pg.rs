@@ -14087,6 +14087,18 @@ async fn compatibility_test_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     config: CompatibilityBundleConfig,
 ) -> Arc<PipelineService> {
+    compatibility_test_service_with_payout(backend, artifact_store, config, None).await
+}
+
+/// `compatibility_test_service`, and, when `near` is given, with its Trace
+/// Credit adapter on the `near` rail and NEAR payout enabled through `near`
+/// on `PAYOUT_TEST_NEAR_CONTRACT`.
+async fn compatibility_test_service_with_payout(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+) -> Arc<PipelineService> {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package =
@@ -14096,7 +14108,7 @@ async fn compatibility_test_service(
     let trace_credit = RecordingSettlementAdapter::new(
         InstrumentId::trace_credit(),
         "recording_trace_credit_test_only",
-        "none",
+        if near.is_some() { "near" } else { "none" },
     );
     let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
         .expect("build settlement adapter registry");
@@ -14118,10 +14130,19 @@ async fn compatibility_test_service(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary())
-    .build()
-    .expect("build pipeline service");
-    Arc::new(service)
+    .with_privacy(default_privacy_boundary());
+    let service = match near {
+        Some(near) => service.with_payout(
+            near,
+            PipelinePayoutConfig {
+                enabled: true,
+                require_confirmation_evidence: true,
+                near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+            },
+        ),
+        None => service,
+    };
+    Arc::new(service.build().expect("build pipeline service"))
 }
 
 /// The `(event_type, points_delta)` of the one `trace_credit_ledger` row for
@@ -16370,6 +16391,28 @@ async fn payout_test_service(
     near: Arc<dyn NearPayoutAdapter>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    payout_test_service_on_contract(
+        backend,
+        artifact_store,
+        config,
+        adapters,
+        near,
+        crash_point,
+        PAYOUT_TEST_NEAR_CONTRACT,
+    )
+    .await
+}
+
+/// `payout_test_service` with the payout configured on `near_contract_id`.
+async fn payout_test_service_on_contract(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+    near_contract_id: &str,
+) -> Arc<PipelineService> {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
@@ -16395,7 +16438,7 @@ async fn payout_test_service(
         PipelinePayoutConfig {
             enabled: true,
             require_confirmation_evidence: true,
-            near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+            near_contract_id: Some(near_contract_id.to_string()),
         },
     );
     if let Some(crash_point) = crash_point {
@@ -17204,5 +17247,443 @@ async fn a_withdrawal_after_a_failed_near_submit_flags_the_payout_unreconciled()
     assert_eq!(
         leg.last_error_label.as_deref(),
         Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
+}
+
+/// A NEAR adapter that counts every `submit` call, delegates to a shared
+/// `RecordingNearAdapter`, and holds its first submit open until the test
+/// lets it go: a payout pass caught in the middle of its external call.
+struct HoldingNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    submits: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HoldingNearAdapter {
+    fn new(inner: Arc<RecordingNearAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submits: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for HoldingNearAdapter {
+    fn dependency_identity(&self) -> &str {
+        "holding_near_test_only"
+    }
+
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        if self.submits.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Finding I1: two payout passes for one tenant at once -- two ingest
+/// replicas, or a pass and a direct `process_payout` -- submit a line once.
+/// The payout takes the tenant's NEAR submit lock (`main`'s key) across its
+/// external call; a second pass that finds it held does nothing, and a
+/// direct `process_payout` is refused with `payout_lock_held`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_payout_passes_at_once_submit_one_line_once() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = HoldingNearAdapter::new(recording.clone());
+    let first = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let second = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-overlap-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
+
+    let first_pass = {
+        let first = first.clone();
+        let tenant = tenant.clone();
+        tokio::spawn(async move { first.process_payouts(&tenant, 32).await })
+    };
+    tokio::time::timeout(HELD_CALL_BOUND, near.entered.notified())
+        .await
+        .expect("the first pass reaches its external submit");
+
+    let overlapping = tokio::time::timeout(HELD_CALL_BOUND, second.process_payouts(&tenant, 32))
+        .await
+        .expect("the second pass does not wait for the first")
+        .unwrap();
+    assert_eq!(
+        near.submits.load(Ordering::SeqCst),
+        1,
+        "the second pass submits nothing while the first is in its submit"
+    );
+    assert_eq!(overlapping, 0, "the second pass finds the lock held");
+    let direct = tokio::time::timeout(HELD_CALL_BOUND, second.process_payout(&tenant, run.run_id))
+        .await
+        .expect("a direct payout does not wait for the pass")
+        .expect_err("a direct payout is refused while a pass holds the lock");
+    assert_eq!(direct.to_string(), "payout_lock_held");
+
+    near.release.notify_one();
+    let paid = tokio::time::timeout(HELD_CALL_BOUND, first_pass)
+        .await
+        .expect("the first pass finishes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(paid, 1);
+    assert_eq!(near.submits.load(Ordering::SeqCst), 1, "one raw submit");
+    assert_eq!(recording.requests().len(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "submitted");
+
+    // Released: the next pass runs again.
+    confirm_every_near_request(&recording);
+    assert_eq!(second.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&second, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+    assert_eq!(near.submits.load(Ordering::SeqCst), 1);
+}
+
+/// Finding I1: the payout shares the tenant's NEAR submit lock with `main`'s
+/// NEAR outbox submitter (`try_acquire_near_credit_submit_lock`), so the two
+/// never submit for one tenant at once: while `main` holds it, the payout
+/// pass does nothing.
+#[tokio::test]
+async fn payout_waits_while_mains_near_submitter_holds_the_tenant_lock() {
+    use trace_commons_server::db::Database;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-main-lock-{}", uuid::Uuid::new_v4());
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    let mains = backend
+        .try_acquire_near_credit_submit_lock(&tenant)
+        .await
+        .unwrap()
+        .expect("main's submitter takes the tenant lock");
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert!(near.requests().is_empty());
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    mains.release().await.unwrap();
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1);
+}
+
+/// The pool-size-one rule: the payout pass holds its lock on one pooled
+/// connection and does all its own database work on that same connection,
+/// so on a pool of one it never waits for a second -- through a submit, a
+/// confirmation, a per-run error, and the guard's refusal.
+#[tokio::test]
+async fn payout_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = Arc::new(BadEvidenceNearAdapter {
+        inner: recording.clone(),
+        bad_keys: std::sync::Mutex::new(BTreeSet::new()),
+    });
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-pool-one-{}", uuid::Uuid::new_v4());
+    let paid = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL),
+    )
+    .await
+    .expect("the run completes on a pool of one");
+    let errored = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL),
+    )
+    .await
+    .expect("the run completes on a pool of one");
+    let withdrawn = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL),
+    )
+    .await
+    .expect("the run completes on a pool of one");
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        withdraw(&service, &tenant, withdrawn.submission_id),
+    )
+    .await
+    .expect("the withdrawal completes on a pool of one");
+
+    let submitted = tokio::time::timeout(HELD_CALL_BOUND, service.process_payouts(&tenant, 32))
+        .await
+        .expect("the submit pass never waits for a second connection")
+        .unwrap();
+    assert_eq!(submitted, 3);
+    let errored_batch = trace_credit_settlement(&service, &tenant, errored.run_id)
+        .await
+        .settlement_batch_id
+        .unwrap();
+    let errored_key = near_outbox_rows(&backend, &tenant)
+        .await
+        .into_iter()
+        .find(|row| row.settlement_batch_id == errored_batch)
+        .unwrap()
+        .near_call_json["idempotency_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    near.bad_keys.lock().unwrap().insert(errored_key);
+    confirm_every_near_request(&recording);
+    let confirmed = tokio::time::timeout(HELD_CALL_BOUND, service.process_payouts(&tenant, 32))
+        .await
+        .expect("the confirm pass never waits for a second connection")
+        .unwrap();
+    assert_eq!(confirmed, 2);
+    let direct = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.process_payout(&tenant, withdrawn.run_id),
+    )
+    .await
+    .expect("a direct payout never waits for a second connection");
+    assert!(direct.is_ok());
+
+    for (run, state, label) in [
+        (&paid, "confirmed", None),
+        (&errored, "failed", Some("near_confirmation_invalid")),
+        (&withdrawn, "failed", Some("submission_inoperable")),
+    ] {
+        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+        assert_eq!(leg.payout_state, state);
+        assert_eq!(leg.last_error_label.as_deref(), label);
+    }
+}
+
+/// Finding I2: a line with an outbox row replays its stored call, never one
+/// rebuilt from the current configuration. After the configured contract
+/// changes, a failed line stored under the old contract is not submitted
+/// again (no second payout, on another contract) and its payout is
+/// `near_contract_changed`; a `submitted` line stored under the old contract
+/// is still confirmed through its stored idempotency key.
+#[tokio::test]
+async fn a_changed_near_contract_replays_the_stored_call_and_submits_nothing_new() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service_on = |contract: &'static str| {
+        payout_test_service_on_contract(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+            contract,
+        )
+    };
+    let on_a = service_on(PAYOUT_TEST_NEAR_CONTRACT).await;
+    let on_b = service_on("other-credits.testnet").await;
+
+    // A failed line, stored under contract A.
+    let tenant = format!("payout-contract-failed-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&on_a, &tenant, RECEIPT_PRINCIPAL).await;
+    recording.fail_next();
+    assert_eq!(on_a.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "failed"
+    );
+
+    on_b.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.submits(), 1, "no submit under the new contract");
+    assert!(recording.requests().is_empty());
+    let leg = trace_credit_settlement(&on_b, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "failed");
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some("near_contract_changed")
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0].near_call_json["contract_id"],
+        PAYOUT_TEST_NEAR_CONTRACT
+    );
+
+    // A submitted line, stored under contract A, confirmed through its key.
+    let tenant = format!("payout-contract-submitted-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&on_a, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(on_a.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 2);
+    confirm_every_near_request(&recording);
+    assert_eq!(on_b.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 2, "a submitted line is never sent again");
+    assert_eq!(recording.requests().len(), 1);
+    assert_eq!(
+        trace_credit_settlement(&on_b, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+}
+
+/// Ruling T10-8: a withdrawal after NEAR confirmed the payout (here, a crash
+/// right after the confirmation was recorded, before the payout state) does
+/// not flag it: the payout is recorded `confirmed`, with no label.
+#[tokio::test]
+async fn a_withdrawal_after_a_confirmed_payout_records_it_confirmed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let crashing = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        Some(PipelineCrashPoint::AfterNearConfirm),
+    )
+    .await;
+    let tenant = format!("payout-confirmed-withdrawn-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(crashing.process_payouts(&tenant, 32).await.unwrap(), 1);
+    confirm_every_near_request(&recording);
+    let error = crashing
+        .process_payouts(&tenant, 32)
+        .await
+        .expect_err("the pass crashes after the confirmation");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "confirmed"
+    );
+    assert_eq!(
+        trace_credit_settlement(&crashing, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+
+    withdraw(&crashing, &tenant, run.submission_id).await;
+    let restarted = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let leg = trace_credit_settlement(&restarted, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "confirmed");
+    assert_eq!(leg.last_error_label, None);
+    assert_eq!(near.submits(), 1);
+}
+
+/// Ruling T10-9: with payout enabled, a compatibility run's Trace Credit leg
+/// (the `NoveltyUtility` event, never batched or paid) is seeded `disabled`
+/// even on the `near` rail, so it never reads as a pending payout.
+#[tokio::test]
+async fn a_compatibility_leg_is_never_a_pending_payout() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = 2_500_000;
+    let service = compatibility_test_service_with_payout(
+        backend.clone(),
+        artifact_store(&dir),
+        config,
+        Some(near.clone()),
+    )
+    .await;
+    assert!(service.payout_enabled());
+    let tenant = format!("compat-payout-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-payout";
+    let run = submit_and_complete(&service, &tenant, principal).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.operation_state, "complete");
+    assert_eq!(leg.payout_rail, "near");
+    assert!(leg.settlement_batch_id.is_none());
+    assert_eq!(leg.payout_state, "disabled");
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert!(near.requests().is_empty());
+
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_ne!(status.payout.as_deref(), Some("pending"));
+    assert_eq!(status.payout.as_deref(), Some("disabled"));
+    assert!(
+        status
+            .instruments
+            .iter()
+            .all(|instrument| instrument.payout_state != "pending")
     );
 }
