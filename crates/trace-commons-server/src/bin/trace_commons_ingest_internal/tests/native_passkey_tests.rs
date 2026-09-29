@@ -843,7 +843,7 @@ async fn pg_ceremonies_cannot_cross_surfaces_or_be_reused() {
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::COOKIE,
-        HeaderValue::from_str(&format!("tc_passkey_ceremony={native_id}")).unwrap(),
+        HeaderValue::from_str(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}={native_id}")).unwrap(),
     );
     let browser = account_passkey_login_finish_handler(
         State(state.clone()),
@@ -1036,7 +1036,7 @@ async fn pg_removing_a_passkey_revokes_its_native_sessions() {
             .uri(format!("/v1/account/passkeys/{}", created.credential_id))
             .header(
                 axum::http::header::COOKIE,
-                format!("tc_account_session={strong}"),
+                format!("{ACCOUNT_SESSION_COOKIE}={strong}"),
             )
             .header("sec-fetch-site", "same-origin")
             .body(Body::empty())
@@ -1073,7 +1073,7 @@ fn cookie_get(uri: &str, cookie_value: &str) -> axum::http::Request<Body> {
         .uri(uri)
         .header(
             axum::http::header::COOKIE,
-            format!("tc_account_session={cookie_value}"),
+            format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
         )
         .body(Body::empty())
         .expect("request")
@@ -1142,7 +1142,7 @@ async fn pg_removing_a_passkey_revokes_every_session_it_minted_but_the_callers()
             .uri(format!("/v1/account/passkeys/{}", created.credential_id))
             .header(
                 axum::http::header::COOKIE,
-                format!("tc_account_session={caller}"),
+                format!("{ACCOUNT_SESSION_COOKIE}={caller}"),
             )
             .header("sec-fetch-site", "same-origin")
             .body(Body::empty())
