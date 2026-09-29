@@ -12,12 +12,16 @@ use trace_commons_server::{
     witness_service::{self, Enclave, SeamUnavailable, Signer},
 };
 
-struct FixtureSigner(SigningKey);
+/// A synthetic EIP-191 signer standing in for a real provider-TEE/gateway
+/// signer. `pub(super)`: shared with `pipeline_http_pg_tests`, which needs
+/// the same NEAR evidence/witness chain to reach a real, evidence-verified
+/// upload for a pipeline-routed, admission-gated tenant.
+pub(super) struct FixtureSigner(SigningKey);
 impl FixtureSigner {
-    fn new(seed: &str) -> Self {
+    pub(super) fn new(seed: &str) -> Self {
         Self(SigningKey::from_slice(&Keccak256::digest(seed.as_bytes())).unwrap())
     }
-    fn address(&self) -> String {
+    pub(super) fn address(&self) -> String {
         let point = self.0.verifying_key().to_encoded_point(false);
         format!(
             "0x{}",
@@ -39,7 +43,8 @@ impl Signer for FixtureSigner {
         ))
     }
 }
-struct FixtureEnclave(String);
+/// `pub(super)`: see `FixtureSigner`.
+pub(super) struct FixtureEnclave(pub(super) String);
 #[async_trait::async_trait]
 impl Enclave for FixtureEnclave {
     fn signing_address(&self) -> &str {
@@ -1243,7 +1248,11 @@ async fn admission_pg_admin() -> Arc<PgBackend> {
 ///
 /// Returns the tenant id, the stored anchor without its `sha256:` prefix, and
 /// the device key id, so a caller can revoke the device.
-async fn provision_synthetic_near_account(
+///
+/// `pub(super)`: shared with `pipeline_http_pg_tests`, which needs the same
+/// NEAR account fixture for its own admission-gated pipeline tests, rather
+/// than keeping a second copy of this SQL.
+pub(super) async fn provision_synthetic_near_account(
     db: &PgBackend,
     principal: &str,
 ) -> (String, String, String) {
@@ -1279,6 +1288,51 @@ async fn provision_synthetic_near_account(
     client.execute("INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",&[&tenant,&account,&principal]).await.unwrap();
     client.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)",&[&tenant,&principal,&account,&device,&prefixed]).await.unwrap();
     (tenant, anchor, device)
+}
+
+/// Adds a second device -- and its own principal -- to the account
+/// `provision_synthetic_near_account` already provisioned under `tenant` and
+/// `anchor` (its bare, unprefixed return value). V58 keys
+/// `trace_near_provisioned_devices` on `(tenant_id, principal_ref)`, and
+/// nothing makes `anchor_hash` unique per principal, so an account can have
+/// more than one provisioned device/principal sharing the same anchor -- this
+/// is the fixture for that shape: `admission::anchor`'s lookup resolves each
+/// principal to the SAME `anchor_hash`, so `admission::reserve`'s
+/// completed-lookup (keyed on `(tenant, anchor, submission, body_hash)`, not
+/// on principal) cannot by itself distinguish a retry from this device from
+/// one from the device `provision_synthetic_near_account` provisioned.
+///
+/// `pub(super)`: shared with `pipeline_http_pg_tests`.
+pub(super) async fn provision_second_device_on_the_same_account(
+    db: &PgBackend,
+    tenant: &str,
+    anchor: &str,
+    principal: &str,
+) -> String {
+    let prefixed = format!("sha256:{anchor}");
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_near_account_anchors
+              WHERE tenant_id = $1 AND anchor_hash = $2",
+            &[&tenant, &prefixed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let device_bytes: [u8; 32] = sha2::Sha256::digest(Uuid::new_v4().as_bytes()).into();
+    let device =
+        trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(&device_bytes);
+    client.execute("INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin) VALUES($1,$2,$3,NULL,'near')",&[&device,&tenant,&base64::engine::general_purpose::STANDARD.encode(device_bytes)]).await.unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_account_principals(tenant_id,account_id,principal_ref) VALUES($1,$2,$3)",
+            &[&tenant, &account, &principal],
+        )
+        .await
+        .unwrap();
+    client.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5)",&[&tenant,&principal,&account,&device,&prefixed]).await.unwrap();
+    device
 }
 
 /// An `AppState` whose only relevant part is the mirror `admission::anchor`
