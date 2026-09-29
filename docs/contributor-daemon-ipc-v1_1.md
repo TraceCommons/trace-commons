@@ -500,7 +500,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -920,7 +920,8 @@ For a `not-yet-scrubbed` entry it means no reason is known yet.
 The queue entry's count is recorded by every preview path -- `preview`, the
 scheduled card, and the pinning build behind `preview_body` /
 `preview_turns` / `approve` -- for a `Pending` entry, and the latest preview
-wins. It is persisted with the queue, so it survives a restart. Recording it
+wins. The Automatic Scrub check's hold records it too, from the envelope the
+hold was decided on (see `scrub_check` under `set_settings`). It is persisted with the queue, so it survives a restart. Recording it
 publishes no event: a shell that just received a preview already holds the
 same three fields on the summary, and the next `list_pending` or `snapshot`
 carries them on the entry. Under an LLM-backed privacy filter, which does
@@ -1595,6 +1596,10 @@ reason no unattended approval can satisfy:
   `approve` uploads exactly those bytes. Like any pinned `Pending` preview,
   the pin is released after the preview age limit, and opening it then runs
   the witness again.
+- `second-look-review-required`: a session approved on the contributor's
+  behalf that the Automatic Scrub check held because the envelope built for
+  it is worth a second look -- nothing matched, or it was trimmed to fit. Its
+  mark count is kept on the entry. See `scrub_check` under `set_settings`.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,
@@ -2334,7 +2339,7 @@ Takes a JSON object whose top-level keys must come from
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
-`private_inference_offer_seen`, `max_uploads_per_day`,
+`private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
 `max_bytes_per_day` --
 a key this method does
 not recognize is
@@ -3085,6 +3090,67 @@ with it false. That default is what makes an offer appear on the first start
 after an upgrade as well as on a fresh install: an installed build's
 settings file has no such key, so the first build that knows the key reads
 it as unanswered and asks once.
+
+#### `scrub_check`
+
+The Settings row "Scrub check" (K4 of #1118). `set_settings` takes a string,
+`"automatic"` or `"manual"`; anything else, including another case, a boolean
+or `null`, is `bad_params` / `settings-invalid-value` and changes nothing.
+`get_settings` always reports the key: `null` until one of the two has been
+chosen, then the string. It is persisted with the other settings and read at
+each watcher pass and each upload, so a change reaches a running daemon
+without a restart.
+
+It decides what happens to a session in a folder set to share automatically
+(`auto_upload`), and only there. A person's own `approve` is never held by it:
+they are the second look.
+
+| Value | Armed folders |
+|---|---|
+| `null` (never chosen, **the default**) | exactly as before this setting existed: every settled session sends on its own, with no second-look hold. |
+| `automatic` | send on their own, **except** a session that is worth a second look (`second_look` is `nothing-matched` or `trimmed-to-fit`, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
+| `manual` | nothing is sent without a person. The watcher approves nothing on anyone's behalf, and an approval made before the switch is held under `scrub-check-manual` when the uploader reaches it. |
+
+**Where the Automatic hold happens.** The watcher approves an armed session
+without building anything, so at that point nobody has counted its marks: it
+is `not-yet-scrubbed`, and treating that as fine would be wrong. So the hold
+is decided by the uploader, on the envelope it has just built for the send,
+after every refusal and before anything reaches the commons -- the same point
+as the witness's residual-risk hold. The count is therefore exact, and never
+"not yet scrubbed". On the local-redaction path nothing has left the machine
+when a session is held. With a witness configured, the witness has already
+seen the session (as with `witness-risk-review-required`): the hold stops the
+upload to the commons, not the send to the enclave.
+
+**What a hold leaves on the entry.** The entry goes back to `Pending` with
+`reason_label` `second-look-review-required`, and the mark count of the
+envelope the hold was decided on is recorded as the entry's `marks`, so
+`list_pending` and `snapshot` show `scrub: "scrubbed"`, the count, and the
+`second_look` reasons without a preview recomputing them. The envelope itself
+is not kept; opening the session builds its preview as for any pending entry.
+`second-look-review-required` is one of the reasons a session is held for a
+person (see the group `approve` section): the watcher does not approve it
+again, and a group `approve` leaves it out and counts it in `excluded_held`.
+A person's `approve` of that one entry sends it.
+
+`scrub-check-manual` is deliberately **not** such a reason. While Manual is
+set the watcher approves nothing anyway, and once Automatic is set again, an
+armed folder's waiting sessions going through the Automatic check -- its hold
+included -- is what the contributor asked for.
+
+**The default is `null`: today's behaviour, no hold.** A settings file written
+before this key existed loads that way, and every existing armed folder keeps
+sending what it sent before. The second-look hold is opt-in -- a shell's
+Customize path sets `automatic` -- pending a product decision on whether it
+should become the default. Holding by default would change, on upgrade, what
+every armed folder does with a session where nothing matched or one trimmed to
+fit, and that is not a change this setting makes on its own. `null` cannot be
+set: once chosen, the Scrub check is `automatic` or `manual`, each of which
+holds at least as much as the default. A shell renders the choice with
+`consent_copy::SCRUB_CHECK_*` (DRAFT, NEEDS APPROVAL), whose Automatic
+sentence says the check only counts what was removed and does not check that
+the scrubbing was right: it is not a model or quality check (the
+connect-and-forget design's R1).
 
 `max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
 validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than

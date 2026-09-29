@@ -193,6 +193,15 @@ pub enum SubmitOutcome {
         witnessed: Box<WitnessedEnvelope>,
         attested_inference: Box<InferenceAttestationRecord>,
     },
+    /// The Automatic Scrub check held this session for a person (K4 of
+    /// #1118): the envelope was built and scrubbed, and the scrub is worth a
+    /// second look. Nothing was uploaded. Only returned when the caller asked
+    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`]. `marks` is
+    /// the built envelope's mark count, so the caller can keep it.
+    HeldForSecondLook {
+        reason_label: String,
+        marks: u32,
+    },
 }
 
 /// The label an unattended witnessed session is held under when its
@@ -215,6 +224,29 @@ fn held_for_review(
         reason_label: REASON_WITNESS_RISK_REVIEW_REQUIRED.to_string(),
         witnessed: Box::new(response.clone()),
         attested_inference: Box::new(record),
+    })
+}
+
+/// The Automatic Scrub check's hold, decided (K4 of #1118): `Some` when the
+/// caller asked for it (`hold` carries the entry's `subagents_dropped`) and
+/// the envelope about to be sent is worth a second look. Read off that
+/// envelope's own redaction counts, so the scrub is always a real count,
+/// never "not yet scrubbed".
+fn held_for_second_look(
+    hold: Option<u32>,
+    envelope: &TraceContributionEnvelope,
+) -> Option<SubmitOutcome> {
+    let subagents_dropped = hold?;
+    let scrub =
+        crate::daemon::second_look::Scrub::from_redactions(&envelope.privacy.redaction_counts);
+    let reason_label = crate::daemon::second_look::unattended_hold(
+        crate::daemon::settings::ScrubCheck::Automatic,
+        scrub,
+        subagents_dropped,
+    )?;
+    Some(SubmitOutcome::HeldForSecondLook {
+        reason_label: reason_label.to_string(),
+        marks: scrub.marks().unwrap_or(0),
     })
 }
 
@@ -432,7 +464,8 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
             SubmitOutcome::SkippedParseFailure { .. }
             | SubmitOutcome::Refused { .. }
             | SubmitOutcome::Failed { .. }
-            | SubmitOutcome::HeldForReview { .. } => None,
+            | SubmitOutcome::HeldForReview { .. }
+            | SubmitOutcome::HeldForSecondLook { .. } => None,
         })
         .collect()
 }
@@ -494,6 +527,13 @@ pub struct SubmitContext<'a> {
     /// `HeldForReview` instead of uploaded. One-shot, like the approvals
     /// above. See the spec's R5.
     hold_unless_low_risk: bool,
+    /// Set by the daemon for a session approved on the contributor's behalf
+    /// under the Automatic Scrub check (K4 of #1118): the envelope, once
+    /// built and past every refusal, is held instead of uploaded when its
+    /// scrub is worth a second look. Carries the entry's
+    /// `subagents_dropped`, the one second-look input the envelope does not.
+    /// One-shot, like the hold above.
+    hold_unless_scrub_clear: Option<u32>,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -578,6 +618,7 @@ impl<'a> SubmitContext<'a> {
             approved_witness: None,
             approved_token_bundle: None,
             hold_unless_low_risk: false,
+            hold_unless_scrub_clear: None,
             last_receipt_shipped: ReceiptShipped::NoCall,
             last_sent_witness: None,
             background_witness: false,
@@ -656,6 +697,21 @@ impl<'a> SubmitContext<'a> {
     /// hold stops the upload to the commons but not the send to the witness.
     pub(crate) fn hold_witnessed_unless_low_risk(&mut self) {
         self.hold_unless_low_risk = true;
+    }
+
+    /// Hold, rather than upload, the next session if the envelope built for
+    /// it is worth a second look (`second_look::unattended_hold` under
+    /// Automatic). For sessions nobody reviewed, under the Automatic Scrub
+    /// check. `subagents_dropped` is the queue entry's discovery-time trim.
+    ///
+    /// Decided on the envelope itself, after redaction and before the send,
+    /// so the mark count is exact and a session is never judged on a scrub
+    /// that did not run. On the local-redaction path nothing has left the
+    /// machine at that point. On the witness path the witness has already
+    /// seen the session -- like R5's hold, it stops the upload to the
+    /// commons, not the send to the enclave.
+    pub(crate) fn hold_unless_scrub_is_clear(&mut self, subagents_dropped: u32) {
+        self.hold_unless_scrub_clear = Some(subagents_dropped);
     }
 
     pub(crate) fn use_approved_token_bundle(
@@ -1264,6 +1320,7 @@ impl<'a> SubmitContext<'a> {
         let approved_envelope = self.approved_envelope.take();
         let approved_witness = self.approved_witness.take();
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
+        let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1526,6 +1583,10 @@ impl<'a> SubmitContext<'a> {
             {
                 return Ok(outcome);
             }
+            // A dry run reports what the real send would do, hold included.
+            if let Some(held) = held_for_second_look(hold_unless_scrub_clear, &envelope) {
+                return Ok(held);
+            }
             if !opts.machine_readable {
                 if opts.unenrolled_preview {
                     println!(
@@ -1596,6 +1657,13 @@ impl<'a> SubmitContext<'a> {
             witnessed.as_ref(),
             witnessed_record.take(),
         ) {
+            return Ok(held);
+        }
+        // The Automatic Scrub check (K4 of #1118), at the same point and for
+        // the same reason: after every refusal, before anything reaches the
+        // commons. The scrub is read off the envelope that would be sent, so
+        // it is always a real count, never "not yet scrubbed".
+        if let Some(held) = held_for_second_look(hold_unless_scrub_clear, &envelope) {
             return Ok(held);
         }
         // Every check above has passed, so this is the certificate the send
@@ -6406,7 +6474,8 @@ pub fn outcomes_to_json(
                     "size_bytes": size_bytes,
                     "limit_bytes": limit_bytes,
                 }),
-                SubmitOutcome::HeldForReview { reason_label, .. } => serde_json::json!({
+                SubmitOutcome::HeldForReview { reason_label, .. }
+                | SubmitOutcome::HeldForSecondLook { reason_label, .. } => serde_json::json!({
                     "outcome": "held",
                     "reason": reason_label,
                 }),

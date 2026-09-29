@@ -606,6 +606,9 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
     crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+    // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
+    // unsure about the session, and an unsure session never moves on its own.
+    super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -1424,6 +1427,28 @@ impl Queue {
             return false;
         }
         self.record_previewed_envelope(entry_id, pin, attested_inference)
+    }
+
+    /// Revoke an unattended approval the Scrub check holds for a person (K4
+    /// of #1118), and keep the scrub the hold was decided on, so the entry's
+    /// `second_look` says why without a preview recomputing it.
+    ///
+    /// `marks` is the count of the envelope the uploader built, or `None`
+    /// when the hold was decided before any build (Manual): then whatever
+    /// count the entry already carries is left alone, never zeroed.
+    pub fn hold_for_second_look(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        marks: Option<u32>,
+    ) -> bool {
+        if !self.revoke_approval(entry_id, reason_label) {
+            return false;
+        }
+        if let Some(marks) = marks {
+            self.record_scrub(entry_id, marks);
+        }
+        true
     }
 
     /// Revoke an approval and put the entry back in front of the

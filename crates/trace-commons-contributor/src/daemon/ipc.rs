@@ -7825,6 +7825,47 @@ mod tests {
         assert!(one.get("excluded_held").is_none(), "{one}");
     }
 
+    /// The Scrub check's hold (K4 of #1118) is left out of a group approve
+    /// like the others: "Submit all" is not a second look at one session.
+    #[tokio::test]
+    async fn a_group_approve_leaves_a_session_held_for_a_second_look() {
+        let s = shared();
+        let key = "/tmp/secondlookproj";
+        let open = seed_entry_with_eligibility(&s, key, None);
+        let held = seed_entry_with_eligibility(&s, key, None);
+        s.queue.lock().unwrap().set_state(
+            held,
+            super::super::queue::QueueState::Pending,
+            Some(super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED.to_string()),
+        );
+
+        let result = handle_request_async(
+            &s,
+            &req(
+                "approve",
+                serde_json::json!({ "project_id": project_id_for(key) }),
+            ),
+        )
+        .await
+        .result
+        .expect("approve answers");
+
+        assert_eq!(result["excluded_held"], 1, "{result}");
+        let selected = result["skipped"].as_array().expect("a skipped list");
+        assert!(
+            selected
+                .iter()
+                .all(|e| e["entry_id"] != serde_json::json!(held)),
+            "the held session was not selected: {result}"
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|e| e["entry_id"] == serde_json::json!(open)),
+            "the other session was: {result}"
+        );
+    }
+
     /// Arming over the socket records the terms it was granted under, so a
     /// later widening can be compared against what was actually agreed
     /// rather than against a baseline taken afterwards.
@@ -11388,6 +11429,47 @@ mod tests {
             "a restart must not put the question back"
         );
         assert!(!reloaded.private_inference);
+    }
+
+    /// The Scrub check (K4 of #1118) is readable, settable, persisted, and
+    /// refuses anything but its two values over the socket too.
+    #[test]
+    fn the_scrub_check_round_trips_over_the_socket_and_persists() {
+        let s = shared();
+        let before = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .expect("get_settings answers");
+        assert_eq!(
+            before["scrub_check"],
+            serde_json::Value::Null,
+            "never chosen, the default"
+        );
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            r.result.expect("set_settings answers")["scrub_check"],
+            "manual"
+        );
+        let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
+        assert_eq!(
+            reloaded.scrub_check,
+            Some(super::super::settings::ScrubCheck::Manual),
+            "a restart keeps it"
+        );
+
+        let bad = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "off"})),
+        );
+        assert!(bad.error.is_some(), "an unknown mode is refused");
+        let after = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .expect("get_settings answers");
+        assert_eq!(after["scrub_check"], "manual", "and changes nothing");
     }
 
     /// Ask 127.0.0.1:`port` for IronWire's health endpoint using nothing

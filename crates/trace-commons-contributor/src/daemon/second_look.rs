@@ -13,7 +13,10 @@
 //! - `preview` and the scheduler's `preview_ready` event, from the summary
 //!   that preview just built;
 //! - the Scrub check setting (K4 of #1118), which holds an unsure session in
-//!   an armed folder for a person, calls [`second_look_reasons`] directly.
+//!   an armed folder for a person, through [`unattended_hold`]. The uploader
+//!   asks it with the scrub of the envelope it has just built, after
+//!   redaction and before the send, so the count is exact and never
+//!   `NotYetScrubbed`.
 //!
 //! # Not yet scrubbed is not zero marks
 //!
@@ -154,9 +157,110 @@ pub fn insert_fields(value: &mut serde_json::Value, scrub: Scrub, subagents_drop
     );
 }
 
+// ---------------------------------------------------------------------------
+// The Scrub check (K4 of #1118)
+// ---------------------------------------------------------------------------
+
+/// The label a session approved on the contributor's behalf is held under,
+/// under the Automatic Scrub check, when [`second_look_reasons`] flags it --
+/// or when it has not been scrubbed at all, which is never taken as fine.
+///
+/// One of `queue::REASONS_NEEDING_A_PERSON`: the watcher does not approve it
+/// again and a group approve leaves it out. The particular reasons are not
+/// in the label; they are the entry's `second_look`, from the mark count the
+/// hold records (`QueueEntry::scrub_marks`) and `subagents_dropped`.
+pub const REASON_SECOND_LOOK_REVIEW_REQUIRED: &str = "second-look-review-required";
+
+/// The label an unattended approval is revoked under while the Scrub check
+/// is Manual: everything waits for a person.
+///
+/// Deliberately **not** one of `queue::REASONS_NEEDING_A_PERSON`. While
+/// Manual is set the watcher approves nothing on anyone's behalf anyway, so
+/// the list adds nothing there; and once Automatic is set again, an armed
+/// folder's session going back through the Automatic check -- the hold
+/// above included -- is exactly what the contributor asked for. Only an
+/// approval that predates the switch to Manual ever carries this label.
+pub const REASON_SCRUB_CHECK_MANUAL: &str = "scrub-check-manual";
+
+/// Whether a session approved on the contributor's behalf must wait for a
+/// person instead of being sent, and under which label. `None` means it may
+/// go.
+///
+/// - Manual: always held, whatever the scrub says.
+/// - Automatic: held when [`second_look_reasons`] names any reason, **and
+///   held when `scrub` is [`Scrub::NotYetScrubbed`]**. An empty reason list
+///   is an all-clear only for a scrubbed session; a caller that has not
+///   scrubbed yet gets a hold, never a pass.
+///
+/// The uploader calls this with the scrub of the envelope it has just built
+/// (so in practice always `Scrubbed`); the `NotYetScrubbed` arm is what
+/// keeps any other caller honest.
+pub fn unattended_hold(
+    check: super::settings::ScrubCheck,
+    scrub: Scrub,
+    subagents_dropped: u32,
+) -> Option<&'static str> {
+    match check {
+        super::settings::ScrubCheck::Manual => Some(REASON_SCRUB_CHECK_MANUAL),
+        super::settings::ScrubCheck::Automatic => {
+            if scrub == Scrub::NotYetScrubbed
+                || !second_look_reasons(scrub, subagents_dropped).is_empty()
+            {
+                Some(REASON_SECOND_LOOK_REVIEW_REQUIRED)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::settings::ScrubCheck;
+
+    #[test]
+    fn manual_holds_everything_whatever_the_scrub_says() {
+        for scrub in [
+            Scrub::NotYetScrubbed,
+            Scrub::Scrubbed { marks: 0 },
+            Scrub::Scrubbed { marks: 7 },
+        ] {
+            for dropped in [0, 2] {
+                assert_eq!(
+                    unattended_hold(ScrubCheck::Manual, scrub, dropped),
+                    Some(REASON_SCRUB_CHECK_MANUAL)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_holds_what_is_worth_a_second_look_and_passes_a_clean_scrub() {
+        let auto = ScrubCheck::Automatic;
+        assert_eq!(
+            unattended_hold(auto, Scrub::Scrubbed { marks: 0 }, 0),
+            Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
+            "nothing matched"
+        );
+        assert_eq!(
+            unattended_hold(auto, Scrub::Scrubbed { marks: 4 }, 1),
+            Some(REASON_SECOND_LOOK_REVIEW_REQUIRED),
+            "trimmed to fit"
+        );
+        assert_eq!(unattended_hold(auto, Scrub::Scrubbed { marks: 4 }, 0), None);
+    }
+
+    /// No reasons for a session nobody scrubbed means nobody has looked,
+    /// not that it is fine.
+    #[test]
+    fn automatic_never_passes_a_session_nobody_has_scrubbed() {
+        assert!(second_look_reasons(Scrub::NotYetScrubbed, 0).is_empty());
+        assert_eq!(
+            unattended_hold(ScrubCheck::Automatic, Scrub::NotYetScrubbed, 0),
+            Some(REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+    }
 
     #[test]
     fn zero_marks_is_nothing_matched() {

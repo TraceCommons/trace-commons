@@ -1068,6 +1068,21 @@ async fn drain_approved(
                 // `REASONS_NEEDING_A_PERSON`.
                 q.hold_with_witness_pin(entry.entry_id, &reason_label, &pin, attested_inference);
             }
+            uploader::UploadDecision::HeldForSecondLook {
+                reason_label,
+                marks,
+            } => {
+                // The Scrub check (K4 of #1118). Held with the mark count the
+                // hold was decided on, so the entry's `second_look` says why
+                // without a preview recomputing it. Under Automatic the
+                // reason is one of `REASONS_NEEDING_A_PERSON`, so nothing
+                // re-approves it. Labels only.
+                tracing::info!(
+                    reason = reason_label.as_str(),
+                    "held a session approved on the contributor's behalf for a person"
+                );
+                q.hold_for_second_look(entry.entry_id, &reason_label, marks);
+            }
             uploader::UploadDecision::Failed { reason_label } => {
                 // Same rule on the failure side: `submit_one` can report an
                 // admission refusal either way round depending on where in
@@ -2592,6 +2607,63 @@ mod tests {
         assert_eq!(h.entry().session_hash, original.session_hash);
         assert_eq!(std::fs::read(&h.session_path).unwrap(), original_bytes);
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+    }
+
+    /// The opt-in Automatic Scrub check (K4 of #1118), through a real upload
+    /// pass. This harness's own session reads "fix the parser please", which
+    /// the scrubber removes nothing from. Under the default (never chosen)
+    /// it is sent, as the other tests here show. Once Automatic is chosen,
+    /// the same session is held for a person with `nothing-matched` and
+    /// nothing is uploaded for it, while a session the scrubber did remove
+    /// something from still goes.
+    #[tokio::test]
+    async fn once_automatic_is_chosen_an_armed_session_where_nothing_matched_is_held() {
+        let h = TransientRetryHarness::new().await;
+        let unmarked = h.entry();
+        assert_eq!(unmarked.state, queue::QueueState::Approved, "armed");
+        assert!(unmarked.approved_unattended);
+        assert_eq!(
+            h.shared.settings.lock().unwrap().scrub_check,
+            None,
+            "the default is never chosen"
+        );
+        h.shared.settings.lock().unwrap().scrub_check = Some(settings::ScrubCheck::Automatic);
+        h.add_session(
+            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
+            "tidy the lexer, then mail alice.smith@example.org",
+        )
+        .await;
+        let marked = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id != unmarked.entry_id)
+            .expect("the session with an address in it")
+            .entry_id;
+
+        h.pass(TransientRetryHarness::now()).await;
+
+        let held = h
+            .entries()
+            .into_iter()
+            .find(|e| e.entry_id == unmarked.entry_id)
+            .unwrap();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+        assert!(held.held_for_review());
+        assert_eq!(held.scrub_marks, Some(0));
+        assert_eq!(
+            held.second_look_reasons(),
+            vec![second_look::REASON_NOTHING_MATCHED]
+        );
+        assert_eq!(
+            h.shared.queue.lock().unwrap().get(marked).unwrap().state,
+            queue::QueueState::Uploaded,
+            "the session with a mark still goes"
+        );
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "only that one");
     }
 
     /// Z5, end to end through a real witness exchange: a witness at capacity
