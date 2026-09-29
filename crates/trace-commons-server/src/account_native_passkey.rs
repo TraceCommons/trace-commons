@@ -131,16 +131,28 @@ impl UnboundAccountCeiling {
 /// trimmed, so what the authenticator stores is exactly what was asked for.
 /// The label becomes the WebAuthn user name the macOS sheet and keychain show
 /// on the contributor's own device; it never reaches a log or an audit row.
-pub fn normalize_passkey_label(label: Option<&str>) -> Result<Option<String>, ()> {
+pub fn normalize_passkey_label(label: Option<&str>) -> Result<Option<String>, InvalidPasskeyLabel> {
     let Some(label) = label.map(str::trim).filter(|label| !label.is_empty()) else {
         return Ok(None);
     };
     if label.chars().count() > NATIVE_PASSKEY_LABEL_MAX_CHARS || label.chars().any(char::is_control)
     {
-        return Err(());
+        return Err(InvalidPasskeyLabel);
     }
     Ok(Some(label.to_string()))
 }
+
+/// A passkey label over the length bound or holding a control character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPasskeyLabel;
+
+impl std::fmt::Display for InvalidPasskeyLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid_passkey_label")
+    }
+}
+
+impl std::error::Error for InvalidPasskeyLabel {}
 
 #[cfg(test)]
 mod tests {
@@ -203,9 +215,15 @@ mod tests {
         );
         assert_eq!(
             normalize_passkey_label(Some(&format!("{longest}x"))),
-            Err(())
+            Err(InvalidPasskeyLabel)
         );
-        assert_eq!(normalize_passkey_label(Some("a\nb")), Err(()));
-        assert_eq!(normalize_passkey_label(Some("a\u{7f}b")), Err(()));
+        assert_eq!(
+            normalize_passkey_label(Some("a\nb")),
+            Err(InvalidPasskeyLabel)
+        );
+        assert_eq!(
+            normalize_passkey_label(Some("a\u{7f}b")),
+            Err(InvalidPasskeyLabel)
+        );
     }
 }
