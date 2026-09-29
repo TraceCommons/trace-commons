@@ -52,7 +52,18 @@
 -- Nothing waits on a lock the reaper cannot take, so it cannot deadlock with
 -- bind or sign-in. A foreign-key refusal (an account that somehow holds a row
 -- in a non-cascading table) rolls that candidate back and counts it skipped.
--- Batches are bounded by p_limit.
+-- Batches are bounded twice: at most p_limit accounts are deleted, and at most
+-- 10 * p_limit candidates are examined.
+--
+-- SKIPPED CANDIDATES DO NOT STALL THE BATCH. Candidates come in a fixed order
+-- (oldest first). A candidate whose delete is refused every time (a foreign
+-- key from a table the cascade does not reach) would otherwise occupy a slot
+-- at the head of that order on every tick, and p_limit or more of them would
+-- starve everything behind them until the unbound-account ceiling filled. The
+-- scan therefore steps past a skipped candidate and keeps going until p_limit
+-- deletions or the scan cap, whichever comes first. The cap keeps the work per
+-- call bounded; a permanent-refusal backlog larger than the cap is what the
+-- `skipped` counter exists to surface (see the operator runbook).
 --
 -- Returns (reaped, skipped): counts only, no identifier.
 --
@@ -153,8 +164,10 @@ BEGIN
                    AND (s.last_seen_at >= v_cutoff
                         OR (s.revoked_at IS NULL AND s.expires_at > v_now)))
          ORDER BY b.created_at, b.tenant_id, b.account_id
-         LIMIT p_limit
+         LIMIT p_limit::BIGINT * 10
     LOOP
+        -- Stop at p_limit deletions. Skipped candidates do not count toward it.
+        EXIT WHEN v_reaped >= p_limit;
         BEGIN
             PERFORM 1 FROM public.trace_account_bindings b
              WHERE b.tenant_id = c.tenant_id AND b.account_id = c.account_id

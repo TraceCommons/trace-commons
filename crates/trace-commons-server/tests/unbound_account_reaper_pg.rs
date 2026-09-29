@@ -370,6 +370,70 @@ async fn batches_are_bounded() {
     }
 }
 
+/// Candidates whose delete is permanently refused (a foreign key from a table
+/// the cascade does not reach) sit at the head of the order. They must not
+/// starve a deletable candidate behind them, even when they outnumber `limit`.
+#[tokio::test]
+async fn permanently_refused_candidates_do_not_stall_the_batch() {
+    let Some(fx) = fixture().await else { return };
+    // Stand-in for a non-cascading dependent table. Dropped before the
+    // assertions so a failure cannot poison the shared fixture.
+    fx.admin
+        .batch_execute("DROP TABLE IF EXISTS reaper_refusal_probe")
+        .await
+        .unwrap();
+    fx.admin
+        .batch_execute(
+            "CREATE TABLE reaper_refusal_probe (
+                 tenant_id TEXT NOT NULL,
+                 account_id UUID NOT NULL,
+                 FOREIGN KEY (tenant_id, account_id)
+                     REFERENCES trace_accounts (tenant_id, account_id)
+             )",
+        )
+        .await
+        .unwrap();
+    let limit = 2;
+    let mut refused = Vec::new();
+    for i in 0..(limit as i64 + 1) {
+        // Older than the deletable one, so they lead the order.
+        let s = seed(&fx, Binding::Unbound, 300 + i, None).await;
+        fx.admin
+            .execute(
+                "INSERT INTO reaper_refusal_probe(tenant_id, account_id) VALUES ($1, $2)",
+                &[&s.tenant, &s.account],
+            )
+            .await
+            .unwrap();
+        refused.push(s);
+    }
+    let deletable = seed(&fx, Binding::Unbound, 100, None).await;
+
+    let first = fx.reaper.reap(TTL_DAYS, limit).await;
+    let second = fx.reaper.reap(TTL_DAYS, limit).await;
+    let deletable_rows = rows(&fx, &deletable.tenant).await;
+    let mut refused_rows = Vec::new();
+    for s in &refused {
+        refused_rows.push(rows(&fx, &s.tenant).await[1]);
+    }
+    fx.admin
+        .batch_execute("DROP TABLE reaper_refusal_probe")
+        .await
+        .unwrap();
+
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(deletable_rows[1], 0, "the deletable candidate was reaped");
+    assert_eq!(first.reaped, 1);
+    assert_eq!(first.skipped, refused.len() as u64);
+    assert_eq!(second.reaped, 0);
+    assert_eq!(
+        refused_rows,
+        vec![1; refused.len()],
+        "refused accounts kept"
+    );
+}
+
 #[tokio::test]
 async fn the_function_refuses_a_ttl_under_a_day_and_an_unbounded_batch() {
     let Some(fx) = fixture().await else { return };

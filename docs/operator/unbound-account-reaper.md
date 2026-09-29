@@ -40,5 +40,9 @@ the database. The loop reports through the driver liveness registry as
 `unbound_account_reaper`. `skipped` counts candidates that were locked by a
 concurrent bind or sign-in, active again, or refused by a foreign key; a
 `skipped` that never falls to zero means an account holds rows the cascade
-cannot remove and needs a look. `trace_audit_events` rows for a reaped tenant
+cannot remove and needs a look. A skipped candidate does not use up the
+batch: each call deletes up to `limit` accounts and examines at most
+`10 * limit` candidates, stepping past skipped ones, so a few permanently
+refused accounts do not starve the rest. A refused backlog larger than that
+scan cap would, which is another reason a persistent `skipped` needs a look. `trace_audit_events` rows for a reaped tenant
 are retained (they are hash-chained and have no tenant foreign key).
