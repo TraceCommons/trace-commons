@@ -595,8 +595,10 @@ pub enum PipelineWithdrawalFollowUpState {
     Failed,
 }
 
-/// What `PgPipelineStore::withdraw_submission` did.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// What `PgPipelineStore::withdraw_submission` did. It holds the raw
+/// tenant id (in `withdrawal`), so it is never serialized: a route builds
+/// its own response from it (Ruling F-M4).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineWithdrawalOutcome {
     /// The requested submission's `trace_withdrawals` row.
     pub withdrawal: crate::trace_corpus_storage::TraceWithdrawalRecord,

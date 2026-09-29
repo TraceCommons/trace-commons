@@ -15,7 +15,6 @@
 //! lives in `versioned_pipeline_bundle.rs`
 //! (`MinimalPolicyBundle::compatibility_package`).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -505,118 +504,6 @@ impl SettlePolicy for CompatibilitySettlePolicy {
     }
 }
 
-/// One documented fixture's expected outcome at each phase, as the baseline
-/// fixture states it (`expected_fixture_classes`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompatibilityFixtureDecision {
-    pub admission: String,
-    pub review: String,
-    pub score: String,
-    pub settle: String,
-}
-
-/// What this bundle's `local_reference()` configuration is observed to
-/// produce, checked against the current baseline fixture
-/// (`docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json`)
-/// by [`compare_compatibility_baseline`]. Holds only the fields the
-/// comparison actually reads from that fixture (Ruling T4-1): the corpus
-/// order and its declared starting index state, three of the fixture's
-/// `configuration_identities` labels, and the per-fixture expected outcomes.
-///
-/// `configuration_identities.embedder_model_id` is deliberately not a field
-/// here: see the comment on [`compare_compatibility_baseline`]'s own
-/// `embedder_model_id` handling (Rulings T4-3/T4-4).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompatibilityBaselineObservation {
-    pub fixture_order: Vec<String>,
-    pub initial_index: String,
-    pub scorer_model_id: String,
-    pub projection_id: String,
-    pub index_id: String,
-    pub gate_floors: String,
-    pub fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
-}
-
-/// Deserializes only the parts of the baseline fixture the comparison reads.
-/// `embedder_model_id` is intentionally absent -- see
-/// [`compare_compatibility_baseline`].
-#[derive(Deserialize)]
-struct CompatibilityBaselineDocument {
-    corpus: CompatibilityBaselineCorpus,
-    configuration_identities: CompatibilityBaselineIdentities,
-    expected_fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityBaselineCorpus {
-    /// Relative to the repository root, as the fixture states it. Read at
-    /// runtime (not `include_str!`) so the comparison actually reads "the
-    /// corpus file it names" rather than a second hardcoded path that could
-    /// silently drift from this one.
-    path: String,
-    initial_index: String,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityBaselineIdentities {
-    scorer_model_id: String,
-    projection_id: String,
-    index_id: String,
-    gate_floors: String,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityCorpusDocument {
-    fixtures: Vec<CompatibilityCorpusFixture>,
-}
-
-#[derive(Deserialize)]
-struct CompatibilityCorpusFixture {
-    label: String,
-}
-
-/// Compares `observation` against the current compatibility baseline
-/// fixture and the corpus file it names, at their present (R1-corrected)
-/// shape: `corpus.path`/`corpus.order`/`corpus.initial_index`, a handful of
-/// `configuration_identities` labels, and `expected_fixture_classes`. Never
-/// reads or writes either file except by loading them (Ruling T4-1); the
-/// fixture and corpus are read-only inputs pinned under `docs/superpowers/specs`.
-pub fn compare_compatibility_baseline(
-    observation: &CompatibilityBaselineObservation,
-) -> anyhow::Result<()> {
-    let baseline: CompatibilityBaselineDocument = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json"
-    )))?;
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let corpus_path = manifest_dir.join("../..").join(&baseline.corpus.path);
-    let corpus_bytes = std::fs::read_to_string(&corpus_path)
-        .map_err(|_| anyhow::anyhow!("compatibility corpus fixture unreadable"))?;
-    let corpus: CompatibilityCorpusDocument = serde_json::from_str(&corpus_bytes)?;
-    let fixture_order = corpus
-        .fixtures
-        .into_iter()
-        .map(|fixture| fixture.label)
-        .collect::<Vec<_>>();
-    // T4-3/T4-4: `configuration_identities.embedder_model_id` in the fixture
-    // is "reference_embedder.v1", but `ReferenceEmbedder::model_id()`
-    // reports "reference-embedder-v1" (underscore vs. hyphen) -- a contract
-    // mismatch tracked as a request to PR 1 (#971). This comparison does not
-    // check `embedder_model_id` against the running embedder until that
-    // lands.
-    let expected = CompatibilityBaselineObservation {
-        fixture_order,
-        initial_index: baseline.corpus.initial_index,
-        scorer_model_id: baseline.configuration_identities.scorer_model_id,
-        projection_id: baseline.configuration_identities.projection_id,
-        index_id: baseline.configuration_identities.index_id,
-        gate_floors: baseline.configuration_identities.gate_floors,
-        fixture_classes: baseline.expected_fixture_classes,
-    };
-    anyhow::ensure!(observation == &expected, "compatibility baseline mismatch");
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +523,124 @@ mod tests {
     use crate::credit_quality::{CREDIT_QUALITY_ACTIVE, QWEN3_8_EFFECTIVE_FROM_UNIX};
     use crate::versioned_pipeline::pipeline_tenant_storage_ref;
     use crate::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    // ---- the compatibility baseline comparison ---------------------------
+    //
+    // Test-only: it reads the pinned baseline fixture and the corpus file it
+    // names from this checkout (Ruling F-M3), so it is never part of a
+    // release binary.
+
+    /// One documented fixture's expected outcome at each phase, as the baseline
+    /// fixture states it (`expected_fixture_classes`).
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct CompatibilityFixtureDecision {
+        pub admission: String,
+        pub review: String,
+        pub score: String,
+        pub settle: String,
+    }
+
+    /// What this bundle's `local_reference()` configuration is observed to
+    /// produce, checked against the current baseline fixture
+    /// (`docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json`)
+    /// by [`compare_compatibility_baseline`]. Holds only the fields the
+    /// comparison actually reads from that fixture (Ruling T4-1): the corpus
+    /// order and its declared starting index state, three of the fixture's
+    /// `configuration_identities` labels, and the per-fixture expected outcomes.
+    ///
+    /// `configuration_identities.embedder_model_id` is deliberately not a field
+    /// here: see the comment on [`compare_compatibility_baseline`]'s own
+    /// `embedder_model_id` handling (Rulings T4-3/T4-4).
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct CompatibilityBaselineObservation {
+        pub fixture_order: Vec<String>,
+        pub initial_index: String,
+        pub scorer_model_id: String,
+        pub projection_id: String,
+        pub index_id: String,
+        pub gate_floors: String,
+        pub fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
+    }
+
+    /// Deserializes only the parts of the baseline fixture the comparison reads.
+    /// `embedder_model_id` is intentionally absent -- see
+    /// [`compare_compatibility_baseline`].
+    #[derive(Deserialize)]
+    struct CompatibilityBaselineDocument {
+        corpus: CompatibilityBaselineCorpus,
+        configuration_identities: CompatibilityBaselineIdentities,
+        expected_fixture_classes: BTreeMap<String, CompatibilityFixtureDecision>,
+    }
+
+    #[derive(Deserialize)]
+    struct CompatibilityBaselineCorpus {
+        /// Relative to the repository root, as the fixture states it. Read at
+        /// runtime (not `include_str!`) so the comparison actually reads "the
+        /// corpus file it names" rather than a second hardcoded path that could
+        /// silently drift from this one.
+        path: String,
+        initial_index: String,
+    }
+
+    #[derive(Deserialize)]
+    struct CompatibilityBaselineIdentities {
+        scorer_model_id: String,
+        projection_id: String,
+        index_id: String,
+        gate_floors: String,
+    }
+
+    #[derive(Deserialize)]
+    struct CompatibilityCorpusDocument {
+        fixtures: Vec<CompatibilityCorpusFixture>,
+    }
+
+    #[derive(Deserialize)]
+    struct CompatibilityCorpusFixture {
+        label: String,
+    }
+
+    /// Compares `observation` against the current compatibility baseline
+    /// fixture and the corpus file it names, at their present (R1-corrected)
+    /// shape: `corpus.path`/`corpus.order`/`corpus.initial_index`, a handful of
+    /// `configuration_identities` labels, and `expected_fixture_classes`. Never
+    /// reads or writes either file except by loading them (Ruling T4-1); the
+    /// fixture and corpus are read-only inputs pinned under `docs/superpowers/specs`.
+    pub fn compare_compatibility_baseline(
+        observation: &CompatibilityBaselineObservation,
+    ) -> anyhow::Result<()> {
+        let baseline: CompatibilityBaselineDocument = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json"
+        )))?;
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let corpus_path = manifest_dir.join("../..").join(&baseline.corpus.path);
+        let corpus_bytes = std::fs::read_to_string(&corpus_path)
+            .map_err(|_| anyhow::anyhow!("compatibility corpus fixture unreadable"))?;
+        let corpus: CompatibilityCorpusDocument = serde_json::from_str(&corpus_bytes)?;
+        let fixture_order = corpus
+            .fixtures
+            .into_iter()
+            .map(|fixture| fixture.label)
+            .collect::<Vec<_>>();
+        // T4-3/T4-4: `configuration_identities.embedder_model_id` in the fixture
+        // is "reference_embedder.v1", but `ReferenceEmbedder::model_id()`
+        // reports "reference-embedder-v1" (underscore vs. hyphen) -- a contract
+        // mismatch tracked as a request to PR 1 (#971). This comparison does not
+        // check `embedder_model_id` against the running embedder until that
+        // lands.
+        let expected = CompatibilityBaselineObservation {
+            fixture_order,
+            initial_index: baseline.corpus.initial_index,
+            scorer_model_id: baseline.configuration_identities.scorer_model_id,
+            projection_id: baseline.configuration_identities.projection_id,
+            index_id: baseline.configuration_identities.index_id,
+            gate_floors: baseline.configuration_identities.gate_floors,
+            fixture_classes: baseline.expected_fixture_classes,
+        };
+        anyhow::ensure!(observation == &expected, "compatibility baseline mismatch");
+        Ok(())
+    }
 
     // ---- test doubles ----------------------------------------------------
 
