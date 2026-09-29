@@ -61,8 +61,8 @@ use crate::versioned_pipeline_credit::{
     PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
     SettlementAdapterRegistry, credit_account_hash, disabled_near_call, issuer_approval_hash,
     microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
-    pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_settlement_batch_id,
-    source_list_hash,
+    pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
+    pipeline_settlement_batch_id, source_list_hash,
 };
 
 /// The tenant's derived storage reference, the same value ingest's
@@ -7659,16 +7659,25 @@ impl PipelineService {
         // `PipelineScore` keeps PR 2's ledger event (`Accepted`); a
         // compatibility run's `NoveltyUtility` leg is main's gate-emitted,
         // never-settled event, which `trace_credit_event_type_is_settlement_eligible`
-        // in `trace-commons-ingest.rs` excludes. Ruling T15-1: the actor
-        // role goes with the event type, so `main`'s readers can parse a
-        // `NoveltyUtility` row.
-        let (ledger_event_type, actor_role) = match trace_credit_event {
-            PipelineTraceCreditEvent::PipelineScore => {
-                (TraceCreditEventType::Accepted, PIPELINE_CREDIT_ACTOR_ROLE)
-            }
+        // in `trace-commons-ingest.rs` excludes. Rulings T15-1 and T15-2:
+        // the rest of the row goes with the event type. A `NoveltyUtility`
+        // row is written as `main`'s gate path writes that event: the gate
+        // caller's actor role (which `main`'s readers can parse), `final`
+        // (it never settles, and the batch composition's event-type filter,
+        // Ruling T5-1, keeps it out of every batch), and `main`'s reason
+        // shape.
+        let (ledger_event_type, actor_role, settlement_state, reason) = match trace_credit_event {
+            PipelineTraceCreditEvent::PipelineScore => (
+                TraceCreditEventType::Accepted,
+                PIPELINE_CREDIT_ACTOR_ROLE,
+                "pending",
+                PIPELINE_CREDIT_REASON.to_string(),
+            ),
             PipelineTraceCreditEvent::NoveltyUtility => (
                 TraceCreditEventType::NoveltyUtility,
                 PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
+                "final",
+                pipeline_novelty_utility_reason(),
             ),
         };
         let ledger_event_type_label = enum_string(&ledger_event_type)?;
@@ -7738,7 +7747,7 @@ impl PipelineService {
                 event_type, points_delta, reason, external_ref, actor_principal_ref,
                 actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id
              ) VALUES (
-                $1,$2,$3,$4,$5,$12,$6,$7,$8,$5,$13,'pending',$9,$10,$11
+                $1,$2,$3,$4,$5,$12,$6,$7,$8,$5,$13,$14,$9,$10,$11
              )
              ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
             &[
@@ -7748,13 +7757,14 @@ impl PipelineService {
                 &run.trace_id,
                 &account_ref,
                 &amount.to_credit_decimal(),
-                &PIPELINE_CREDIT_REASON,
+                &reason,
                 &external_ref,
                 &run.run_id,
                 &score_outcome_id,
                 &settlement.instrument_id,
                 &ledger_event_type_label,
                 &actor_role,
+                &settlement_state,
             ],
         )
         .await?;
@@ -7836,10 +7846,11 @@ impl PipelineService {
     /// Ruling T5-1: only pending events whose `event_type` is `event_type`
     /// (the caller's own leg's ledger event type -- `PipelineScore`'s
     /// `Accepted`, computed once by the caller with the same enum-to-string
-    /// path the ledger insert used) are eligible. Without this predicate, a
-    /// still-`pending` `NoveltyUtility` row for the same account and
-    /// instrument would be swept into this batch too, even though `main`
-    /// never pays that event (Review Focus 3).
+    /// path the ledger insert used) are eligible, so a `NoveltyUtility` row
+    /// for the same account and instrument is never swept into this batch,
+    /// since `main` never pays that event (Review Focus 3). Ruling T15-2
+    /// writes that row `final`, so the state predicate leaves it out as
+    /// well; the event-type predicate does not depend on that.
     #[allow(clippy::too_many_arguments)]
     async fn finalize_pending_credit_batch(
         &self,

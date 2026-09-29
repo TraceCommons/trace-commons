@@ -30,6 +30,17 @@ pub const PIPELINE_CREDIT_ACTOR_ROLE: &str = "pipeline_worker";
 /// read on one that is not a token role, so `pipeline_worker` on this event
 /// type would fail every credit, status, and withdrawal read of the tenant.
 pub const PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE: &str = "vector_worker";
+
+/// Ruling T15-2: the ledger `reason` of a compatibility `NoveltyUtility`
+/// event, in `main`'s shape `novelty_utility:<version>`, with the
+/// compatibility Score rule as the version where `main` has its gate policy
+/// version.
+pub fn pipeline_novelty_utility_reason() -> String {
+    format!(
+        "novelty_utility:{}",
+        crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_RULE
+    )
+}
 pub const PIPELINE_TEST_CREDIT_CAP_MICROCREDITS: u64 = 10_000_000;
 
 #[derive(Default)]

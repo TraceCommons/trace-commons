@@ -55,7 +55,9 @@ use trace_commons_server::versioned_pipeline_bundle::{
     PipelineInstrumentAwardConfig, dependency_content_hash, pipeline_operation_ref,
     pipeline_result_ref,
 };
-use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
+use trace_commons_server::versioned_pipeline_compat::{
+    COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
+};
 use trace_commons_server::versioned_pipeline_credit::{
     NearConfirmationEvidence, NearPayoutAdapter, RecordingNearAdapter, RecordingSettlementAdapter,
     SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
@@ -14410,6 +14412,24 @@ async fn compatibility_credit_matches_main_gate_path() {
             .is_empty(),
         "a NoveltyUtility ledger event is in no settlement batch"
     );
+    // Rulings T15-1 and T15-2: the row is written as `main`'s gate path
+    // writes this event -- `final`, under `main`'s reason shape
+    // `novelty_utility:<version>` with the compatibility Score rule as the
+    // version, and with the gate caller's actor role.
+    assert_eq!(
+        credit_event_state(&backend, &tenant_positive, event_id)
+            .await
+            .as_deref(),
+        Some("final"),
+        "a NoveltyUtility ledger row is written final, as main writes it"
+    );
+    assert_eq!(
+        credit_event_reason_and_actor(&backend, &tenant_positive, event_id).await,
+        (
+            format!("novelty_utility:{COMPATIBILITY_SCORE_RULE}"),
+            "vector_worker".to_string()
+        )
+    );
 
     // No NEAR outbox row: payout is disabled by default (Review Focus 5).
     assert_eq!(count_near_outbox_rows(&backend, &tenant_positive).await, 0);
@@ -14456,7 +14476,7 @@ async fn compatibility_credit_matches_main_gate_path() {
     // the same credit_account_ref, `credit_account_ref` being the
     // submission's `auth_principal_ref`) as the NoveltyUtility run above.
     // Batch composition for this minimal run must not sweep in the
-    // NoveltyUtility event, which stays pending and in no batch forever.
+    // NoveltyUtility event, which stays in no batch forever.
     let minimal_config = PipelineBundleConfig {
         instrument_awards: vec![PipelineInstrumentAwardConfig {
             instrument_id: InstrumentId::trace_credit().as_str().to_string(),
@@ -14513,14 +14533,43 @@ async fn compatibility_credit_matches_main_gate_path() {
             .is_empty(),
         "the NoveltyUtility event must still be in no batch after a later minimal run's batch composition"
     );
-    // ...and its ledger row is untouched: still pending, never finalized.
+    // ...and its ledger row is untouched: still `final` from its insert,
+    // with no batch -- the batch composition's event-type filter (Ruling
+    // T5-1), not its settlement state, keeps it out.
     assert_eq!(
         credit_event_state(&backend, &tenant_positive, event_id)
             .await
             .as_deref(),
-        Some("pending"),
-        "a NoveltyUtility ledger row is never marked final"
+        Some("final"),
+        "a later batch composition leaves the NoveltyUtility row as it was"
     );
+}
+
+/// The `(reason, actor_role)` of `credit_event_id`'s `trace_credit_ledger`
+/// row.
+async fn credit_event_reason_and_actor(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    credit_event_id: uuid::Uuid,
+) -> (String, String) {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for credit_event_reason_and_actor");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT reason, actor_role FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND credit_event_id = $2",
+            &[&tenant_id, &credit_event_id],
+        )
+        .await
+        .expect("the credit event exists");
+    tx.commit()
+        .await
+        .expect("commit credit_event_reason_and_actor");
+    (row.get("reason"), row.get("actor_role"))
 }
 
 // ---------------------------------------------------------------------------
