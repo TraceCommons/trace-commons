@@ -3,10 +3,16 @@
 
 use super::*;
 
+#[path = "tests/account_binding_gate_tests.rs"]
+mod account_binding_gate_tests;
 #[path = "tests/legacy_invite_link_tests.rs"]
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
 mod mission_catalog_tests;
+#[path = "tests/native_passkey_tests.rs"]
+mod native_passkey_tests;
+#[path = "tests/near_ai_bind_tests.rs"]
+mod near_ai_bind_tests;
 #[path = "tests/public_run_lifecycle_tests.rs"]
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
@@ -6294,6 +6300,14 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_unbound_ceiling: Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
+        ),
+        account_native_creation_cap: Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
+                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ),
+        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -28594,6 +28608,14 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_require_production_gate: false,
         account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
+        account_unbound_ceiling: Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
+        ),
+        account_native_creation_cap: Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
+                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ),
+        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -93767,10 +93789,18 @@ struct NativeTestSession {
 
 /// In-memory `Database` covering native sign-in plus the owned session-detail
 /// read. Everything else keeps the trait's fail-closed default.
+///
+/// The unbound-gate tests (Z2 S1) also set the binding state every session
+/// validates with (`None` is legacy), make the binding read fail, force a
+/// rotation, and read back the account audit rows.
 #[derive(Default)]
 struct NativeAuthTestDb {
     sessions: std::sync::Mutex<Vec<NativeTestSession>>,
     submissions: std::sync::Mutex<Vec<StorageTraceSubmissionRecord>>,
+    binding: std::sync::Mutex<Option<trace_commons_server::account_binding::AccountBindingState>>,
+    binding_read_fails: std::sync::atomic::AtomicBool,
+    rotate_to: std::sync::Mutex<Option<String>>,
+    account_audits: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
 }
 
 impl NativeAuthTestDb {
@@ -93861,8 +93891,11 @@ impl Database for NativeAuthTestDb {
         token_hash: &str,
     ) -> Result<Option<trace_commons_server::db::ValidatedSession>, DatabaseError> {
         let now = Utc::now();
+        let binding = (*self.binding.lock().unwrap())
+            .unwrap_or(trace_commons_server::account_binding::AccountBindingState::Legacy);
+        let rotated_secret = self.rotate_to.lock().unwrap().clone();
         let sessions = self.sessions.lock().unwrap();
-        Ok(sessions
+        let session = sessions
             .iter()
             .find(|s| {
                 s.tenant_id == tenant_id
@@ -93874,8 +93907,21 @@ impl Database for NativeAuthTestDb {
                 account_id: s.account_id,
                 auth_credential_id: None,
                 client_kind: s.client_kind.clone(),
-                rotated_secret: None,
-            }))
+                rotated_secret: rotated_secret.clone(),
+                binding,
+            });
+        // The binding state is read in the same query as the session, so a
+        // failure is a failure of the whole validation.
+        if session.is_some()
+            && self
+                .binding_read_fails
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DatabaseError::Serialization(
+                "account_binding_state_unknown".into(),
+            ));
+        }
+        Ok(session)
     }
 
     async fn expand_account_principals(
@@ -93923,11 +93969,16 @@ impl Database for NativeAuthTestDb {
     async fn append_account_audit(
         &self,
         _tenant_id: &str,
-        _action: &str,
-        _actor_ref: &str,
+        action: &str,
+        actor_ref: &str,
         _outcome: &str,
-        _metadata: serde_json::Value,
+        metadata: serde_json::Value,
     ) -> Result<(), DatabaseError> {
+        self.account_audits.lock().unwrap().push((
+            action.to_string(),
+            actor_ref.to_string(),
+            metadata,
+        ));
         Ok(())
     }
 
@@ -101276,4 +101327,61 @@ async fn account_trace_withdraw_reports_forfeited_unsettled_credit() {
         !retry.credit_retained,
         "a retry reports the same forfeiture"
     );
+}
+
+// -- Device-authenticated settlement posture (#1118 Z3a) --------------------
+
+/// `GET /v1/contributors/me/settlement-posture` reports the live settlement
+/// mode label to a device bearer, and the label matches what
+/// `GET /v1/account/credit-summary` reports for the same deployment, because
+/// both go through `credit_numbers::credit_posture`. `Disabled` is the
+/// fail-safe and must read as `disabled`, not as an absence.
+#[tokio::test]
+async fn settlement_posture_handler_reports_each_mode_to_a_device_bearer() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    for (mode, label) in [
+        (NearSettlementMode::Http, "http"),
+        (NearSettlementMode::DryRun, "dry_run"),
+        (NearSettlementMode::Disabled, "disabled"),
+    ] {
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_settlement_mode = mode;
+
+        let Json(posture) =
+            settlement_posture_handler(State(state.clone()), auth_headers("token-a"))
+                .await
+                .expect("device bearer reads the posture");
+
+        assert_eq!(posture.settlement, label);
+        assert!(!posture.graded, "the pipeline is shadow-mode");
+        assert_eq!(
+            posture,
+            trace_commons_server::credit_numbers::credit_posture(
+                state.near_settlement_mode_label(),
+                false
+            ),
+            "the account route derives its posture from the same function"
+        );
+        let body = serde_json::to_string(&posture).expect("posture serializes");
+        assert!(
+            !body.contains("://"),
+            "label-only: no URL in the body {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn settlement_posture_handler_refuses_without_a_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = settlement_posture_handler(State(state.clone()), HeaderMap::new())
+        .await
+        .expect_err("no bearer is refused");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    let err = settlement_posture_handler(State(state), auth_headers("not-a-token"))
+        .await
+        .expect_err("an unknown bearer is refused");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
 }

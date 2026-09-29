@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "trace_commons_ingest_internal/account_routes.rs"]
+mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/admission.rs"]
@@ -40,7 +42,7 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Query};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{
     Extension, Json, Router, extract::Path as AxumPath, extract::Request, extract::State,
     middleware::Next,
@@ -1829,6 +1831,16 @@ struct AppState {
     /// Single-instance only (see `account_passkey` module docs). Consumed by
     /// the register/login ceremony handlers in later Slice 2 tasks.
     account_ceremony_store: Arc<CeremonyStore>,
+    /// Z2 S2: the cap on unbound passkey-origin accounts, from
+    /// `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`. Unset disables native
+    /// passkey creation.
+    account_unbound_ceiling:
+        Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
+    /// Z2 S2: successful native passkey creations per client IP in a rolling
+    /// 24 hours, from `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`
+    /// (default 10). In process, like the other account limiters.
+    account_native_creation_cap:
+        Arc<trace_commons_server::account_native_passkey::PerSourceCreationCap>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -4231,6 +4243,16 @@ impl AppState {
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
+        // Z2 S2: unset disables native passkey creation; a malformed value
+        // fails startup rather than guessing either way.
+        let account_unbound_ceiling = Arc::new(
+            trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
+        let account_native_creation_cap = Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -4405,6 +4427,8 @@ impl AppState {
             ),
             account_webauthn,
             account_ceremony_store,
+            account_unbound_ceiling,
+            account_native_creation_cap,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
@@ -7677,111 +7701,159 @@ fn community_routes() -> Router<Arc<AppState>> {
 /// response. `from_fn_with_state` binds the shared `AppState` the middleware needs
 /// to resolve + rotate.
 fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let reward_routes = rewards::account_routes(state.clone());
-    Router::new()
-        .route(
+    authenticated_account_surface(state).into_router()
+}
+
+/// Every authenticated account route, with the record of what was registered.
+///
+/// Routes join ONLY through [`account_routes::AccountRoutes`], which records
+/// each `(method, path)`. Each one must also be classified in
+/// [`account_routes::UNBOUND_ACCOUNT_ROUTE_POLICY`] -- the unbound gate in
+/// `account_auth_middleware` refuses any route that is not -- and the test
+/// `every_authenticated_account_route_is_classified_for_unbound_accounts`
+/// fails until it is.
+fn authenticated_account_surface(
+    state: Arc<AppState>,
+) -> account_routes::AuthenticatedAccountRoutes {
+    let (general, rewards) = account_route_groups();
+    general
+        .authenticated(state.clone())
+        .merge(rewards::protected(rewards.authenticated(state)))
+}
+
+/// The account routes before authentication, as two groups because the reward
+/// routes take an extra response layer outside the auth middleware. The
+/// production surface above and the gate tests both build from this, so they
+/// cannot disagree about which routes exist.
+fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
+    let general = account_routes::AccountRoutes::new()
+        .get(
             "/v1/account/contribution-status",
-            get(admission::account_status_handler),
+            admission::account_status_handler,
         )
-        .route(
-            "/v1/account/invites/redeem",
-            post(account_invite_redeem_handler),
-        )
+        // Z2 S1: the caller's binding state, for the native app's state machine.
+        .get("/v1/account/binding", account_binding_handler)
+        .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
-        .route("/v1/account/traces", get(account_traces_list_handler))
-        .route(
+        .get("/v1/account/traces", account_traces_list_handler)
+        .post(
             "/v1/account/source-sessions/status",
-            post(account_source_session_status_handler),
+            account_source_session_status_handler,
         )
-        .route(
-            "/v1/account/credit-summary",
-            get(account_credit_summary_handler),
-        )
-        .route(
+        .get("/v1/account/credit-summary", account_credit_summary_handler)
+        .get(
             "/v1/account/traces/{submission_id}",
-            get(account_trace_detail_handler),
+            account_trace_detail_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/content",
-            get(account_trace_content_handler),
+            account_trace_content_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/session-detail",
-            get(account_public_run_session_detail_handler),
+            account_public_run_session_detail_handler,
         )
-        .route(
+        .post(
             "/v1/account/traces/{submission_id}/withdraw",
-            post(account_trace_withdraw_handler),
+            account_trace_withdraw_handler,
         )
-        .route(
+        .get(
             "/v1/account/traces/{submission_id}/publication",
-            get(account_public_run_handler)
-                .put(account_public_run_publish_handler)
-                .delete(account_public_run_unpublish_handler),
+            account_public_run_handler,
         )
-        .route("/v1/account/logout", post(account_logout_handler))
-        .route(
+        .put(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_publish_handler,
+        )
+        .delete(
+            "/v1/account/traces/{submission_id}/publication",
+            account_public_run_unpublish_handler,
+        )
+        .post("/v1/account/logout", account_logout_handler)
+        .post(
             "/v1/account/sessions/revoke-all",
-            post(account_revoke_all_handler),
+            account_revoke_all_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/start",
-            post(account_passkey_register_start_handler),
+            account_passkey_register_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/passkeys/register/finish",
-            post(account_passkey_register_finish_handler),
+            account_passkey_register_finish_handler,
+        )
+        // The native sibling (Z2 S2): the same registration with the ceremony
+        // id in the body instead of a cookie, native session only.
+        .post(
+            "/v1/account/passkeys/native/register/start",
+            account_passkey_native_register_start_handler,
+        )
+        .post(
+            "/v1/account/passkeys/native/register/finish",
+            account_passkey_native_register_finish_handler,
         )
         // Passkey credential management (Slice 2 Task 7). list / rename / remove the
         // caller's OWN credentials. `{credential_id}` is the public base64url id.
-        .route("/v1/account/passkeys", get(account_passkeys_list_handler))
-        .route(
+        .get("/v1/account/passkeys", account_passkeys_list_handler)
+        .patch(
             "/v1/account/passkeys/{credential_id}",
-            patch(account_passkey_rename_handler).delete(account_passkey_remove_handler),
+            account_passkey_rename_handler,
+        )
+        .delete(
+            "/v1/account/passkeys/{credential_id}",
+            account_passkey_remove_handler,
         )
         // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
         // key to the caller's account behind the same account-auth middleware.
-        .route(
+        .post(
             "/v1/account/near/enroll/start",
-            post(account_near_enroll_start_handler),
+            account_near_enroll_start_handler,
         )
-        .route(
+        .post(
             "/v1/account/near/enroll/finish",
-            post(account_near_enroll_finish_handler),
+            account_near_enroll_finish_handler,
         )
         // NEAR identity management (Slice 3a Task 9). list / rename / remove the
         // caller's OWN NEAR identities. `{public_key}` is the public NEAR access
         // key. Removal shares the Task 8 strong-authenticator gate; list/rename
         // are not gated.
-        .route(
+        .get(
             "/v1/account/near-identities",
-            get(account_near_identities_list_handler),
+            account_near_identities_list_handler,
         )
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}",
-            patch(account_near_identity_rename_handler)
-                .delete(account_near_identity_remove_handler),
+            account_near_identity_rename_handler,
+        )
+        .delete(
+            "/v1/account/near-identities/{public_key}",
+            account_near_identity_remove_handler,
         )
         // Payout designation (Slice 3b Task 6). Designate / clear where credit
         // settles. Money-sensitive, so it shares the strong-authenticator gate.
-        .route(
+        .patch(
             "/v1/account/near-identities/{public_key}/payout",
-            patch(account_near_identity_payout_handler),
+            account_near_identity_payout_handler,
         )
         // Device-principal merge (Slice 3b Task 8). `start` stages a proposal by
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
-        .route("/v1/account/merge/start", post(account_merge_start_handler))
-        .route(
-            "/v1/account/merge/confirm",
-            post(account_merge_confirm_handler),
+        .post("/v1/account/merge/start", account_merge_start_handler)
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler)
+        // Connect near.ai (Z2 S3): bind this unbound passkey account to a NEAR
+        // AI login through the provisioning ceremony. Behind the account
+        // middleware, unlike the unauthenticated provisioning pair: the account
+        // comes from the session, and the ceremony is bound to it.
+        .post(
+            "/v1/account/near-ai/provision/bind/start",
+            near_ai_bind_start_handler,
         )
-        .route_layer(axum::middleware::from_fn_with_state(
-            state,
-            account_auth_middleware,
-        ))
-        .merge(reward_routes)
+        .post(
+            "/v1/account/near-ai/provision/bind/finish",
+            near_ai_bind_finish_handler,
+        );
+    (general, rewards::account_routes())
 }
 
 fn community_cors_layer() -> CorsLayer {
@@ -7869,6 +7941,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/contributors/me/credit", get(credit_handler))
         .route(
+            "/v1/contributors/me/settlement-posture",
+            get(settlement_posture_handler),
+        )
+        .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
         )
@@ -7903,6 +7979,28 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
+        // Native passkey identity (Z2 S2). Unauthenticated for the same reason
+        // as the pair above: create/finish and login/finish CREATE the
+        // session, so they cannot require one. The credential is the verified
+        // WebAuthn ceremony itself; every refusal is `native_generic_deny`.
+        // Outside `AccountRoutes` on purpose, so the unbound gate and its
+        // classification table do not apply to them.
+        .route(
+            "/v1/account/native/passkey/create/start",
+            post(native_passkey_create_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/create/finish",
+            post(native_passkey_create_finish_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/start",
+            post(native_passkey_login_start_handler),
+        )
+        .route(
+            "/v1/account/native/passkey/login/finish",
+            post(native_passkey_login_finish_handler),
+        )
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
@@ -15674,6 +15772,26 @@ async fn credit_handler(
     ))
 }
 
+/// `GET /v1/contributors/me/settlement-posture`
+///
+/// The deployment's settlement posture for a caller holding a device
+/// credential. `GET /v1/account/credit-summary` reports the same object but is
+/// an account route that refuses device bearers, so a contributor daemon
+/// cannot read it. The posture is deployment-wide and label-only (`settlement`
+/// is `http`, `dry_run` or `disabled`; no URL, account or transaction
+/// reference), so any authenticated caller may read it. Both routes derive it
+/// through `credit_numbers::credit_posture`, so they cannot disagree.
+async fn settlement_posture_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_server::credit_numbers::CreditPosture>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(trace_commons_server::credit_numbers::credit_posture(
+        state.near_settlement_mode_label(),
+        false,
+    )))
+}
+
 async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -16279,7 +16397,7 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_secret_value) =
+    let (ctx, rotated_secret_value, binding) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
@@ -16293,6 +16411,23 @@ async fn account_auth_middleware(
             }
         };
 
+    // The unbound gate (Z2 S1). An account whose binding state is gated
+    // reaches only the routes `UNBOUND_ACCOUNT_ROUTE_POLICY` marks `Allowed`,
+    // looked up by method and matched path template; anything else, including
+    // a route missing from the policy, is refused here, before any handler.
+    // Legacy (no binding row) and bound accounts skip this entirely. The
+    // binding state was read in the same query that validated the session, and
+    // a failed read already refused above.
+    //
+    // A refusal still flows through the rotation attach below: the session may
+    // have rotated in this very request, and withholding the new secret would
+    // sign the client out once the grace window lapses.
+    let gate_refused = binding.is_gated()
+        && account_routes::unbound_access(
+            request.method(),
+            request.extensions().get::<axum::extract::MatchedPath>(),
+        ) != account_routes::UnboundAccess::Allowed;
+
     // A native token rotates exactly like a cookie session, but a native client
     // has no cookie jar. Hand the new token back in a response header — the
     // bearer analogue of `Set-Cookie`, on the same channel, to the same
@@ -16300,8 +16435,13 @@ async fn account_auth_middleware(
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
     if native_rotation {
-        request.extensions_mut().insert(ctx);
-        let mut response = next.run(request).await;
+        let mut response = if gate_refused {
+            unbound_gate_refusal(state.as_ref(), &ctx).await
+        } else {
+            request.extensions_mut().insert(ctx);
+            request.extensions_mut().insert(binding);
+            next.run(request).await
+        };
         if let Some(token) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
@@ -16316,8 +16456,13 @@ async fn account_auth_middleware(
         return response;
     }
 
-    request.extensions_mut().insert(ctx);
-    let mut response = next.run(request).await;
+    let mut response = if gate_refused {
+        unbound_gate_refusal(state.as_ref(), &ctx).await
+    } else {
+        request.extensions_mut().insert(ctx);
+        request.extensions_mut().insert(binding);
+        next.run(request).await
+    };
 
     if let Some(cookie_value) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
@@ -16360,8 +16505,63 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
     // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
-    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
+    let (ctx, _rotated, _binding) = resolve_account_ctx_with_rotation(state, headers).await?;
     Ok(ctx)
+}
+
+/// The unbound gate's refusal: `403 account_unbound`, one label-only audit row
+/// (`account_unbound_gate_denied`, empty metadata), and a label-only log line.
+/// The refusal does not depend on the audit write: if that fails, the request
+/// is refused all the same.
+async fn unbound_gate_refusal(state: &AppState, ctx: &AccountCtx) -> axum::response::Response {
+    if let Some(db) = state.db_mirror.as_ref() {
+        if db
+            .append_account_audit(
+                &ctx.tenant_id,
+                "account_unbound_gate_denied",
+                &ctx.actor_ref,
+                "denied",
+                serde_json::json!({}),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                label = "account_unbound_gate_audit_failed",
+                "unbound gate refusal could not be audited"
+            );
+        }
+    }
+    tracing::info!(
+        label = account_routes::ACCOUNT_UNBOUND,
+        "unbound gate refusal"
+    );
+    let mut response =
+        api_error(StatusCode::FORBIDDEN, account_routes::ACCOUNT_UNBOUND).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// `GET /v1/account/binding` (Z2 S1): the caller's binding state, as a label.
+///
+/// `unbound` and `bound` for a passkey-origin account, `closed` for one closed
+/// by the existing-account branch of bind, and `legacy` for an account with no
+/// binding row. The state comes from `account_auth_middleware`, which read it
+/// in the session validation query; a request that did not pass through the
+/// middleware has no such extension and is refused by the extractor.
+async fn account_binding_handler(
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
+) -> axum::response::Response {
+    let mut response =
+        Json(serde_json::json!({ "binding_state": binding.label() })).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
@@ -16371,7 +16571,11 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
 async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -16431,7 +16635,11 @@ async fn resolve_account_ctx_with_rotation(
 async fn resolve_account_ctx_native(
     state: &AppState,
     bearer: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16476,10 +16684,15 @@ async fn resolve_account_ctx_native(
             auth_method: AccountAuthMethod::NativeToken,
             tenant_id,
             actor_ref: account_actor_ref(&account),
-            auth_credential_id: None,
+            // The passkey that minted a native session (Z2 S2), so the passkey
+            // list can mark `this_device`. NULL for loopback and NEAR AI
+            // sessions. A public id; it confers no strength (see below).
+            auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+            session_token_hash: Some(token_hash),
         },
         rotated,
+        session.binding,
     ))
 }
 
@@ -16491,7 +16704,11 @@ async fn resolve_account_ctx_native(
 async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
-) -> ApiResult<(AccountCtx, Option<String>)> {
+) -> ApiResult<(
+    AccountCtx,
+    Option<String>,
+    trace_commons_server::account_binding::AccountBindingState,
+)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -16539,8 +16756,10 @@ async fn resolve_account_ctx_cookie(
             // Session strength for the authenticator-change gate: `'web'` is weak,
             // `'passkey'`/`'near'` are strong.
             client_kind: session.client_kind,
+            session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
+        session.binding,
     ))
 }
 
@@ -16817,10 +17036,7 @@ async fn account_credit_summary_handler(
             earned_this_period,
             rate.as_ref(),
         ),
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
         period: AccountCreditPeriod {
             start: period_start,
             end: period_end,
@@ -17954,11 +18170,21 @@ async fn native_authorize_start_handler(
     response
 }
 
+#[path = "trace_commons_ingest_internal/native_passkey.rs"]
+mod native_passkey;
+#[cfg(test)]
+use native_passkey::NATIVE_PASSKEY_PER_IP_LIMIT;
+use native_passkey::{
+    account_passkey_native_register_finish_handler, account_passkey_native_register_start_handler,
+    native_passkey_create_finish_handler, native_passkey_create_start_handler,
+    native_passkey_login_finish_handler, native_passkey_login_start_handler,
+};
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
-    near_ai_provision_finish_handler, near_ai_provision_start_handler,
-    near_provision_finish_handler, near_provision_start_handler,
+    near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
+    near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
 };
 
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
@@ -19813,8 +20039,15 @@ async fn account_passkey_remove_handler(
 
     let db = account_db(state.as_ref())?;
 
+    // Z2 S2: every live session this passkey minted is revoked with it, browser
+    // and native, except the session making this request.
     let result = db
-        .revoke_account_credential(&ctx.tenant_id, ctx.account_id.as_uuid(), &credential_id)
+        .revoke_account_credential_sparing_session(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &credential_id,
+            ctx.session_token_hash.as_deref(),
+        )
         .await
         .map_err(internal_error)?;
 
@@ -20356,6 +20589,103 @@ async fn account_passkey_login_start_handler(
     response
 }
 
+/// A discoverable passkey assertion that verified: the tenant the credential
+/// lives in, the account it belongs to, and its canonical credential id.
+struct VerifiedPasskeyAssertion {
+    tenant: String,
+    account_id: uuid::Uuid,
+    credential_id: String,
+}
+
+/// The ONE passkey login verifier, shared by the browser
+/// (`/account/passkey/login/finish`) and native
+/// (`/v1/account/native/passkey/login/finish`) sign-ins. The two differ only in
+/// how the ceremony state was recovered (a cookie or a body-borne id) and what
+/// they issue; every check on the assertion itself lives here, so the surfaces
+/// cannot drift apart. `None` on any failure; the caller answers with its own
+/// uniform deny.
+///
+/// Steps, in order: identify the asserted handle and credential id (no tenant
+/// context yet); the per-credential ceiling; resolve the tenant through the
+/// NARROW resolver pool with NO tenant write; load the active credential under
+/// that tenant's RLS; require the asserted user handle to equal the
+/// credential's account (before verification runs); verify, which enforces the
+/// signature and the sign-counter clone check; persist the advanced counter.
+async fn verify_discoverable_passkey_assertion(
+    webauthn: &webauthn_rs::Webauthn,
+    db: &dyn Database,
+    assertion: &webauthn_rs::prelude::PublicKeyCredential,
+    auth_state: webauthn_rs::prelude::DiscoverableAuthentication,
+) -> Option<VerifiedPasskeyAssertion> {
+    // Extract the asserted user handle + credential id from the assertion (no
+    // tenant context yet). Encode the credential id with the SAME canonical
+    // base64url encoding enrollment used so the lookup agrees byte-for-byte.
+    let (account_handle_uuid, cred_id_bytes) = webauthn
+        .identify_discoverable_authentication(assertion)
+        .ok()?;
+    let credential_id =
+        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
+
+    // Per-credential hard ceiling (replay/brute bound on one specific credential,
+    // IP-independent, and shared by both surfaces).
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("passkey-login-cred:{credential_id}"),
+        PASSKEY_LOGIN_PER_CRED_LIMIT,
+    ) {
+        return None;
+    }
+
+    // Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
+    // ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
+    // -> deny, and critically NO tenant row is written for a forged id.
+    let tenant = db.resolve_credential_tenant(&credential_id).await.ok()??;
+
+    // Under the resolved tenant's RLS, load the active credential. Deserialize
+    // the stored passkey JSON into a webauthn-rs `Passkey`; a corrupt row also
+    // denies.
+    let credential = db
+        .load_webauthn_credential_for_login(&tenant, &credential_id)
+        .await
+        .ok()??;
+    let credential_account_id = credential.account_id;
+    let mut passkey: webauthn_rs::prelude::Passkey =
+        serde_json::from_value(credential.passkey).ok()?;
+
+    // Cross-account / handle binding (checked BEFORE finish so a mismatch never
+    // reaches verification): the user handle the authenticator asserted MUST
+    // equal the account the stored credential belongs to. Defense-in-depth on
+    // top of the credential_id -> account binding.
+    if account_handle_uuid != credential_account_id {
+        return None;
+    }
+
+    // Verify the assertion. The SIGN-COUNTER regression / clone-detection check
+    // is enforced INSIDE finish_discoverable_authentication (a regressed counter
+    // -> Err), as is the allowed-credential / signature check.
+    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
+    let auth_result = webauthn
+        .finish_discoverable_authentication(assertion, auth_state, &[discoverable_key])
+        .ok()?;
+
+    // Persist the advanced sign counter (clone-detection state) when it moved.
+    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
+    // property (counter / backup flags) actually changed. A persistence failure is
+    // NOT fatal to this login (the assertion already verified), but we fail closed
+    // so a stuck counter can't silently accumulate.
+    if matches!(passkey.update_credential(&auth_result), Some(true)) {
+        let updated = serde_json::to_value(&passkey).ok()?;
+        db.update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
+            .await
+            .ok()?;
+    }
+
+    Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    })
+}
+
 /// `POST /account/passkey/login/finish` — complete a discoverable passkey login
 /// and issue a session (Slice 2 Task 6). UNAUTHENTICATED, with full redeem-style
 /// hardening: a fixed timing floor wraps the WHOLE handler so success and every
@@ -20414,93 +20744,18 @@ async fn account_passkey_login_finish_inner(
         None => return passkey_login_generic_deny(),
     };
 
-    // 4. Extract the asserted user handle + credential id from the assertion (no
-    //    tenant context yet). Encode the credential id with the SAME canonical
-    //    base64url encoding enrollment used so the lookup agrees byte-for-byte.
-    let (account_handle_uuid, cred_id_bytes) =
-        match webauthn.identify_discoverable_authentication(&assertion) {
-            Ok(parts) => parts,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-    let credential_id =
-        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
-
-    // Per-credential hard ceiling (replay/brute bound on one specific credential,
-    // IP-independent). Same uniform deny.
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-cred:{credential_id}"),
-        PASSKEY_LOGIN_PER_CRED_LIMIT,
-    ) {
+    // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
+    //    the advanced sign counter: the verification core shared with native
+    //    passkey sign-in. Any failure -> uniform deny.
+    let Some(VerifiedPasskeyAssertion {
+        tenant,
+        account_id: credential_account_id,
+        credential_id,
+    }) =
+        verify_discoverable_passkey_assertion(&webauthn, db.as_ref(), &assertion, auth_state).await
+    else {
         return passkey_login_generic_deny();
-    }
-
-    // 5. Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
-    //    ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
-    //    -> uniform deny, and critically NO tenant row is written for a forged id.
-    let tenant = match db.resolve_credential_tenant(&credential_id).await {
-        Ok(Some(tenant)) => tenant,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
     };
-
-    // 6. Under the resolved tenant's RLS, load the active credential. None ->
-    //    uniform deny. Deserialize the stored passkey JSON into a webauthn-rs
-    //    `Passkey`; a corrupt row also collapses to the uniform deny.
-    let credential = match db
-        .load_webauthn_credential_for_login(&tenant, &credential_id)
-        .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) | Err(_) => return passkey_login_generic_deny(),
-    };
-    // Move the owned `passkey` JSON out of the row (no clone) for deserialization;
-    // `account_id` is retained for the handle-binding check below.
-    let credential_account_id = credential.account_id;
-    let mut passkey: webauthn_rs::prelude::Passkey =
-        match serde_json::from_value(credential.passkey) {
-            Ok(passkey) => passkey,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-
-    // 8. Cross-account / handle binding (checked BEFORE finish so a mismatch never
-    //    reaches verification): the user handle the authenticator asserted MUST
-    //    equal the account the stored credential belongs to. Defense-in-depth on
-    //    top of the credential_id -> account binding.
-    if account_handle_uuid != credential_account_id {
-        return passkey_login_generic_deny();
-    }
-
-    // 7. Verify the assertion. The SIGN-COUNTER regression / clone-detection check
-    //    is enforced INSIDE finish_discoverable_authentication (a regressed counter
-    //    -> Err), as is the allowed-credential / signature check. Any Err ->
-    //    uniform deny.
-    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
-    let auth_result = match webauthn.finish_discoverable_authentication(
-        &assertion,
-        auth_state,
-        &[discoverable_key],
-    ) {
-        Ok(auth_result) => auth_result,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    // Persist the advanced sign counter (clone-detection state) when it moved.
-    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
-    // property (counter / backup flags) actually changed. A persistence failure is
-    // NOT fatal to this login (the assertion already verified), but we fail closed
-    // to the uniform deny so a stuck counter can't silently accumulate.
-    if matches!(passkey.update_credential(&auth_result), Some(true)) {
-        let updated = match serde_json::to_value(&passkey) {
-            Ok(value) => value,
-            Err(_) => return passkey_login_generic_deny(),
-        };
-        if db
-            .update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
-            .await
-            .is_err()
-        {
-            return passkey_login_generic_deny();
-        }
-    }
 
     // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
     //    the session (client_kind='passkey', auth_credential_id=credential_id) +
@@ -20513,7 +20768,7 @@ async fn account_passkey_login_finish_inner(
     if db
         .issue_passkey_session(
             &tenant,
-            credential.account_id,
+            credential_account_id,
             trace_commons_server::db::NewSession {
                 token_hash: &token_hash,
                 client_kind: "passkey",
@@ -52213,10 +52468,7 @@ fn register_stats_response(
         withheld,
         scope: REGISTER_STATS_SCOPE,
         as_of: row.as_of,
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
     }
 }
 

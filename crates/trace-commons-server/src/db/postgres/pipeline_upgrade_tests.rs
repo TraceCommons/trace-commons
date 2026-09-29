@@ -235,7 +235,24 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, Some(95));
+    // The upgrade runs every migration, so the recorded maximum is the
+    // newest one in the list; the pipeline versions themselves must be there.
+    let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
+    assert_eq!(version, latest);
+    for pipeline_version in 92..=95 {
+        let recorded: bool = admin
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
+                &[&pipeline_version],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            recorded,
+            "V{pipeline_version} was not recorded by the upgrade"
+        );
+    }
 
     for table in PIPELINE_TABLES {
         assert!(

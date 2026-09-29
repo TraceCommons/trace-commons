@@ -127,6 +127,12 @@ pub struct AccountCtx {
     /// bearer is NOT a strong authenticator for the gate). A public label, never
     /// key material.
     pub client_kind: String,
+    /// The sha256 `token_hash` of the session credential THIS request
+    /// presented (cookie or native token), set by the resolver. Used only to
+    /// spare the caller's own session when a passkey removal revokes the
+    /// sessions that passkey minted. A hash, never the secret; `None` when no
+    /// session was presented.
+    pub session_token_hash: Option<String>,
 }
 
 impl AccountCtx {
