@@ -30,40 +30,39 @@ unbound accounts.
 
 ## What is deleted, and what is refused
 
-A reaped account takes its tenant with it. That covers the tenant row, the
-account, its binding, credential and sessions, and the tenant's
-`trace_account_audit` rows. `trace_audit_events` rows are kept: they are
-hash-chained and have no foreign key to the tenant.
+The reaper deletes the **account**, never the tenant (decided 2026-09-29). It
+deletes the `trace_accounts` row and nothing else directly; everything that
+goes, goes by `ON DELETE CASCADE` from that row. For a passkey account that is
+its binding, credentials, sessions and login links.
 
-The tenant delete cascades into about fifty tenant-keyed tables. The function
-therefore first checks that the tenant holds only what a passkey tenant may
-hold: the rows listed above, for this one account. If the tenant holds
-another account, or any row in any other table keyed to the tenant or the
-account, the candidate is **refused whole**. Nothing is deleted, and it
+The tenant row stays, possibly empty, and so does every row keyed to the
+tenant rather than the account. That includes `trace_account_audit` and the
+hash-chained `trace_audit_events`. What else the tenant holds does not matter
+and does not refuse the candidate.
+
+The same cascade from `trace_accounts` also reaches
+`trace_account_principals`, `trace_near_identities`,
+`trace_account_merge_proposals`, `trace_public_runs`, `trace_source_sessions`
+and `trace_account_inference_connections`. The unbound gate refuses an unbound
+or closed account's session on every route that writes those, so a candidate
+is not expected to hold any. If one does, the reap deletes them with the
+account. `unbound_account_reaper_pg` pins the exact list of tables that cascade
+from `trace_accounts`, so a migration that changes it has to change that list
+too, where review sees it. That is the only place it shows up: a migration owes
+the reaper no grant, policy or other change.
+
+An account-keyed row whose foreign key does **not** cascade (`ON DELETE
+RESTRICT` or `NO ACTION`: `trace_reward_principal_accounts`, the account trust
+and admission tables, the legacy invite link tables,
+`trace_near_account_anchors`, and any added later) makes the account delete
+fail with a foreign-key violation (23503). The candidate is then **refused
+whole**: its sub-transaction rolls back, nothing of it is deleted, and it
 counts as `skipped`.
 
-That set of tables comes from the catalog: every foreign key into
-`trace_tenants` or `trace_accounts` through a `tenant_id` column. The reaper
-role cannot bypass row security, so a table it cannot see into would look
-empty. Rather than risk cascading such a table away unseen, the function
-refuses the whole call with:
-
-```
-unbound_reaper_scope_incomplete: <table>, ...
-```
-
-The tick logs that error and deletes nothing. V99 grants the guard what it
-needs on every such table that exists when V99 runs. **A later migration that
-adds a tenant- or account-keyed table must do the same:**
-
-```sql
-GRANT SELECT (tenant_id) ON <table> TO trace_unbound_account_reaper_guard;
-CREATE POLICY trace_unbound_reaper_scope ON <table>
-    FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
-```
-
-Until it does, `unbound_account_reaper_pg` fails in CI. The error names
-tables only, never a tenant or an account.
+A second account in the same tenant does not refuse the candidate and is not
+touched. The delete is keyed to the candidate's `(tenant_id, account_id)` and
+cascades only from that row. A tenant-wide refusal existed only to protect a
+tenant delete, which the reaper no longer does.
 
 ## Enable
 
@@ -92,8 +91,9 @@ its replacement.
 V99 creates two NOLOGIN roles:
 
 - `trace_unbound_account_reaper_guard` owns the `SECURITY DEFINER` function
-  `trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER)`. It holds the
-  column-scoped grants and permissive policies the function needs.
+  `trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER)`. It holds
+  column-scoped grants and permissive policies on `trace_account_bindings`,
+  `trace_accounts` and `trace_sessions`, and on nothing else.
 - `trace_unbound_account_reaper` holds EXECUTE on that function and nothing
   else.
 
@@ -116,16 +116,16 @@ liveness registry as `unbound_account_reaper`.
 
 `skipped` counts candidates that were left alone for any of these reasons:
 
-- locked by a concurrent bind, sign-in or tenant write;
+- locked by a concurrent bind, sign-in or other write to the account;
 - holding a live session since the scan;
-- refused by the tenant check;
-- refused by a foreign key;
+- refused by a non-cascading foreign key into the account (23503);
 - lost a lock wait (a 3-second `lock_timeout`);
 - aborted by PostgreSQL's deadlock detector (40P01).
 
 The last two resolve on a later tick. A `skipped` count that never falls to
-zero means some account's tenant holds rows a passkey tenant should not hold,
-and needs a look.
+zero means some unbound or closed account is held by a non-cascading row (a
+reward principal, trust or admission row, or a legacy invite link) that such
+an account should not have, and needs a look.
 
 A skipped candidate does not use up the batch. Each call deletes up to `limit`
 accounts and examines at most `10 * limit` candidates, oldest first, stepping

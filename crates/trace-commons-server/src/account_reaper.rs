@@ -12,9 +12,11 @@
 //! - a `closed` account 30 days after `trace_accounts.closed_at`, which S3
 //!   sets in the transaction that closes the binding.
 //!
-//! Either way the account is reaped only once it holds no live session, and
-//! only when its tenant holds nothing but the rows a passkey tenant may hold;
-//! anything else refuses the candidate. The delete is a cross-tenant sweep, so
+//! Either way the account is reaped only once it holds no live session. The
+//! reap deletes the account and what cascades from it (binding, credentials,
+//! sessions, login links); the tenant row is never deleted. An account-keyed
+//! row that does not cascade refuses the candidate. The delete is a
+//! cross-tenant sweep, so
 //! it runs through `trace_reap_unbound_accounts`, a `SECURITY DEFINER`
 //! function, on its own small pool whose login holds only the
 //! `trace_unbound_account_reaper` role. It never touches the runtime pool.
@@ -45,14 +47,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Counts only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReapSummary {
-    /// Unbound accounts deleted, with their tenant, binding, credential and
-    /// sessions.
+    /// Unbound accounts deleted, with the rows that cascade from them
+    /// (binding, credentials, sessions). Their tenant rows are kept.
     pub reaped_unbound: u64,
     /// Closed accounts deleted, likewise.
     pub reaped_closed: u64,
     /// Candidates left alone: locked by a concurrent request, holding a live
-    /// session since the scan, in a tenant that holds any other row, refused
-    /// by a foreign key, or chosen as a deadlock victim.
+    /// session since the scan, refused by a non-cascading foreign key into the
+    /// account, timed out on a lock, or chosen as a deadlock victim.
     pub skipped: u64,
 }
 
