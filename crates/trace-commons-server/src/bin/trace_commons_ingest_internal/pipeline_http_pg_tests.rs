@@ -284,6 +284,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
         .with_scorer(scorer)
         .with_embedder(embedder)
         .with_object_store_name(context.object_store_name)
+        .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary));
         if let Some(crash_point) = self.crash_point {
@@ -347,6 +348,7 @@ fn assemble_test_pipeline_service(
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("assemble the injected pipeline runtime")
     .expect("an assembler was given, so a service is returned")
@@ -3251,6 +3253,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
         .with_scorer(scorer)
         .with_embedder(embedder)
         .with_object_store_name(context.object_store_name)
+        .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(self.privacy.clone())
         .build()?;
@@ -3287,6 +3290,7 @@ fn assemble_compatibility_pipeline_service(
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("assemble the injected compatibility pipeline runtime")
     .expect("an assembler was given, so a service is returned")

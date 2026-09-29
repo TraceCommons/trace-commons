@@ -10284,6 +10284,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
     .unwrap();
@@ -10442,6 +10443,18 @@ fn minimal_pipeline_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
 ) -> anyhow::Result<Arc<PipelineService>> {
+    Ok(Arc::new(
+        minimal_pipeline_service_builder(backend, artifact_store, object_store_name)?.build()?,
+    ))
+}
+
+/// The builder `minimal_pipeline_service` builds, for an assembler that sets
+/// more on it.
+fn minimal_pipeline_service_builder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<trace_commons_server::versioned_pipeline::PipelineServiceBuilder> {
     use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
     use trace_commons_server::versioned_pipeline_bundle::{
@@ -10478,7 +10491,7 @@ fn minimal_pipeline_service(
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
-    Ok(Arc::new(builder.build()?))
+    Ok(builder)
 }
 
 /// M11: ingest's assembly hands the configured store's name to the
@@ -10522,6 +10535,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10542,6 +10556,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .unwrap()
     .unwrap();
@@ -10988,6 +11003,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
     .expect("an unqualified dependency with routed tenants and no opt-in is refused");
@@ -11014,6 +11030,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("the opt-in lets an unqualified dependency start")
     .expect("an assembler was given, so a service is returned");
@@ -11038,6 +11055,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
     .expect("the test opt-in never combines with the required flag");
@@ -11065,6 +11083,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
@@ -11092,6 +11111,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
     .expect("a missing authority provider with routed tenants and no opt-in is refused");
@@ -11118,6 +11138,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .err()
     .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
@@ -11237,6 +11258,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             false,
             configured,
             TEST_NEAR_CONFIRMATION_INTERVAL,
+            &PipelineNoveltyUtilityChecks::default(),
         )
     };
 
@@ -11273,6 +11295,73 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
     }
 }
 
+/// Builds `minimal_pipeline_service` through the seam, passing on the
+/// NoveltyUtility checks ingest hands it only when `forward` is set.
+struct NoveltyUtilityChecksAssembler {
+    forward: bool,
+}
+
+impl IngestPipelineRuntimeAssembler for NoveltyUtilityChecksAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        let mut builder = minimal_pipeline_service_builder(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )?;
+        if self.forward {
+            builder = builder.with_novelty_utility_checks(context.novelty_utility_checks);
+        }
+        Ok(Arc::new(builder.build()?))
+    }
+}
+
+/// Ruling T15-12: ingest hands the configuration of `main`'s NoveltyUtility
+/// credit checks to the assembly and refuses a runtime that does not hold
+/// it, as for the NEAR contract: an assembly that forwards it starts with
+/// it, and one that drops it is refused.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let checks = PipelineNoveltyUtilityChecks {
+        central_issuer_principal_refs: BTreeSet::from([format!(
+            "principal_sha256:{}",
+            "c".repeat(64)
+        )]),
+        issuer_principal_ref: Some(format!("principal_sha256:{}", "c".repeat(64))),
+        require_production_gate: true,
+    };
+    let assemble = |forward: bool| {
+        assemble_ingest_pipeline_runtime(
+            Some(&NoveltyUtilityChecksAssembler { forward }),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            &checks,
+        )
+    };
+
+    let service = assemble(true)
+        .expect("an assembly that forwards the checks starts")
+        .expect("an assembler was given, so a service is returned");
+    assert_eq!(service.novelty_utility_checks(), &checks);
+    let error = assemble(false)
+        .err()
+        .expect("an assembly that drops the checks is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_novelty_utility_checks_mismatch"
+    );
+}
+
 /// Ruling T10-10: an enabled payout polls a submitted payout at `main`'s
 /// NEAR outbox scheduler cadence. Ingest hands that cadence to the assembly
 /// and refuses a runtime whose payout polls at another one.
@@ -11291,6 +11380,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
             false,
             Some(TEST_PAYOUT_NEAR_CONTRACT),
             TEST_NEAR_CONFIRMATION_INTERVAL,
+            &PipelineNoveltyUtilityChecks::default(),
         )
     };
 
@@ -11381,6 +11471,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
+        &PipelineNoveltyUtilityChecks::default(),
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")
     .expect("an assembler was given, so a service is returned");
@@ -101865,6 +101956,57 @@ fn pipeline_contributor_status_fixture() -> PipelineContributorStatus {
         ],
         compatibility: None,
     }
+}
+
+/// Rulings T15-7 and T15-12: a compatibility run's status reads its credit
+/// figure from the Score evidence as `main` reads its gate decision, and a
+/// Trace Credit leg one of `main`'s checks withheld passes its label on as
+/// that decision's `credit_withheld_reason`, as on `main`. A run that is not
+/// of the compatibility family, or whose Score has not committed, gives no
+/// decision.
+#[test]
+fn compatibility_credit_decision_carries_the_withheld_reason() {
+    use trace_commons_server::versioned_pipeline_product::{
+        PipelineCompatibilityStatus, PipelineShadowCreditQuality,
+    };
+    let mut status = pipeline_contributor_status_fixture();
+    assert!(compatibility_credit_decision(&status).is_none());
+    status.compatibility = Some(PipelineCompatibilityStatus {
+        credit_quality: None,
+    });
+    assert!(compatibility_credit_decision(&status).is_none());
+    status.compatibility = Some(PipelineCompatibilityStatus {
+        credit_quality: Some(PipelineShadowCreditQuality {
+            credit_quality_micros: 812_000,
+            credit_quality_version: 3,
+            chunk_count: Some(2),
+            total_chunk_count: Some(3),
+            chunks_capped: Some(true),
+        }),
+    });
+    let decision = compatibility_credit_decision(&status).expect("a decision");
+    assert_eq!(decision.submission_id, status.submission_id);
+    assert_eq!(decision.credit_quality_micros, Some(812_000));
+    assert_eq!(decision.credit_quality_calibration_version, Some(3));
+    assert_eq!(decision.chunk_count, Some(2));
+    assert_eq!(decision.total_chunk_count, Some(3));
+    assert_eq!(decision.chunks_capped, Some(true));
+    assert_eq!(decision.credit_withheld_reason, None);
+
+    let trace_credit = status
+        .instruments
+        .iter_mut()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .unwrap();
+    trace_credit.internal_settlement_state = "withheld".to_string();
+    trace_credit.reason_label = Some("policy_mismatch".to_string());
+    assert_eq!(
+        compatibility_credit_decision(&status)
+            .unwrap()
+            .credit_withheld_reason
+            .as_deref(),
+        Some("policy_mismatch")
+    );
 }
 
 /// A submission only the pipeline knows reads as a status document built

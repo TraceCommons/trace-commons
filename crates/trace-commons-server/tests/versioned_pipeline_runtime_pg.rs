@@ -64,8 +64,9 @@ use trace_commons_server::versioned_pipeline_credit::{
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
-    PIPELINE_EXPORT_ITEM_MAX, PipelineCreditStatus, PipelineExportConsentScopes,
-    PipelineExportSnapshot, PipelineProcessingStatus, PipelineProductStore,
+    PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineCreditStatus,
+    PipelineExportConsentScopes, PipelineExportSnapshot, PipelineProcessingStatus,
+    PipelineProductStore,
 };
 
 use pilot_runtime_login::{
@@ -1560,6 +1561,18 @@ async fn envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
         .unwrap();
     envelope.submission_id = submission_id;
     envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope
+}
+
+/// `envelope`, with consent that allows model training: the allowed use
+/// `main`'s `NoveltyUtility` credit requires (Ruling T15-8). `envelope`'s
+/// own consent is the default scope, debugging and evaluation.
+async fn model_training_envelope(submission_id: uuid::Uuid) -> TraceContributionEnvelope {
+    let mut envelope = envelope(submission_id).await;
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses =
+        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
     envelope
 }
 
@@ -14128,6 +14141,28 @@ async fn compatibility_test_service_with_payout(
     config: CompatibilityBundleConfig,
     near: Option<Arc<dyn NearPayoutAdapter>>,
 ) -> Arc<PipelineService> {
+    compatibility_test_service_with(
+        backend,
+        artifact_store,
+        config,
+        near,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await
+}
+
+/// `compatibility_test_service_with_payout`, with `authority` as its tenant
+/// authority and `checks` as the configuration of `main`'s NoveltyUtility
+/// credit checks.
+async fn compatibility_test_service_with(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    near: Option<Arc<dyn NearPayoutAdapter>>,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package =
@@ -14158,8 +14193,9 @@ async fn compatibility_test_service_with_payout(
     )
     .with_scorer(scorer)
     .with_embedder(embedder)
-    .with_authority(allow_all_authority())
-    .with_privacy(default_privacy_boundary());
+    .with_authority(authority)
+    .with_privacy(default_privacy_boundary())
+    .with_novelty_utility_checks(checks);
     let service = match near {
         Some(near) => service.with_payout(
             near,
@@ -14301,7 +14337,15 @@ async fn compatibility_credit_matches_main_gate_path() {
     activate_bundle_as_operator(&tenant_positive, &positive_package.bundle_id).await;
 
     let run_zero = submit_and_complete(&service, &tenant_zero, principal).await;
-    let run_positive = submit_and_complete(&service, &tenant_positive, principal).await;
+    // Model-training consent: the allowed use `main`'s NoveltyUtility credit
+    // requires (Ruling T15-8).
+    let run_positive = submit_envelope_and_complete(
+        &service,
+        &tenant_positive,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
 
     assert_eq!(run_zero.state, PipelineRunState::Complete);
     assert_eq!(run_positive.state, PipelineRunState::Complete);
@@ -14542,6 +14586,314 @@ async fn compatibility_credit_matches_main_gate_path() {
             .as_deref(),
         Some("final"),
         "a later batch composition leaves the NoveltyUtility row as it was"
+    );
+}
+
+/// The `NoveltyUtility` delta the credit-check tests below award.
+const CHECKED_DELTA_MICROCREDITS: u64 = 2_500_000;
+
+/// A compatibility service awarding `CHECKED_DELTA_MICROCREDITS`, with
+/// `authority` and `checks`.
+async fn checked_compatibility_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    compatibility_test_service_with(
+        backend.clone(),
+        artifact_store(dir),
+        config,
+        None,
+        authority,
+        checks,
+    )
+    .await
+}
+
+/// Runs `env` to completion for a fresh tenant of `service`, and returns its
+/// Trace Credit leg, its ledger row count, and its contributor status.
+async fn settled_compatibility_award(
+    service: &PipelineService,
+    backend: &Arc<PgBackend>,
+    env: &TraceContributionEnvelope,
+) -> (PipelineSettlementRecord, i64, PipelineContributorStatus) {
+    let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-checks";
+    let run = submit_envelope_and_complete(service, &tenant, principal, env).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let leg = trace_credit_settlement(service, &tenant, run.run_id).await;
+    let rows = count_credit_ledger_rows_for_run(backend, &tenant, run.run_id).await;
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .expect("the owner reads the run's status");
+    (leg, rows, status)
+}
+
+/// Ruling T15-12: a withheld leg completed with no ledger row under `label`,
+/// its product status reads `Withheld` with that label, and Score's decision
+/// still holds its award.
+fn assert_withheld(
+    (leg, rows, status): &(PipelineSettlementRecord, i64, PipelineContributorStatus),
+    label: &str,
+) {
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert_eq!(leg.credit_event_id, None, "{leg:?}");
+    assert_eq!(leg.last_error_label.as_deref(), Some(label), "{leg:?}");
+    assert_eq!(*rows, 0, "a withheld leg writes no ledger row");
+    assert_eq!(status.credit, PipelineCreditStatus::Withheld);
+    assert_eq!(
+        status.score_microcredits,
+        Some(CHECKED_DELTA_MICROCREDITS),
+        "Score's decision is unchanged"
+    );
+    let trace_credit = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the trace_credit instrument");
+    assert_eq!(trace_credit.internal_settlement_state, "withheld");
+    assert_eq!(trace_credit.reason_label.as_deref(), Some(label));
+}
+
+/// The leg wrote its one `NoveltyUtility` ledger row.
+fn assert_credited(
+    (leg, rows, status): &(PipelineSettlementRecord, i64, PipelineContributorStatus),
+) {
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.credit_event_id.is_some(), "{leg:?}");
+    assert_eq!(leg.last_error_label, None, "{leg:?}");
+    assert_eq!(*rows, 1);
+    assert_eq!(status.credit, PipelineCreditStatus::NotSettlementEligible);
+}
+
+/// Ruling T15-8: `main` credits `NoveltyUtility` only to a submission whose
+/// allowed uses include model training. A default-consent submission
+/// (debugging and evaluation) is withheld `policy_mismatch`, with no ledger
+/// row and a `Withheld` product status; a model-training one gets its row.
+#[tokio::test]
+async fn a_compatibility_award_needs_the_model_training_allowed_use() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let default_consent = envelope(uuid::Uuid::new_v4()).await;
+    assert!(
+        !default_consent
+            .trace_card
+            .allowed_uses
+            .contains(&TraceAllowedUse::ModelTraining)
+    );
+    assert_withheld(
+        &settled_compatibility_award(&service, &backend, &default_consent).await,
+        PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL,
+    );
+    assert_credited(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+    );
+}
+
+/// Ruling T15-10: with a non-empty central-issuer allowlist, a positive
+/// compatibility award needs the pipeline's configured issuer on it, where
+/// `main` needs its calling gate worker there. No issuer, or one not on the
+/// list, is withheld `central_issuer_denied`; the listed issuer is credited.
+/// An empty list allows (the test above).
+#[tokio::test]
+async fn a_compatibility_award_needs_the_pipeline_issuer_on_the_central_issuer_list() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let listed = format!("principal_sha256:{}", "a".repeat(64));
+    let unlisted = format!("principal_sha256:{}", "b".repeat(64));
+    for (issuer, credited) in [
+        (None, false),
+        (Some(unlisted.clone()), false),
+        (Some(listed.clone()), true),
+    ] {
+        let service = checked_compatibility_service(
+            &backend,
+            &dir,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks {
+                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+                issuer_principal_ref: issuer,
+                require_production_gate: false,
+            },
+        )
+        .await;
+        let outcome = settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        if credited {
+            assert_credited(&outcome);
+        } else {
+            assert_withheld(
+                &outcome,
+                PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL,
+            );
+        }
+    }
+}
+
+/// Ruling T15-11: with `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`
+/// set, a compatibility award needs a production-qualified scorer and
+/// embedder, where `main` needs a production gate service. The reference
+/// scorer and embedder are not, so the award is withheld
+/// `non_production_gate`.
+#[tokio::test]
+async fn the_production_gate_flag_withholds_an_award_from_unqualified_dependencies() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks {
+            require_production_gate: true,
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+    )
+    .await;
+    let qualification = service.dependency_qualification();
+    assert!(!qualification.scorer && !qualification.embedder);
+    assert_withheld(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+        PIPELINE_NOVELTY_UTILITY_NON_PRODUCTION_GATE_LABEL,
+    );
+}
+
+/// A tenant authority a test replaces between phases, so the receipt and
+/// Settle can read different ones.
+struct SwitchableAuthority(std::sync::Mutex<SubmissionAuthority>);
+
+impl PipelineAuthorityProvider for SwitchableAuthority {
+    fn authority_for_tenant(&self, _tenant_id: &str) -> Option<SubmissionAuthority> {
+        Some(self.0.lock().unwrap().clone())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "switchable_authority_test_only"
+    }
+}
+
+/// Ruling T15-8: Settle reads the tenant policy from the authority provider,
+/// the source the receipt uses.
+/// - A policy that does not allow model training (the receipt admits the
+///   submission, since its evaluation use is allowed) is withheld
+///   `policy_mismatch`.
+/// - A policy removed after the receipt, while one is required, is withheld
+///   `credit_check_error` -- not a charged Settle error.
+#[tokio::test]
+async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let evaluation_only = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: Some(SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::new(),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::Evaluation]),
+            }),
+            require_policy: true,
+        },
+    )));
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        evaluation_only.clone(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    assert_withheld(
+        &settled_compatibility_award(
+            &service,
+            &backend,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await,
+        PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL,
+    );
+
+    // The policy allows model training at the receipt and is gone by Settle.
+    *evaluation_only.0.lock().unwrap() = SubmissionAuthority {
+        tenant: SubmissionAllowlists::default(),
+        policy: Some(SubmissionAllowlists::default()),
+        require_policy: true,
+    };
+    let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    *evaluation_only.0.lock().unwrap() = SubmissionAuthority {
+        tenant: SubmissionAllowlists::default(),
+        policy: None,
+        require_policy: true,
+    };
+    let settled = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(
+        settled.attempt_count, 3,
+        "the withheld leg charged nothing extra"
+    );
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[env.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_withheld(
+        &(leg, rows, status),
+        PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL,
     );
 }
 
@@ -18529,11 +18881,21 @@ async fn a_compatibility_leg_is_never_a_pending_payout() {
     assert!(service.payout_enabled());
     let tenant = format!("compat-payout-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-payout";
-    let run = submit_and_complete(&service, &tenant, principal).await;
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
     assert_eq!(run.state, PipelineRunState::Complete);
 
     let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(leg.operation_state, "complete");
+    assert!(
+        leg.credit_event_id.is_some(),
+        "the leg wrote its ledger row"
+    );
     assert_eq!(leg.payout_rail, "near");
     assert!(leg.settlement_batch_id.is_none());
     assert_eq!(leg.payout_state, "disabled");

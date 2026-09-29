@@ -28,6 +28,16 @@ use super::*;
 /// unless configured). An assembly that enables payout passes it as
 /// `PipelinePayoutConfig::confirmation_interval` (Ruling T10-10), and
 /// `assemble_ingest_pipeline_runtime` refuses one that does not.
+///
+/// `novelty_utility_checks` is the configuration of `main`'s
+/// `NoveltyUtility` credit checks (Rulings T15-6, T15-10, T15-11): `main`'s
+/// central-issuer allowlist, the pipeline's issuer principal
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), and `main`'s
+/// production-gate flag. An assembly passes it to
+/// `PipelineServiceBuilder::with_novelty_utility_checks`, and
+/// `assemble_ingest_pipeline_runtime` refuses one that does not. The tenant
+/// policy those checks read comes from the assembly's own authority
+/// provider, the source the receipt uses.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
@@ -35,6 +45,7 @@ pub struct IngestPipelineRuntimeContext {
     pub lease_config: PipelineLeaseConfig,
     pub near_contract_id: Option<String>,
     pub near_confirmation_interval: StdDuration,
+    pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -71,8 +82,9 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// qualification. The caller resolves both booleans from the environment (or
 /// from the tenant rollout gates); this function reads neither directly.
 /// `near_contract_id` is `main`'s configured NEAR credit contract and
-/// `near_confirmation_interval` its NEAR outbox scheduler cadence, both
-/// handed to the assembly in its context.
+/// `near_confirmation_interval` its NEAR outbox scheduler cadence, and
+/// `novelty_utility_checks` the configuration of `main`'s `NoveltyUtility`
+/// credit checks, all handed to the assembly in its context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -84,6 +96,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     allow_test_dependencies: bool,
     near_contract_id: Option<&str>,
     near_confirmation_interval: StdDuration,
+    novelty_utility_checks: &PipelineNoveltyUtilityChecks,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -109,6 +122,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         lease_config,
         near_contract_id: near_contract_id.map(str::to_string),
         near_confirmation_interval,
+        novelty_utility_checks: novelty_utility_checks.clone(),
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
@@ -136,6 +150,13 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         !service.payout_enabled()
             || service.payout_confirmation_interval() == Some(near_confirmation_interval),
         "pipeline_runtime_near_confirmation_interval_mismatch"
+    );
+    // Ruling T15-12: a compatibility award applies `main`'s NoveltyUtility
+    // credit checks with the configuration ingest was started with, never a
+    // looser one an assembly picked itself or dropped.
+    anyhow::ensure!(
+        service.novelty_utility_checks() == novelty_utility_checks,
+        "pipeline_runtime_novelty_utility_checks_mismatch"
     );
     if (production_required || tenants_routed)
         && !pipeline_runtime_is_production_qualified(&service)

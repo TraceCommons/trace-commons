@@ -256,9 +256,9 @@ use trace_commons_server::trace_score_attestation::{
 };
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-    PipelineAdmissionLimits, PipelineLeaseConfig, PipelineQuotaScope, PipelineReceiptRequest,
-    PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim, PipelineRunState,
-    PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
+    PipelineAdmissionLimits, PipelineLeaseConfig, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim,
+    PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -682,6 +682,13 @@ const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RU
 /// `docs/operator/pipeline-activation.md`.
 const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
     "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
+/// The principal the pipeline issues a compatibility `NoveltyUtility` credit
+/// as (Ruling T15-10): checked against
+/// `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` where
+/// `main` checks its calling gate worker. A canonical hashed principal ref;
+/// unset means none. Documented in `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF: &str =
+    "TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF";
 /// Whole-seconds overrides for the per-phase claim lease; see
 /// `parse_pipeline_lease_config_from_env`. Unset keeps
 /// `PipelineLeaseConfig::default()`'s value for that phase.
@@ -3825,6 +3832,15 @@ impl AppState {
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
         let pipeline_receipts_tenants_routed =
             tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
+        let novelty_utility_require_production_gate =
+            env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
+        // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
+        // checks, for a compatibility run's Trace Credit leg.
+        let pipeline_novelty_utility_checks = PipelineNoveltyUtilityChecks {
+            central_issuer_principal_refs: credit_settlement_central_issuer_principal_refs.clone(),
+            issuer_principal_ref: parse_pipeline_credit_issuer_principal_ref_from_env()?,
+            require_production_gate: novelty_utility_require_production_gate,
+        };
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
@@ -3835,6 +3851,7 @@ impl AppState {
             pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
             parse_near_credit_outbox_scheduler_interval_from_env()?,
+            &pipeline_novelty_utility_checks,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
@@ -4423,9 +4440,7 @@ impl AppState {
                 parse_revocation_propagation_max_attempts_from_env()?,
             novelty_utility_credit_points_delta:
                 parse_novelty_utility_credit_points_delta_from_env()?,
-            novelty_utility_require_production_gate: env_truthy(
-                TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE,
-            ),
+            novelty_utility_require_production_gate,
             account_webauthn,
             account_ceremony_store,
             near_provisioning_public_origin: std::env::var(
@@ -11288,6 +11303,22 @@ fn parse_credit_settlement_allowed_policy_versions(
     Ok(policy_versions)
 }
 
+/// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`, held to the same
+/// canonical hashed form `parse_credit_settlement_central_issuer_principal_refs`
+/// requires of the allowlist it is checked against.
+fn parse_pipeline_credit_issuer_principal_ref_from_env() -> anyhow::Result<Option<String>> {
+    let Some(configured) =
+        optional_trimmed_env(TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF)?
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        is_canonical_principal_storage_ref(&configured),
+        "{TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF} must be a canonical hashed principal ref"
+    );
+    Ok(Some(configured))
+}
+
 fn parse_central_issuer_principal_refs_from_env() -> anyhow::Result<BTreeSet<String>> {
     match optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS)? {
         Some(configured) => parse_credit_settlement_central_issuer_principal_refs(&configured),
@@ -15947,17 +15978,28 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
 
 /// Ruling T15-7: the gate decision `main`'s status reads its credit figure
 /// and explanation from, for a compatibility run whose Score has committed:
-/// the shadow credit quality and coverage the Score evidence recorded.
+/// the shadow credit quality and coverage the Score evidence recorded, and,
+/// when one of `main`'s credit checks withheld the Trace Credit leg, its
+/// label as the decision's `credit_withheld_reason`, as on `main` (Ruling
+/// T15-12).
 fn compatibility_credit_decision(
     status: &PipelineContributorStatus,
 ) -> Option<StorageTraceGateCreditDecisionRow> {
     let quality = status.compatibility.as_ref()?.credit_quality.as_ref()?;
     let count = |value: Option<u32>| value.and_then(|value| i32::try_from(value).ok());
+    let credit_withheld_reason = status
+        .instruments
+        .iter()
+        .find(|instrument| {
+            instrument.instrument_id == "trace_credit"
+                && instrument.internal_settlement_state == "withheld"
+        })
+        .and_then(|instrument| instrument.reason_label.clone());
     Some(StorageTraceGateCreditDecisionRow {
         submission_id: status.submission_id,
         credit_quality_micros: i64::try_from(quality.credit_quality_micros).ok(),
         credit_quality_calibration_version: Some(quality.credit_quality_version),
-        credit_withheld_reason: None,
+        credit_withheld_reason,
         chunk_count: count(quality.chunk_count),
         total_chunk_count: count(quality.total_chunk_count),
         chunks_capped: quality.chunks_capped,

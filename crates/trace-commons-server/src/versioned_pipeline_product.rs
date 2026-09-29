@@ -158,6 +158,10 @@ pub enum PipelineCreditStatus {
     /// forfeits. It never settles and is never paid, so it must not sit at
     /// `Pending` forever either.
     Forfeited,
+    /// Ruling T15-12: a compatibility `NoveltyUtility` leg one of `main`'s
+    /// credit checks refused. It completed with no ledger event, and its
+    /// `reason_label` is `main`'s withheld reason.
+    Withheld,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -391,13 +395,18 @@ pub struct PipelineContributorCredit {
 /// produces, `trace_corpus_storage.rs`, `rename_all = "snake_case"`; the
 /// same string `versioned_pipeline.rs`'s `settle_internal_credit` writes,
 /// Ruling S10) reports `not_settlement_eligible` rather than `pending`
-/// forever, since `main` never batches or pays that event type. Every query
-/// that embeds this must alias its rows exactly as this text assumes, and
-/// must also embed `TRACE_CREDIT_LEDGER_JOIN`.
+/// forever, since `main` never batches or pays that event type. A
+/// `trace_credit` row that completed with no ledger event is one of `main`'s
+/// credit checks refused (Ruling T15-12): `withheld`. Every query that
+/// embeds this must alias its rows exactly as this text assumes, and must
+/// also embed `TRACE_CREDIT_LEDGER_JOIN`.
 const INTERNAL_SETTLEMENT_STATE_CASE: &str = "
                                     CASE
                                         WHEN settlement.instrument_id <> 'trace_credit'
                                             THEN 'not_applicable'
+                                        WHEN settlement.operation_state = 'complete'
+                                         AND settlement.credit_event_id IS NULL
+                                            THEN 'withheld'
                                         WHEN ledger.event_type = 'novelty_utility'
                                             THEN 'not_settlement_eligible'
                                         WHEN batch.status IS NOT NULL THEN batch.status
@@ -1530,6 +1539,12 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
             }) =>
         {
             PipelineCreditStatus::NotSettlementEligible
+        }
+        (Some(_), Some(_))
+            if trace_credit
+                .is_some_and(|instrument| instrument.internal_settlement_state == "withheld") =>
+        {
+            PipelineCreditStatus::Withheld
         }
         _ => PipelineCreditStatus::Pending,
     };

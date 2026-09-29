@@ -28,7 +28,8 @@ use trace_commons_gate_api::{
     IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
 };
 use trace_commons_protocol::trace_contribution::{
-    ResidualPiiRisk, ResidualRiskCondition, TraceContributionEnvelope, retention_policy_for_trace,
+    ConsentScope, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
+    TraceContributionEnvelope, retention_policy_for_trace,
 };
 use uuid::Uuid;
 
@@ -4554,6 +4555,37 @@ pub struct PipelinePayoutConfig {
     pub confirmation_interval: std::time::Duration,
 }
 
+/// Ruling T15-6: the configuration `main`'s `NoveltyUtility` credit checks
+/// read, which a compatibility run's Trace Credit leg applies before it
+/// writes its ledger row. Ingest hands it to the assembly
+/// (`IngestPipelineRuntimeContext`) and refuses a runtime that does not hold
+/// the same value.
+///
+/// - `central_issuer_principal_refs` is `main`'s
+///   `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`, as
+///   `main` parses it. Empty allows, as on `main`.
+/// - `issuer_principal_ref` is the principal the pipeline issues credit as
+///   (Ruling T15-10), checked against that list in place of `main`'s calling
+///   gate worker. With a non-empty list and no issuer, every positive award
+///   is withheld.
+/// - `require_production_gate` is `main`'s
+///   `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` (Ruling T15-11).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipelineNoveltyUtilityChecks {
+    pub central_issuer_principal_refs: std::collections::BTreeSet<String>,
+    pub issuer_principal_ref: Option<String>,
+    pub require_production_gate: bool,
+}
+
+/// `main`'s withheld-reason labels for a `NoveltyUtility` credit its checks
+/// refuse (`attempt_emit_novelty_utility_credit` in `trace-commons-ingest.rs`,
+/// and `CREDIT_CHECK_ERROR_LABEL` there), which a withheld compatibility leg
+/// records as its `last_error_label` (Ruling T15-12).
+pub const PIPELINE_NOVELTY_UTILITY_NON_PRODUCTION_GATE_LABEL: &str = "non_production_gate";
+pub const PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL: &str = "central_issuer_denied";
+pub const PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL: &str = "credit_check_error";
+pub const PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL: &str = "policy_mismatch";
+
 /// The submission-operability check Settle runs before deciding index
 /// membership and again immediately before it dispatches to the index
 /// (`PipelineService::submission_guard`).
@@ -4661,6 +4693,7 @@ pub struct PipelineServiceBuilder {
     authority: Option<Arc<dyn PipelineAuthorityProvider>>,
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
+    novelty_utility_checks: PipelineNoveltyUtilityChecks,
 }
 
 impl PipelineServiceBuilder {
@@ -4690,6 +4723,7 @@ impl PipelineServiceBuilder {
             authority: None,
             privacy: None,
             payout: None,
+            novelty_utility_checks: PipelineNoveltyUtilityChecks::default(),
         }
     }
 
@@ -4761,6 +4795,15 @@ impl PipelineServiceBuilder {
         self
     }
 
+    /// The configuration of `main`'s `NoveltyUtility` credit checks, which a
+    /// compatibility run's Trace Credit leg applies (Ruling T15-6). Defaults
+    /// to no issuer allowlist, no pipeline issuer, and no production-gate
+    /// requirement when not called.
+    pub fn with_novelty_utility_checks(mut self, checks: PipelineNoveltyUtilityChecks) -> Self {
+        self.novelty_utility_checks = checks;
+        self
+    }
+
     /// Resolves the default package once, so a service that cannot run its
     /// own default bundle fails at construction rather than on the first
     /// receipt.
@@ -4800,6 +4843,7 @@ impl PipelineServiceBuilder {
             authority: self.authority,
             privacy: self.privacy,
             payout: self.payout,
+            novelty_utility_checks: self.novelty_utility_checks,
         };
         service
             .construct(service.default_package.clone())
@@ -4828,6 +4872,7 @@ pub struct PipelineService {
     authority: Option<Arc<dyn PipelineAuthorityProvider>>,
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
+    novelty_utility_checks: PipelineNoveltyUtilityChecks,
 }
 
 impl PipelineService {
@@ -4898,6 +4943,12 @@ impl PipelineService {
             .as_ref()
             .filter(|(_, config)| config.enabled)
             .map(|(_, config)| config.confirmation_interval)
+    }
+
+    /// The configuration of `main`'s `NoveltyUtility` credit checks this
+    /// service applies (`PipelineServiceBuilder::with_novelty_utility_checks`).
+    pub fn novelty_utility_checks(&self) -> &PipelineNoveltyUtilityChecks {
+        &self.novelty_utility_checks
     }
 
     /// The NEAR credit contract an enabled payout names
@@ -7741,6 +7792,35 @@ impl PipelineService {
             // Dropping the transaction rolls it back: nothing was written.
             return Ok(InternalCreditResult::Inoperable);
         }
+        // Rulings T15-6 and T15-12: `main` appends a `NoveltyUtility` event
+        // only when its credit checks pass. A compatibility leg one of them
+        // refuses completes here with no ledger row, under `main`'s label;
+        // the Score decision stays as it was.
+        if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
+            if let Some(label) = self
+                .novelty_utility_withheld_reason(&tx, run, amount.get())
+                .await?
+            {
+                update_settlement_on_tx(
+                    &tx,
+                    run,
+                    lease_token,
+                    &settlement.instrument_id,
+                    SettlementUpdate {
+                        operation_state: "complete",
+                        result_ref_hash: Some(receipt.result_ref_hash()),
+                        external_receipt_hash: receipt.external_receipt_hash(),
+                        credit_event_id: None,
+                        settlement_batch_id: None,
+                        payout_state: None,
+                        error_label: Some(label),
+                    },
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(InternalCreditResult::Complete);
+            }
+        }
         tx.execute(
             "INSERT INTO trace_credit_ledger (
                 tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
@@ -7835,6 +7915,96 @@ impl PipelineService {
         .await?;
         tx.commit().await?;
         Ok(InternalCreditResult::Complete)
+    }
+
+    /// Rulings T15-6 and T15-8 to T15-11: `main`'s `NoveltyUtility` credit
+    /// checks (`attempt_emit_novelty_utility_credit` in
+    /// `trace-commons-ingest.rs`, and what it calls), in `main`'s order, for
+    /// a compatibility leg about to write its ledger row, on the leg's own
+    /// credit transaction. `Some` is the label the leg is withheld under,
+    /// the label `main` records on its gate decision for the same refusal.
+    ///
+    /// - The production gate: with `require_production_gate`, the service's
+    ///   scorer and embedder must be production-qualified, where `main`
+    ///   requires a production gate service (`non_production_gate`).
+    /// - The central issuer: with a non-empty issuer allowlist, a positive
+    ///   award needs the pipeline's configured issuer on it, where `main`
+    ///   needs its calling gate worker there (`central_issuer_denied`).
+    /// - `main` also applies its calling token's scoped allowlists. Settle
+    ///   has no calling token, so that check does not apply here (Ruling
+    ///   T15-9); the tenant authority's own allowlists were applied to this
+    ///   submission at the receipt (`SubmissionAuthority::permits`).
+    /// - The tenant policy comes from the authority provider, the source the
+    ///   receipt uses. No authority for the tenant, no policy while one is
+    ///   required, or a submission row whose scopes or uses do not decode is
+    ///   `credit_check_error`, where `main` fails the call; a withheld leg is
+    ///   never a charged Settle error.
+    /// - The submission's allowed uses must include model training, and its
+    ///   consent scopes and model training must be inside the policy's
+    ///   non-empty allowlists (`policy_mismatch`). `main` also requires the
+    ///   submission to be `accepted`; the leg's operability re-check, which
+    ///   runs first, already does (Ruling T15-8).
+    async fn novelty_utility_withheld_reason(
+        &self,
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        amount_microcredits: u64,
+    ) -> anyhow::Result<Option<&'static str>> {
+        let checks = &self.novelty_utility_checks;
+        if checks.require_production_gate {
+            let qualification = self.dependency_qualification();
+            if !(qualification.scorer && qualification.embedder) {
+                return Ok(Some(PIPELINE_NOVELTY_UTILITY_NON_PRODUCTION_GATE_LABEL));
+            }
+        }
+        if amount_microcredits > 0
+            && !checks.central_issuer_principal_refs.is_empty()
+            && !checks
+                .issuer_principal_ref
+                .as_ref()
+                .is_some_and(|issuer| checks.central_issuer_principal_refs.contains(issuer))
+        {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL));
+        }
+        let Some(authority) = self
+            .authority
+            .as_ref()
+            .and_then(|provider| provider.authority_for_tenant(&run.tenant_id))
+        else {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
+        };
+        if authority.policy.is_none() && authority.require_policy {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
+        }
+        let row = tx
+            .query_one(
+                "SELECT consent_scopes, allowed_uses FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?;
+        let (Ok(consent_scopes), Ok(allowed_uses)) = (
+            serde_json::from_value::<Vec<ConsentScope>>(row.get("consent_scopes")),
+            serde_json::from_value::<Vec<TraceAllowedUse>>(row.get("allowed_uses")),
+        ) else {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
+        };
+        let required = TraceAllowedUse::ModelTraining;
+        if !allowed_uses.contains(&required) {
+            return Ok(Some(PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL));
+        }
+        if let Some(policy) = authority.policy.as_ref() {
+            let scope_outside = !policy.allowed_consent_scopes.is_empty()
+                && !consent_scopes
+                    .iter()
+                    .any(|scope| policy.allowed_consent_scopes.contains(scope));
+            let use_outside =
+                !policy.allowed_uses.is_empty() && !policy.allowed_uses.contains(&required);
+            if scope_outside || use_outside {
+                return Ok(Some(PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL));
+            }
+        }
+        Ok(None)
     }
 
     /// Composes the account's pending pipeline credit events for
