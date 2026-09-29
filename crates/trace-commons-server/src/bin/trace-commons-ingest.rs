@@ -16221,6 +16221,7 @@ async fn resolve_account_ctx_native(
             // sessions. A public id; it confers no strength (see below).
             auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
+            session_token_hash: Some(token_hash),
         },
         rotated,
         session.binding,
@@ -16287,6 +16288,7 @@ async fn resolve_account_ctx_cookie(
             // Session strength for the authenticator-change gate: `'web'` is weak,
             // `'passkey'`/`'near'` are strong.
             client_kind: session.client_kind,
+            session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
         session.binding,
@@ -19497,8 +19499,15 @@ async fn account_passkey_remove_handler(
 
     let db = account_db(state.as_ref())?;
 
+    // Z2 S2: every live session this passkey minted is revoked with it, browser
+    // and native, except the session making this request.
     let result = db
-        .revoke_account_credential(&ctx.tenant_id, ctx.account_id.as_uuid(), &credential_id)
+        .revoke_account_credential_sparing_session(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &credential_id,
+            ctx.session_token_hash.as_deref(),
+        )
         .await
         .map_err(internal_error)?;
 

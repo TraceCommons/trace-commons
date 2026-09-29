@@ -26,26 +26,50 @@ const LOGIN_FINISH: &str = "/v1/account/native/passkey/login/finish";
 const REGISTER_START: &str = "/v1/account/passkeys/native/register/start";
 const REGISTER_FINISH: &str = "/v1/account/passkeys/native/register/finish";
 
+/// A test state together with the temp directory it writes under. The
+/// directory lives exactly as long as the state and is removed when this is
+/// dropped. Derefs to the `Arc<AppState>` every helper takes.
+struct NativeState {
+    state: Arc<AppState>,
+    _root: tempfile::TempDir,
+}
+
+impl std::ops::Deref for NativeState {
+    type Target = Arc<AppState>;
+
+    fn deref(&self) -> &Arc<AppState> {
+        &self.state
+    }
+}
+
+impl NativeState {
+    /// Mutate the state before any clone of it escapes.
+    fn configure(&mut self, change: impl FnOnce(&mut AppState)) {
+        change(Arc::get_mut(&mut self.state).expect("fresh state is uniquely owned"));
+    }
+}
+
 /// A state with the test relying party and the given unbound ceiling.
-fn native_state(db: Option<Arc<dyn Database>>, ceiling: Option<i64>) -> Arc<AppState> {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let mut state = test_state_with_webauthn(temp.keep(), db);
-    Arc::get_mut(&mut state)
-        .expect("fresh state is uniquely owned")
-        .account_unbound_ceiling = Arc::new(match ceiling {
-        Some(limit) => UnboundAccountCeiling::with_limit(limit),
-        None => UnboundAccountCeiling::disabled(),
+fn native_state(db: Option<Arc<dyn Database>>, ceiling: Option<i64>) -> NativeState {
+    let root = tempfile::tempdir().expect("temp dir");
+    let mut state = NativeState {
+        state: test_state_with_webauthn(root.path().to_path_buf(), db),
+        _root: root,
+    };
+    state.configure(|state| {
+        state.account_unbound_ceiling = Arc::new(match ceiling {
+            Some(limit) => UnboundAccountCeiling::with_limit(limit),
+            None => UnboundAccountCeiling::disabled(),
+        })
     });
     state
 }
 
 /// A second state over the same database and the SAME ceremony store, with a
 /// different ceiling: a ceremony started on `from` can be finished on it.
-fn sibling_state(from: &Arc<AppState>, ceiling: Option<i64>) -> Arc<AppState> {
+fn sibling_state(from: &Arc<AppState>, ceiling: Option<i64>) -> NativeState {
     let mut state = native_state(from.db_mirror.clone(), ceiling);
-    Arc::get_mut(&mut state)
-        .expect("fresh state is uniquely owned")
-        .account_ceremony_store = from.account_ceremony_store.clone();
+    state.configure(|state| state.account_ceremony_store = from.account_ceremony_store.clone());
     state
 }
 
@@ -326,7 +350,7 @@ async fn bind_in_place(admin: &deadpool_postgres::Object, created: &Created) {
         .expect("bind");
 }
 
-async fn pg_state(ceiling_headroom: Option<i64>) -> Option<(Arc<PgBackend>, Arc<AppState>)> {
+async fn pg_state(ceiling_headroom: Option<i64>) -> Option<(Arc<PgBackend>, NativeState)> {
     let backend = postgres_backend_for_ingest_test().await?;
     reset_account_rate_limiter_for_test();
     let current = backend
@@ -388,7 +412,7 @@ async fn native_refusals_are_byte_identical() {
 
     // No relying party: both starts refuse the same way.
     let mut no_rp = native_state(None, Some(10));
-    Arc::get_mut(&mut no_rp).unwrap().account_webauthn = None;
+    no_rp.configure(|state| state.account_webauthn = None);
     for uri in [CREATE_START, LOGIN_START] {
         let reply = send(&no_rp, post(uri, &serde_json::json!({}), None)).await;
         assert_uniform_deny(&reply, uri).await;
@@ -965,6 +989,128 @@ async fn pg_removing_a_passkey_revokes_its_native_sessions() {
         reply.status,
         StatusCode::OK,
         "a session the passkey did not mint survives"
+    );
+
+    drop_tenant(&admin, &created.tenant).await;
+}
+
+fn cookie_get(uri: &str, cookie_value: &str) -> axum::http::Request<Body> {
+    axum::http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(
+            axum::http::header::COOKIE,
+            format!("tc_account_session={cookie_value}"),
+        )
+        .body(Body::empty())
+        .expect("request")
+}
+
+/// Removing a passkey revokes EVERY live session it minted, browser and
+/// native, except the session making the removal request. Sessions minted by
+/// another passkey survive.
+#[tokio::test]
+async fn pg_removing_a_passkey_revokes_every_session_it_minted_but_the_callers() {
+    let Some((backend, state)) = pg_state(Some(5)).await else {
+        return;
+    };
+    let admin = pg_admin(&backend).await;
+    let mut created = create_native_account(&state).await;
+    bind_in_place(&admin, &created).await;
+
+    // P is the created passkey. The caller is a strong browser session from P.
+    let caller = passkey_login_cookie_value(
+        &state,
+        &mut created.authenticator,
+        &created.credential_id,
+        created.account_id,
+    )
+    .await;
+    // A second passkey Q, added from the caller's strong session.
+    let (mut q_authenticator, q_credential) = enroll_passkey_for_token(&state, &caller).await;
+    // Another browser session minted by P, and one minted by Q.
+    let other_browser_from_p = passkey_login_cookie_value(
+        &state,
+        &mut created.authenticator,
+        &created.credential_id,
+        created.account_id,
+    )
+    .await;
+    let browser_from_q = passkey_login_cookie_value(
+        &state,
+        &mut q_authenticator,
+        &q_credential,
+        created.account_id,
+    )
+    .await;
+    // A native session minted by P (besides the create-time token).
+    let native_from_p = native_login(&state, &mut created).await;
+    assert_eq!(native_from_p.status, StatusCode::OK);
+    let native_from_p = native_from_p.json()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Every session is live before the removal.
+    for request in [
+        cookie_get("/v1/account/binding", &caller),
+        cookie_get("/v1/account/binding", &other_browser_from_p),
+        cookie_get("/v1/account/binding", &browser_from_q),
+        get("/v1/account/binding", &native_from_p),
+        get("/v1/account/binding", &created.token),
+    ] {
+        assert_eq!(send(&state, request).await.status, StatusCode::OK);
+    }
+
+    let removed = send(
+        &state,
+        axum::http::Request::builder()
+            .method("DELETE")
+            .uri(format!("/v1/account/passkeys/{}", created.credential_id))
+            .header(
+                axum::http::header::COOKIE,
+                format!("tc_account_session={caller}"),
+            )
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        removed.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&removed.bytes)
+    );
+
+    let status = |request| {
+        let state = &state;
+        async move { send(state, request).await.status }
+    };
+    assert_eq!(
+        status(cookie_get("/v1/account/binding", &other_browser_from_p)).await,
+        StatusCode::UNAUTHORIZED,
+        "a browser session minted by the removed passkey is revoked"
+    );
+    assert_eq!(
+        status(get("/v1/account/binding", &native_from_p)).await,
+        StatusCode::UNAUTHORIZED,
+        "a native session minted by the removed passkey is revoked"
+    );
+    assert_eq!(
+        status(get("/v1/account/binding", &created.token)).await,
+        StatusCode::UNAUTHORIZED,
+        "the create-time native token is revoked"
+    );
+    assert_eq!(
+        status(cookie_get("/v1/account/binding", &caller)).await,
+        StatusCode::OK,
+        "the caller's own session survives"
+    );
+    assert_eq!(
+        status(cookie_get("/v1/account/binding", &browser_from_q)).await,
+        StatusCode::OK,
+        "a session minted by a different passkey survives"
     );
 
     drop_tenant(&admin, &created.tenant).await;

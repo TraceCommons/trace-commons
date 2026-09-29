@@ -1389,9 +1389,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// for an unknown / already-revoked / other-account credential. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke a credential
     /// they do not own; the remaining-count lets the caller refuse to remove the
-    /// last passkey. When a credential is removed, every live NATIVE session it
-    /// minted (`client_kind = 'native'`, `auth_credential_id` = that
-    /// credential) is revoked in the same transaction.
+    /// last passkey. When a credential is removed, every live session it
+    /// minted (`auth_credential_id` = that credential, browser or native) is
+    /// revoked in the same transaction. See
+    /// [`Database::revoke_account_credential_sparing_session`], which the
+    /// removal route calls to keep the caller's own session.
     async fn revoke_account_credential(
         &self,
         _tenant_id: &str,
@@ -1400,6 +1402,22 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<RevokeCredentialResult, DatabaseError> {
         Err(DatabaseError::Pool(
             "revoke_account_credential not implemented".to_string(),
+        ))
+    }
+
+    /// [`Database::revoke_account_credential`], sparing one session: the one
+    /// whose current or within-grace previous `token_hash` is
+    /// `caller_token_hash` (the session making the removal request). `None`
+    /// spares nothing. Sessions with no recorded credential are never touched.
+    async fn revoke_account_credential_sparing_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+        _caller_token_hash: Option<&str>,
+    ) -> Result<RevokeCredentialResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_credential_sparing_session not implemented".to_string(),
         ))
     }
 

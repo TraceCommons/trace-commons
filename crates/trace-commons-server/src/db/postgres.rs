@@ -4311,6 +4311,17 @@ impl Database for PgBackend {
         account_id: Uuid,
         credential_id: &str,
     ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
+        self.revoke_account_credential_sparing_session(tenant_id, account_id, credential_id, None)
+            .await
+    }
+
+    async fn revoke_account_credential_sparing_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        caller_token_hash: Option<&str>,
+    ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -4329,25 +4340,25 @@ impl Database for PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         if removed > 0 {
-            // Z2 S2: a native `tcn1_` session minted by this credential (native
-            // passkey create or sign-in) dies with it, in the same
-            // transaction, so no native token outlives the removal of the
-            // passkey that authenticated it. Browser `passkey` cookie sessions
-            // keep today's behaviour: removal is made FROM a strong browser
-            // session, often the one this credential minted.
+            // Z2 S2: every live session this credential minted -- a browser
+            // `passkey` cookie or a native `tcn1_` from passkey create or
+            // sign-in -- dies with it, in the same transaction, EXCEPT the
+            // session making the removal request (`caller_token_hash`). The
+            // caller is matched on its current token or its within-grace
+            // previous one, since rotation may have fired on this very
+            // request. A session with no recorded credential (loopback, NEAR
+            // AI, device-link, or one minted before credentials were recorded)
+            // is not touched.
             tx.execute(
                 "UPDATE trace_sessions
                     SET revoked_at = now()
                   WHERE tenant_id = trace_current_tenant_id()
                     AND account_id = $1
                     AND auth_credential_id = $2
-                    AND client_kind = $3
-                    AND revoked_at IS NULL",
-                &[
-                    &account_id,
-                    &credential_id,
-                    &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
-                ],
+                    AND revoked_at IS NULL
+                    AND ($3::text IS NULL
+                         OR NOT (token_hash = $3 OR COALESCE(prev_token_hash, '') = $3))",
+                &[&account_id, &credential_id, &caller_token_hash],
             )
             .await
             .map_err(DatabaseError::Postgres)?;
