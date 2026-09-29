@@ -272,6 +272,31 @@ SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindi
        has_function_privilege('<ingest runtime login>', 'public.trace_unbound_passkey_account_count()', 'EXECUTE');
 ```
 
+### Connect near.ai: binding a passkey account (Z2 S3)
+
+An unbound account attaches its NEAR AI identity through
+`POST /v1/account/near-ai/provision/bind/{start,finish}`, behind the account
+middleware with a native (`tcn1_`) session. It runs the NEAR AI login
+provisioning ceremony and needs exactly what that path needs (the provisioning
+switch, the admission gate, the NEAR account identity, the published issuer,
+and the login-resolver pool); there is no new setting. It uses the v2
+readiness, so no witness JSON is required.
+
+V100 grants `trace_ingest_runtime` `UPDATE (state, bound_at)` on
+`trace_account_bindings` and nothing else. An ingest login that holds its
+grants some other way needs it, or every bind fails and leaves the account
+`unbound`:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'state', 'UPDATE'),
+       has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'bound_at', 'UPDATE');
+```
+
+When the NEAR AI account already belongs to another commons account, the bind
+is refused: the passkey account is closed (its sessions and passkey revoked)
+and the response carries the existing account's session. Nothing moves between
+the two accounts; folding the passkey into the existing account is not built.
+
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
 NEAR enrollment and login require the NEAR configuration. All **three** of these

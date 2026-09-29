@@ -132,6 +132,8 @@ struct Harness {
     subject: String,
     near_ai_base: String,
     _env: ProvisioningEnv,
+    // The state writes under this; it lives exactly as long as the state.
+    _root: tempfile::TempDir,
 }
 
 impl Harness {
@@ -158,7 +160,7 @@ async fn harness() -> Option<Harness> {
     let subject = fresh_subject();
     let (near_ai_base, hits) = stub_near_ai(subject.clone()).await;
     let temp = tempfile::tempdir().expect("temp dir");
-    let mut state = test_state(temp.keep());
+    let mut state = test_state(temp.path().to_path_buf());
     let settings = Arc::get_mut(&mut state).expect("fresh state is uniquely owned");
     settings.near_provisioning_enabled = true;
     settings.near_provisioning_admission_ready = true;
@@ -172,6 +174,7 @@ async fn harness() -> Option<Harness> {
         subject,
         near_ai_base,
         _env: env,
+        _root: temp,
     })
 }
 
