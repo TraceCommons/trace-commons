@@ -20,6 +20,16 @@ use crate::trace_corpus_storage::TraceCreditSettlementNearStatus;
 
 pub const PIPELINE_SETTLEMENT_POLICY_VERSION: &str = "pipeline-internal-v1";
 pub const PIPELINE_CREDIT_REASON: &str = "pipeline_score";
+/// The ledger `actor_role` of a minimal-family (`PipelineScore`) Trace
+/// Credit event, whose event type is `accepted`.
+pub const PIPELINE_CREDIT_ACTOR_ROLE: &str = "pipeline_worker";
+/// Ruling T15-1: the ledger `actor_role` of a compatibility `NoveltyUtility`
+/// event -- the role `main`'s gate path records for the same event, its
+/// caller's (`vector_worker`). `main`'s database credit readers parse the
+/// role of every event type they map to a legacy event and refuse the whole
+/// read on one that is not a token role, so `pipeline_worker` on this event
+/// type would fail every credit, status, and withdrawal read of the tenant.
+pub const PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE: &str = "vector_worker";
 pub const PIPELINE_TEST_CREDIT_CAP_MICROCREDITS: u64 = 10_000_000;
 
 #[derive(Default)]

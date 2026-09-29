@@ -49,6 +49,7 @@ use trace_commons_server::versioned_pipeline_authority::{
 use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
 };
+use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
@@ -283,19 +284,25 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
         .with_scorer(scorer)
         .with_embedder(embedder)
         .with_object_store_name(context.object_store_name)
-        .with_authority(Arc::new(StaticPipelineAuthorityProvider::test_only(
-            SubmissionAuthority {
-                tenant: SubmissionAllowlists::default(),
-                policy: None,
-                require_policy: false,
-            },
-        )))
+        .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary));
         if let Some(crash_point) = self.crash_point {
             builder = builder.with_crash_point(crash_point);
         }
         Ok(Arc::new(builder.build()?))
     }
+}
+
+/// The authority every test service in this file holds: each tenant gets
+/// empty allowlists, which restrict nothing, and no tenant policy.
+fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
+    Arc::new(StaticPipelineAuthorityProvider::test_only(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: None,
+            require_policy: false,
+        },
+    ))
 }
 
 /// Builds a `PipelineService` through the same injection seam ingest's real
@@ -1917,14 +1924,27 @@ async fn completed_pipeline_run(
     tenant: &str,
     principal: &str,
 ) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let run = completed_run_of(service, tenant, principal, &envelope).await;
+    assert_eq!(run.index_write_state, "complete");
+    run
+}
+
+/// `envelope`, received from `principal` and run through Review, Score, and
+/// Settle: the run is complete.
+async fn completed_run_of(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+    envelope: &TraceContributionEnvelope,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
     service
         .register_default_bundle(tenant)
         .await
         .expect("register the bundle");
-    let mut envelope = sample_envelope().await;
-    envelope.submission_id = Uuid::new_v4();
-    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-    let raw = serde_json::to_vec(&envelope).unwrap();
+    let raw = serde_json::to_vec(envelope).unwrap();
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
@@ -1933,7 +1953,7 @@ async fn completed_pipeline_run(
             counts_toward_quota: true,
             request_idempotency_key: &key,
             request_bytes: &raw,
-            server_envelope: &envelope,
+            server_envelope: envelope,
             residual_risk_basis: &[],
             limits: PipelineAdmissionLimits {
                 max_per_tenant_per_hour: 0,
@@ -1958,7 +1978,6 @@ async fn completed_pipeline_run(
         .unwrap()
         .expect("the run exists");
     assert_eq!(run.state, PipelineRunState::Complete);
-    assert_eq!(run.index_write_state, "complete");
     run
 }
 
@@ -3177,4 +3196,265 @@ async fn pipeline_product_admin_reads_and_score_attestation_are_scoped_to_their_
     let (status, other) = get(fixture.base.other_token.clone(), attestation_uri).await;
     assert_eq!(status, StatusCode::OK, "{other}");
     assert_eq!(decode(&other)["submissions"], serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// The compatibility bundle's Trace Credit, read by `main`'s credit readers.
+// ---------------------------------------------------------------------------
+
+/// P5: `TestAssembler` with the compatibility bundle instead of the minimal
+/// one: `CompatibilityBundleConfig::local_reference()` with the given
+/// `NoveltyUtility` delta, the reference scorer and embedder, the isolated
+/// index, one `trace_credit` recording adapter on payout rail `none`, and
+/// the given privacy boundary. Payout stays disabled (the default).
+struct CompatibilityTestAssembler {
+    index: Arc<IsolatedPipelineIndex>,
+    novelty_utility_microcredits: u64,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+}
+
+impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        let scorer = Arc::new(ReferencePerplexityScorer::new());
+        let embedder = Arc::new(ReferenceEmbedder::new());
+        let mut config = CompatibilityBundleConfig::local_reference();
+        config.novelty_utility_microcredits = self.novelty_utility_microcredits;
+        let package = MinimalPolicyBundle::compatibility_package(
+            &config,
+            scorer.as_ref(),
+            embedder.as_ref(),
+        )?;
+        let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_compatibility_http_test_only",
+            "none",
+        );
+        let registry = SettlementAdapterRegistry::new(vec![trace_credit])?;
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::from([(
+                InstrumentId::trace_credit().as_str().to_string(),
+                AtomicUnits::from_raw(u128::MAX),
+            )]),
+        };
+        let service = PipelineServiceBuilder::new(
+            context.backend,
+            context.artifact_store,
+            package,
+            self.index.clone(),
+            self.index.clone(),
+            registry,
+            caps,
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_object_store_name(context.object_store_name)
+        .with_authority(allow_all_test_authority())
+        .with_privacy(self.privacy.clone())
+        .build()?;
+        Ok(Arc::new(service))
+    }
+}
+
+/// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
+/// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
+/// real boot uses, over `configured_store`.
+fn assemble_compatibility_pipeline_service(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    index: Arc<IsolatedPipelineIndex>,
+    novelty_utility_microcredits: u64,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+) -> Arc<PipelineService> {
+    let assembler = CompatibilityTestAssembler {
+        index,
+        novelty_utility_microcredits,
+        privacy,
+    };
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    assemble_ingest_pipeline_runtime(
+        Some(&assembler),
+        Some(&connections),
+        Some(configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
+        true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+    )
+    .expect("assemble the injected compatibility pipeline runtime")
+    .expect("an assembler was given, so a service is returned")
+}
+
+/// A metadata-only, Low-risk envelope whose consent allows model training,
+/// the allowed use `main`'s `NoveltyUtility` credit requires.
+async fn model_training_envelope() -> TraceContributionEnvelope {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+    envelope
+}
+
+/// `method uri` through `app()` with `headers` (and a JSON `body`), returning
+/// the status and the body, parsed as JSON when it is JSON.
+async fn route_request(
+    state: Arc<AppState>,
+    method: &str,
+    uri: &str,
+    headers: HeaderMap,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let builder = axum::http::Request::builder().method(method).uri(uri);
+    let mut request = match body {
+        Some(body) => builder
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string())),
+        None => builder.body(axum::body::Body::empty()),
+    }
+    .unwrap();
+    request.headers_mut().extend(headers);
+    let response = app(state).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    (status, body)
+}
+
+/// Ruling T15-1: a compatibility run's `NoveltyUtility` ledger row carries
+/// the actor role `main`'s gate path records for that event
+/// (`vector_worker`). `main`'s database credit readers parse the role of
+/// every event type they map, and refuse the whole read on a role that is
+/// not a token role. With contributor and reviewer reads from PostgreSQL, as
+/// the pilot runs, a tenant with compatibility runs with a positive delta
+/// gets 200 from the submission-status route, the credit route, and both
+/// withdrawal routes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_credit_rows_stay_readable_by_mains_database_reads() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-reads-{suffix}");
+    let token = format!("token-compat-reads-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        Some(artifacts),
+        true,
+        true,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+    let principal = static_token_principal_ref(&token);
+    let first = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let second = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+
+    let (status, documents) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/contributors/me/submission-status",
+        auth_headers(&token),
+        Some(serde_json::json!({
+            "submission_ids": [first.submission_id, second.submission_id],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{documents}");
+    assert_eq!(documents.as_array().map(Vec::len), Some(2), "{documents}");
+    let (status, credit) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/contributors/me/credit",
+        auth_headers(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{credit}");
+    assert_eq!(
+        credit["credit_points_ledger"].as_f64(),
+        Some(5.0),
+        "both runs' events count: {credit}"
+    );
+    let session = account_session_headers(&state, &token).await;
+    let (status, withdrawal) = route_request(
+        state.clone(),
+        "POST",
+        &format!(
+            "/v1/contributors/me/pipeline-submissions/{}/withdraw",
+            first.submission_id
+        ),
+        session.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{withdrawal}");
+    let (status, withdrawal) = route_request(
+        state.clone(),
+        "POST",
+        &format!("/v1/account/traces/{}/withdraw", second.submission_id),
+        session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{withdrawal}");
+
+    // The rows the routes above read.
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let rows = tx
+        .query(
+            "SELECT event_type, actor_role FROM trace_credit_ledger WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect::<Vec<_>>();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        rows,
+        vec![("novelty_utility".to_string(), "vector_worker".to_string()); 2]
+    );
 }

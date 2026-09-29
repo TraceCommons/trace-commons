@@ -57,7 +57,8 @@ use crate::versioned_pipeline_bundle::{
     pipeline_operation_ref, pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::{
-    NearPayoutAdapter, PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION,
+    NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
+    PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
     SettlementAdapterRegistry, credit_account_hash, disabled_near_call, issuer_approval_hash,
     microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_settlement_batch_id,
@@ -7658,10 +7659,17 @@ impl PipelineService {
         // `PipelineScore` keeps PR 2's ledger event (`Accepted`); a
         // compatibility run's `NoveltyUtility` leg is main's gate-emitted,
         // never-settled event, which `trace_credit_event_type_is_settlement_eligible`
-        // in `trace-commons-ingest.rs` excludes.
-        let ledger_event_type = match trace_credit_event {
-            PipelineTraceCreditEvent::PipelineScore => TraceCreditEventType::Accepted,
-            PipelineTraceCreditEvent::NoveltyUtility => TraceCreditEventType::NoveltyUtility,
+        // in `trace-commons-ingest.rs` excludes. Ruling T15-1: the actor
+        // role goes with the event type, so `main`'s readers can parse a
+        // `NoveltyUtility` row.
+        let (ledger_event_type, actor_role) = match trace_credit_event {
+            PipelineTraceCreditEvent::PipelineScore => {
+                (TraceCreditEventType::Accepted, PIPELINE_CREDIT_ACTOR_ROLE)
+            }
+            PipelineTraceCreditEvent::NoveltyUtility => (
+                TraceCreditEventType::NoveltyUtility,
+                PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
+            ),
         };
         let ledger_event_type_label = enum_string(&ledger_event_type)?;
         let mut client = self.backend.trace_pool().get().await?;
@@ -7730,7 +7738,7 @@ impl PipelineService {
                 event_type, points_delta, reason, external_ref, actor_principal_ref,
                 actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id
              ) VALUES (
-                $1,$2,$3,$4,$5,$12,$6,$7,$8,$5,'pipeline_worker','pending',$9,$10,$11
+                $1,$2,$3,$4,$5,$12,$6,$7,$8,$5,$13,'pending',$9,$10,$11
              )
              ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
             &[
@@ -7746,6 +7754,7 @@ impl PipelineService {
                 &score_outcome_id,
                 &settlement.instrument_id,
                 &ledger_event_type_label,
+                &actor_role,
             ],
         )
         .await?;
