@@ -38,6 +38,7 @@ the link.
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
+| Sending a native-app user to the browser passkey step-up page (URL contract, origin list) | [`./native-step-up-page.md`](./native-step-up-page.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
 | Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
 | Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |
