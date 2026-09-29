@@ -254,6 +254,15 @@ pilot notes on `/proc/<MainPID>/environ`.
    reproduced locally: V90 failed on the second grantor's grant, and applied
    cleanly after the `REVOKE … CASCADE`.
 7. Disk and binary backups are in place, as in `deployment.md`.
+8. **For a target with #1142: the runtime can insert tombstone rows.** From
+   #1142 the account withdraw route writes a `trace_tombstones` row, as an
+   operator revocation already does. If the runtime cannot insert it, every
+   account withdrawal returns 500. As `app`:
+   ```sql
+   SELECT has_table_privilege('trace_ingest_runtime', 'trace_tombstones', 'INSERT');
+   ```
+   It must return `t`. If it returns `f`, grant it as `app` before
+   installing: `GRANT INSERT ON trace_tombstones TO trace_ingest_runtime;`.
 
 ## Backups
 
@@ -368,7 +377,7 @@ sessions.
    legacy prefix (row 4 of What breaks).
 
    After the step 6 withdrawal, `rollback` reports `file_tombstone_count`
-   equal to `db_tombstone_count`. On a target with #1112 but without #TOMBSTONE_PR,
+   equal to `db_tombstone_count`. On a target with #1112 but without #1142,
    it reports `missing_file_tombstones_in_db=1` instead: the withdrawal wrote
    the file tombstone but not its DB row. See row 13 of What breaks and
    [Withdrawal tombstone repair](#withdrawal-tombstone-repair).
@@ -393,9 +402,9 @@ sessions.
      database but not the file-side record, so the file still says
      `accepted`. See row 12 of What breaks. With #1112, these gaps after a
      withdrawal are a finding.
-   - `missing_tombstone_submission_ids_in_db=<n>` (from #TOMBSTONE_PR): file
+   - `missing_tombstone_submission_ids_in_db=<n>` (from #1142): file
      revocation tombstones with no DB row. After a withdrawal made on a build
-     with #1112 but without #TOMBSTONE_PR, this is expected until the tombstone repair
+     with #1112 but without #1142, this is expected until the tombstone repair
      runs; after the repair, it is a finding.
 
    Record the full `blocking_gaps` for each tenant, so a later run can be
@@ -489,7 +498,7 @@ the cutover itself.
 ## Withdrawal tombstone repair
 
 A withdrawal made through the account route on a build with #1112 but
-without #TOMBSTONE_PR (on the pilot, from 2026-09-29 11:41Z until #TOMBSTONE_PR is deployed)
+without #1142 (on the pilot, from 2026-09-29 11:41Z until #1142 is deployed)
 wrote the file revocation tombstone and no `trace_tombstones` row. The
 submission is `revoked` on both sides and its content is deleted; only the DB
 tombstone row is missing, so the file and DB tombstone records disagree. The
@@ -502,9 +511,9 @@ summary hashes, and time, under the deterministic tombstone id the revocation
 mirror uses. It is tenant-scoped (the admin token's tenant only), dry-run by
 default, and idempotent. It needs no migration: `trace_tombstones` is a V1
 table that the operator revocation path already writes on the same runtime
-pool.
+pool. Run pre-check 8 before installing #1142.
 
-**Run it after #TOMBSTONE_PR is deployed**, for each tenant the rollback drill reports
+**Run it after #1142 is deployed**, for each tenant the rollback drill reports
 `missing_file_tombstones_in_db` for, starting with the smoke tenant:
 
 ```bash
@@ -568,7 +577,7 @@ refused with 422 rather than read as a dry run.
 | 10 | Drill responses: `purpose` became `purpose_hash` (#1044); rollback drill adds `legacy_submit_audit_row_count` | anyone parsing drill JSON | No in-repo script reads `purpose`. `smoke-gate.sh` and `rotate-kek.sh` read only `ready`, `blocking_gaps`, `success` and `required_checks`. Update any out-of-repo parser. |
 | 11 | Out-of-repo deploy scripts are pinned to `5f239be4` / `EXPECT_MAX_MIGRATION=74` | operators | Re-pin to the target, with the maximum at 91 |
 | 12 | After a withdrawal, the file-side submission record still says `accepted`, so db-reconciliation reports `status_mismatches` and reader-parity failures for that tenant | operators | Present on `5f239be4`, and on `main` up to #1112, which writes the file tombstone and marks the file records revoked. With #1112 in the target, new withdrawals leave no such status gap. A withdrawal made before it keeps the gap: read it as that withdrawal, and check that the DB says `revoked`. |
-| 13 | After a withdrawal, the rollback drill reports `missing_file_tombstones_in_db=1` (`file_tombstone_count` one above `db_tombstone_count`) | operators | Present on `main` from #1112 up to #TOMBSTONE_PR: the account route wrote the file tombstone and not its `trace_tombstones` row. #TOMBSTONE_PR writes both, and db-reconciliation now reports the same difference as `missing_tombstone_submission_ids_in_db`. Withdrawals made in between keep the difference until the [tombstone repair](#withdrawal-tombstone-repair) runs for their tenant. The pilot has at least one: the smoke tenant from the `d8fb248b` cutover smoke test. |
+| 13 | After a withdrawal, the rollback drill reports `missing_file_tombstones_in_db=1` (`file_tombstone_count` one above `db_tombstone_count`) | operators | Present on `main` from #1112 up to #1142: the account route wrote the file tombstone and not its `trace_tombstones` row. #1142 writes both, and db-reconciliation now reports the same difference as `missing_tombstone_submission_ids_in_db`. Withdrawals made in between keep the difference until the [tombstone repair](#withdrawal-tombstone-repair) runs for their tenant. The pilot has at least one: the smoke tenant from the `d8fb248b` cutover smoke test. |
 
 ## Evidence
 
