@@ -36,7 +36,11 @@
 //! measurement outside the pins, a binding that does not reconcile: each
 //! answers something other than keys, and IronWire records the row as not
 //! proof. A key set is cached for [`FRESH_TTL`] and then must be earned again;
-//! a failed refresh does not extend an old one.
+//! a failed refresh does not extend an old one. A "not attested" verdict is
+//! cached for the much shorter [`NOT_ATTESTED_TTL`]. Either is cached against
+//! the digest of the pins it was reached under, so a pin change drops it at
+//! once. Refreshes are single-flight per model, and one model's slow fetch
+//! does not hold up another's.
 //!
 //! # Where the pins come from
 //!
@@ -92,6 +96,17 @@ const CONTROL: &str = "near_ai_expected_measurements";
 
 /// How long an earned key set is served before it must be earned again.
 pub const FRESH_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// How long a "not attested" verdict for a model is remembered.
+///
+/// Short on purpose. Two things can turn the verdict around: the pins
+/// catching up with a new image, which changes the pins digest and so drops
+/// the cached verdict at once whatever this says; and the report itself
+/// changing under the same pins, which only this TTL covers. It exists so
+/// that a burst of answers for a model that does not attest -- an image
+/// rollout ingest's pins have not caught up with, say -- costs one report
+/// and collateral fetch per model per interval rather than one per answer.
+pub const NOT_ATTESTED_TTL: Duration = Duration::from_secs(60);
 
 /// How old a published pin set may get before it is fetched again.
 pub const PIN_REFRESH_AFTER: Duration = Duration::from_secs(10 * 60);
@@ -417,11 +432,26 @@ struct Inner {
     now_unix: Clock,
     nonce: Nonces,
     verify: QuoteVerifier,
-    /// model -> (keys, earned at, digest of the pins they were earned under).
-    cache: Mutex<HashMap<String, (Vec<String>, u64, String)>>,
-    /// One refresh at a time, so a burst of rows for one model costs one
-    /// report fetch rather than one each.
-    refresh: tokio::sync::Mutex<()>,
+    /// model -> its last verdict, when, and under which pins.
+    cache: Mutex<HashMap<String, Remembered>>,
+    /// model -> its refresh lock. One refresh per model at a time, so a burst
+    /// of rows for one model costs one report fetch rather than one each; per
+    /// model, so a slow fetch for one does not hold up another.
+    refresh: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// A verdict worth remembering. `Unavailable` never is: it says nothing about
+/// the model, only that we could not ask.
+#[derive(Clone)]
+enum Verdict {
+    Keys(Vec<String>),
+    NotAttested,
+}
+
+struct Remembered {
+    verdict: Verdict,
+    at: u64,
+    pins_digest: String,
 }
 
 impl std::fmt::Debug for NearAiQuoteAttestor {
@@ -464,18 +494,62 @@ impl NearAiQuoteAttestor {
                 nonce,
                 verify,
                 cache: Mutex::new(HashMap::new()),
-                refresh: tokio::sync::Mutex::new(()),
+                refresh: Mutex::new(HashMap::new()),
             }),
         }
     }
 
-    /// Keys earned under exactly these pins, still inside their TTL. A set
-    /// earned under pins that have since changed is not served.
-    fn cached(&self, model: &str, now: u64, pins_digest: &str) -> Option<Vec<String>> {
+    /// A verdict reached under exactly these pins, still inside its TTL
+    /// ([`FRESH_TTL`] for keys, [`NOT_ATTESTED_TTL`] for a refusal). One
+    /// reached under pins that have since changed is not served.
+    fn cached(&self, model: &str, now: u64, pins_digest: &str) -> Option<Attestation> {
         let cache = self.inner.cache.lock().ok()?;
-        let (keys, at, digest) = cache.get(model)?;
-        (now.saturating_sub(*at) < FRESH_TTL.as_secs() && digest == pins_digest)
-            .then(|| keys.clone())
+        let remembered = cache.get(model)?;
+        if remembered.pins_digest != pins_digest {
+            return None;
+        }
+        let ttl = match remembered.verdict {
+            Verdict::Keys(_) => FRESH_TTL,
+            Verdict::NotAttested => NOT_ATTESTED_TTL,
+        };
+        if now.saturating_sub(remembered.at) >= ttl.as_secs() {
+            return None;
+        }
+        Some(match &remembered.verdict {
+            Verdict::Keys(keys) => Attestation::Keys(keys.clone()),
+            Verdict::NotAttested => Attestation::NotAttested,
+        })
+    }
+
+    /// Remember a verdict for `model`, replacing whatever was there -- never
+    /// merging, so a rotation drops the old key. `Unavailable` is not
+    /// remembered, and leaves an older entry to lapse on its own TTL.
+    fn remember(&self, model: &str, now: u64, pins_digest: &str, answer: &Attestation) {
+        let verdict = match answer {
+            Attestation::Keys(keys) => Verdict::Keys(keys.clone()),
+            Attestation::NotAttested => Verdict::NotAttested,
+            _ => return,
+        };
+        if let Ok(mut cache) = self.inner.cache.lock() {
+            cache.insert(
+                model.to_string(),
+                Remembered {
+                    verdict,
+                    at: now,
+                    pins_digest: pins_digest.to_string(),
+                },
+            );
+        }
+    }
+
+    /// The refresh lock for one model, created on first use.
+    fn refresh_lock(&self, model: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .inner
+            .refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(model.to_string()).or_default())
     }
 
     /// Earn the key set for `model` from scratch, under `pins`.
@@ -518,13 +592,7 @@ impl NearAiQuoteAttestor {
         }
         let report_data: Vec<&[u8]> = verified.iter().map(|q| q.report_data.as_slice()).collect();
         match quote_bound_keys(&claimed, &report_data, &nonce) {
-            Ok(keys) => {
-                if let Ok(mut cache) = inner.cache.lock() {
-                    // Replace, never merge: a rotation must drop the old key.
-                    cache.insert(model.to_string(), (keys.clone(), now, pins.digest.clone()));
-                }
-                Attestation::Keys(keys)
-            }
+            Ok(keys) => Attestation::Keys(keys),
             Err(_) => Attestation::NotAttested,
         }
     }
@@ -544,15 +612,20 @@ impl SignerAttestor for NearAiQuoteAttestor {
             // its budget, and it can never become `verified` from here.
             return Attestation::Unavailable;
         }
-        if let Some(keys) = self.cached(model, now, &pins.digest) {
-            return Attestation::Keys(keys);
+        if let Some(answer) = self.cached(model, now, &pins.digest) {
+            return answer;
         }
-        let _one_at_a_time = self.inner.refresh.lock().await;
-        // Somebody else may have earned it while we waited.
-        if let Some(keys) = self.cached(model, now, &pins.digest) {
-            return Attestation::Keys(keys);
+        let lock = self.refresh_lock(model);
+        let _one_at_a_time = lock.lock().await;
+        // Somebody else may have answered it while we waited -- keys or a
+        // refusal alike, or a burst for an unattested model would still
+        // fetch once per caller, one after another.
+        if let Some(answer) = self.cached(model, now, &pins.digest) {
+            return answer;
         }
-        self.earn(model, now, &pins).await
+        let answer = self.earn(model, now, &pins).await;
+        self.remember(model, now, &pins.digest, &answer);
+        answer
     }
 }
 
@@ -855,6 +928,214 @@ mod tests {
         clock.fetch_add(FRESH_TTL.as_secs(), Ordering::SeqCst);
         let _ = attestor.model_keys(NEAR_AI_BACKEND, MODEL).await;
         assert_eq!(reports.load(Ordering::SeqCst), 2, "refetched past the TTL");
+    }
+
+    /// A "not attested" verdict is remembered too, briefly: during an image
+    /// rollout that ingest's pins have not caught up with, a burst of answers
+    /// for the model costs one report fetch, not one each. Past its TTL it is
+    /// asked again.
+    #[tokio::test]
+    async fn a_not_attested_verdict_is_cached_for_its_short_ttl() {
+        let (report, nonce, _) = synthetic_report();
+        let clock = clock_at(FIXTURE_CAPTURED_AT);
+        let (attestor, reports) = attestor(report, nonce, other_pins(), Arc::clone(&clock));
+        for _ in 0..3 {
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::NotAttested
+            );
+        }
+        assert_eq!(reports.load(Ordering::SeqCst), 1, "one fetch for a burst");
+        clock.fetch_add(NOT_ATTESTED_TTL.as_secs(), Ordering::SeqCst);
+        let _ = attestor.model_keys(NEAR_AI_BACKEND, MODEL).await;
+        assert_eq!(reports.load(Ordering::SeqCst), 2, "asked again past it");
+        assert!(NOT_ATTESTED_TTL < PIN_REFRESH_AFTER && NOT_ATTESTED_TTL < FRESH_TTL);
+    }
+
+    /// A report source that holds the report for one model until released,
+    /// and says when a fetch for it has begun.
+    struct Gated {
+        report: String,
+        slow_model: &'static str,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        reports: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AttestationSource for Gated {
+        async fn report(&self, model: &str, _nonce: &str) -> Result<String, SourceUnavailable> {
+            self.reports.fetch_add(1, Ordering::SeqCst);
+            if model == self.slow_model {
+                self.entered.notify_one();
+                let _permit = self
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|_| SourceUnavailable)?;
+            }
+            Ok(self.report.clone())
+        }
+        async fn collateral(&self, _quote: &[u8]) -> Result<Collateral, SourceUnavailable> {
+            parse_collateral(COLLATERAL).map_err(|_| SourceUnavailable)
+        }
+    }
+
+    fn gated_attestor(
+        pins: Vec<ExpectedMeasurements>,
+    ) -> (
+        NearAiQuoteAttestor,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Semaphore>,
+        Arc<AtomicUsize>,
+        String,
+    ) {
+        let (report, nonce, key) = synthetic_report();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let reports = Arc::new(AtomicUsize::new(0));
+        let attestor = NearAiQuoteAttestor::with_parts(
+            Box::new(Gated {
+                report,
+                slow_model: MODEL,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                reports: Arc::clone(&reports),
+            }),
+            Arc::new(PinProvider::new(Some(pins), None)),
+            Box::new(|| FIXTURE_CAPTURED_AT),
+            Box::new(move || Some(nonce.clone())),
+            Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+        );
+        (attestor, entered, release, reports, key)
+    }
+
+    /// One model whose report is slow to come back does not hold up the
+    /// answer for another: the refresh lock is per model.
+    #[tokio::test]
+    async fn one_slow_model_does_not_stall_another() {
+        let (attestor, entered, release, _, key) = gated_attestor(real_pins());
+        let slow = tokio::spawn({
+            let attestor = attestor.clone();
+            async move { attestor.model_keys(NEAR_AI_BACKEND, MODEL).await }
+        });
+        entered.notified().await;
+        let other = tokio::time::timeout(
+            Duration::from_secs(5),
+            attestor.model_keys(NEAR_AI_BACKEND, "Qwen/Qwen3.8-27B"),
+        )
+        .await
+        .expect("the other model is answered while the slow one is still fetching");
+        assert_eq!(other, Attestation::NotAttested);
+        release.add_permits(64);
+        assert_eq!(slow.await.unwrap(), Attestation::Keys(vec![key]));
+    }
+
+    /// Concurrent questions about one model share one refresh: one report
+    /// fetch, and every caller gets the answer it earned. Holds for a key set
+    /// and for a "not attested" verdict alike.
+    #[tokio::test]
+    async fn refreshes_are_single_flight_per_model() {
+        for (pins, attested) in [(real_pins(), true), (other_pins(), false)] {
+            let (attestor, entered, release, reports, key) = gated_attestor(pins);
+            let callers: Vec<_> = (0..8)
+                .map(|_| {
+                    let attestor = attestor.clone();
+                    tokio::spawn(async move { attestor.model_keys(NEAR_AI_BACKEND, MODEL).await })
+                })
+                .collect();
+            entered.notified().await;
+            // Let every other caller reach the lock before the fetch returns.
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            release.add_permits(64);
+            let expected = if attested {
+                Attestation::Keys(vec![key.clone()])
+            } else {
+                Attestation::NotAttested
+            };
+            for caller in callers {
+                assert_eq!(caller.await.unwrap(), expected);
+            }
+            assert_eq!(reports.load(Ordering::SeqCst), 1, "attested={attested}");
+        }
+    }
+
+    /// A cached answer belongs to the pins it was earned under. When the
+    /// published pins change, the next question is answered afresh -- in
+    /// both directions, and well inside either cache's TTL.
+    #[tokio::test]
+    async fn a_pin_digest_flip_invalidates_the_cache() {
+        let doc = |pins: Vec<ExpectedMeasurements>| {
+            NearAiMeasurementPins::new(
+                PinState::Configured,
+                pins.iter()
+                    .map(ExpectedMeasurements::to_pin_string)
+                    .collect(),
+            )
+        };
+        for (before, after, first, then) in [
+            (other_pins(), real_pins(), false, true),
+            (real_pins(), other_pins(), true, false),
+        ] {
+            let (report, nonce, key) = synthetic_report();
+            let source = Published::serving(doc(before));
+            let provider = Arc::new(PinProvider::new(None, Some(Box::new(Arc::clone(&source)))));
+            // Fetched just under one refresh interval ago, so a two-second
+            // step in the attestor's clock is enough to make it fetch again.
+            let t = FIXTURE_CAPTURED_AT;
+            provider.current(t - PIN_REFRESH_AFTER.as_secs() + 1).await;
+            let clock = clock_at(t);
+            let reports = Arc::new(AtomicUsize::new(0));
+            let attestor = NearAiQuoteAttestor::with_parts(
+                Box::new(Fixture {
+                    report,
+                    reports: Arc::clone(&reports),
+                    collateral_ok: true,
+                }),
+                provider,
+                Box::new({
+                    let clock = Arc::clone(&clock);
+                    move || clock.load(Ordering::SeqCst)
+                }),
+                Box::new(move || Some(nonce.clone())),
+                Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+            );
+            let expect = |attested: bool| {
+                if attested {
+                    Attestation::Keys(vec![key.clone()])
+                } else {
+                    Attestation::NotAttested
+                }
+            };
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                expect(first)
+            );
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                expect(first)
+            );
+            assert_eq!(
+                reports.load(Ordering::SeqCst),
+                1,
+                "cached under the first pins"
+            );
+
+            source.set(Ok(doc(after)));
+            clock.fetch_add(2, Ordering::SeqCst);
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                expect(then),
+                "first={first}"
+            );
+            assert_eq!(
+                reports.load(Ordering::SeqCst),
+                2,
+                "re-earned under the new pins"
+            );
+        }
     }
 
     #[test]
