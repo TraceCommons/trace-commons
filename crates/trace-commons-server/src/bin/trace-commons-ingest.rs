@@ -1783,6 +1783,11 @@ struct AppState {
     /// passkey creation.
     account_unbound_ceiling:
         Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
+    /// Z2 S2: successful native passkey creations per client IP in a rolling
+    /// 24 hours, from `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`
+    /// (default 10). In process, like the other account limiters.
+    account_native_creation_cap:
+        Arc<trace_commons_server::account_native_passkey::PerSourceCreationCap>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -4160,6 +4165,10 @@ impl AppState {
             trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
                 .map_err(|error| anyhow::anyhow!(error))?,
         );
+        let account_native_creation_cap = Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::from_env()
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -4332,6 +4341,7 @@ impl AppState {
             account_webauthn,
             account_ceremony_store,
             account_unbound_ceiling,
+            account_native_creation_cap,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
