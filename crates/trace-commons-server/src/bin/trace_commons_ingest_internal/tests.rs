@@ -102146,6 +102146,39 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     );
 }
 
+/// Ruling F-M8: points that will never arrive are not pending. A run whose
+/// Trace Credit leg was forfeited (a withdrawal came first) or failed (Settle
+/// failed it) reports no pending points and no final points; the pipeline
+/// block still carries the award and the leg's state.
+#[test]
+fn a_forfeited_or_failed_leg_reports_no_pending_points() {
+    for (credit, operation_state) in [
+        (PipelineCreditStatus::Forfeited, "forfeited"),
+        (PipelineCreditStatus::Failed, "failed"),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.credit = credit;
+        let trace_credit = status
+            .instruments
+            .iter_mut()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .unwrap();
+        trace_credit.operation_state = operation_state.to_string();
+        trace_credit.internal_settlement_state = "not_settled".to_string();
+        trace_credit.credit_event_id = None;
+        trace_credit.settlement_batch_id = None;
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(
+            projected.credit_points_pending, 0.0,
+            "a {operation_state} leg has no pending points"
+        );
+        assert_eq!(projected.credit_points_final, None, "{operation_state}");
+        let pipeline = projected.pipeline.expect("the pipeline block");
+        assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+        assert_eq!(pipeline.instruments[1].operation_state, operation_state);
+    }
+}
+
 /// A legacy status document still reads, with no pipeline block, and a list
 /// that mixes it with an upgraded one writes the pipeline key only for the
 /// upgraded one, whose amounts are decimal strings; the upgraded document

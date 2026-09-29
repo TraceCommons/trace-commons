@@ -16067,7 +16067,9 @@ async fn compatibility_status_from_database(
 /// The status document of a submission only the pipeline knows. Trace Credit
 /// becomes points as the legacy status computes them, microcredits over one
 /// million: pending from the award, and final only once the leg is
-/// finalized. The ledger and total points keep their legacy meaning, the
+/// finalized. A leg that was forfeited or failed reports no pending points,
+/// because they will never arrive (Ruling F-M8); its pipeline block still
+/// carries the award and the leg's state. The ledger and total points keep their legacy meaning, the
 /// delayed ledger deltas and final plus those deltas: a minimal-family run
 /// has no delayed ledger event, so they are 0 and absent (Ruling T14-9). A
 /// compatibility run's document is `main`'s instead
@@ -16082,11 +16084,15 @@ fn submission_status_from_pipeline(
         .find(|instrument| instrument.instrument_id == "trace_credit")
         .map(|instrument| instrument.atomic_units.get() as f32 / 1_000_000.0)
         .unwrap_or_default();
+    let credit_points_pending = match status.credit {
+        PipelineCreditStatus::Forfeited | PipelineCreditStatus::Failed => 0.0,
+        _ => trace_credit_points,
+    };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
         status: snake_case_label(status.processing),
-        credit_points_pending: trace_credit_points,
+        credit_points_pending,
         credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
             .then_some(trace_credit_points),
         credit_points_ledger: 0.0,
