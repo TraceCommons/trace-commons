@@ -229,8 +229,8 @@ fn every_authenticated_account_route_is_classified_for_unbound_accounts() {
     );
 }
 
-/// The allowlist is exactly the spec's (S1 subset: the bind routes arrive in
-/// S3). Pinned as literals so widening it is a visible diff to this test.
+/// The allowlist is exactly the spec's, the bind routes (S3) included. Pinned
+/// as literals so widening it is a visible diff to this test.
 #[test]
 fn the_unbound_allowlist_is_the_specs() {
     let allowed: BTreeSet<(&str, &str)> = UNBOUND_ACCOUNT_ROUTE_POLICY
@@ -245,6 +245,8 @@ fn the_unbound_allowlist_is_the_specs() {
         ("POST", "/v1/account/sessions/revoke-all"),
         ("GET", "/v1/account/passkeys"),
         ("PATCH", "/v1/account/passkeys/{credential_id}"),
+        ("POST", "/v1/account/near-ai/provision/bind/start"),
+        ("POST", "/v1/account/near-ai/provision/bind/finish"),
     ]
     .into_iter()
     .collect();
