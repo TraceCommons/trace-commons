@@ -1,19 +1,21 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The unbound-account reaper (V99) against a real PostgreSQL, run as the
+//! The passkey-account reaper (V99) against a real PostgreSQL, run as the
 //! non-superuser login it runs as in production. Explicit isolated database
 //! only; never falls back to DATABASE_URL.
 
-use trace_commons_server::account_reaper::UnboundAccountReaper;
+use std::time::Duration;
+
+use trace_commons_server::account_reaper::{ReapSummary, UnboundAccountReaper};
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use uuid::Uuid;
 
 const URL_VAR: &str = "TRACE_COMMONS_UNBOUND_REAPER_PG_TEST_DATABASE_URL";
 const LOGIN: &str = "unbound_reaper_test_login";
-const TTL_DAYS: i64 = 30;
-const NEVER_USED_TTL_DAYS: i64 = 7;
+const UNBOUND_TTL_DAYS: i64 = 7;
+const CLOSED_TTL_DAYS: i64 = 30;
 
 /// The sweep is cross-tenant, so tests share one database and run one at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -58,6 +60,8 @@ async fn fixture() -> Option<Fixture> {
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{LOGIN}') \
              THEN CREATE ROLE {LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; \
              GRANT trace_unbound_account_reaper TO {LOGIN}; \
+             DROP TABLE IF EXISTS reaper_refusal_probe; \
+             DROP TABLE IF EXISTS reaper_scope_probe; \
              DELETE FROM trace_tenants; \
              DELETE FROM trace_audit_events;"
         ))
@@ -79,7 +83,6 @@ async fn fixture() -> Option<Fixture> {
 enum Binding {
     Unbound,
     Bound,
-    Closed,
     /// No binding row: a legacy account.
     Legacy,
 }
@@ -91,12 +94,12 @@ struct Seeded {
 }
 
 /// Seed a tenant holding an account, its credential, an audit row and, when
-/// asked, one session. `idle_days` backdates the binding and the session;
-/// `session_expires_in_days` is negative for an expired session.
+/// asked, one session `(seen_days_ago, expires_in_days, revoked)`.
+/// `age_days` backdates the account and the binding's `created_at`.
 async fn seed(
     fx: &Fixture,
     binding: Binding,
-    idle_days: i64,
+    age_days: i64,
     session: Option<(i64, i64, bool)>,
 ) -> Seeded {
     let tenant = format!("passkey-{}", Uuid::new_v4().simple());
@@ -111,14 +114,13 @@ async fn seed(
     a.execute(
         "INSERT INTO trace_accounts(tenant_id, account_id, created_at)
          VALUES ($1, $2, now() - make_interval(days => $3::int))",
-        &[&tenant, &account, &(idle_days as i32)],
+        &[&tenant, &account, &(age_days as i32)],
     )
     .await
     .unwrap();
     let state = match binding {
         Binding::Unbound => Some("unbound"),
         Binding::Bound => Some("bound"),
-        Binding::Closed => Some("closed"),
         Binding::Legacy => None,
     };
     if let Some(state) = state {
@@ -126,7 +128,7 @@ async fn seed(
             "INSERT INTO trace_account_bindings(tenant_id, account_id, origin, state, created_at, bound_at)
              VALUES ($1, $2, 'passkey', $3, now() - make_interval(days => $4::int),
                      CASE WHEN $3 = 'bound' THEN now() END)",
-            &[&tenant, &account, &state, &(idle_days as i32)],
+            &[&tenant, &account, &state, &(age_days as i32)],
         )
         .await
         .unwrap();
@@ -191,6 +193,98 @@ async fn insert_session(
         .unwrap();
 }
 
+/// Mirror what S2's create/finish leaves: the binding and exactly one native
+/// session, both stamped with the creation transaction's now(), the session
+/// with a 12 hour expiry. S5 is stacked on S1, so nothing here calls S2.
+async fn seed_created(fx: &Fixture, created_days_ago: i64) -> Seeded {
+    let s = seed(fx, Binding::Unbound, created_days_ago, None).await;
+    insert_native_session(&fx.admin, &s, created_days_ago * 24, 0, 12).await;
+    s
+}
+
+/// A native session created `created_hours_ago`, last seen `seen_hours_after`
+/// hours after that, expiring `lifetime_hours` after creation.
+async fn insert_native_session(
+    client: &deadpool_postgres::Object,
+    s: &Seeded,
+    created_hours_ago: i64,
+    seen_hours_after: i64,
+    lifetime_hours: i64,
+) {
+    let token_hash = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    client
+        .execute(
+            "INSERT INTO trace_sessions(tenant_id, session_id, account_id, token_hash,
+                client_kind, created_at, last_seen_at, expires_at)
+             VALUES ($1, $2, $3, $4, 'native',
+                     now() - make_interval(hours => $5::int),
+                     now() - make_interval(hours => ($5::int - $6::int)),
+                     now() - make_interval(hours => ($5::int - $7::int)))",
+            &[
+                &s.tenant,
+                &Uuid::new_v4(),
+                &s.account,
+                &token_hash,
+                &(created_hours_ago as i32),
+                &(seen_hours_after as i32),
+                &(lifetime_hours as i32),
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+/// Close the account exactly as S3's refuse branch does
+/// (`near_ai_bind_close_refused`, #1135): the binding goes `unbound` ->
+/// `closed` with `bound_at` NULL, every session and credential is revoked,
+/// `trace_accounts.closed_at` is set, and a label-only audit row is written.
+/// Every timestamp S3 stamps with now() is backdated by `closed_days_ago`.
+async fn close_like_s3(fx: &Fixture, s: &Seeded, closed_days_ago: i64) {
+    fx.admin
+        .execute(
+            "WITH b AS (UPDATE trace_account_bindings SET state = 'closed'
+                          WHERE tenant_id = $1 AND account_id = $2 AND state = 'unbound'
+                        RETURNING 1),
+                  s AS (UPDATE trace_sessions SET revoked_at = now() - make_interval(days => $3::int)
+                          WHERE tenant_id = $1 AND account_id = $2 AND revoked_at IS NULL
+                        RETURNING 1),
+                  c AS (UPDATE trace_webauthn_credentials
+                           SET revoked_at = now() - make_interval(days => $3::int)
+                          WHERE tenant_id = $1 AND account_id = $2 AND revoked_at IS NULL
+                        RETURNING 1),
+                  a AS (UPDATE trace_accounts SET closed_at = now() - make_interval(days => $3::int)
+                          WHERE tenant_id = $1 AND account_id = $2 AND closed_at IS NULL
+                        RETURNING 1)
+             INSERT INTO trace_account_audit(tenant_id, action, actor_ref, outcome, safe_metadata)
+             SELECT $1, 'account_binding_refused', 'label', 'denied',
+                    '{\"reason\":\"near_ai_account_exists\"}'::jsonb
+              WHERE (SELECT count(*) FROM b) = 1 AND (SELECT count(*) FROM a) = 1",
+            &[&s.tenant, &s.account, &(closed_days_ago as i32)],
+        )
+        .await
+        .unwrap();
+    let state: String = fx
+        .admin
+        .query_one(
+            "SELECT state FROM trace_account_bindings WHERE tenant_id = $1",
+            &[&s.tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(state, "closed", "fixture closed the account");
+}
+
+/// A closed account as S3 leaves it: created `created_days_ago`, used for a
+/// native session, then closed `closed_days_ago`.
+async fn seed_closed(fx: &Fixture, created_days_ago: i64, closed_days_ago: i64) -> Seeded {
+    let s = seed(fx, Binding::Unbound, created_days_ago, None).await;
+    // Created on the day of the close, still unexpired when it was revoked.
+    insert_native_session(&fx.admin, &s, closed_days_ago * 24, 0, 12).await;
+    close_like_s3(fx, &s, closed_days_ago).await;
+    s
+}
+
 /// (tenants, accounts, bindings, credentials, sessions, account_audit, audit_events)
 async fn rows(fx: &Fixture, tenant: &str) -> [i64; 7] {
     let row = fx
@@ -211,255 +305,254 @@ async fn rows(fx: &Fixture, tenant: &str) -> [i64; 7] {
 }
 
 const WHOLE: [i64; 7] = [1, 1, 1, 1, 0, 1, 1];
+/// Everything the tenant held is gone except the retained hash-chained audit.
+const GONE: [i64; 7] = [0, 0, 0, 0, 0, 0, 1];
+
+impl Fixture {
+    async fn reap(&self, limit: i32) -> ReapSummary {
+        self.reaper
+            .reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, limit)
+            .await
+            .unwrap()
+    }
+}
+
+fn counts(s: ReapSummary) -> (u64, u64, u64) {
+    (s.reaped_unbound, s.reaped_closed, s.skipped)
+}
 
 #[tokio::test]
-async fn an_idle_unbound_account_past_the_ttl_is_deleted_with_all_its_rows() {
+async fn an_unbound_account_past_the_ttl_is_deleted_with_all_its_rows() {
     let Some(fx) = fixture().await else { return };
-    // Old sessions: idle beyond the TTL, expired, and one revoked.
+    // Old sessions: expired, and one revoked.
     let target = seed(&fx, Binding::Unbound, 45, Some((40, -33, false))).await;
     insert_session(&fx.admin, &target.tenant, target.account, 35, 5, true).await;
-    let before = rows(&fx, &target.tenant).await;
     assert_eq!(
-        before,
+        rows(&fx, &target.tenant).await,
         [1, 1, 1, 1, 2, 1, 1],
         "fixture holds every row kind"
     );
 
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((summary.reaped, summary.skipped), (1, 0));
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
     // Tenant, account, binding, credential, sessions and account audit go.
     // The hash-chained trace_audit_events row is retained, as it is for every
     // other deletion in the repo.
-    assert_eq!(rows(&fx, &target.tenant).await, [0, 0, 0, 0, 0, 0, 1]);
-
-    let again = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((again.reaped, again.skipped), (0, 0), "idempotent");
+    assert_eq!(rows(&fx, &target.tenant).await, GONE);
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0), "idempotent");
 }
 
+/// Decision 1 (2026-09-29): reap on bound status, not on use. An account that
+/// signed in again on day 2 used to move to a 30-day idle window; now it goes
+/// at day 8 like any other unbound account, once its sessions are dead.
 #[tokio::test]
-async fn an_unbound_account_with_no_session_uses_the_binding_created_at() {
+async fn an_unbound_account_that_signed_in_again_is_reaped_at_eight_days() {
     let Some(fx) = fixture().await else { return };
-    let old = seed(&fx, Binding::Unbound, 8, None).await;
-    let young = seed(&fx, Binding::Unbound, 6, None).await;
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!(summary.reaped, 1);
-    assert_eq!(rows(&fx, &old.tenant).await[1], 0);
-    assert_eq!(rows(&fx, &young.tenant).await[..6], WHOLE[..6]);
-}
+    // Created 8 days ago; a second session (a later sign-in) on day 2, expired.
+    let second_session = seed_created(&fx, 8).await;
+    insert_native_session(&fx.admin, &second_session, 6 * 24, 0, 12).await;
+    // Created 8 days ago; the creation session itself presented again on day 2.
+    let same_session = seed(&fx, Binding::Unbound, 8, None).await;
+    insert_native_session(&fx.admin, &same_session, 8 * 24, 2 * 24, 7 * 24).await;
 
-/// Mirror what S2's create/finish leaves: the binding and exactly one native
-/// session, both stamped with the creation transaction's now(), the session
-/// with a 12 hour expiry. S5 is stacked on S1, so nothing here calls S2.
-async fn seed_created(fx: &Fixture, created_days_ago: i64) -> Seeded {
-    let s = seed(fx, Binding::Unbound, created_days_ago, None).await;
-    insert_creation_session(&fx.admin, &s, created_days_ago * 24, 0).await;
-    s
-}
-
-/// A session created `created_hours_ago` and last seen `seen_hours_after`
-/// hours after that; it expires 12 hours after creation, as a native one does.
-async fn insert_creation_session(
-    client: &deadpool_postgres::Object,
-    s: &Seeded,
-    created_hours_ago: i64,
-    seen_hours_after: i64,
-) {
-    let token_hash = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
-    client
-        .execute(
-            "INSERT INTO trace_sessions(tenant_id, session_id, account_id, token_hash,
-                client_kind, created_at, last_seen_at, expires_at)
-             VALUES ($1, $2, $3, $4, 'native',
-                     now() - make_interval(hours => $5::int),
-                     now() - make_interval(hours => ($5::int - $6::int)),
-                     now() - make_interval(hours => ($5::int - 12)))",
-            &[
-                &s.tenant,
-                &Uuid::new_v4(),
-                &s.account,
-                &token_hash,
-                &(created_hours_ago as i32),
-                &(seen_hours_after as i32),
-            ],
-        )
-        .await
-        .unwrap();
+    assert_eq!(counts(fx.reap(100).await), (2, 0, 0));
+    for s in [&second_session, &same_session] {
+        assert_eq!(rows(&fx, &s.tenant).await, GONE);
+    }
 }
 
 #[tokio::test]
-async fn a_never_used_account_is_reaped_at_eight_days_and_survives_at_six() {
+async fn an_unbound_account_with_a_live_session_survives() {
+    let Some(fx) = fixture().await else { return };
+    // Same shape as above, but the day-2 sign-in holds a session that is
+    // still unrevoked and unexpired.
+    let live = seed_created(&fx, 8).await;
+    insert_native_session(&fx.admin, &live, 6 * 24, 0, 7 * 24).await;
+    // Unexpired but revoked is not live.
+    let revoked = seed(&fx, Binding::Unbound, 90, Some((60, 2, true))).await;
+    // Unrevoked but expired is not live.
+    let expired = seed(&fx, Binding::Unbound, 90, Some((5, -1, false))).await;
+
+    assert_eq!(counts(fx.reap(100).await), (2, 0, 0));
+    assert_eq!(rows(&fx, &live.tenant).await[..5], [1, 1, 1, 1, 2]);
+    assert_eq!(rows(&fx, &revoked.tenant).await, GONE);
+    assert_eq!(rows(&fx, &expired.tenant).await, GONE);
+}
+
+#[tokio::test]
+async fn an_unbound_account_is_reaped_at_eight_days_and_survives_at_six() {
     let Some(fx) = fixture().await else { return };
     let eight = seed_created(&fx, 8).await;
     let six = seed_created(&fx, 6).await;
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((summary.reaped, summary.skipped), (1, 0));
-    assert_eq!(rows(&fx, &eight.tenant).await[..6], [0; 6]);
+    let six_no_session = seed(&fx, Binding::Unbound, 6, None).await;
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
+    assert_eq!(rows(&fx, &eight.tenant).await, GONE);
     assert_eq!(rows(&fx, &six.tenant).await[..6], [1, 1, 1, 1, 1, 1]);
+    assert_eq!(rows(&fx, &six_no_session.tenant).await, WHOLE);
 }
 
 #[tokio::test]
-async fn presenting_the_creation_session_within_the_hour_is_not_use() {
+async fn a_bound_account_survives() {
     let Some(fx) = fixture().await else { return };
-    let s = seed(&fx, Binding::Unbound, 8, None).await;
-    // Seen 30 minutes after creation (bind start, step-up): still never used.
+    let eight = seed(&fx, Binding::Bound, 8, None).await;
+    insert_native_session(&fx.admin, &eight, 8 * 24, 0, 12).await;
+    let old = seed(&fx, Binding::Bound, 400, None).await;
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0));
+    assert_eq!(rows(&fx, &eight.tenant).await[..6], [1, 1, 1, 1, 1, 1]);
+    assert_eq!(rows(&fx, &old.tenant).await, WHOLE);
+}
+
+#[tokio::test]
+async fn a_legacy_account_survives() {
+    let Some(fx) = fixture().await else { return };
+    let legacy = seed(&fx, Binding::Legacy, 400, None).await;
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0));
+    // A legacy account has no binding row and is never a candidate.
+    assert_eq!(rows(&fx, &legacy.tenant).await, [1, 1, 0, 1, 0, 1, 1]);
+}
+
+/// Decision 2 (2026-09-29): a closed passkey account is deleted 30 days after
+/// it was closed. The clock is `trace_accounts.closed_at`, which S3 sets in the
+/// transaction that closes the binding, never the binding's `created_at`.
+#[tokio::test]
+async fn a_closed_account_is_reaped_at_thirty_one_days_and_survives_at_twenty_nine() {
+    let Some(fx) = fixture().await else { return };
+    let thirty_one = seed_closed(&fx, 400, 31).await;
+    // Created long ago: only closed_at can keep it.
+    let twenty_nine = seed_closed(&fx, 400, 29).await;
+    assert_eq!(
+        rows(&fx, &thirty_one.tenant).await,
+        [1, 1, 1, 1, 1, 2, 1],
+        "fixture holds what S3 leaves, plus its refusal audit row"
+    );
+
+    assert_eq!(counts(fx.reap(100).await), (0, 1, 0));
+    assert_eq!(rows(&fx, &thirty_one.tenant).await, GONE);
+    assert_eq!(rows(&fx, &twenty_nine.tenant).await, [1, 1, 1, 1, 1, 2, 1]);
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0), "idempotent");
+}
+
+/// A closed account is not held to the unbound window: 8 days after creation
+/// and 2 days after closing, it survives.
+#[tokio::test]
+async fn a_recently_closed_account_is_not_reaped_on_the_unbound_window() {
+    let Some(fx) = fixture().await else { return };
+    let s = seed_closed(&fx, 8, 2).await;
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0));
+    assert_eq!(rows(&fx, &s.tenant).await[..3], [1, 1, 1]);
+}
+
+/// The spec (S5): "the function refuses a tenant holding any other row". The
+/// candidate is refused whole -- nothing is deleted, not even the account --
+/// and counted as skipped.
+#[tokio::test]
+async fn a_tenant_holding_any_other_row_is_refused() {
+    let Some(fx) = fixture().await else { return };
+    // Another account in the tenant.
+    let other_account = seed(&fx, Binding::Unbound, 90, None).await;
     fx.admin
         .execute(
-            "INSERT INTO trace_sessions(tenant_id, session_id, account_id, token_hash,
-                client_kind, created_at, last_seen_at, expires_at)
-             VALUES ($1, $2, $3, $4, 'native',
-                     now() - interval '8 days',
-                     now() - interval '8 days' + interval '30 minutes',
-                     now() - interval '8 days' + interval '12 hours')",
+            "INSERT INTO trace_accounts(tenant_id, account_id) VALUES ($1, $2)",
+            &[&other_account.tenant, &Uuid::new_v4()],
+        )
+        .await
+        .unwrap();
+    // A tenant-keyed row the cascade from trace_tenants would destroy.
+    let policy = seed(&fx, Binding::Unbound, 90, None).await;
+    fx.admin
+        .execute(
+            "INSERT INTO trace_tenant_policies(tenant_id, policy_version, allowed_consent_scopes,
+                allowed_uses, updated_by_principal_ref)
+             VALUES ($1, 'v1', '[]'::jsonb, '[]'::jsonb, 'label')",
+            &[&policy.tenant],
+        )
+        .await
+        .unwrap();
+    // An account-keyed row the cascade from trace_accounts would destroy.
+    let login_link = seed(&fx, Binding::Unbound, 90, None).await;
+    fx.admin
+        .execute(
+            "INSERT INTO trace_login_links(tenant_id, link_id, account_id, code_hash,
+                created_principal_ref, expires_at)
+             VALUES ($1, $2, $3, $4, 'label', now() - interval '80 days')",
             &[
-                &s.tenant,
+                &login_link.tenant,
                 &Uuid::new_v4(),
-                &s.account,
+                &login_link.account,
                 &format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2)),
             ],
         )
         .await
         .unwrap();
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!(summary.reaped, 1);
-}
-
-#[tokio::test]
-async fn an_account_that_signed_in_again_keeps_the_long_window() {
-    let Some(fx) = fixture().await else { return };
-    // Created 8 days ago; a second session (a later sign-in) at day 2.
-    // (Hours below are since the start of each session's own life.)
-    let second_session = seed_created(&fx, 8).await;
-    insert_creation_session(&fx.admin, &second_session, 6 * 24, 0).await;
-    // Created 8 days ago; the creation session itself seen again at day 2.
-    let same_session = seed(&fx, Binding::Unbound, 8, None).await;
-    insert_creation_session(&fx.admin, &same_session, 8 * 24, 2 * 24).await;
-
-    let day8 = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((day8.reaped, day8.skipped), (0, 0), "survive at day 8");
-    for s in [&second_session, &same_session] {
-        assert_eq!(rows(&fx, &s.tenant).await[1], 1);
-    }
-
-    // Day 31 from creation is day 29 from the day-2 sign-in: still inside the
-    // 30-day idle window. Day 33 is day 31 idle, so both go.
-    for (shift_days, expect) in [(23, 0), (2, 2)] {
-        fx.admin
-            .batch_execute(&format!(
-                "UPDATE trace_account_bindings SET created_at = created_at - interval '{shift_days} days';
-                 UPDATE trace_sessions SET created_at = created_at - interval '{shift_days} days',
-                     last_seen_at = last_seen_at - interval '{shift_days} days',
-                     expires_at = expires_at - interval '{shift_days} days'"
-            ))
-            .await
-            .unwrap();
-        let summary = fx
-            .reaper
-            .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-            .await
-            .unwrap();
-        assert_eq!(summary.reaped, expect, "after shifting {shift_days} days");
-    }
-    for s in [&second_session, &same_session] {
-        assert_eq!(rows(&fx, &s.tenant).await[1], 0, "reaped past 30 idle days");
-    }
-}
-
-#[tokio::test]
-async fn a_bound_account_survives_at_eight_days() {
-    let Some(fx) = fixture().await else { return };
-    let s = seed(&fx, Binding::Bound, 8, None).await;
-    insert_creation_session(&fx.admin, &s, 8 * 24, 0).await;
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((summary.reaped, summary.skipped), (0, 0));
-    assert_eq!(rows(&fx, &s.tenant).await[..6], [1, 1, 1, 1, 1, 1]);
-}
-
-#[tokio::test]
-async fn a_recently_active_or_live_account_survives() {
-    let Some(fx) = fixture().await else { return };
-    // Old binding, session last seen 5 days ago (expired since).
-    let recent = seed(&fx, Binding::Unbound, 90, Some((5, -1, false))).await;
-    // Old binding, last seen long ago, but the session is still unrevoked and unexpired.
-    let live = seed(&fx, Binding::Unbound, 90, Some((60, 2, false))).await;
-    // Same, but revoked and expired: idle, so it goes.
-    let dead = seed(&fx, Binding::Unbound, 90, Some((60, -50, true))).await;
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((summary.reaped, summary.skipped), (1, 0));
-    assert_eq!(rows(&fx, &recent.tenant).await[..5], [1, 1, 1, 1, 1]);
-    assert_eq!(rows(&fx, &live.tenant).await[..5], [1, 1, 1, 1, 1]);
-    assert_eq!(rows(&fx, &dead.tenant).await[..5], [0, 0, 0, 0, 0]);
-}
-
-#[tokio::test]
-async fn bound_closed_and_legacy_accounts_survive() {
-    let Some(fx) = fixture().await else { return };
-    let bound = seed(&fx, Binding::Bound, 400, None).await;
-    let closed = seed(&fx, Binding::Closed, 400, None).await;
-    let legacy = seed(&fx, Binding::Legacy, 400, None).await;
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((summary.reaped, summary.skipped), (0, 0));
-    assert_eq!(rows(&fx, &bound.tenant).await[..6], WHOLE[..6]);
-    assert_eq!(rows(&fx, &closed.tenant).await[..6], WHOLE[..6]);
-    // A legacy account has no binding row and is never a candidate.
-    assert_eq!(rows(&fx, &legacy.tenant).await[..6], [1, 1, 0, 1, 0, 1]);
-}
-
-#[tokio::test]
-async fn a_tenant_holding_another_account_keeps_its_tenant() {
-    let Some(fx) = fixture().await else { return };
-    let target = seed(&fx, Binding::Unbound, 90, None).await;
-    let other = Uuid::new_v4();
+    // The same, for a closed account.
+    let closed = seed_closed(&fx, 400, 31).await;
     fx.admin
         .execute(
-            "INSERT INTO trace_accounts(tenant_id, account_id) VALUES ($1, $2)",
-            &[&target.tenant, &other],
+            "INSERT INTO trace_tenant_policies(tenant_id, policy_version, allowed_consent_scopes,
+                allowed_uses, updated_by_principal_ref)
+             VALUES ($1, 'v1', '[]'::jsonb, '[]'::jsonb, 'label')",
+            &[&closed.tenant],
         )
         .await
         .unwrap();
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
+    // A clean one behind them all is still reaped.
+    let clean = seed(&fx, Binding::Unbound, 10, None).await;
+
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 4));
+    assert_eq!(rows(&fx, &clean.tenant).await, GONE);
+    for s in [&policy, &login_link] {
+        assert_eq!(rows(&fx, &s.tenant).await, WHOLE, "refused whole");
+    }
+    // Both accounts kept, and the candidate's own rows with them.
+    assert_eq!(
+        rows(&fx, &other_account.tenant).await,
+        [1, 2, 1, 1, 0, 1, 1]
+    );
+    assert_eq!(rows(&fx, &closed.tenant).await[..3], [1, 1, 1]);
+}
+
+/// A tenant-keyed table the guard cannot see into would read as empty and be
+/// cascaded away unseen. The function must refuse the whole call instead,
+/// naming the table, so a migration that adds one fails this suite in CI.
+#[tokio::test]
+async fn a_tenant_keyed_table_outside_the_reaper_scope_refuses_the_call() {
+    let Some(fx) = fixture().await else { return };
+    let target = seed(&fx, Binding::Unbound, 90, None).await;
+    fx.admin
+        .batch_execute(
+            "CREATE TABLE reaper_scope_probe (
+                 tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE
+             );
+             ALTER TABLE reaper_scope_probe ENABLE ROW LEVEL SECURITY;
+             ALTER TABLE reaper_scope_probe FORCE ROW LEVEL SECURITY;",
+        )
         .await
         .unwrap();
-    assert_eq!(summary.reaped, 1);
-    let left = rows(&fx, &target.tenant).await;
-    assert_eq!((left[0], left[1], left[2]), (1, 1, 0));
+    let no_grant = fx.reaper.reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, 100).await;
+    // Granted but with no guard-visible policy: still refused.
+    fx.admin
+        .batch_execute(
+            "GRANT SELECT (tenant_id) ON reaper_scope_probe TO trace_unbound_account_reaper_guard",
+        )
+        .await
+        .unwrap();
+    let no_policy = fx.reaper.reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, 100).await;
+    let kept = rows(&fx, &target.tenant).await;
+    fx.admin
+        .batch_execute("DROP TABLE reaper_scope_probe")
+        .await
+        .unwrap();
+
+    for result in [no_grant, no_policy] {
+        let message = format!("{:?}", result.expect_err("refused"));
+        assert!(
+            message.contains("unbound_reaper_scope_incomplete")
+                && message.contains("reaper_scope_probe"),
+            "{message}"
+        );
+    }
+    assert_eq!(kept, WHOLE);
+    // With the probe gone the scope is complete again.
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
 }
 
 #[tokio::test]
@@ -477,73 +570,25 @@ async fn an_account_that_binds_during_the_sweep_survives() {
     )
     .await
     .unwrap();
-    let mid = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
     assert_eq!(
-        (mid.reaped, mid.skipped),
-        (0, 1),
+        counts(fx.reap(100).await),
+        (0, 0, 1),
         "locked row is skipped, not waited on"
     );
     tx.commit().await.unwrap();
 
     // After the commit the row is bound, so it is not a candidate at all.
-    let after = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((after.reaped, after.skipped), (0, 0));
-    assert_eq!(rows(&fx, &target.tenant).await[..6], WHOLE[..6]);
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0));
+    assert_eq!(rows(&fx, &target.tenant).await, WHOLE);
 }
 
 #[tokio::test]
 async fn an_account_that_signs_in_during_the_sweep_survives() {
     let Some(fx) = fixture().await else { return };
-    let target = seed(&fx, Binding::Unbound, 90, None).await;
-
-    // A sign-in has inserted a session and not committed: the foreign key
-    // holds a key-share lock on the account row.
-    let mut login = fx.admin_connection().await;
-    let tx = login.transaction().await.unwrap();
-    tx.execute(
-        "INSERT INTO trace_sessions(tenant_id, session_id, account_id, token_hash, expires_at)
-         VALUES ($1, $2, $3, $4, now() + interval '7 days')",
-        &[
-            &target.tenant,
-            &Uuid::new_v4(),
-            &target.account,
-            &format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2)),
-        ],
-    )
-    .await
-    .unwrap();
-    let mid = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((mid.reaped, mid.skipped), (0, 1));
-    tx.commit().await.unwrap();
-
-    let after = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!(after.reaped, 0);
-    assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 1]);
-}
-
-#[tokio::test]
-async fn a_never_used_account_that_signs_in_during_the_sweep_survives() {
-    let Some(fx) = fixture().await else { return };
     let target = seed_created(&fx, 8).await;
 
-    // A sign-in has inserted a session and not committed: the foreign key
-    // holds a key-share lock on the account row.
+    // A sign-in has inserted a session and not committed: the foreign keys
+    // hold key-share locks on the account and tenant rows.
     let mut login = fx.admin_connection().await;
     let tx = login.transaction().await.unwrap();
     tx.execute(
@@ -558,39 +603,118 @@ async fn a_never_used_account_that_signs_in_during_the_sweep_survives() {
     )
     .await
     .unwrap();
-    let mid = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!((mid.reaped, mid.skipped), (0, 1));
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 1));
     tx.commit().await.unwrap();
 
-    let after = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
+    // Committed, the new session is live, so the account is not a candidate.
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0));
+    assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 2]);
+}
+
+/// A tenant-keyed insert that begins between the reaper's scope check and its
+/// delete waits on the tenant row lock the reaper holds, so it cannot slip a
+/// row in to be cascaded away. Holding that lock is what can deadlock: here a
+/// peer locks the candidate's session row first, the reaper's cascade waits
+/// on it, and the peer then waits on the reaper's account lock. The reaper
+/// must count that candidate skipped (40P01), not fail the batch.
+#[tokio::test]
+async fn a_deadlock_is_skipped() {
+    let Some(fx) = fixture().await else { return };
+    let superuser: bool = fx
+        .admin
+        .query_one(
+            "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        superuser,
+        "the deadlock test sets deadlock_timeout on its peer, which needs a superuser fixture"
+    );
+    let target = seed(&fx, Binding::Unbound, 90, Some((60, -50, false))).await;
+    let clean = seed(&fx, Binding::Unbound, 10, None).await;
+
+    let mut peer = fx.admin_connection().await;
+    // The peer must never be the one that detects the cycle.
+    peer.batch_execute("SET deadlock_timeout = '30s'")
         .await
         .unwrap();
-    assert_eq!(after.reaped, 0);
-    assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 2]);
+    let tx = peer.transaction().await.unwrap();
+    // A row lock on the candidate's (expired) session. A non-key update
+    // takes no lock on the parent rows, so the reaper still locks them.
+    tx.execute(
+        "UPDATE trace_sessions SET last_seen_at = last_seen_at
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&target.tenant, &target.account],
+    )
+    .await
+    .unwrap();
+
+    let reaper = fx.reaper.clone();
+    let sweep =
+        tokio::spawn(async move { reaper.reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, 100).await });
+    // Wait until the reaper's cascade is blocked on the peer's session lock.
+    let mut waited = false;
+    for _ in 0..200 {
+        let blocked: bool = fx
+            .admin
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                                 WHERE usename = $1 AND wait_event_type = 'Lock')",
+                &[&LOGIN],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if blocked {
+            waited = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        waited,
+        "the reaper never blocked on the peer's session lock"
+    );
+    // Close the cycle: a new session needs a key-share lock on the account
+    // row the reaper holds FOR UPDATE. This returns once the reaper's
+    // subtransaction is rolled back by the deadlock detector.
+    tx.execute(
+        "INSERT INTO trace_sessions(tenant_id, session_id, account_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '7 days')",
+        &[
+            &target.tenant,
+            &Uuid::new_v4(),
+            &target.account,
+            &format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2)),
+        ],
+    )
+    .await
+    .unwrap();
+    let summary = sweep.await.unwrap();
+    tx.rollback().await.unwrap();
+
+    let summary = summary.expect("a deadlock is a skip, not a failed batch");
+    assert_eq!(counts(summary), (1, 0, 1));
+    assert_eq!(rows(&fx, &clean.tenant).await, GONE);
+    assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 1]);
 }
 
 #[tokio::test]
 async fn batches_are_bounded() {
     let Some(fx) = fixture().await else { return };
     let mut tenants = Vec::new();
-    for i in 0..5 {
+    for i in 0..3 {
         tenants.push(seed(&fx, Binding::Unbound, 100 + i, None).await.tenant);
+    }
+    for i in 0..2 {
+        tenants.push(seed_closed(&fx, 400, 40 + i).await.tenant);
     }
     let mut reaped = Vec::new();
     for _ in 0..4 {
-        reaped.push(
-            fx.reaper
-                .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 2)
-                .await
-                .unwrap()
-                .reaped,
-        );
+        reaped.push(fx.reap(2).await.reaped());
     }
     assert_eq!(reaped, vec![2, 2, 1, 0]);
     for tenant in &tenants {
@@ -598,18 +722,16 @@ async fn batches_are_bounded() {
     }
 }
 
-/// Candidates whose delete is permanently refused (a foreign key from a table
-/// the cascade does not reach) sit at the head of the order. They must not
-/// starve a deletable candidate behind them, even when they outnumber `limit`.
+/// Candidates whose delete is permanently refused sit at the head of the
+/// order. They must not starve a deletable candidate behind them, even when
+/// they outnumber `limit`.
 #[tokio::test]
 async fn permanently_refused_candidates_do_not_stall_the_batch() {
     let Some(fx) = fixture().await else { return };
-    // Stand-in for a non-cascading dependent table. Dropped before the
-    // assertions so a failure cannot poison the shared fixture.
-    fx.admin
-        .batch_execute("DROP TABLE IF EXISTS reaper_refusal_probe")
-        .await
-        .unwrap();
+    // Stand-in for an account-keyed table holding something of value. It is
+    // in the reaper's scope (granted and visible), so the tenant check
+    // refuses its holders. Dropped before the assertions so a failure cannot
+    // poison the shared fixture.
     fx.admin
         .batch_execute(
             "CREATE TABLE reaper_refusal_probe (
@@ -617,7 +739,8 @@ async fn permanently_refused_candidates_do_not_stall_the_batch() {
                  account_id UUID NOT NULL,
                  FOREIGN KEY (tenant_id, account_id)
                      REFERENCES trace_accounts (tenant_id, account_id)
-             )",
+             );
+             GRANT SELECT (tenant_id) ON reaper_refusal_probe TO trace_unbound_account_reaper_guard;",
         )
         .await
         .unwrap();
@@ -637,8 +760,14 @@ async fn permanently_refused_candidates_do_not_stall_the_batch() {
     }
     let deletable = seed(&fx, Binding::Unbound, 100, None).await;
 
-    let first = fx.reaper.reap(TTL_DAYS, NEVER_USED_TTL_DAYS, limit).await;
-    let second = fx.reaper.reap(TTL_DAYS, NEVER_USED_TTL_DAYS, limit).await;
+    let first = fx
+        .reaper
+        .reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, limit)
+        .await;
+    let second = fx
+        .reaper
+        .reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, limit)
+        .await;
     let deletable_rows = rows(&fx, &deletable.tenant).await;
     let mut refused_rows = Vec::new();
     for s in &refused {
@@ -651,10 +780,9 @@ async fn permanently_refused_candidates_do_not_stall_the_batch() {
 
     let first = first.unwrap();
     let second = second.unwrap();
-    assert_eq!(deletable_rows[1], 0, "the deletable candidate was reaped");
-    assert_eq!(first.reaped, 1);
-    assert_eq!(first.skipped, refused.len() as u64);
-    assert_eq!(second.reaped, 0);
+    assert_eq!(deletable_rows, GONE, "the deletable candidate was reaped");
+    assert_eq!(counts(first), (1, 0, refused.len() as u64));
+    assert_eq!(second.reaped(), 0);
     assert_eq!(
         refused_rows,
         vec![1; refused.len()],
@@ -668,18 +796,16 @@ async fn the_function_refuses_a_ttl_under_a_day_and_an_unbounded_batch() {
     let target = seed(&fx, Binding::Unbound, 90, None).await;
     let client = fx.reaper_client().await;
     let day = 86_400_i64;
-    for (ttl, never_used, limit) in [
-        (3600_i64, 3600_i64, 10_i32),
+    for (unbound, closed, limit) in [
+        (3600_i64, day, 10_i32),
+        (day, 3600, 10),
         (day, day, 0),
         (day, day, 1001),
-        // The never-used window may not exceed the idle window, nor be under a day.
-        (30 * day, 31 * day, 10),
-        (30 * day, 3600, 10),
     ] {
         let error = client
             .query(
                 "SELECT * FROM trace_reap_unbound_accounts($1, $2, $3)",
-                &[&ttl, &never_used, &limit],
+                &[&unbound, &closed, &limit],
             )
             .await
             .expect_err("refused");
@@ -738,27 +864,37 @@ async fn it_works_as_the_non_superuser_role_and_not_by_bypassing_row_security() 
         )
         .await
         .unwrap();
-    let blind = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
+    let blind = fx.reaper.reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, 100).await;
     fx.admin
         .batch_execute(
             "ALTER POLICY trace_unbound_reaper_read ON trace_account_bindings USING (TRUE)",
         )
         .await
         .unwrap();
-    assert_eq!(blind.reaped, 0, "the sweep is subject to row security");
+    assert_eq!(
+        blind.unwrap().reaped(),
+        0,
+        "the sweep is subject to row security"
+    );
     assert_eq!(rows(&fx, &target.tenant).await[1], 1);
 
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
+    assert_eq!(rows(&fx, &target.tenant).await, GONE);
+}
+
+/// Boot does one `pool.get()` on the reaper pool, so a login that cannot
+/// connect fails boot rather than the first tick.
+#[tokio::test]
+async fn a_bad_reaper_login_fails_the_startup_check() {
+    let Some(fx) = fixture().await else { return };
+    fx.reaper
+        .verify_login()
         .await
-        .unwrap();
-    assert_eq!(summary.reaped, 1);
-    assert_eq!(rows(&fx, &target.tenant).await[..6], [0; 6]);
+        .expect("the real login connects");
+    let mut bad = reqwest::Url::parse(&fx.reaper_url).unwrap();
+    bad.set_username("unbound_reaper_no_such_login").unwrap();
+    let bad = UnboundAccountReaper::connect(bad.as_str()).expect("builds lazily");
+    assert!(bad.verify_login().await.is_err());
 }
 
 /// Re-applying V99 changes nothing and leaves the reaper working. The
@@ -767,19 +903,16 @@ async fn it_works_as_the_non_superuser_role_and_not_by_bypassing_row_security() 
 async fn reapplying_the_migration_changes_nothing() {
     let Some(fx) = fixture().await else { return };
     let target = seed(&fx, Binding::Unbound, 90, None).await;
+    let closed = seed_closed(&fx, 400, 31).await;
     fx.admin
         .batch_execute(include_str!(
             "../../../migrations/V99__unbound_account_reaper.sql"
         ))
         .await
         .unwrap();
-    let summary = fx
-        .reaper
-        .reap(TTL_DAYS, NEVER_USED_TTL_DAYS, 100)
-        .await
-        .unwrap();
-    assert_eq!(summary.reaped, 1);
-    assert_eq!(rows(&fx, &target.tenant).await[1], 0);
+    assert_eq!(counts(fx.reap(100).await), (1, 1, 0));
+    assert_eq!(rows(&fx, &target.tenant).await, GONE);
+    assert_eq!(rows(&fx, &closed.tenant).await, GONE);
 }
 
 impl Fixture {

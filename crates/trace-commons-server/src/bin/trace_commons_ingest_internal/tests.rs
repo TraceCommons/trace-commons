@@ -101846,11 +101846,3 @@ async fn settlement_posture_handler_refuses_without_a_credential() {
         .expect_err("an unknown bearer is refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
 }
-
-#[test]
-fn unbound_reaper_never_used_ttl_may_not_exceed_the_idle_ttl() {
-    assert!(validate_unbound_reaper_ttls(30, 7).is_ok());
-    assert!(validate_unbound_reaper_ttls(30, 30).is_ok());
-    let message = validate_unbound_reaper_ttls(5, 7).unwrap_err().to_string();
-    assert!(message.contains("NEVER_USED_TTL_DAYS"));
-}
