@@ -1063,3 +1063,119 @@ async fn re_approving_never_resurrects_an_entry_the_contributor_declined() {
     assert_eq!(h.only_entry().state, QueueState::Refused);
     assert_eq!(h.received.lock().unwrap().len(), 0);
 }
+
+// --- K5: arming from now, and "Keep on this Mac", through the upload pass ---
+
+impl Harness {
+    fn key(project: &str) -> String {
+        trace_commons_contributor::daemon::policy::project_key_for(Some(&format!(
+            "/Users/testuser/code/{project}"
+        )))
+    }
+
+    fn ipc_ok(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let resp = ipc::handle_local(&self.shared, method, params);
+        assert!(resp.error.is_none(), "{method}: {:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    fn arm(&self, project: &str, from_now: bool) -> serde_json::Value {
+        self.ipc_ok(
+            "set_project_mode",
+            serde_json::json!({
+                "project_key": Self::key(project),
+                "mode": "auto_upload",
+                "from_now": from_now,
+            }),
+        )
+    }
+}
+
+/// Arming from now sends a session that appears after the arming and never
+/// the one that was already waiting when the folder was armed.
+#[tokio::test]
+async fn arming_from_now_uploads_new_sessions_and_never_the_backlog() {
+    let h = Harness::new().await;
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+    h.discover().await;
+    assert_eq!(h.states(), vec![QueueState::Pending]);
+
+    h.arm("myproj", true);
+    h.discover().await;
+    h.upload_pass().await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 0, "the backlog waits");
+    assert_eq!(h.states(), vec![QueueState::Pending]);
+
+    h.write_session("myproj", "22222222-2222-2222-2222-222222222222");
+    h.discover().await;
+    h.upload_pass().await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 1, "the new session goes");
+    let queue = h.shared.queue.lock().unwrap();
+    let pending: Vec<_> = queue.pending().iter().map(|e| e.path.clone()).collect();
+    assert_eq!(pending.len(), 1, "the backlog still waits for a person");
+    assert!(
+        pending[0]
+            .to_string_lossy()
+            .contains("11111111-1111-1111-1111-111111111111")
+    );
+}
+
+/// An unattended approval made under a plain arming that comes back
+/// `Approved` after the folder was armed from now is stopped at send time and
+/// returned to waiting, not uploaded.
+#[tokio::test]
+async fn the_send_path_holds_back_an_on_disk_session_once_armed_from_now() {
+    let h = Harness::new().await;
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+    h.opt_in("myproj");
+    h.discover().await;
+    assert_eq!(h.states(), vec![QueueState::Approved]);
+    assert!(h.only_entry().approved_unattended);
+
+    // As if the approval were in flight when the arming changed, so the
+    // handler's retraction never saw it: only the policy moves.
+    {
+        let mut policy = h.shared.policy.lock().unwrap();
+        policy
+            .set_mode(&Harness::key("myproj"), ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+        policy.arm_from_now(&Harness::key("myproj"), Utc::now());
+    }
+    h.upload_pass().await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 0);
+    assert_eq!(h.states(), vec![QueueState::Pending]);
+}
+
+/// A kept session is never uploaded, even once its folder is armed, and the
+/// undo waits for a person rather than going out under the folder's rule.
+#[tokio::test]
+async fn a_kept_session_is_never_uploaded_after_its_folder_is_armed() {
+    let h = Harness::new().await;
+    h.write_session("myproj", "11111111-1111-1111-1111-111111111111");
+    h.discover().await;
+    let entry_id = h.only_entry().entry_id;
+    h.ipc_ok(
+        "keep",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+
+    h.arm("myproj", false);
+    h.discover().await;
+    h.upload_pass().await.unwrap();
+    assert_eq!(h.received.lock().unwrap().len(), 0);
+    assert_eq!(h.states(), vec![QueueState::Refused]);
+    assert!(h.only_entry().is_kept());
+
+    h.ipc_ok(
+        "undo_keep",
+        serde_json::json!({ "entry_id": entry_id.to_string() }),
+    );
+    h.discover().await;
+    h.upload_pass().await.unwrap();
+    assert_eq!(
+        h.received.lock().unwrap().len(),
+        0,
+        "the undo waits for a person"
+    );
+    assert_eq!(h.states(), vec![QueueState::Pending]);
+}

@@ -416,6 +416,20 @@ impl QueueEntry {
                 .is_some_and(|reason| REASONS_NEEDING_A_PERSON.contains(&reason))
     }
 
+    /// Whether the contributor kept this session on this Mac. See
+    /// [`REASON_KEPT`].
+    pub fn is_kept(&self) -> bool {
+        self.state == QueueState::Refused && self.reason_label.as_deref() == Some(REASON_KEPT)
+    }
+
+    /// Whether this entry is waiting because the contributor undid a "Keep on
+    /// this Mac", and so must not be approved on anyone's behalf. See
+    /// [`REASON_RETURNED_FROM_KEEP`].
+    pub fn returned_from_keep(&self) -> bool {
+        self.state == QueueState::Pending
+            && self.reason_label.as_deref() == Some(REASON_RETURNED_FROM_KEEP)
+    }
+
     /// A paced retry -- a transient classifier outage, or a witness at
     /// capacity -- stays approved, but cannot be claimed before its
     /// persisted deadline. A missing deadline fails closed.
@@ -519,6 +533,37 @@ pub const REASON_CHANGED: &str = "session-changed-after-offer";
 /// this exact string. Changing it in one place and not the other would
 /// silently start re-offering declined sessions again.
 pub const REASON_DISMISSED: &str = "dismissed-by-contributor";
+
+/// The reason label `keep` records: the contributor chose "Keep on this Mac"
+/// for this session (K5, open decision #4 in #1118).
+///
+/// **Reversible, unlike `REASON_DISMISSED`.** A kept entry is `Refused` with
+/// this label, which is what keeps it out of every path that sends: it is
+/// not `Pending`, so it is out of `list_pending`, `status.queue_depth` (the
+/// badge), every group `approve`, `approve_unattended` and `expire`; it is not
+/// `Approved`, so nothing uploads it; and only `Superseded` is ever
+/// compacted, so the record does not decay. `Queue::kept_at_path` makes it a
+/// decision about the *conversation*, the way `dismissed_at_path` does: while
+/// kept, the watcher skips that session at its path -- no new card, no
+/// unattended approval in an armed project, and no re-read -- however much it
+/// grows. `undo_keep` is the only way out, and it returns the entry to
+/// waiting marked `REASON_RETURNED_FROM_KEEP`.
+///
+/// It is a distinct string so that none of the path-level rules keyed on
+/// `REASON_DISMISSED` apply to it, and so no reader can mistake a keep for a
+/// permanent decline.
+pub const REASON_KEPT: &str = "kept-on-this-mac";
+
+/// The reason label `undo_keep` leaves on the entry it returns to waiting.
+///
+/// A person ruled on this conversation, so undoing the keep asks them again
+/// rather than handing it to a folder's standing yes: `approve_unattended`
+/// refuses it and the watcher does not approve it on anyone's behalf, in an
+/// armed folder included. A person's own `approve` clears it like any other
+/// label. Not in `REASONS_NEEDING_A_PERSON`, deliberately: those are also
+/// left out of a group `approve`, and a contributor who undid a keep and then
+/// pressed "Submit all" for the folder did decide about it.
+pub const REASON_RETURNED_FROM_KEEP: &str = "returned-from-keep";
 
 /// The reason label an approve records when the envelope it built is past
 /// `envelope::MAX_ENVELOPE_BYTES`.
@@ -833,6 +878,74 @@ impl Queue {
         self.at_path(path).any(|e| {
             e.state == QueueState::Refused && e.reason_label.as_deref() == Some(REASON_DISMISSED)
         })
+    }
+
+    /// Has the contributor kept the session living at `path` on this Mac?
+    /// The reversible sibling of [`Self::dismissed_at_path`]: answered the
+    /// same way, from the path, for the same reason. See [`REASON_KEPT`].
+    pub fn kept_at_path(&self, path: &Path) -> bool {
+        self.at_path(path).any(QueueEntry::is_kept)
+    }
+
+    /// Whether a live entry at `path` is one a contributor returned from a
+    /// keep. The watcher asks before it supersedes that entry with newer
+    /// content, so the mark follows the conversation rather than the bytes:
+    /// a session that grew while kept is still asked about after the undo.
+    pub fn returned_from_keep_at_path(&self, path: &Path) -> bool {
+        self.at_path(path).any(QueueEntry::returned_from_keep)
+    }
+
+    /// Every entry kept on this Mac, in queue order.
+    pub fn kept(&self) -> Vec<&QueueEntry> {
+        self.entries.iter().filter(|e| e.is_kept()).collect()
+    }
+
+    /// Keep a waiting session on this Mac: `Pending` to `Refused` with
+    /// [`REASON_KEPT`]. Only a `Pending` entry can be kept; an approved one
+    /// is a decision already made, which `cancel` undoes first, and one past
+    /// that is in flight or finished. Any preview pin goes, so the stored
+    /// envelope is swept like a dismissed one's -- an undo rebuilds.
+    pub fn keep(&mut self, entry_id: Uuid) -> Result<()> {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        if e.state != QueueState::Pending {
+            bail!("not-pending");
+        }
+        e.state = QueueState::Refused;
+        e.reason_label = Some(REASON_KEPT.to_string());
+        e.retry_after = None;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        Ok(())
+    }
+
+    /// Undo a keep: the kept entry returns to `Pending`, marked
+    /// [`REASON_RETURNED_FROM_KEEP`] so it waits for a person, and dated
+    /// `now` -- expiry counts from `discovered_at`, and a session kept for a
+    /// month must not expire on the pass after the contributor asked for it
+    /// back. Refuses anything that is not kept, a dismissal included: a
+    /// dismissal stays permanent.
+    pub fn undo_keep(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> Result<()> {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            bail!("unknown-entry-id");
+        };
+        if !e.is_kept() {
+            bail!("not-kept");
+        }
+        e.state = QueueState::Pending;
+        e.reason_label = Some(REASON_RETURNED_FROM_KEEP.to_string());
+        e.discovered_at = now;
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        Ok(())
     }
 
     pub fn pending(&self) -> Vec<&QueueEntry> {
@@ -1219,7 +1332,7 @@ impl Queue {
         if self
             .entries
             .iter()
-            .any(|e| e.entry_id == entry_id && e.held_for_review())
+            .any(|e| e.entry_id == entry_id && (e.held_for_review() || e.returned_from_keep()))
         {
             return false;
         }
@@ -3452,5 +3565,79 @@ mod tests {
         value.as_object_mut().unwrap().remove("session_cwd");
         let loaded: QueueEntry = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.session_cwd, None);
+    }
+
+    /// K5: "Keep on this Mac" takes a waiting session out of everything that
+    /// sends or counts it as owed, without expiring it, and the undo puts it
+    /// back as waiting for a person.
+    #[test]
+    fn a_kept_session_is_out_of_pending_never_expires_and_can_be_undone() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        q.keep(id).unwrap();
+
+        assert!(
+            q.pending().is_empty(),
+            "out of the Ask-me list and the badge"
+        );
+        assert!(q.kept_at_path(&the_path()));
+        assert!(!q.dismissed_at_path(&the_path()), "not a dismissal");
+        assert_eq!(q.kept().len(), 1);
+        assert!(!q.approve_unattended(id, &[], None), "nothing sends it");
+        assert!(
+            !q.approve(id, &[], None, None, None, None),
+            "not even by hand"
+        );
+        assert_eq!(
+            q.expire(at("2027-01-01T00:00:00Z"), 14, false),
+            0,
+            "a kept session does not age out"
+        );
+        assert!(q.get(id).unwrap().is_kept());
+
+        q.undo_keep(id, at("2027-01-01T00:00:00Z")).unwrap();
+        let e = q.get(id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert!(e.returned_from_keep());
+        assert!(!q.kept_at_path(&the_path()));
+        assert_eq!(
+            q.expire(at("2027-01-02T00:00:00Z"), 14, false),
+            0,
+            "the undo restarts the clock"
+        );
+        assert!(
+            !q.approve_unattended(id, &[], None),
+            "an undone keep waits for a person"
+        );
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+        assert_eq!(q.get(id).unwrap().reason_label, None);
+    }
+
+    /// Only a waiting session can be kept, and only a kept one un-kept -- so a
+    /// dismissal can never be undone through the keep route.
+    #[test]
+    fn keep_and_its_undo_refuse_every_other_state() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        assert_eq!(
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"))
+                .unwrap_err()
+                .to_string(),
+            "not-kept"
+        );
+        q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
+        assert_eq!(q.keep(id).unwrap_err().to_string(), "not-pending");
+        assert_eq!(
+            q.undo_keep(id, at("2026-08-02T00:00:00Z"))
+                .unwrap_err()
+                .to_string(),
+            "not-kept",
+            "a dismissal stays permanent"
+        );
+        assert!(q.dismissed_at_path(&the_path()));
+        assert_eq!(
+            q.keep(entry_id_for("sha256:none")).unwrap_err().to_string(),
+            "unknown-entry-id"
+        );
     }
 }
