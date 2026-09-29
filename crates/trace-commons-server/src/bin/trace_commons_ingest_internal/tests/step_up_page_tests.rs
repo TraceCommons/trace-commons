@@ -605,7 +605,7 @@ async fn page_sign_in(
     .await;
     assert_eq!(start.status, StatusCode::OK, "login/start");
     let ceremony = start
-        .cookie_pair("tc_passkey_ceremony")
+        .cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE)
         .expect("ceremony cookie");
     let assertion = assert_from(
         authenticator,
@@ -742,7 +742,7 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
     )
     .await;
     assert_eq!(stray.status, StatusCode::BAD_REQUEST);
-    assert!(stray.cookie_pair("tc_account_session").is_none());
+    assert!(stray.cookie_pair(ACCOUNT_SESSION_COOKIE).is_none());
 
     // The page's sign-in from the ingest origin: a 303 carrying a strong
     // `passkey` session bound to the credential that asserted.
@@ -761,7 +761,7 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
         signed_in.text()
     );
     let session = signed_in
-        .cookie_pair("tc_account_session")
+        .cookie_pair(ACCOUNT_SESSION_COOKIE)
         .expect("session cookie");
     let cookie_value = session.split_once('=').unwrap().1.to_string();
     let (cookie_tenant, token_hash) =
@@ -786,7 +786,7 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
     .await;
     assert_eq!(register.status, StatusCode::OK, "{}", register.text());
     let ceremony = register
-        .cookie_pair("tc_passkey_ceremony")
+        .cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE)
         .expect("ceremony cookie");
     let options: webauthn_rs::prelude::CreationChallengeResponse =
         serde_json::from_value(register.json()).expect("creation challenge");
