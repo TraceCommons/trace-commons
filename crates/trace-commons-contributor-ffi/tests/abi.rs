@@ -27,23 +27,24 @@ use trace_commons_contributor_ffi::{
     tc_contribution_attestation_tone, tc_contribution_eligibility_control,
     tc_contribution_eligibility_line, tc_contribution_eligibility_reason_line,
     tc_contribution_eligibility_tone, tc_contribution_group_control, tc_contribution_withheld_line,
-    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_sources,
-    tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host, tc_last_error,
-    tc_legacy_migration_notice, tc_near_ai_credential_action, tc_near_ai_credential_state_line,
-    tc_near_ai_credential_state_tone, tc_near_ai_enroll_line, tc_near_ai_enroll_tone, tc_preview,
-    tc_preview_body, tc_preview_open, tc_preview_search, tc_preview_summary_json,
-    tc_preview_turns_json, tc_private_inference_copy, tc_private_inference_quit_needs_notice,
-    tc_private_inference_serving_line, tc_private_inference_should_offer,
-    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
-    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
-    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
-    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
-    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_daemon_start, tc_daemon_start_with_settings, tc_daemon_stop, tc_discover_opencode_export,
+    tc_discover_sources, tc_grant_void_notice, tc_handle, tc_handle_free, tc_invite_issuer_host,
+    tc_last_error, tc_legacy_migration_notice, tc_near_ai_credential_action,
+    tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
+    tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
+    tc_preview_summary_json, tc_preview_turns_json, tc_private_inference_copy,
+    tc_private_inference_quit_needs_notice, tc_private_inference_serving_line,
+    tc_private_inference_should_offer, tc_private_inference_state_line,
+    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
+    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
+    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
+    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
+    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
+    tc_skill_draft_validate, tc_skill_learning_copy, tc_skill_learning_error_line,
+    tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear,
+    tc_witness_configure, tc_witness_copy, tc_witness_last_result_json,
+    tc_witness_last_result_line, tc_witness_last_result_tone, tc_witness_state_line,
+    tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -1965,7 +1966,87 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
         assert!(item["session_count"].is_u64());
         assert!(item["relocated_by_env"].is_boolean());
         assert!(item["most_recent"].is_string() || item["most_recent"].is_null());
+        assert!(item["answers_at"].is_string() || item["answers_at"].is_null());
     }
+
+    let answers_at =
+        |source: &str| items.iter().find(|i| i["source"] == source).unwrap()["answers_at"].clone();
+    assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
+    assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
+    assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+    assert_eq!(
+        answers_at("cline"),
+        serde_json::Value::Null,
+        "Cline ships with no single default vendor to name"
+    );
+}
+
+/// The Antigravity design decision: `~/.gemini/tmp` is Gemini CLI's own
+/// store, so it is reported under Gemini CLI's real name here, never
+/// relabelled `"antigravity"`. See issue #1118 decision #2.
+#[test]
+fn the_gemini_store_is_never_relabelled_antigravity() {
+    let out = tc_discover_sources();
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let sources: Vec<&str> = parsed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|i| i["source"].as_str().unwrap())
+        .collect();
+    assert!(sources.contains(&"gemini-cli"));
+    assert!(!sources.contains(&"antigravity"));
+}
+
+/// An OpenCode export folder the contributor has already named is described
+/// with a real count, not left unreachable through this ABI.
+#[test]
+fn discover_opencode_export_reports_a_named_folders_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ses_a.json"), b"{}").unwrap();
+    std::fs::write(dir.path().join("ses_b.json"), b"{}").unwrap();
+
+    let out = unsafe { tc_discover_opencode_export(cstr(dir.path()).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["source"], serde_json::json!("opencode"));
+    assert_eq!(parsed["exists"], serde_json::json!(true));
+    assert_eq!(parsed["session_count"], serde_json::json!(2));
+    assert_eq!(
+        parsed["answers_at"],
+        serde_json::Value::Null,
+        "OpenCode ships with no single default vendor to name"
+    );
+}
+
+/// A folder named for OpenCode that has not been created yet -- or was
+/// removed -- is reported absent, not hidden or defaulted to zero.
+#[test]
+fn discover_opencode_export_reports_a_missing_folder_as_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let never_created = dir.path().join("not-there");
+
+    let out = unsafe { tc_discover_opencode_export(cstr(&never_created).as_ptr()) };
+    assert!(!out.is_null());
+    let json = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { tc_string_free(out) };
+
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["exists"], serde_json::json!(false));
+    assert_eq!(parsed["session_count"], serde_json::json!(0));
 }
 
 #[test]
