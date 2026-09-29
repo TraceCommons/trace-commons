@@ -16105,6 +16105,7 @@ struct InvalidationDetail {
     attempt_count: i32,
     max_attempts: i32,
     last_error_label: Option<String>,
+    requested_at: chrono::DateTime<chrono::Utc>,
     next_attempt_at: chrono::DateTime<chrono::Utc>,
     completed: bool,
     run_state: String,
@@ -16121,7 +16122,7 @@ async fn invalidation_detail(
         .query_one(
             "SELECT i.state, i.attempt_count, i.max_attempts, i.last_error_label,
                     i.next_attempt_at, i.completed_at IS NOT NULL,
-                    r.index_invalidation_state
+                    r.index_invalidation_state, i.requested_at
                FROM pipeline_index_invalidations i
                JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
               WHERE i.tenant_id = $1 AND i.run_id = $2",
@@ -16138,6 +16139,7 @@ async fn invalidation_detail(
         next_attempt_at: row.get(4),
         completed: row.get(5),
         run_state: row.get(6),
+        requested_at: row.get(7),
     }
 }
 
@@ -16217,23 +16219,19 @@ async fn invalidation_removes_the_revision_after_withdrawal() {
     );
 }
 
-/// How long a run's invalidation still waits before it is due, in
-/// milliseconds, against the database clock.
-async fn invalidation_wait_ms(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) -> f64 {
-    let mut client = backend.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, tenant_id).await;
-    let wait: f64 = tx
-        .query_one(
-            "SELECT (EXTRACT(EPOCH FROM next_attempt_at - NOW()) * 1000)::float8
-               FROM pipeline_index_invalidations
-              WHERE tenant_id = $1 AND run_id = $2",
-            &[&tenant_id, &run_id],
-        )
+/// The database clock: `NOW()` of a transaction of its own. Read just
+/// before and just after a call, it brackets the `NOW()` of every
+/// transaction the call ran.
+async fn database_now(backend: &PgBackend) -> chrono::DateTime<chrono::Utc> {
+    backend
+        .trace_pool_for_test()
+        .get()
         .await
         .unwrap()
-        .get(0);
-    tx.commit().await.unwrap();
-    wait
+        .query_one("SELECT NOW()", &[])
+        .await
+        .unwrap()
+        .get(0)
 }
 
 /// Moves a run's invalidation `requested_at` back by `hours`, as the owner:
@@ -16263,6 +16261,11 @@ async fn age_invalidation(tenant_id: &str, run_id: uuid::Uuid, hours: i32) {
 /// `index_invalidation_state` stays `pending` and every entry stays where
 /// it was. When the index answers again, the invalidation completes and the
 /// revision's entries are gone.
+///
+/// Ruling F-M6: the backoff is checked against the database clock read
+/// just before and just after each attempt, which brackets the `NOW()` the
+/// retry wrote from, and not against the time left when the test reads the
+/// row. However slow the runner, the row alone decides the result.
 #[tokio::test]
 async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
     let Some(backend) = runtime_backend(4).await else {
@@ -16292,6 +16295,7 @@ async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
         }
         index.set_fault(IndexFault::FailBeforeApply);
         make_invalidation_due(&tenant, run.run_id).await;
+        let before = database_now(&backend).await;
         assert_eq!(
             service
                 .process_index_invalidations(&tenant, 32)
@@ -16300,6 +16304,7 @@ async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
             1,
             "outage {outage} is processed"
         );
+        let after = database_now(&backend).await;
         let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
         assert_eq!(detail.state, "pending", "outage {outage}");
         assert_eq!(
@@ -16313,21 +16318,36 @@ async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
         );
         assert!(!detail.completed, "outage {outage}");
         assert_eq!(detail.run_state, "pending", "outage {outage}");
-        let wait_ms = invalidation_wait_ms(&backend, &tenant, run.run_id).await;
+        // The retry wrote `next_attempt_at = t + wait` at a database time `t`
+        // between `before` and `after`, with `wait` its age clamped to
+        // [1 s, 1 h]: bounded, whatever the runner's speed.
+        let second = chrono::Duration::seconds(1);
+        let hour = chrono::Duration::hours(1);
         assert!(
-            wait_ms > 0.0 && wait_ms <= 3_600_000.0,
-            "outage {outage} waits out a bounded backoff ({wait_ms} ms)"
+            detail.next_attempt_at >= before + second && detail.next_attempt_at <= after + hour,
+            "outage {outage} waits out a bounded backoff \
+             (before {before}, after {after}, due {})",
+            detail.next_attempt_at
         );
         if outage == 1 {
+            // The wait is the age at `t`, or the one-second floor when that is
+            // longer: never past `after` plus the larger of the two.
+            let floor_or_age = std::cmp::max(after - detail.requested_at, second);
             assert!(
-                wait_ms > 500.0 && wait_ms <= 1_000.0,
-                "the first outage waits the one-second floor ({wait_ms} ms)"
+                detail.next_attempt_at <= after + floor_or_age,
+                "the first outage waits the one-second floor \
+                 (requested {}, after {after}, due {})",
+                detail.requested_at,
+                detail.next_attempt_at
             );
         }
         if outage == outages {
+            // Three hours old: the wait is exactly the one-hour cap.
             assert!(
-                wait_ms > 3_540_000.0,
-                "an outage of an old invalidation waits the one-hour cap ({wait_ms} ms)"
+                detail.next_attempt_at >= before + hour,
+                "an outage of an old invalidation waits the one-hour cap \
+                 (before {before}, due {})",
+                detail.next_attempt_at
             );
         }
         if let Some(previous) = previous_wait_end {
