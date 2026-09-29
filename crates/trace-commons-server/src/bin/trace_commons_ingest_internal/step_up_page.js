@@ -63,6 +63,7 @@
     for (const id of SECTIONS) $(id).hidden = true;
     $('finish').hidden = true;
     $('account').hidden = true;
+    $('account-retry').hidden = true;
   };
 
   // A 401 means the step-up session is over (it lasts minutes, so this is
@@ -126,12 +127,26 @@
   async function signedIn() {
     $('sign-in-section').hidden = true;
     say('status_signed_in');
-    // Which account this is goes on screen before any change is offered, so
-    // someone with passkeys for two accounts can see which one they are in.
-    if (!(await showAccount())) return;
+    await offerActions();
+  }
+
+  // Which account this is goes on screen before any change is offered, so
+  // someone with passkeys for two accounts can see which one they are in.
+  // Fail closed: when the page cannot name the account, it offers no change,
+  // only a retry (and sign-out).
+  async function offerActions() {
+    const retry = $('account-retry');
+    retry.hidden = true;
+    const known = await showAccount();
+    if (known === 'ended') return;
+    $('finish').hidden = false;
+    if (known !== 'known') {
+      retry.disabled = false;
+      retry.hidden = false;
+      return;
+    }
     const wanted = action ? [action] : SECTIONS;
     for (const id of wanted) $(id).hidden = false;
-    $('finish').hidden = false;
     if (wanted.includes('remove-passkey')) loadPasskeys();
     if (wanted.includes('change-payout')) loadPayout();
   }
@@ -139,7 +154,8 @@
   // Name the signed-in account by what the person can recognise and nothing
   // else: the label of the passkey that just signed in, and the public NEAR
   // account names linked to it. Never a credential id, a key, or an internal
-  // id. Returns false when the session has already ended.
+  // id. Returns 'known', 'unknown' (a read failed: nothing may be offered),
+  // or 'ended' (a 401: the session-ended path has already run).
   async function showAccount() {
     const passkeyLine = $('account-passkey');
     const nearLine = $('account-near');
@@ -153,25 +169,33 @@
       ]);
       if (passkeys.status === 401 || near.status === 401) {
         sessionEnded();
-        return false;
+        return 'ended';
       }
-      if (!passkeys.ok) throw new Error('passkeys');
+      if (!passkeys.ok || !near.ok) throw new Error('read');
       const current = ((await passkeys.json()).passkeys || []).find((p) => p.this_device);
       if (!current) throw new Error('passkey');
       passkeyLine.textContent = current.label
         ? t('account_passkey') + ' ' + current.label
         : t('account_passkey_unnamed');
-      const names = near.ok
-        ? ((await near.json()).near_identities || []).map((n) => n.near_account_id)
-        : [];
+      const names = ((await near.json()).near_identities || []).map((n) => n.near_account_id);
       if (names.length > 0) {
         nearLine.textContent = t('account_near') + ' ' + names.join(', ');
         nearLine.hidden = false;
       }
     } catch (_) {
       passkeyLine.textContent = t('account_unknown');
+      nearLine.textContent = '';
+      nearLine.hidden = true;
+      return 'unknown';
     }
-    return true;
+    return 'known';
+  }
+
+  async function retryAccount() {
+    const retry = $('account-retry');
+    retry.disabled = true;
+    say('status_signed_in');
+    await offerActions();
   }
 
   async function addPasskey() {
@@ -332,4 +356,5 @@
   $('sign-in').addEventListener('click', signIn);
   $('add-passkey-button').addEventListener('click', addPasskey);
   $('sign-out').addEventListener('click', signOut);
+  $('account-retry').addEventListener('click', retryAccount);
 })();

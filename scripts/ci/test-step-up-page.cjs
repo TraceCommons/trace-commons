@@ -396,12 +396,64 @@ test("the page shows which account is signed in, and nothing secret", async () =
   await signIn(p);
   assert.equal(p.$("account-near").hidden, true);
   assert.equal(p.$("account-passkey").textContent, `${copy.account_passkey} Laptop`);
+});
 
-  // It cannot be read: the page says so rather than showing nothing.
-  p = page({ routes: { "GET /v1/account/passkeys": reply(500, {}) } });
+test("an account that cannot be named is offered no changes, only a retry", async () => {
+  const failures = [
+    ["passkeys 500", { "GET /v1/account/passkeys": reply(500, {}) }],
+    ["near-identities 500", { "GET /v1/account/near-identities": reply(500, {}) }],
+    ["passkeys network error", { "GET /v1/account/passkeys": new Error("network") }],
+    [
+      "no passkey marked this_device",
+      {
+        "GET /v1/account/passkeys": reply(200, {
+          passkeys: [{ credential_id: "C", label: "Laptop", this_device: false }],
+        }),
+      },
+    ],
+  ];
+  for (const [what, routes] of failures) {
+    for (const action of ["", ...SECTIONS]) {
+      const p = page({ action, routes: { ...routes } });
+      await signIn(p);
+      for (const id of SECTIONS) assert.equal(p.$(id).hidden, true, `${what} ${action}: #${id} hidden`);
+      assert.equal(p.reveals.length, 0, `${what} ${action}: no action ever appeared`);
+      assert.equal(p.$("account").hidden, false, `${what}: account block shown`);
+      assert.equal(p.$("account-passkey").textContent, copy.account_unknown, what);
+      assert.equal(p.$("account-retry").hidden, false, `${what}: retry offered`);
+      assert.equal(p.$("finish").hidden, false, `${what}: sign-out still offered`);
+      assert.equal(p.$("sign-in-section").hidden, true, `${what}: still signed in`);
+      // Only reads were made: nothing was changed.
+      assert.ok(
+        p.calls.every((c) => c.key.startsWith("GET ") || c.key.includes("/login/")),
+        `${what}: made a change`,
+      );
+    }
+  }
+
+  // The retry succeeds once the reads do: the account is named, then the
+  // actions appear.
+  const p = page({ routes: { "GET /v1/account/passkeys": reply(500, {}) } });
   await signIn(p);
-  assert.equal(p.$("account").hidden, false);
-  assert.equal(p.$("account-passkey").textContent, copy.account_unknown);
+  delete p.routes["GET /v1/account/passkeys"];
+  p.routes["GET /v1/account/passkeys"] = reply(200, {
+    passkeys: [{ credential_id: "C", label: "Laptop", this_device: true }],
+  });
+  await p.$("account-retry").handlers.click();
+  await flush();
+  assert.equal(p.$("account-retry").hidden, true, "retry gone");
+  assert.equal(p.$("account-passkey").textContent, `${copy.account_passkey} Laptop`);
+  for (const id of SECTIONS) assert.equal(p.$(id).hidden, false, `after retry: #${id} shown`);
+  for (const shownThen of p.reveals) assert.equal(shownThen, `${copy.account_passkey} Laptop`);
+
+  // A retry that meets an ended session takes the session-ended path.
+  const q = page({ routes: { "GET /v1/account/passkeys": reply(500, {}) } });
+  await signIn(q);
+  q.routes["GET /v1/account/passkeys"] = reply(401, {});
+  await q.$("account-retry").handlers.click();
+  await flush();
+  assertSessionEnded(q, "retry 401");
+  assert.equal(q.$("account-retry").hidden, true, "retry 401: retry hidden");
 });
 
 (async () => {

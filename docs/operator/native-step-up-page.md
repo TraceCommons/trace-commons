@@ -45,6 +45,13 @@ label of the passkey that signed in (from `GET /v1/account/passkeys`,
 `GET /v1/account/near-identities`). It never shows a credential id, a public
 key, the account id or the tenant.
 
+This is fail closed. If either read fails with anything other than a 401 (a
+server error, a network error, or no passkey marked `this_device`), the page
+shows "could not confirm which account you are signed in to", offers no action
+(no add, remove or payout change), and shows a "Try again" button plus
+sign-out. Try again repeats the reads and offers the actions only once the
+account is named. A 401 still takes the session-ended path.
+
 ## URL contract (for the native client, C1)
 
 ```
@@ -152,5 +159,6 @@ It is **proposed** and awaits approval.
   same HTTP calls the script makes, with a software authenticator reporting the
   ingest origin. `scripts/ci/test-step-up-page.cjs` (run in CI) drives the
   script itself against stub elements and a scripted fetch: the finish bodies
-  it builds, a 401 ending the session, sign-out reporting what logout did, and
-  the account line.
+  it builds, a 401 ending the session, sign-out reporting what logout did,
+  the account line, and the fail-closed case (no action shown, only a retry,
+  when the account cannot be named).

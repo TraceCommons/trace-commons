@@ -115,8 +115,9 @@ pub(super) const STEP_UP_COPY: &[(&str, &str)] = &[
     ("account_near", "NEAR accounts linked to this account:"),
     (
         "account_unknown",
-        "This page could not show which account you are signed in to. Check before you change anything, or sign out and sign in again.",
+        "This page could not confirm which account you are signed in to, so it is not offering any changes. Nothing was changed. Try again, or sign out.",
     ),
+    ("account_retry_button", "Try again"),
     (
         "session_ended",
         "Your sign-in on this page has ended. Nothing was changed. Sign in again to continue.",
@@ -314,7 +315,7 @@ pub(super) fn ceremony_html(action: Option<StepUpAction>) -> String {
         "{head}<body data-action=\"{action}\"><main>\
 <h1>{heading}</h1><p>{intro}</p><noscript><p>{noscript}</p></noscript>\
 <section id=\"sign-in-section\"><button id=\"sign-in\" type=\"button\" disabled>{sign_in}</button></section>\
-<section id=\"account\" hidden><p id=\"account-passkey\"></p><p id=\"account-near\" hidden></p></section>\
+<section id=\"account\" hidden><p id=\"account-passkey\"></p><p id=\"account-near\" hidden></p><button id=\"account-retry\" type=\"button\" hidden>{account_retry}</button></section>\
 <section id=\"add-passkey\" hidden><h2>{add_heading}</h2><label for=\"passkey-label\">{add_label}</label><input id=\"passkey-label\" maxlength=\"64\" autocomplete=\"off\"><button id=\"add-passkey-button\" type=\"button\">{add_button}</button></section>\
 <section id=\"remove-passkey\" hidden><h2>{remove_heading}</h2><ul id=\"passkey-list\"></ul></section>\
 <section id=\"change-payout\" hidden><h2>{payout_heading}</h2><ul id=\"payout-list\"></ul></section>\
@@ -326,6 +327,7 @@ pub(super) fn ceremony_html(action: Option<StepUpAction>) -> String {
         intro = c("intro"),
         noscript = c("noscript"),
         sign_in = c("sign_in_button"),
+        account_retry = c("account_retry_button"),
         add_heading = c("action_add_heading"),
         add_label = c("action_add_label"),
         add_button = c("action_add_button"),
