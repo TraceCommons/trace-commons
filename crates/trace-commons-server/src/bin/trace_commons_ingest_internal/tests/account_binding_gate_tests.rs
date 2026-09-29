@@ -438,6 +438,8 @@ async fn a_gate_refusal_still_returns_the_rotated_cookie() {
         set_cookie.contains("rotated-gate-secret"),
         "the rotated secret is what the browser must swap to"
     );
+    assert_set_cookies_are_host_bound(&response.headers);
+    assert_clears_legacy_session_cookie(&response.headers);
 }
 
 #[tokio::test]
