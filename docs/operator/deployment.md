@@ -230,9 +230,80 @@ export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authe
   exact origin the browser sees (scheme + host + port). A mismatch makes every
   ceremony fail verification at the authenticator. `RP_ID` must be a registrable
   suffix of that origin's host.
+- **Several origins.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` may be a
+  comma-separated list, e.g. `https://tracecommons.ai,https://ingest.tracecommons.ai`.
+  The first entry is the primary origin; every entry is accepted. A single value
+  means what it always did. Every entry must be the `RP_ID` host or a subdomain
+  of it, or startup fails. Subdomains are never implied: list each origin.
 - The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
   in-process soft-authenticator used by the passkey tests). It is **not** compiled
   into or shipped with the production binaries; no production env var enables it.
+
+### Native passkey creation (Z2 S2)
+
+The native app creates a passkey, and with it an `unbound` account, through the
+unauthenticated `POST /v1/account/native/passkey/create/{start,finish}`. Because
+anyone can call it, and attestation is `none`, creation is capped by:
+
+```sh
+export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value; there is no default
+```
+
+- **Unset disables creation.** Every `create` request gets the uniform deny.
+  A value that is not a non-negative integer fails startup.
+- The cap is on accounts in state `unbound`, counted across every tenant. It is
+  checked at `create/start` and again inside the `create/finish` transaction.
+- When the count reaches the cap, ingest logs the label
+  `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
+  again only after the count has dropped below and reached it a second time.
+  Alert on it.
+- Each client IP (as the per-IP rate limiter reads it) may make at most
+  `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` successful
+  `create/finish` calls in a rolling 24 hours; the next gets the uniform deny.
+  Unset means **10**; `0` refuses every creation; a value that is not a
+  non-negative integer fails startup. The count is held in process, like the
+  per-minute limits, and holds only a salted hash of each IP: nothing about
+  the caller's address is written to the database. A restart clears it, and
+  with more than one ingest instance each keeps its own count.
+- Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
+  capped and needs no new setting; like the browser sign-in it needs the
+  login-resolver pool above.
+
+V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
+`EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`
+function owned by the new NOLOGIN role `trace_unbound_account_count_guard`.
+An ingest login that holds its grants some other way than through
+`trace_ingest_runtime` needs both, or every `create` is refused:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'INSERT'),
+       has_function_privilege('<ingest runtime login>', 'public.trace_unbound_passkey_account_count()', 'EXECUTE');
+```
+
+### Connect near.ai: binding a passkey account (Z2 S3)
+
+An unbound account attaches its NEAR AI identity through
+`POST /v1/account/near-ai/provision/bind/{start,finish}`, behind the account
+middleware with a native (`tcn1_`) session. It runs the NEAR AI login
+provisioning ceremony and needs exactly what that path needs (the provisioning
+switch, the admission gate, the NEAR account identity, the published issuer,
+and the login-resolver pool); there is no new setting. It uses the v2
+readiness, so no witness JSON is required.
+
+V100 grants `trace_ingest_runtime` `UPDATE (state, bound_at)` on
+`trace_account_bindings` and nothing else. An ingest login that holds its
+grants some other way needs it, or every bind fails and leaves the account
+`unbound`:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'state', 'UPDATE'),
+       has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'bound_at', 'UPDATE');
+```
+
+When the NEAR AI account already belongs to another commons account, the bind
+is refused: the passkey account is closed (its sessions and passkey revoked)
+and the response carries the existing account's session. Nothing moves between
+the two accounts; folding the passkey into the existing account is not built.
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -606,10 +677,64 @@ missing them, and the pipeline -- like the legacy path -- fails closed with
 pilot's V62-era grants and V90's own, has nothing left to do by hand for the
 pipeline.
 
-### V96 and V97: review, invalidation, and export tables
+### Account cookies take the `__Host-` prefix: a one-time browser sign-out
 
-V96 adds the human review claims and assessments, the index invalidation
-queue, a column on `pipeline_runs`, and an index for the payout pass. V97
+The browser cookies ingest sets for contributor accounts are bound to the
+exact host that set them:
+
+| Cookie | Was | Now |
+|---|---|---|
+| account session | `tc_account_session` | `__Host-tc_account_session` |
+| passkey ceremony | `tc_passkey_ceremony` | `__Host-tc_passkey_ceremony` |
+| NEAR ceremony | `tc_near_ceremony` | `__Host-tc_near_ceremony` |
+| sign-in link ceremony | `tc_login_ceremony` (`Path=/account/login`) | `__Host-tc_login_ceremony` (`Path=/`) |
+
+A browser accepts a `__Host-` cookie only with `Secure`, `Path=/` and no
+`Domain`, which every one of these already carried except the sign-in link
+ceremony's path. Nothing changes for native clients: the desktop apps
+authenticate with a `tcn1_` bearer, not a cookie.
+
+**The first deploy of this build signs every browser out once.** The server
+does not read the old session cookie name, so a browser that presents only
+`tc_account_session` gets a `401` from `/v1/account/*` and has to sign in
+again. There is deliberately no period in which both names are accepted.
+Server-side, the old sessions stay valid rows until they expire (seven days)
+or are revoked; only the browser's handle to them is dropped.
+
+The old cookie is also cleaned out of browsers. Every response that sets the
+new session cookie (sign-in by link, passkey or NEAR, and session rotation),
+and a browser logout, carries a second `Set-Cookie` that expires
+`tc_account_session` (`Max-Age=0`, `Path=/`, same attributes). The in-flight
+ceremony cookies need no cleanup: they live three to ten minutes, and a
+ceremony started before the deploy simply has to be started again.
+
+Nothing needs configuring. If a contributor reports being signed out after the
+deploy, that is this change; signing in again is the fix.
+
+Signing in again does not end the old session, and the contributor cannot log
+it out: logout identifies the session by the new cookie, and the browser no
+longer presents the old one. That row stays valid until it expires, up to
+seven days. A contributor who wants it gone now should sign in again and call
+`POST /v1/account/sessions/revoke-all`, which revokes every session on the
+account, the old one and the current one alike, and then sign in once more.
+
+### V97: account bindings
+
+V97 (`trace_account_bindings`, native passkey identity) grants
+`trace_ingest_runtime` `SELECT` on the new table and nothing else. Session
+validation joins it on every authenticated `/v1/account/*` request, so an
+ingest login that holds its grants some other way than through
+`trace_ingest_runtime` fails those requests with a 500 until it can read the
+table. Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
+```
+
+### V101 and V102: review, invalidation, and export tables
+
+V101 adds the human review claims and assessments, the index invalidation
+queue, a column on `pipeline_runs`, and an index for the payout pass. V102
 adds the export snapshots and their items. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist:
@@ -619,7 +744,7 @@ nothing broader, and each refuses to apply if the group does not exist:
 | `pipeline_review_claims` | `SELECT, INSERT, DELETE`; `UPDATE` on `reviewer_principal_ref`, `lease_token`, `lease_expires_at`, `claimed_at` | a reviewer's claim inserts the row, or takes over an expired claim or renews its own; the assessment deletes the spent claim |
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
-| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V96 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
+| `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V101 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
 

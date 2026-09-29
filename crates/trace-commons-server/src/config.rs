@@ -181,7 +181,10 @@ pub struct WebauthnConfig {
     /// Relying-party id (an effective domain, e.g. `tracecommons.ai`). Credentials
     /// bind to this value; it cannot change without invalidating every passkey.
     pub rp_id: String,
-    /// Relying-party origin (a full URL, e.g. `https://app.tracecommons.ai`).
+    /// Relying-party origin (a full URL, e.g. `https://tracecommons.ai`), or a
+    /// comma-separated list of them. The first is the primary origin; the rest
+    /// are also accepted (see `account_passkey::build_webauthn`). A single
+    /// value means exactly what it always did.
     pub rp_origin: String,
     /// Human-readable relying-party name shown in authenticator prompts.
     pub rp_name: String,

@@ -105,7 +105,7 @@ impl RewardHttpFixture {
     }
 
     fn cookie_header(&self) -> String {
-        format!("tc_account_session={}", self.cookie)
+        format!("{ACCOUNT_SESSION_COOKIE}={}", self.cookie)
     }
 }
 
@@ -208,7 +208,7 @@ async fn account_isolation_and_cursor_scenario(fixture: &RewardHttpFixture) {
             ))
             .header(
                 COOKIE.as_str(),
-                format!("tc_account_session={other_cookie}"),
+                format!("{ACCOUNT_SESSION_COOKIE}={other_cookie}"),
             )
             .send(),
         StatusCode::NOT_FOUND,
@@ -254,7 +254,7 @@ async fn account_isolation_and_cursor_scenario(fixture: &RewardHttpFixture) {
         .get(format!("{}/v1/account/rewards?limit=1", fixture.base))
         .header(
             COOKIE.as_str(),
-            format!("tc_account_session={other_cookie}"),
+            format!("{ACCOUNT_SESSION_COOKIE}={other_cookie}"),
         )
         .send()
         .await
@@ -278,7 +278,7 @@ async fn account_isolation_and_cursor_scenario(fixture: &RewardHttpFixture) {
         ))
         .header(
             COOKIE.as_str(),
-            format!("tc_account_session={other_cookie}"),
+            format!("{ACCOUNT_SESSION_COOKIE}={other_cookie}"),
         )
         .send()
         .await
@@ -724,6 +724,7 @@ async fn provision_test_logins(admin: &PgBackend) {
              GRANT trace_login_resolver TO trace_reward_http_resolver;\n\
              GRANT SELECT, INSERT, UPDATE ON trace_tenants, trace_accounts, trace_account_principals,\n\
                  trace_login_links, trace_sessions, trace_account_audit TO trace_reward_http_participant;\n\
+             GRANT SELECT ON trace_account_bindings TO trace_reward_http_participant;\n\
              GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trace_reward_http_participant;",
         )
         .await
@@ -867,7 +868,7 @@ async fn reserve_with_header(
 
 async fn native_account_token(state: &Arc<AppState>) -> String {
     let cookie = mint_redeem_session_cookie_value(state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie);
     let account = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("cookie account");

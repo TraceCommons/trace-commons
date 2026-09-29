@@ -101,7 +101,7 @@ const PIPELINE_TABLES: [&str; 13] = [
 ];
 
 /// Every privilege any role but the owner holds on the pipeline tables once
-/// V92 to V97 have run, as `(table, privilege, columns)`; no columns means
+/// V92 to V95, V101 and V102 have run, as `(table, privilege, columns)`; no columns means
 /// the whole table. The ingest runtime group, `trace_ingest_runtime`, is the
 /// only grantee, and it holds what the pipeline code reads and writes and
 /// nothing broader. A privilege the code comes to need goes into its
@@ -137,7 +137,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             // V95
             "approved_object_ref_id",
             "approved_content_hash",
-            // V96
+            // V101
             "index_invalidation_state",
         ],
     ),
@@ -179,7 +179,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     ("pipeline_admission_usage", "SELECT", &[]),
     ("pipeline_admission_usage", "INSERT", &[]),
-    // V96
+    // V101
     ("pipeline_index_invalidations", "SELECT", &[]),
     ("pipeline_index_invalidations", "INSERT", &[]),
     (
@@ -208,7 +208,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ),
     ("pipeline_review_assessments", "SELECT", &[]),
     ("pipeline_review_assessments", "INSERT", &[]),
-    // V97
+    // V102
     ("pipeline_export_snapshots", "SELECT", &[]),
     ("pipeline_export_snapshots", "INSERT", &[]),
     (
@@ -291,7 +291,24 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, Some(97));
+    // The upgrade runs every migration, so the recorded maximum is the
+    // newest one in the list; the pipeline versions themselves must be there.
+    let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
+    assert_eq!(version, latest);
+    for pipeline_version in [92, 93, 94, 95, 101, 102] {
+        let recorded: bool = admin
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
+                &[&pipeline_version],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            recorded,
+            "V{pipeline_version} was not recorded by the upgrade"
+        );
+    }
 
     for table in PIPELINE_TABLES {
         assert!(
