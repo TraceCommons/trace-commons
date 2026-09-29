@@ -2389,12 +2389,71 @@ async fn complete_pipeline_export(
     .await
 }
 
+/// The tenant's `export` audit events, oldest first, as `main`'s mirrored
+/// audit helper writes them to the database: each one's reason, export
+/// manifest id, decision-inputs hash, and metadata.
+async fn export_audit_events(owner: &Arc<PgBackend>, tenant_id: &str) -> Vec<serde_json::Value> {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT reason, export_manifest_id, decision_inputs_hash, metadata_json
+               FROM trace_audit_events
+              WHERE tenant_id = $1 AND action = 'export'
+              ORDER BY audit_sequence",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.iter()
+        .map(|row| {
+            serde_json::json!({
+                "reason": row.get::<_, Option<String>>(0),
+                "export_manifest_id": row.get::<_, Option<Uuid>>(1),
+                "decision_inputs_hash": row.get::<_, Option<String>>(2),
+                "metadata": row.get::<_, serde_json::Value>(3),
+            })
+        })
+        .collect()
+}
+
+/// Checks the newest of `events`: an export event of `stage` for
+/// `snapshot`, with the use label, the purpose hash, the source-list hash,
+/// and the item count, and nothing else.
+fn assert_pipeline_export_audit(
+    events: &[serde_json::Value],
+    stage: &str,
+    snapshot: &serde_json::Value,
+) {
+    let event = events.last().expect("an export audit event");
+    assert_eq!(
+        event["reason"],
+        format!(
+            "pipeline_export={stage};allowed_use=evaluation;purpose_hash={};source_list_hash={}",
+            snapshot["purpose_hash"].as_str().unwrap(),
+            snapshot["source_list_hash"].as_str().unwrap(),
+        ),
+        "{event}"
+    );
+    assert_eq!(event["export_manifest_id"], snapshot["snapshot_id"]);
+    assert_eq!(event["decision_inputs_hash"], snapshot["source_list_hash"]);
+    assert_eq!(event["metadata"]["purpose_code"], "evaluation", "{event}");
+    assert_eq!(
+        event["metadata"]["item_count"],
+        snapshot["items"].as_array().unwrap().len(),
+        "{event}"
+    );
+}
+
 /// The export routes, with the export credential. Creation snapshots the
 /// tenant's approved revision; the same request key with the same body
 /// returns that snapshot, and with another item limit is refused (the limit
 /// is part of the request the key names). Another tenant's export
 /// credential does not find the snapshot. Completion delivers it, and
 /// again returns it unchanged. The response never carries the tenant id.
+/// Each call that succeeds appends one `export` audit event (`created` or
+/// `delivered`), hash- and label-only; a refused call appends none.
 ///
 /// Also recorded here, for the owner's decision and without changing
 /// `main`: a delivered pipeline snapshot's manifest has kind
@@ -2425,30 +2484,67 @@ async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential(
     );
     assert!(created.get("tenant_id").is_none());
     assert!(!created.to_string().contains(tenant), "{created}");
+    let owner = &fixture.base.owner;
+    let audit = export_audit_events(owner, tenant).await;
+    assert_eq!(audit.len(), 1, "creation writes one audit event: {audit:?}");
+    assert_pipeline_export_audit(&audit, "created", &created);
+    let exporter = static_token_principal_ref(&fixture.export_token);
+    let audit_text = serde_json::to_string(&audit).unwrap();
+    assert!(
+        !audit_text.contains(tenant) && !audit_text.contains(&exporter),
+        "{audit_text}"
+    );
 
     let (status, again) = create_pipeline_export(state, &fixture.export_token, "key-1", 10).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(again, created, "the same request returns the same snapshot");
+    let audit = export_audit_events(owner, tenant).await;
+    assert_eq!(audit.len(), 2, "{audit:?}");
+    assert_pipeline_export_audit(&audit, "created", &created);
     let (status, conflict) =
         create_pipeline_export(state, &fixture.export_token, "key-1", 11).await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["error"], "export_idempotency_conflict");
+    assert_eq!(
+        export_audit_events(owner, tenant).await.len(),
+        2,
+        "a refused creation writes no audit event"
+    );
 
     let snapshot_id = &created["snapshot_id"];
     let (status, other) =
         complete_pipeline_export(state, &fixture.other_tenant_export_token, snapshot_id).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{other}");
     assert_eq!(other["error"], "export_snapshot_not_found");
+    assert_eq!(export_audit_events(owner, tenant).await.len(), 2);
+    let other_tenant = fixture
+        .base
+        .state
+        .tokens
+        .get(&fixture.other_tenant_export_token)
+        .expect("the other tenant's token")
+        .tenant_id
+        .clone();
+    assert!(
+        export_audit_events(owner, &other_tenant).await.is_empty(),
+        "a refused completion writes no audit event"
+    );
     let (status, completed) =
         complete_pipeline_export(state, &fixture.export_token, snapshot_id).await;
     assert_eq!(status, StatusCode::OK, "{completed}");
     assert_eq!(completed["state"], "complete");
     assert_eq!(&completed["export_manifest_id"], snapshot_id);
     assert_eq!(completed["items"], created["items"]);
+    let audit = export_audit_events(owner, tenant).await;
+    assert_eq!(audit.len(), 3, "delivery writes one audit event: {audit:?}");
+    assert_pipeline_export_audit(&audit, "delivered", &completed);
     let (status, completed_again) =
         complete_pipeline_export(state, &fixture.export_token, snapshot_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(completed_again, completed);
+    let audit = export_audit_events(owner, tenant).await;
+    assert_eq!(audit.len(), 4, "{audit:?}");
+    assert_pipeline_export_audit(&audit, "delivered", &completed);
 
     let (status, manifests) = pipeline_product_request(
         state.clone(),
@@ -2476,6 +2572,16 @@ async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential(
     );
     assert_eq!(manifest["item_count"], 1);
     assert_eq!(manifest["audit_event_id"], serde_json::Value::Null);
+
+    // `main`'s own check accepts the mirrored audit rows: each row's columns
+    // match its canonical payload, whose kind is `dataset_export`, the kind
+    // an `Export` row projects to.
+    let rows = owner
+        .list_trace_audit_events(tenant)
+        .await
+        .expect("main lists the tenant's audit events");
+    let failures = collect_db_audit_canonical_projection_failures(&rows);
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 /// The export route passes the caller's consent-scope allowlists to the
@@ -2557,7 +2663,8 @@ async fn pipeline_export_route_applies_the_callers_consent_scope_allowlists() {
 /// complete route says to create a new one. A submission that expired
 /// after the snapshot was taken leaves the snapshot `ready` but not
 /// deliverable; a withdrawal invalidates the snapshot. Each answer is a
-/// label, and a new snapshot leaves the expired submission out.
+/// label and writes no audit event, and a new snapshot leaves the expired
+/// submission out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pipeline_export_complete_route_tells_the_caller_to_create_a_new_snapshot() {
     let Some(fixture) = product_fixture().await else {
@@ -2589,10 +2696,17 @@ async fn pipeline_export_complete_route_tells_the_caller_to_create_a_new_snapsho
     .expect("expire the submission");
     tx.commit().await.unwrap();
     drop(owner);
+    let owner = &fixture.base.owner;
+    assert_eq!(export_audit_events(owner, tenant).await.len(), 1);
     let (status, stale) =
         complete_pipeline_export(state, &fixture.export_token, &first["snapshot_id"]).await;
     assert_eq!(status, StatusCode::CONFLICT, "{stale}");
     assert_eq!(stale["error"], "export_snapshot_stale_create_new_snapshot");
+    assert_eq!(
+        export_audit_events(owner, tenant).await.len(),
+        1,
+        "a refused completion writes no audit event"
+    );
 
     let (status, second) = create_pipeline_export(state, &fixture.export_token, "second", 10).await;
     assert_eq!(status, StatusCode::OK, "{second}");
@@ -2611,6 +2725,11 @@ async fn pipeline_export_complete_route_tells_the_caller_to_create_a_new_snapsho
     assert_eq!(
         invalidated["error"],
         "export_snapshot_invalidated_create_new_snapshot"
+    );
+    assert_eq!(
+        export_audit_events(owner, tenant).await.len(),
+        2,
+        "two creations, and no audit event for either refused completion"
     );
 }
 

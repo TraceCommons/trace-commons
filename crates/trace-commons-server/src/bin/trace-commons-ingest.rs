@@ -15878,8 +15878,9 @@ async fn submission_status_handler(
     Ok(Json(statuses))
 }
 
-/// The snake_case label a pipeline status enum serializes as.
-fn pipeline_status_label<T: Serialize>(value: T) -> String {
+/// The snake_case label an enum (a pipeline status, an allowed use)
+/// serializes as.
+fn snake_case_label<T: Serialize>(value: T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -15893,9 +15894,9 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
     TracePipelineStatusUpdate {
         run_id: status.run_id,
         bundle_id: status.bundle_id.clone(),
-        processing_state: pipeline_status_label(status.processing),
-        current_phase: status.current_phase.map(pipeline_status_label),
-        responsible_phase: status.responsible_phase.map(pipeline_status_label),
+        processing_state: snake_case_label(status.processing),
+        current_phase: status.current_phase.map(snake_case_label),
+        responsible_phase: status.responsible_phase.map(snake_case_label),
         reason_label: status.reason_label.clone(),
         instruments: status
             .instruments
@@ -15929,7 +15930,7 @@ fn submission_status_from_pipeline(
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
-        status: pipeline_status_label(status.processing),
+        status: snake_case_label(status.processing),
         credit_points_pending: trace_credit_points,
         credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
             .then_some(trace_credit_points),
@@ -16286,6 +16287,30 @@ fn pipeline_export_purpose_hash(purpose: &str, limit: usize) -> String {
     sha256_prefixed(&format!("{limit}:{purpose}"))
 }
 
+/// Records a pipeline export snapshot's `stage` (`created` or `delivered`)
+/// as `main`'s replay export records a delivered dataset: one `Export`
+/// audit event with `Export` metadata (export artifact, the use as the
+/// purpose code, the item count), appended through `main`'s mirrored helper.
+async fn append_pipeline_export_audit(
+    state: &AppState,
+    tenant: &TenantAuth,
+    stage: &str,
+    snapshot: &PipelineExportSnapshot,
+) -> anyhow::Result<()> {
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::pipeline_export(tenant, stage, snapshot),
+        StorageTraceAuditAction::Export,
+        StorageTraceAuditSafeMetadata::Export {
+            artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
+            purpose_code: Some(snake_case_label(snapshot.allowed_use)),
+            item_count: snapshot.items.len().min(u32::MAX as usize) as u32,
+        },
+    )
+    .await
+}
+
 /// `POST /v1/pipeline/exports`: snapshots the tenant's approved pipeline
 /// revisions for `allowed_use`, at most `limit` of them (1 to
 /// `PIPELINE_EXPORT_ITEM_MAX`, by default the most). It authenticates as
@@ -16294,7 +16319,8 @@ fn pipeline_export_purpose_hash(purpose: &str, limit: usize) -> String {
 /// and the tenant policy must allow the use, and a submission must meet
 /// their consent-scope allowlists. The `idempotency-key` header names the
 /// request: the same key with the same use, purpose, and limit returns the
-/// first snapshot, and with any of them different is refused.
+/// first snapshot, and with any of them different is refused. Each snapshot
+/// returned is recorded as one `created` export audit event.
 async fn create_pipeline_export_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -16346,6 +16372,9 @@ async fn create_pipeline_export_handler(
             }
             other => internal_error(other),
         })?;
+    append_pipeline_export_audit(state.as_ref(), &tenant, "created", &snapshot)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(snapshot))
 }
 
@@ -16355,7 +16384,9 @@ async fn create_pipeline_export_handler(
 /// route. A snapshot that can no longer be delivered is refused with a label
 /// that tells the caller to create a new snapshot: a withdrawal invalidated
 /// it, or one of its submissions is no longer exportable (it expired, or was
-/// revoked outside the pipeline), which leaves the snapshot `ready`.
+/// revoked outside the pipeline), which leaves the snapshot `ready`. Each
+/// snapshot returned is recorded as one `delivered` export audit event; a
+/// refusal records none.
 async fn complete_pipeline_export_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -16388,6 +16419,9 @@ async fn complete_pipeline_export_handler(
             }
             other => internal_error(other),
         })?;
+    append_pipeline_export_audit(state.as_ref(), &tenant, "delivered", &snapshot)
+        .await
+        .map_err(internal_error)?;
     Ok(Json(snapshot))
 }
 
@@ -76864,6 +76898,35 @@ impl TraceCommonsAuditEvent {
             export_count: Some(export_count),
             export_id: Some(export_id),
             decision_inputs_hash: Some(source_submission_ids_hash),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// A versioned-pipeline export snapshot at `stage` (`created` or
+    /// `delivered`), in the `dataset_export` shape: the snapshot is the
+    /// export id, the item count the export count, and the source-list hash
+    /// the decision inputs. The reason holds only labels and hashes: the
+    /// stage, the use, the purpose hash, and the source-list hash.
+    fn pipeline_export(auth: &TenantAuth, stage: &str, snapshot: &PipelineExportSnapshot) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: "dataset_export".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(format!(
+                "pipeline_export={stage};allowed_use={};purpose_hash={};source_list_hash={}",
+                snake_case_label(snapshot.allowed_use),
+                snapshot.purpose_hash,
+                snapshot.source_list_hash
+            )),
+            export_count: Some(snapshot.items.len()),
+            export_id: Some(snapshot.snapshot_id),
+            decision_inputs_hash: Some(snapshot.source_list_hash.clone()),
             previous_event_hash: None,
             event_hash: None,
         }
