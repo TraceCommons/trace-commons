@@ -22,8 +22,8 @@ V63), and earned account trust
 Scope: `trace-commons-server` (ingest routes, `account_passkey.rs`,
 `account_native_auth.rs`, `db/postgres_account_onboarding.rs`, one or two
 migrations), `trace-commons-protocol` (one preimage function), the community
-site (`community/public`), and the IPC surface the macOS client needs. No
-production code in this PR.
+site (TraceCommons/trace-commons-community), and the IPC surface the macOS
+client needs. No production code in this PR.
 
 Code is referenced by function, type and constant names, not line numbers,
 which rot. An unqualified name is in
@@ -717,33 +717,46 @@ binary carries it.
 
 ### Where it is deployed
 
-The apex `tracecommons.ai` is the community site, on Cloudflare Pages; ingest
-is `ingest.tracecommons.ai`. The community site's source lives in the
-**`trace-commons-community` repository**, and that repository, not this one, is
-where the association file is deployed from. #1124 first built the pieces
-below under `community/` in this repository and is being moved to the
-community repository. The design is unchanged by the move:
+The apex `tracecommons.ai` is the Astro community site in
+[`TraceCommons/trace-commons-community`](https://github.com/TraceCommons/trace-commons-community),
+published by that repo's `deploy.yml`
+(`wrangler pages deploy dist --project-name trace-commons-community`). It is
+**not** this repo's `community/` SPA. `community/wrangler.toml` names the same
+Pages project, so deploying `community/` would replace the live site, and the
+next community deploy would drop anything added here. Ingest is
+`ingest.tracecommons.ai`. So the file is built and served by the community
+repo (TraceCommons/trace-commons-community#46):
 
-- an association file rendered at deploy time from `TC_APPLE_TEAM_ID` and
-  `TC_MACOS_BUNDLE_ID` (default `ai.tracecommons.shell`), served at
-  `/.well-known/apple-app-site-association`, by a step the `deploy:pages`
-  script runs before `wrangler pages deploy`. With `TC_APPLE_TEAM_ID` unset the
-  step writes no file and the deploy says so: no association means the app's
-  passkey calls fail, which is closed. For the native launch deploy set
-  `TC_AASA_REQUIRED=1` so an unset Team ID stops the deploy.
-- a check script that validates the rendered file's shape (one
-  `webcredentials.apps` entry matching `^[A-Z0-9]{10}\.`).
-- **The Pages worker must answer this path itself.** `serveAsset` falls back
-  to `index.html` with `200` for any `GET` 404 whose last segment has no dot.
-  `apple-app-site-association` has no dot, so a missing file would be served as
-  the site's HTML with a `200`. The worker routes `/.well-known/*` before that
-  fallback: it returns the asset with an explicit `content-type:
-  application/json`, or a real `404`. Setting the header in the worker rather
-  than relying on `_headers` removes any question about whether `_headers`
-  applies to responses from an advanced-mode worker.
-- a deploy smoke: `curl -sS -D - https://tracecommons.ai/.well-known/apple-app-site-association`
-  must show `200`, `content-type: application/json`, no `location`, and the
-  expected app id.
+- An Astro integration (`astro:build:done`, `scripts/aasa.mjs`) writes
+  `dist/.well-known/apple-app-site-association` from `TC_APPLE_TEAM_ID` and
+  `TC_MACOS_BUNDLE_ID` (default `ai.tracecommons.shell`):
+  - unset: no file and a warning, and the path 404s. No association means the
+    app's passkey calls fail, which is closed;
+  - malformed: the build fails;
+  - `TC_AASA_REQUIRED=1` with it unset: the build fails.
+
+  `ci.yml` and `deploy.yml` set the Team ID in strict mode. Tests write only
+  to temp dirs, so they cannot delete the rendered file.
+- `node scripts/aasa.mjs verify dist` fails the deploy if a Team ID is set
+  but the file is missing from the output.
+- **The worker must answer this path itself.** The file has no extension, so
+  the asset layer labels it `application/octet-stream`. Whether `_headers`
+  applies to responses that pass through an advanced-mode worker is not
+  something to rely on. `public/_worker.js` therefore:
+  - sets `application/json`;
+  - never forwards conditional headers to `ASSETS`, and answers
+    `If-None-Match` itself, so a Pages `304` is not turned into a `404`;
+  - returns a `no-store` `404` for any non-`200` asset response, including a
+    redirect;
+  - returns the same `404` for any body that is not JSON with
+    `webcredentials.apps`, so an HTML fallback is never relabelled as JSON.
+- Deploy smoke:
+  - the community `deploy.yml` checks the live origin after each deploy;
+  - `scripts/check-aasa.sh https://tracecommons.ai` in this repo checks the
+    origin and then Apple's CDN
+    (`https://app-site-association.cdn-apple.com/a/v1/tracecommons.ai`),
+    which caches. Both bodies are validated as JSON with `webcredentials.apps`
+    whatever the content type.
 
 The Team ID is `KXSWJN7WY8` (Iqlusion Inc, decided 2026-09-28), so the app id
 is `KXSWJN7WY8.ai.tracecommons.shell`. It is not a secret.
@@ -1030,16 +1043,23 @@ Built in #1135, stacked on S2.
 
 ### S4 — AASA and the relying party (community site + ops)
 
-Built in #1124, which is being moved to the `trace-commons-community`
-repository, where the association file is deployed from. #1137 pins the env
-template's RP ID to the apex.
+Built in #1124 (this repo's part: `scripts/check-aasa.sh`) and
+TraceCommons/trace-commons-community#46 (the render step, worker route and
+deploy gate). #1124 is being moved there. #1137 pins the env template's RP ID
+to the apex.
 
-- The rendered `.well-known` file, the worker route and header, the check
-  script, the deploy smoke, env template and `deployment.md` updates for the
-  origin list, and the RP change if S0 says one is needed.
-- Tests: the check script refuses a missing or malformed file; a worker unit
-  test that `/.well-known/apple-app-site-association` never returns the index
-  fallback.
+- In trace-commons-community:
+  - the rendered `.well-known` file;
+  - the worker route and header;
+  - the deploy gate and the post-deploy smoke.
+- In this repo:
+  - `scripts/check-aasa.sh`, which checks the origin and Apple's CDN;
+  - the env template and `deployment.md` updates for the origin list;
+  - the RP change, if S0 says one is needed.
+- Tests:
+  - the check script refuses a missing or malformed file;
+  - a worker unit test that `/.well-known/apple-app-site-association` never
+    returns an HTML fallback as JSON and answers revalidation with `304`.
 
 ### S5 — Unbound-account reaper (server)
 
