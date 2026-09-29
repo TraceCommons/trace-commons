@@ -1369,3 +1369,63 @@ async fn pg_rotation_cannot_extend_a_step_up_session() {
         .await
         .expect("cleanup");
 }
+
+// --- The script's hand-built finish bodies ----------------------------------
+
+/// The finish bodies exactly as `step_up_page.js` builds them by hand: the
+/// literal text, not a value serialized from webauthn-rs. The PostgreSQL tests
+/// above build theirs with serde, which always emits every field the server
+/// wants, so they cannot notice the script drifting from it.
+/// `scripts/ci/test-step-up-page.cjs` checks from the other side that the
+/// script builds exactly these keys, so the one file pins both ends.
+const SCRIPT_FINISH_BODIES: &str = include_str!("step_up_finish_bodies.json");
+
+fn script_finish_body(name: &str) -> String {
+    let all: serde_json::Value =
+        serde_json::from_str(SCRIPT_FINISH_BODIES).expect("finish-body fixture is JSON");
+    let body = all.get(name).unwrap_or_else(|| panic!("no fixture {name}"));
+    body.to_string()
+}
+
+/// The login finish body the script builds is a `PublicKeyCredential`, the
+/// type the `login/finish` extractor reads, with or without a user handle.
+#[test]
+fn the_script_login_finish_body_deserializes() {
+    let with: webauthn_rs::prelude::PublicKeyCredential =
+        serde_json::from_str(&script_finish_body("login_finish")).expect("login/finish body");
+    assert_eq!(with.id, "AQIDBA");
+    assert_eq!(with.raw_id.as_ref(), &[1, 2, 3, 4]);
+    assert_eq!(with.type_, "public-key");
+    assert_eq!(with.response.authenticator_data.as_ref(), &[0, 1, 2]);
+    assert_eq!(with.response.client_data_json.as_ref(), b"{}");
+    let handle: Vec<u8> = (0u8..16).collect();
+    assert_eq!(with.get_user_unique_id(), Some(handle.as_slice()));
+
+    let without: webauthn_rs::prelude::PublicKeyCredential =
+        serde_json::from_str(&script_finish_body("login_finish_without_user_handle"))
+            .expect("login/finish body with a null userHandle");
+    assert_eq!(without.get_user_unique_id(), None);
+}
+
+/// The register finish body the script builds is the
+/// `AccountPasskeyRegisterFinishBody` the `register/finish` route reads, with
+/// the optional label beside the flattened credential.
+#[test]
+fn the_script_register_finish_body_deserializes() {
+    let labelled: AccountPasskeyRegisterFinishBody =
+        serde_json::from_str(&script_finish_body("register_finish")).expect("register/finish body");
+    assert_eq!(labelled.label.as_deref(), Some("Phone"));
+    assert_eq!(labelled.credential.id, "AQIDBA");
+    assert_eq!(labelled.credential.raw_id.as_ref(), &[1, 2, 3, 4]);
+    assert_eq!(labelled.credential.type_, "public-key");
+    assert_eq!(
+        labelled.credential.response.client_data_json.as_ref(),
+        b"{}"
+    );
+    assert!(!labelled.credential.response.attestation_object.is_empty());
+
+    let unlabelled: AccountPasskeyRegisterFinishBody =
+        serde_json::from_str(&script_finish_body("register_finish_without_label"))
+            .expect("register/finish body without a label");
+    assert_eq!(unlabelled.label, None);
+}
