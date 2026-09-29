@@ -663,8 +663,9 @@ async fn sign_in_through(
 /// `SameSite=Strict` -- the attributes a browser demands before it accepts a
 /// `__Host-` name, plus the two the account cookies always carry. Names are
 /// the constants, never a literal, so this holds whatever prefix they carry.
-/// It is the step-up flow's copy of the shared host-bound check that #1138
-/// adds, and folds into it once both land.
+/// It is the step-up flow's copy of the shared host-bound check
+/// (`assert_set_cookies_are_host_bound`), which additionally requires that a
+/// named cookie be present.
 fn assert_step_up_cookies_are_host_bound(reply: &Reply, expected: &[&str], what: &str) {
     let values: Vec<&str> = reply
         .headers
@@ -684,6 +685,12 @@ fn assert_step_up_cookies_are_host_bound(reply: &Reply, expected: &[&str], what:
         let parsed = cookie::Cookie::parse(raw.to_string()).expect("Set-Cookie parses");
         // The name only: the value is a live secret and stays out of output.
         let name = parsed.name();
+        // The one permitted non-prefixed write: the `Max-Age=0` that expires
+        // the pre-`__Host-` session cookie (#1138), checked on its own by
+        // `assert_clears_legacy_session_cookie`.
+        if name == LEGACY_ACCOUNT_SESSION_COOKIE {
+            continue;
+        }
         assert!(
             [ACCOUNT_SESSION_COOKIE, ACCOUNT_PASSKEY_CEREMONY_COOKIE].contains(&parsed.name()),
             "{what}: unexpected cookie {}",
