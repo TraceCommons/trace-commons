@@ -1388,6 +1388,7 @@ mod tests {
 
     fn row(facade: &str, offset: i64) -> crate::routing::RoutedExchange {
         crate::routing::RoutedExchange {
+            proof: None,
             id: None,
             started_at: Utc.timestamp_opt(1_700_000_000 + offset, 0).unwrap(),
             client_session_id: None,
