@@ -1260,6 +1260,58 @@ mod tests {
         ));
     }
 
+    /// Pins that ingest starts publishing after the attestor was built reach
+    /// that same instance: it answers `Unavailable` while there are none and
+    /// earns keys once they arrive, with no new attestor and so no proxy
+    /// restart. This is what lets the daemon install the attestor always.
+    #[tokio::test]
+    async fn pins_published_after_start_reach_the_same_attestor() {
+        let source = Published::serving(NearAiMeasurementPins::new(
+            PinState::Unconfigured,
+            Vec::new(),
+        ));
+        let provider = Arc::new(PinProvider::new(None, Some(Box::new(Arc::clone(&source)))));
+        let (report, nonce, key) = synthetic_report();
+        let clock = clock_at(FIXTURE_CAPTURED_AT);
+        let reports = Arc::new(AtomicUsize::new(0));
+        let attestor = NearAiQuoteAttestor::with_parts(
+            Box::new(Fixture {
+                report,
+                reports: Arc::clone(&reports),
+                collateral_ok: true,
+            }),
+            provider,
+            Box::new({
+                let clock = Arc::clone(&clock);
+                move || clock.load(Ordering::SeqCst)
+            }),
+            Box::new(move || Some(nonce.clone())),
+            Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+        );
+        assert_eq!(
+            attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+            Attestation::Unavailable
+        );
+        assert_eq!(
+            reports.load(Ordering::SeqCst),
+            0,
+            "nothing fetched unpinned"
+        );
+
+        source.set(Ok(NearAiMeasurementPins::new(
+            PinState::Configured,
+            real_pins()
+                .iter()
+                .map(ExpectedMeasurements::to_pin_string)
+                .collect(),
+        )));
+        clock.fetch_add(PIN_REFRESH_AFTER.as_secs(), Ordering::SeqCst);
+        assert_eq!(
+            attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+            Attestation::Keys(vec![key])
+        );
+    }
+
     /// A document whose digest does not match its sets is not trusted.
     #[tokio::test]
     async fn a_published_document_with_a_wrong_digest_pins_nothing() {
