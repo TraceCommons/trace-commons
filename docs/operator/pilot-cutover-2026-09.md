@@ -3,13 +3,25 @@
 This runbook moves the pilot from build `5f239be4` at schema V74 to current
 `main`, schema V91. Every server PR the earlier draft listed as landing with
 the cutover (#1071, #1073, #1077, #1078, #1084, #1085, #1086, #1087) is now
-on `main`, as are #1095, #1098 (V90) and #1100. It records a go/no-go for
-released contributor clients, what was tested and how, and the order of
-operations.
+on `main`, as are #1095, #1098 (V90), #1100, #1112 and #1114. It records a
+go/no-go for released contributor clients, what was tested and how, and the
+order of operations.
 
 It was written from local rehearsals, not from the pilot. Nothing here was
 run against the pilot or any remote system. The latest rehearsal ran `main`
-at `5888b8bcd`.
+at `5888b8bcd`. The target is `main` at `d8fb248b7`. Between the two, the
+server changed in two places only:
+
+- **#1112** writes the file-side tombstone when an account withdraws. See
+  item 12 in [What breaks and the mitigation](#what-breaks-and-the-mitigation)
+  and step 6 of the [smoke test](#smoke-test-with-a-released-client).
+- **#1114** edits `V60__onboarding_retention.sql` so a fresh PostgreSQL 16
+  migrator can apply it. The pilot recorded V60 long ago. The runner skips a
+  recorded migration by version and name (`recorded_migration_state` in
+  `db/postgres.rs`) and never compares file contents, so the edit never runs
+  there. Route B must skip it too.
+
+Every other commit in that range is client-side: #1101–#1104 and #1109.
 
 ## Decision
 
@@ -47,7 +59,7 @@ both are fixed on `main` by #1095 and #1100:
 | | |
 |---|---|
 | From | build `5f239be4` (deployed 2026-09-22), schema V74. Confirm this on the host first: pre-check 0. |
-| To | `main`, rehearsed at `5888b8bcd` |
+| To | `main` at `d8fb248b7`, rehearsed at `5888b8bcd`; the delta is described above |
 | New migrations | V75–V82 and V84–V91: sixteen files. There is no V83 (the runner tolerates gaps). If the pilot turns out to be at V73, V74 comes first: seventeen files. |
 | Binaries | ingest **and** issuer. The issuer changed (#1015, #1086), so deploy `both`. |
 | Switches, all default off | `TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`, `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED`, `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON`/`_VERSION`, `TRACE_COMMONS_INFERENCE_CONNECTION_CATALOG_JSON`. The witness's certificate profile defaults to `v1`. |
@@ -180,9 +192,16 @@ pilot notes on `/proc/<MainPID>/environ`.
    - At `73`, apply V74 first; see
      [If the pilot is at V73](#if-the-pilot-is-at-v73). Any other build or
      version: stop, and redo the scope and the pins against what is live.
-1. `git diff --name-only 5f239be4 <target> -- migrations` lists sixteen files,
-   V75–V82 and V84–V91. A plain install over unapplied migrations crash-loops
-   the pilot, because the runtime login cannot run DDL.
+1. `git diff --name-only 5f239be4 d8fb248b7 -- migrations` lists seventeen
+   files: V60 plus the sixteen new ones, V75–V82 and V84–V91.
+   - **V60 is an edit, not a new migration** (#1114). The pilot has it
+     recorded, so neither the runner nor Route B applies it. Confirm
+     `SELECT name FROM _trace_commons_migrations WHERE version = 60` returns
+     `V60__onboarding_retention`.
+   - If the diff lists any file other than these seventeen, `main` has moved:
+     stop, and redo the scope and the pins.
+   - A plain install over unapplied migrations crash-loops the pilot, because
+     the runtime login cannot run DDL.
 2. `dig issuer.tracecommons.ai` resolves. Ingest fails closed at boot without
    the keyset.
 3. The running ingest has `TRACE_COMMONS_DB_DUAL_WRITE=true`,
@@ -270,8 +289,11 @@ first, with rollback.
   applies the rest there and then: unrehearsed DDL at install time, including
   V90's grant changes. Route B's point is that the issuer's boot finds nothing
   to do.
-- **Re-pin the Route B script.** The existing one is pinned to V74 and must be
-  generalised, and its pins taken from the target commit.
+- **Re-pin the Route B script.** The existing one is pinned to V74. It must be
+  generalised, and its pins taken from `d8fb248b7`. Its bundle is V75–V91
+  only. V60's file hash changed in #1114, but V60 is already recorded, so the
+  script must skip it like any recorded version and must never re-apply it
+  because the hash changed.
 - **No hand grants.** V90 is the grant step. Run the V90 post-check above
   after V91.
 - **The old build keeps serving.** An earlier rehearsal ran `5f239be4` on the
