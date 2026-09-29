@@ -6963,6 +6963,16 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
     }))
 }
 
+/// Fail closed: the never-used window may not outlast the idle window.
+fn validate_unbound_reaper_ttls(ttl_days: i64, never_used_ttl_days: i64) -> anyhow::Result<()> {
+    if never_used_ttl_days > ttl_days {
+        anyhow::bail!(
+            "{TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS} must not exceed {TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS}"
+        );
+    }
+    Ok(())
+}
+
 /// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
 /// existing deployments and CI are unaffected until an operator opts in.
 ///
@@ -6998,12 +7008,7 @@ fn parse_unbound_account_reaper_config_from_env()
         MIN_TTL_DAYS,
         MAX_TTL_DAYS,
     )?;
-    // Fail closed: the never-used window may not outlast the idle window.
-    if never_used_ttl_days > ttl_days {
-        anyhow::bail!(
-            "{TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS} must not exceed {TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS}"
-        );
-    }
+    validate_unbound_reaper_ttls(ttl_days, never_used_ttl_days)?;
     let interval_seconds = parse_optional_scheduler_u64_env(
         TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
         TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
