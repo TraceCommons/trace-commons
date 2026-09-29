@@ -30,7 +30,7 @@ use std::sync::Arc;
 use axum::body::to_bytes;
 use axum::extract::State;
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind,
+    AtomicUnits, InstrumentDescriptor, InstrumentId, InstrumentKind, Microcredits,
 };
 use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter};
 use trace_commons_protocol::admission::{AdmissionBinding, REQUEST_METADATA_KEY, hash_hex};
@@ -49,7 +49,9 @@ use trace_commons_server::versioned_pipeline_authority::{
 use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
 };
-use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
+use trace_commons_server::versioned_pipeline_compat::{
+    COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
+};
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
@@ -3624,4 +3626,1274 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         );
         assert_eq!(document["pipeline"]["run_id"], run.run_id.to_string());
     }
+}
+
+// ---------------------------------------------------------------------------
+// The compatibility bundle through the real router and worker, and parity
+// with the legacy path under the same configuration.
+// ---------------------------------------------------------------------------
+
+/// Replaces a marker token in the envelope, as a redacting classifier would.
+/// The same test double as `versioned_pipeline_runtime_pg.rs`'s
+/// `MarkerRedactingBoundary` (test doubles live in the test files, P5).
+struct MarkerRedactingBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
+    async fn rescrub(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        let text = serde_json::to_string(envelope)?;
+        *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
+        Ok(Vec::new())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "marker_redacting_boundary_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+}
+
+/// A privacy boundary whose rescrub always fails: the classifier outage a
+/// receipt must fail closed on. The same test double as
+/// `versioned_pipeline_runtime_pg.rs`'s `FailingPrivacyBoundary`.
+struct FailingPrivacyBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        anyhow::bail!("privacy classifier unavailable (test double)")
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "failing_privacy_boundary_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        false
+    }
+}
+
+/// until it is `expected`; the live worker moves the run, never this test.
+async fn wait_for_run_state(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    expected: &str,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant_id).await;
+        let state: Option<String> = tx
+            .query_opt(
+                "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0));
+        tx.commit().await.unwrap();
+        if state.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after 60s waiting for the worker to move the run to {expected} \
+             (last observed state: {state:?})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// The run the pipeline created for `submission_id`.
+async fn run_of_submission(
+    service: &PipelineService,
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let run_id: Uuid = tx
+        .query_one(
+            "SELECT run_id FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("the submission has a run")
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    service
+        .store()
+        .get_run(tenant_id, run_id)
+        .await
+        .unwrap()
+        .expect("the run exists")
+}
+
+/// Sends `body` (JSON, when given) to `url` over real HTTP with `headers`,
+/// and returns the status and the response body, parsed as JSON when it is
+/// JSON and as a string otherwise.
+async fn send_http(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: String,
+    headers: HeaderMap,
+    body: Option<serde_json::Value>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let mut request = client
+        .request(method, url)
+        .headers(reqwest_headers(headers));
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(body.to_string());
+    }
+    let response = request
+        .send()
+        .await
+        .expect("the request reaches the server");
+    let status = response.status();
+    let text = response.text().await.expect("a response body");
+    let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    (status, body)
+}
+
+/// `POST /v1/traces` of `body` with `token`.
+async fn post_trace(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    body: &[u8],
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let response = client
+        .post(format!("{base}/v1/traces"))
+        .headers(reqwest_headers(auth_headers(token)))
+        .header("content-type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+        .expect("submit over real HTTP");
+    let status = response.status();
+    let text = response.text().await.expect("a receipt body");
+    let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    (status, body)
+}
+
+/// `POST /v1/contributors/me/submission-status` for `submission_ids` with
+/// `token`.
+async fn post_submission_status(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    submission_ids: &[Uuid],
+) -> (reqwest::StatusCode, serde_json::Value) {
+    send_http(
+        client,
+        reqwest::Method::POST,
+        format!("{base}/v1/contributors/me/submission-status"),
+        auth_headers(token),
+        Some(serde_json::json!({ "submission_ids": submission_ids })),
+    )
+    .await
+}
+
+/// `headers` with `Bearer token` and an `idempotency-key`.
+fn bearer_with_idempotency_key(token: &str, key: &str) -> HeaderMap {
+    let mut headers = auth_headers(token);
+    headers.insert("idempotency-key", key.parse().unwrap());
+    headers
+}
+
+/// The compatibility bundle through the router and worker ingest boots
+/// (`run_pipeline_app`), with no direct processor call. Tenant A is routed to
+/// a service holding the compatibility bundle (`local_reference()`, delta
+/// 2_500_000) and `MarkerRedactingBoundary`:
+///
+/// - `POST /v1/traces` answers `processing`, and the worker completes the
+///   run. The approved revision is the transformed content: its hash is not
+///   the request's, and it holds the boundary's replacement, not the marker.
+/// - `POST /v1/contributors/me/submission-status` returns the pipeline block,
+///   whose `trace_credit` leg is `"2500000"` and not settlement eligible.
+/// - `POST /v1/pipeline/exports` and `.../complete`, with the export
+///   credential, return one item whose content hash is the approved hash.
+/// - A Medium-risk receipt parks in `awaiting_review`; the three review routes,
+///   with the review credential, list, claim, and approve it, and the worker
+///   completes the run.
+/// - The pipeline withdrawal route, with the owner's account session, answers
+///   `credit_retained` and a pending `index_invalidation`, and the worker then
+///   removes the withdrawn revision's index entries.
+/// - Tenant B's credentials: the status route has no document for tenant A's
+///   submission (the route omits what the caller cannot see, as `main`'s
+///   does, rather than answering 403 or 404), and completing tenant A's
+///   export is 404.
+/// - A service whose privacy boundary fails answers `POST /v1/traces` with a
+///   label that carries no trace text, and creates no run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-http-{suffix}");
+    let other_tenant = format!("tenant-compat-http-other-{suffix}");
+    let failing_tenant = format!("tenant-compat-http-failing-{suffix}");
+    let token = format!("token-compat-{suffix}");
+    let reviewer_token = format!("token-compat-reviewer-{suffix}");
+    let export_token = format!("token-compat-export-{suffix}");
+    let other_token = format!("token-compat-other-{suffix}");
+    let other_export_token = format!("token-compat-other-export-{suffix}");
+    let failing_token = format!("token-compat-failing-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    insert_token(&mut tokens, &tenant, &reviewer_token, TokenRole::Reviewer);
+    insert_token(&mut tokens, &tenant, &export_token, TokenRole::ExportWorker);
+    insert_token(
+        &mut tokens,
+        &other_tenant,
+        &other_token,
+        TokenRole::Contributor,
+    );
+    insert_token(
+        &mut tokens,
+        &other_tenant,
+        &other_export_token,
+        TokenRole::ExportWorker,
+    );
+    insert_token(
+        &mut tokens,
+        &failing_tenant,
+        &failing_token,
+        TokenRole::Contributor,
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let index = IsolatedPipelineIndex::new();
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        index.clone(),
+        2_500_000,
+        Arc::new(MarkerRedactingBoundary),
+    );
+    // The account side (sessions) runs on the migration owner with the
+    // login-resolver pool, as `withdrawal_fixture` does; the pipeline service
+    // and the product store run on the runtime login.
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        Some(artifacts.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    let state_handle = state.clone();
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+    let tenant_ref = trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(&tenant);
+
+    // ---- A receipt whose content the privacy boundary transforms ----
+    // Its consent allows model training, which `main`'s NoveltyUtility
+    // credit requires (Ruling T15-8), and evaluation, the use the export
+    // below selects.
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses =
+        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
+    envelope
+        .privacy
+        .warnings
+        .push("MARKER_SECRET in a free-text field".to_string());
+    let body = serde_json::to_vec(&envelope).expect("envelope serialises");
+    assert!(String::from_utf8_lossy(&body).contains("MARKER_SECRET"));
+    let (status, receipt) = post_trace(&client, &base, &token, &body).await;
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["status"], "processing", "{receipt}");
+
+    wait_for_run_state(&runtime, &tenant, envelope.submission_id, "complete").await;
+    let run = run_of_submission(&service, &runtime, &tenant, envelope.submission_id).await;
+    assert_eq!(run.admission_decision, "admit");
+    assert_eq!(run.index_write_state, "complete");
+    let approved_hash = run
+        .approved_content_hash
+        .clone()
+        .expect("Review approved a revision");
+    assert_ne!(
+        approved_hash, run.request_content_hash,
+        "the approved revision is the transformed content, not the raw request"
+    );
+    let approved = String::from_utf8(service.load_approved_bytes(&run).await.unwrap()).unwrap();
+    assert!(!approved.contains("MARKER_SECRET"), "{approved}");
+    assert!(approved.contains("[redacted]"), "{approved}");
+    let revision_entries = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    assert!(revision_entries > 0, "Settle wrote the revision's entries");
+
+    let (status, documents) =
+        post_submission_status(&client, &base, &token, &[envelope.submission_id]).await;
+    assert_eq!(status, 200, "{documents}");
+    let documents = documents.as_array().expect("a document list").clone();
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    assert_eq!(
+        documents[0]["submission_id"],
+        envelope.submission_id.to_string()
+    );
+    assert_eq!(documents[0]["pipeline"]["run_id"], run.run_id.to_string());
+    assert_eq!(documents[0]["pipeline"]["processing_state"], "complete");
+    assert_eq!(
+        documents[0]["pipeline"]["instruments"],
+        serde_json::json!([{
+            "instrument_id": "trace_credit",
+            "atomic_units": "2500000",
+            "operation_state": "complete",
+            "internal_settlement_state": "not_settlement_eligible",
+            "payout_rail": "none",
+            "payout_state": "disabled",
+            "reason_label": null,
+        }])
+    );
+    let (status, other_documents) =
+        post_submission_status(&client, &base, &other_token, &[envelope.submission_id]).await;
+    assert_eq!(status, 200, "{other_documents}");
+    assert_eq!(
+        other_documents,
+        serde_json::json!([]),
+        "tenant B's credential gets no document for tenant A's submission"
+    );
+
+    // ---- Export of the approved revision ----
+    let (status, created) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/pipeline/exports"),
+        bearer_with_idempotency_key(&export_token, "compatibility-export"),
+        Some(serde_json::json!({
+            "allowed_use": "evaluation",
+            "purpose": "benchmark refresh",
+            "limit": 10,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["state"], "ready", "{created}");
+    let items = created["items"].as_array().expect("items").clone();
+    assert_eq!(items.len(), 1, "{created}");
+    assert_eq!(items[0]["run_id"], run.run_id.to_string());
+    assert_eq!(items[0]["source_content_hash"], approved_hash.as_str());
+    assert!(!created.to_string().contains(&tenant), "{created}");
+    let snapshot_id = created["snapshot_id"]
+        .as_str()
+        .expect("a snapshot id")
+        .to_string();
+    let (status, refused) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/pipeline/exports/{snapshot_id}/complete"),
+        auth_headers(&other_export_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 404, "{refused}");
+    assert_eq!(refused["error"], "export_snapshot_not_found");
+    let (status, completed) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/pipeline/exports/{snapshot_id}/complete"),
+        auth_headers(&export_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{completed}");
+    assert_eq!(completed["state"], "complete", "{completed}");
+    assert_eq!(completed["items"], created["items"]);
+    assert_eq!(
+        completed["items"][0]["source_content_hash"],
+        approved_hash.as_str()
+    );
+
+    // ---- A Medium-risk receipt waits for a human reviewer ----
+    let mut medium = sample_envelope().await;
+    make_metadata_only_low_risk(&mut medium);
+    medium.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let (status, receipt) = post_trace(
+        &client,
+        &base,
+        &token,
+        &serde_json::to_vec(&medium).expect("envelope serialises"),
+    )
+    .await;
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["status"], "processing", "{receipt}");
+    wait_for_run_state(&runtime, &tenant, medium.submission_id, "awaiting_review").await;
+    let medium_run = run_of_submission(&service, &runtime, &tenant, medium.submission_id).await;
+    assert_eq!(medium_run.admission_decision, "quarantine");
+    let (status, queue) = send_http(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/v1/review/pipeline/quarantine"),
+        auth_headers(&reviewer_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{queue}");
+    let queue = queue.as_array().expect("a review queue").clone();
+    assert_eq!(queue.len(), 1, "{queue:?}");
+    assert_eq!(queue[0]["run_id"], medium_run.run_id.to_string());
+    let reason = queue[0]["admission_reason"]
+        .as_str()
+        .expect("the quarantine reason")
+        .to_string();
+    let (status, refused) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/review/pipeline/runs/{}/claim", medium_run.run_id),
+        auth_headers(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "a contributor cannot claim: {refused}");
+    let (status, claim) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/v1/review/pipeline/runs/{}/claim", medium_run.run_id),
+        auth_headers(&reviewer_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{claim}");
+    let (status, assessment) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!(
+            "{base}/v1/review/pipeline/runs/{}/assessment",
+            medium_run.run_id
+        ),
+        auth_headers(&reviewer_token),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "approve",
+            "reason": reason,
+            "resolved_quarantine_reasons": [reason],
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{assessment}");
+    assert!(assessment["assessment_id"].is_string(), "{assessment}");
+    wait_for_run_state(&runtime, &tenant, medium.submission_id, "complete").await;
+    let reviewed = run_of_submission(&service, &runtime, &tenant, medium.submission_id).await;
+    assert!(
+        reviewed.approved_content_hash.is_some(),
+        "the approved assessment let Review approve the revision"
+    );
+    let (status, queue) = send_http(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/v1/review/pipeline/quarantine"),
+        auth_headers(&reviewer_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(queue, serde_json::json!([]), "the queue is empty again");
+
+    // ---- Withdrawal through the account session ----
+    let entries_before_withdrawal = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    let session = account_session_headers(&state_handle, &token).await;
+    let (status, withdrawal) = send_http(
+        &client,
+        reqwest::Method::POST,
+        format!(
+            "{base}/v1/contributors/me/pipeline-submissions/{}/withdraw",
+            envelope.submission_id
+        ),
+        session,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{withdrawal}");
+    assert_eq!(
+        withdrawal["submission_id"],
+        envelope.submission_id.to_string()
+    );
+    assert_eq!(
+        withdrawal["credit_retained"], true,
+        "a complete NoveltyUtility leg is not forfeited: {withdrawal}"
+    );
+    assert_eq!(withdrawal["index_invalidation"], "pending", "{withdrawal}");
+    assert!(!withdrawal.to_string().contains(&tenant), "{withdrawal}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while queued_index_invalidation(&runtime, &tenant, run.run_id)
+        .await
+        .1
+        != "complete"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never completed the withdrawn revision's index invalidation"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        entries_before_withdrawal - revision_entries,
+        "the withdrawn revision's entries left the index"
+    );
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "compatibility HTTP test server").await;
+
+    // ---- A privacy boundary that fails ----
+    let failing_service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(FailingPrivacyBoundary),
+    );
+    let mut failing_state = state_handle;
+    let failing_mut = Arc::make_mut(&mut failing_state);
+    failing_mut.pipeline_service = Some(failing_service);
+    failing_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[failing_tenant.as_str()],
+    );
+    let (base, stop, server) = serve_pipeline_app(failing_state).await;
+    let mut failing = sample_envelope_with_user_input("Summarise the failing-boundary notes").await;
+    failing.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let (status, refused) = post_trace(
+        &client,
+        &base,
+        &failing_token,
+        &serde_json::to_vec(&failing).expect("envelope serialises"),
+    )
+    .await;
+    assert_eq!(status, 500, "{refused}");
+    assert_eq!(
+        refused,
+        serde_json::json!({"error": "trace commons operation failed"}),
+        "the refusal is a label"
+    );
+    assert!(
+        !refused.to_string().contains("failing-boundary"),
+        "{refused}"
+    );
+    let mut client_pg = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client_pg, &failing_tenant).await;
+    let runs: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_runs WHERE tenant_id = $1",
+            &[&failing_tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(runs, 0, "a failed rescrub creates no run");
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "failing boundary test server").await;
+}
+
+/// The legacy `NoveltyUtility` points delta the parity test configures
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`).
+const LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 2.5;
+
+/// The gate policy version of the parity test's in-memory gate, which
+/// `main`'s `NoveltyUtility` reason carries.
+const PARITY_GATE_POLICY_VERSION: &str = "parity_gate_v1";
+
+/// Collects every legacy-versus-pipeline difference, so one run reports all
+/// of them rather than the first.
+#[derive(Default)]
+struct ParityReport {
+    mismatches: Vec<String>,
+}
+
+impl ParityReport {
+    /// The two paths must agree.
+    fn compare(&mut self, what: &str, legacy: serde_json::Value, pipeline: serde_json::Value) {
+        if legacy != pipeline {
+            self.mismatches
+                .push(format!("{what}: legacy {legacy}, pipeline {pipeline}"));
+        }
+    }
+
+    /// The two paths differ by design (`ruling`): each side must hold its
+    /// own pinned value.
+    fn pin(
+        &mut self,
+        what: &str,
+        ruling: &str,
+        (legacy, legacy_expected): (serde_json::Value, serde_json::Value),
+        (pipeline, pipeline_expected): (serde_json::Value, serde_json::Value),
+    ) {
+        if legacy != legacy_expected || pipeline != pipeline_expected {
+            self.mismatches.push(format!(
+                "{what} ({ruling}): legacy {legacy} (pinned {legacy_expected}), \
+                 pipeline {pipeline} (pinned {pipeline_expected})"
+            ));
+        }
+    }
+}
+
+/// The sorted top-level keys of a JSON object.
+fn json_keys(value: &serde_json::Value) -> serde_json::Value {
+    let mut keys = value
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    keys.sort();
+    serde_json::json!(keys)
+}
+
+/// `main`'s `NoveltyUtility` reason shape, `novelty_utility:<version>`, with
+/// the version replaced: each path names its own version (Ruling T15-2).
+fn novelty_utility_reason_shape(text: &str) -> String {
+    match text.split_once("novelty_utility:") {
+        Some((before, after)) => {
+            let rest = after
+                .find(')')
+                .map(|close| &after[close..])
+                .unwrap_or_default();
+            format!("{before}novelty_utility:<version>{rest}")
+        }
+        None => text.to_string(),
+    }
+}
+
+/// Every `trace_credit_ledger` row of `submission_id`, read as the migration
+/// owner: event type, amount in microcredits, settlement state, actor role,
+/// and the reason with its version replaced.
+async fn ledger_rows(
+    owner: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> serde_json::Value {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT event_type, points_delta, settlement_state, actor_role, reason
+               FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY occurred_at",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    serde_json::json!(
+        rows.iter()
+            .map(|row| {
+                let points: String = row.get(1);
+                serde_json::json!({
+                    "event_type": row.get::<_, String>(0),
+                    "microcredits": Microcredits::from_credit_decimal(&points)
+                        .expect("points_delta is a credit decimal")
+                        .get(),
+                    "settlement_state": row.get::<_, String>(2),
+                    "actor_role": row.get::<_, String>(3),
+                    "reason": novelty_utility_reason_shape(&row.get::<_, String>(4)),
+                })
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+/// The raw `reason` of every `trace_credit_ledger` row of `submission_id`.
+async fn ledger_reasons(
+    owner: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> serde_json::Value {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let reasons = tx
+        .query(
+            "SELECT reason FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    tx.commit().await.unwrap();
+    serde_json::json!(reasons)
+}
+
+/// The fields of a status document the two paths must share outright.
+fn status_fields(document: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "status": document["status"],
+        "credit_points_final": document["credit_points_final"],
+        "credit_points_ledger": document["credit_points_ledger"],
+        "credit_points_total": document["credit_points_total"],
+        "consent_scopes": document["consent_scopes"],
+        "delayed_credit_explanations": document["delayed_credit_explanations"]
+            .as_array()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| novelty_utility_reason_shape(line.as_str().unwrap_or_default()))
+                    .collect::<Vec<_>>()
+            }),
+    })
+}
+
+/// How a status document presents its credit figure, against the gate
+/// decision it should come from: the legacy path's own gate decision, or the
+/// pipeline's Score evidence (Ruling T15-7). The figures themselves differ
+/// (two scorers read two traces); `main`'s rule for turning a decision into
+/// a figure and an explanation must be the same on both paths.
+fn credit_presentation(
+    document: &serde_json::Value,
+    decision: Option<&StorageTraceGateCreditDecisionRow>,
+) -> serde_json::Value {
+    let Some(decision) = decision else {
+        return serde_json::json!("no gate decision");
+    };
+    let quality = decision
+        .credit_quality_micros
+        .expect("the decision has a credit quality");
+    let pending = document["credit_points_pending"].as_f64().unwrap_or(-1.0);
+    let basis = gate_credit_basis_line(decision);
+    let explanation = document["explanation"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|line| {
+            let line = line.as_str().unwrap_or_default();
+            if line == basis {
+                "<the decision's basis line>".to_string()
+            } else if line.starts_with("Attributed to tenant ") {
+                "Attributed to tenant <tenant>".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "pending_is_the_decision_figure":
+            (pending - f64::from(credit_points_from_quality_micros(quality))).abs() < 1e-4,
+        "explanation": explanation,
+    })
+}
+
+/// Brief section 3C acceptance: receipt, status, withdrawal, and credit and
+/// dedup behaviour match `main` under equivalent configuration. Tenant L
+/// takes `main`'s path; tenant P is routed to a pipeline whose compatibility
+/// bundle pins `novelty_utility_microcredits` equal to L's
+/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` in microcredits. Both
+/// share one `AppState` with the pilot's database reads
+/// (`deploy/pilot-gcp/ingest.env.template`: contributor and reviewer reads
+/// from PostgreSQL), and both submit equivalent envelopes, a pair allowing
+/// model training and a pair that does not (the default consent scope).
+///
+/// L's credit comes from `main`'s own gate path: `POST
+/// /v1/workers/gate/evaluate` with an in-memory gate service whose floors
+/// pass, which runs `main`'s `NoveltyUtility` checks and append
+/// (`attempt_emit_novelty_utility_credit`). P's comes from the live worker.
+///
+/// Differences by design are pinned per side with their ruling (T15-2,
+/// T15-3); everything else must be equal. The status document is also read
+/// with contributor reads from files (Ruling T15-7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let legacy_tenant = format!("tenant-parity-legacy-{suffix}");
+    let pipeline_tenant = format!("tenant-parity-pipeline-{suffix}");
+    let legacy_token = format!("token-parity-legacy-{suffix}");
+    let legacy_gate_token = format!("token-parity-legacy-gate-{suffix}");
+    let pipeline_token = format!("token-parity-pipeline-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        &legacy_tenant,
+        &legacy_token,
+        TokenRole::Contributor,
+    );
+    insert_token(
+        &mut tokens,
+        &legacy_tenant,
+        &legacy_gate_token,
+        TokenRole::VectorWorker,
+    );
+    insert_token(
+        &mut tokens,
+        &pipeline_tenant,
+        &pipeline_token,
+        TokenRole::Contributor,
+    );
+
+    // The gate worker reads only KEK-wrapped (v2) envelopes, so both paths
+    // store into the service-owned store the gate-worker tests use.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifact_dir = tempfile::tempdir().expect("artifact dir");
+    let (configured_store, _) = fixture_gate_worker_artifact_store(artifact_dir.path());
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        Some(configured_store),
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    let pipeline_delta_microcredits =
+        (f64::from(LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA) * 1_000_000.0).round() as u64;
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        state.artifact_store.as_ref().expect("a configured store"),
+        IsolatedPipelineIndex::new(),
+        pipeline_delta_microcredits,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.gate_service = Arc::new(InMemoryGateService::new(
+        PARITY_GATE_POLICY_VERSION,
+        "sha256:parity_gate_v1",
+    ));
+    state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[pipeline_tenant.as_str()],
+    );
+    let state_handle = state.clone();
+    // The same state with contributor and reviewer reads from files, for the
+    // file-read status (Ruling T15-7). `make_mut` copies the state, which
+    // keeps the same database, store, and pipeline service.
+    let mut file_reads = state.clone();
+    let file_reads_mut = Arc::make_mut(&mut file_reads);
+    file_reads_mut.db_contributor_reads = false;
+    file_reads_mut.db_reviewer_reads = false;
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+    let mut parity = ParityReport::default();
+
+    let envelope = |model_training: bool| async move {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        if model_training {
+            envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+            envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+            envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
+        }
+        envelope
+    };
+
+    for model_training in [true, false] {
+        let case = if model_training {
+            "model training allowed"
+        } else {
+            "model training not allowed"
+        };
+        let legacy_envelope = envelope(model_training).await;
+        let pipeline_envelope = envelope(model_training).await;
+        let legacy_body = serde_json::to_vec(&legacy_envelope).unwrap();
+        let pipeline_body = serde_json::to_vec(&pipeline_envelope).unwrap();
+
+        // ---- Receipt ----
+        let (legacy_code, legacy_receipt) =
+            post_trace(&client, &base, &legacy_token, &legacy_body).await;
+        let (pipeline_code, pipeline_receipt) =
+            post_trace(&client, &base, &pipeline_token, &pipeline_body).await;
+        parity.compare(
+            &format!("{case}: receipt code"),
+            serde_json::json!(legacy_code.as_u16()),
+            serde_json::json!(pipeline_code.as_u16()),
+        );
+        // Ruling T15-3: the pipeline's receipt is asynchronous (PR 2's
+        // `pipeline_processing_receipt`): `processing`, and no credit figure
+        // until a run has one.
+        parity.pin(
+            &format!("{case}: receipt status and keys"),
+            "T15-3",
+            (
+                serde_json::json!([legacy_receipt["status"], json_keys(&legacy_receipt)]),
+                serde_json::json!([
+                    "accepted",
+                    ["credit_points_pending", "explanation", "status"]
+                ]),
+            ),
+            (
+                serde_json::json!([pipeline_receipt["status"], json_keys(&pipeline_receipt)]),
+                serde_json::json!(["processing", ["explanation", "status"]]),
+            ),
+        );
+
+        // ---- Processing: main's gate path, and the pipeline's worker ----
+        let (gate_code, gate) = send_http(
+            &client,
+            reqwest::Method::POST,
+            format!("{base}/v1/workers/gate/evaluate"),
+            auth_headers(&legacy_gate_token),
+            Some(serde_json::json!({ "submission_id": legacy_envelope.submission_id })),
+        )
+        .await;
+        assert_eq!(gate_code, 200, "main's gate path runs: {gate}");
+        assert_eq!(gate["perplexity_passed"], true, "{gate}");
+        assert_eq!(gate["novelty_passed"], true, "{gate}");
+        wait_for_run_state(
+            &runtime,
+            &pipeline_tenant,
+            pipeline_envelope.submission_id,
+            "complete",
+        )
+        .await;
+        let pipeline_run = run_of_submission(
+            &service,
+            &runtime,
+            &pipeline_tenant,
+            pipeline_envelope.submission_id,
+        )
+        .await;
+        let legacy_decision = owner
+            .list_latest_gate_credit_decisions(&legacy_tenant, &[legacy_envelope.submission_id])
+            .await
+            .unwrap()
+            .pop();
+        let pipeline_decision =
+            score_shadow_credit_decision(&runtime, &pipeline_tenant, &pipeline_run).await;
+
+        // ---- Credit: the ledger event each path appends ----
+        let legacy_ledger =
+            ledger_rows(&owner, &legacy_tenant, legacy_envelope.submission_id).await;
+        let pipeline_ledger =
+            ledger_rows(&owner, &pipeline_tenant, pipeline_envelope.submission_id).await;
+        parity.compare(
+            &format!("{case}: ledger events"),
+            legacy_ledger.clone(),
+            pipeline_ledger.clone(),
+        );
+        // Ruling T15-2: `main`'s reason names its gate policy version; the
+        // pipeline's names the compatibility Score rule.
+        let (legacy_reasons, pipeline_reasons) = if model_training {
+            (
+                serde_json::json!([format!("novelty_utility:{PARITY_GATE_POLICY_VERSION}")]),
+                serde_json::json!([format!("novelty_utility:{COMPATIBILITY_SCORE_RULE}")]),
+            )
+        } else {
+            (serde_json::json!([]), serde_json::json!([]))
+        };
+        parity.pin(
+            &format!("{case}: ledger reasons"),
+            "T15-2",
+            (
+                ledger_reasons(&owner, &legacy_tenant, legacy_envelope.submission_id).await,
+                legacy_reasons,
+            ),
+            (
+                ledger_reasons(&owner, &pipeline_tenant, pipeline_envelope.submission_id).await,
+                pipeline_reasons,
+            ),
+        );
+
+        // ---- Status after processing: database reads, then file reads ----
+        for (reads, legacy_state, pipeline_state) in [
+            ("database reads", None, None),
+            (
+                "file reads",
+                Some(file_reads.clone()),
+                Some(file_reads.clone()),
+            ),
+        ] {
+            let status_of = |state: Option<Arc<AppState>>, token: String, id: Uuid| {
+                let client = client.clone();
+                let base = base.clone();
+                async move {
+                    match state {
+                        None => post_submission_status(&client, &base, &token, &[id]).await,
+                        Some(state) => {
+                            let (code, body) = route_request(
+                                state,
+                                "POST",
+                                "/v1/contributors/me/submission-status",
+                                auth_headers(&token),
+                                Some(serde_json::json!({ "submission_ids": [id] })),
+                            )
+                            .await;
+                            (reqwest::StatusCode::from_u16(code.as_u16()).unwrap(), body)
+                        }
+                    }
+                }
+            };
+            let (legacy_code, legacy_documents) = status_of(
+                legacy_state,
+                legacy_token.clone(),
+                legacy_envelope.submission_id,
+            )
+            .await;
+            let (pipeline_code, pipeline_documents) = status_of(
+                pipeline_state,
+                pipeline_token.clone(),
+                pipeline_envelope.submission_id,
+            )
+            .await;
+            parity.compare(
+                &format!("{case}, {reads}: status route code"),
+                serde_json::json!(legacy_code.as_u16()),
+                serde_json::json!(pipeline_code.as_u16()),
+            );
+            parity.compare(
+                &format!("{case}, {reads}: status document"),
+                status_fields(&legacy_documents[0]),
+                status_fields(&pipeline_documents[0]),
+            );
+            parity.compare(
+                &format!("{case}, {reads}: credit figure and explanation"),
+                credit_presentation(&legacy_documents[0], legacy_decision.as_ref()),
+                credit_presentation(&pipeline_documents[0], Some(&pipeline_decision)),
+            );
+        }
+
+        // ---- Credit summary (database reads) ----
+        let credit_of = |token: String| {
+            let client = client.clone();
+            let base = base.clone();
+            async move {
+                let (code, body) = send_http(
+                    &client,
+                    reqwest::Method::GET,
+                    format!("{base}/v1/contributors/me/credit"),
+                    auth_headers(&token),
+                    None,
+                )
+                .await;
+                serde_json::json!({
+                    "code": code.as_u16(),
+                    "accepted": body["accepted"],
+                    "credit_points_ledger": body["credit_points_ledger"],
+                    "credit_points_pending_ledger": body["credit_points_pending_ledger"],
+                    "credit_points_total": body["credit_points_total"],
+                    "credit_points_settled": body["credit_points_settled"],
+                })
+            }
+        };
+        parity.compare(
+            &format!("{case}: credit summary"),
+            credit_of(legacy_token.clone()).await,
+            credit_of(pipeline_token.clone()).await,
+        );
+
+        // ---- Another tenant's credential (Ruling T15-4) ----
+        // `main`'s status route omits what the caller cannot see: 200 and an
+        // empty list, never 403 or 404.
+        let (legacy_code, legacy_other) = post_submission_status(
+            &client,
+            &base,
+            &pipeline_token,
+            &[legacy_envelope.submission_id],
+        )
+        .await;
+        let (pipeline_code, pipeline_other) = post_submission_status(
+            &client,
+            &base,
+            &legacy_token,
+            &[pipeline_envelope.submission_id],
+        )
+        .await;
+        parity.pin(
+            &format!("{case}: another tenant's status read"),
+            "T15-4",
+            (
+                serde_json::json!([legacy_code.as_u16(), legacy_other]),
+                serde_json::json!([200, []]),
+            ),
+            (
+                serde_json::json!([pipeline_code.as_u16(), pipeline_other]),
+                serde_json::json!([200, []]),
+            ),
+        );
+
+        // ---- Dedup: the same bytes again, and changed bytes under the id ----
+        let (legacy_code, legacy_retry) =
+            post_trace(&client, &base, &legacy_token, &legacy_body).await;
+        let (pipeline_code, pipeline_retry) =
+            post_trace(&client, &base, &pipeline_token, &pipeline_body).await;
+        parity.compare(
+            &format!("{case}: retry code"),
+            serde_json::json!(legacy_code.as_u16()),
+            serde_json::json!(pipeline_code.as_u16()),
+        );
+        parity.pin(
+            &format!("{case}: retry status"),
+            "T15-3",
+            (
+                legacy_retry["status"].clone(),
+                serde_json::json!("accepted"),
+            ),
+            (
+                pipeline_retry["status"].clone(),
+                serde_json::json!("processing"),
+            ),
+        );
+        parity.compare(
+            &format!("{case}: ledger events after a retry"),
+            ledger_rows(&owner, &legacy_tenant, legacy_envelope.submission_id).await,
+            ledger_rows(&owner, &pipeline_tenant, pipeline_envelope.submission_id).await,
+        );
+        parity.compare(
+            &format!("{case}: a retry adds no ledger event"),
+            serde_json::json!([
+                legacy_ledger,
+                ledger_rows(&owner, &legacy_tenant, legacy_envelope.submission_id).await
+            ]),
+            serde_json::json!([
+                pipeline_ledger,
+                ledger_rows(&owner, &pipeline_tenant, pipeline_envelope.submission_id).await
+            ]),
+        );
+        let changed = |mut envelope: TraceContributionEnvelope| {
+            envelope
+                .privacy
+                .warnings
+                .push("changed content".to_string());
+            serde_json::to_vec(&envelope).unwrap()
+        };
+        let (legacy_code, legacy_changed) = post_trace(
+            &client,
+            &base,
+            &legacy_token,
+            &changed(legacy_envelope.clone()),
+        )
+        .await;
+        let (pipeline_code, pipeline_changed) = post_trace(
+            &client,
+            &base,
+            &pipeline_token,
+            &changed(pipeline_envelope.clone()),
+        )
+        .await;
+        // Ruling T15-3: spec section 3D -- the pipeline's replay identity is
+        // the request's bytes, so changed content under the same id is a
+        // conflict; `main` returns the existing receipt.
+        parity.pin(
+            &format!("{case}: changed content under the same id"),
+            "T15-3",
+            (
+                serde_json::json!([legacy_code.as_u16(), legacy_changed["error"]]),
+                serde_json::json!([200, null]),
+            ),
+            (
+                serde_json::json!([pipeline_code.as_u16(), pipeline_changed["error"]]),
+                serde_json::json!([409, "receipt id reused with different content"]),
+            ),
+        );
+
+        // ---- Withdrawal through the account session ----
+        let legacy_session = account_session_headers(&state_handle, &legacy_token).await;
+        let pipeline_session = account_session_headers(&state_handle, &pipeline_token).await;
+        let (legacy_code, legacy_withdrawal) = send_http(
+            &client,
+            reqwest::Method::POST,
+            format!(
+                "{base}/v1/account/traces/{}/withdraw",
+                legacy_envelope.submission_id
+            ),
+            legacy_session,
+            None,
+        )
+        .await;
+        let (pipeline_code, pipeline_withdrawal) = send_http(
+            &client,
+            reqwest::Method::POST,
+            format!(
+                "{base}/v1/contributors/me/pipeline-submissions/{}/withdraw",
+                pipeline_envelope.submission_id
+            ),
+            pipeline_session,
+            None,
+        )
+        .await;
+        parity.compare(
+            &format!("{case}: withdrawal code"),
+            serde_json::json!(legacy_code.as_u16()),
+            serde_json::json!(pipeline_code.as_u16()),
+        );
+        for field in [
+            "credit_retained",
+            "prior_status",
+            "distribution_reach",
+            "already_distributed",
+            "token_deletion_state",
+        ] {
+            parity.compare(
+                &format!("{case}: withdrawal {field}"),
+                legacy_withdrawal[field].clone(),
+                pipeline_withdrawal[field].clone(),
+            );
+        }
+        let (_, legacy_after) = post_submission_status(
+            &client,
+            &base,
+            &legacy_token,
+            &[legacy_envelope.submission_id],
+        )
+        .await;
+        let (_, pipeline_after) = post_submission_status(
+            &client,
+            &base,
+            &pipeline_token,
+            &[pipeline_envelope.submission_id],
+        )
+        .await;
+        parity.compare(
+            &format!("{case}: status after the withdrawal"),
+            serde_json::json!([
+                status_fields(&legacy_after[0]),
+                legacy_after[0]["credit_points_pending"]
+            ]),
+            serde_json::json!([
+                status_fields(&pipeline_after[0]),
+                pipeline_after[0]["credit_points_pending"]
+            ]),
+        );
+    }
+
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "parity test server").await;
+    assert!(
+        parity.mismatches.is_empty(),
+        "the legacy and pipeline paths differ:\n{}",
+        parity.mismatches.join("\n")
+    );
 }

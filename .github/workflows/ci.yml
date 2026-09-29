@@ -177,7 +177,7 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline pipeline_http; do
+          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline pipeline_http pipeline_parity; do
             PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
@@ -187,6 +187,19 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace pipeline_test_upgrade
+      # The two versioned pipeline HTTP steps below withdraw through an
+      # account session, which needs the login-resolver pool. The roles are
+      # the ones the `ingest-bin-postgres` job creates, for the same reason
+      # it gives there, and they are created here before any suite migrates:
+      # V30 creates `trace_login_resolver` only if it is absent.
+      - name: Create the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
       # Each step carries only the variables its own suite reads, NOT a job-wide
       # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
@@ -362,6 +375,35 @@ jobs:
         run: cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
+      - name: versioned pipeline compatibility through HTTP
+        run: cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_http
+      - name: versioned pipeline parity with legacy
+        run: cargo test -p trace-commons-server --bin trace-commons-ingest legacy_and_pipeline_tenants_match_under_equivalent_configuration
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_pipeline_parity
+      # The three steps above run in `<database>_pilot`, a database each test
+      # process drops and creates beside the one its URL names, so the
+      # xact_commit guard at the end of this job cannot see them. A test name
+      # that matches nothing passes with "0 passed"; the pilot databases'
+      # activity is the evidence that each step ran its test.
+      - name: Refuse a pipeline HTTP run that executed nothing
+        run: |
+          set -euo pipefail
+          fail=0
+          for db in admission_test_pipeline_http_pilot admission_test_pipeline_parity_pilot; do
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions"
+            if [ "${n:-0}" -lt 5 ]; then
+              echo "::error::$db shows no activity; its pipeline HTTP test did not run"
+              fail=1
+            fi
+          done
+          exit $fail
       - name: mission and insight reward ledger
         # Reward suites report independently: a red ledger step used to abort
         # the job before the two published-mission steps ever ran, so their
