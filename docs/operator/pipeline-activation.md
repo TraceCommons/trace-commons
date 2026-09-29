@@ -186,8 +186,9 @@ answers `404` when no pipeline runtime is injected:
   run's Admission reason (default 50 runs).
 - `POST /v1/review/pipeline/runs/{run_id}/claim` claims a run for the
   reviewer for 30 minutes and returns a `lease_token`. `404` means the run is
-  not waiting for review (it is not at Review, not quarantined, or already
-  assessed). `409` means another reviewer holds a live claim.
+  not waiting for review (it is not at Review, not quarantined, already
+  assessed, or its submission is no longer operable, for example because it
+  was withdrawn). `409` means another reviewer holds a live claim.
 - `POST /v1/review/pipeline/runs/{run_id}/assessment` records the
   reviewer's `approve` or `reject` for the claim's `lease_token`, with a
   reason label. An approval must list every Admission reason it resolves in

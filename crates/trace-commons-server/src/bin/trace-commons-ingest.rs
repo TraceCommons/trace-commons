@@ -41186,16 +41186,22 @@ fn require_pipeline_service(state: &AppState) -> ApiResult<&Arc<PipelineService>
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline runtime not configured"))
 }
 
-/// Maps `claim_review`/`record_review_assessment`'s labeled `Constraint`
-/// refusals to their HTTP shape: a stale or inoperable claim is a conflict
-/// with the run's current state, an unresolved quarantine reason is a
-/// semantically invalid request. Every other `DatabaseError` -- including
-/// `claim_review`'s own `invalid review claim`, which this handler's fixed
-/// 30-minute duration and derived reviewer ref should never trigger -- falls
-/// back to the generic hash-only internal error.
+/// `claim_review`'s and `record_review_assessment`'s refusal of a run whose
+/// submission is no longer operable (or, for an assessment, of a claim that
+/// is no longer live).
+const PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE: &str = "review claim is stale or inoperable";
+
+/// Maps `record_review_assessment`'s labeled `Constraint` refusals to their
+/// HTTP shape: a stale or inoperable claim is a conflict with the run's
+/// current state, an unresolved quarantine reason is a semantically invalid
+/// request. The claim route maps its own inoperable refusal first
+/// (`pipeline_review_claim_db_error`). Every other `DatabaseError` --
+/// including `claim_review`'s own `invalid review claim`, which the claim
+/// handler's fixed 30-minute duration and derived reviewer ref should never
+/// trigger -- falls back to the generic hash-only internal error.
 fn pipeline_review_db_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
     if let DatabaseError::Constraint(label) = &error {
-        if label == "review claim is stale or inoperable" {
+        if label == PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE {
             return api_error(StatusCode::CONFLICT, label.clone());
         }
         if label == "quarantine reason is unresolved" {
@@ -41260,6 +41266,25 @@ struct PipelineReviewClaimResponse {
     lease_expires_at: DateTime<Utc>,
 }
 
+/// The claim route's mapping of `claim_review`'s errors. A claim on a run
+/// whose submission is no longer operable answers 404, "not waiting for
+/// review", like any other run a reviewer cannot claim (Ruling T3-9(b));
+/// 409 means only that another reviewer holds a live claim
+/// (`pipeline_review_claim_conflict`). Everything else maps as
+/// `pipeline_review_db_error` does.
+fn pipeline_review_claim_db_error(error: DatabaseError) -> (StatusCode, Json<ApiError>) {
+    if matches!(
+        &error,
+        DatabaseError::Constraint(label) if label == PIPELINE_REVIEW_CLAIM_STALE_OR_INOPERABLE
+    ) {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "pipeline run is not waiting for review",
+        );
+    }
+    pipeline_review_db_error(error)
+}
+
 /// `POST /v1/review/pipeline/runs/{run_id}/claim`: claims the run for the
 /// authenticated reviewer, for 30 minutes.
 async fn pipeline_review_claim_handler(
@@ -41280,7 +41305,7 @@ async fn pipeline_review_claim_handler(
             Duration::minutes(PIPELINE_REVIEW_CLAIM_LEASE_MINUTES),
         )
         .await
-        .map_err(pipeline_review_db_error)?;
+        .map_err(pipeline_review_claim_db_error)?;
     let Some(claim) = claimed else {
         return pipeline_review_claim_conflict(pipeline_service, &tenant.tenant_id, run_id).await;
     };

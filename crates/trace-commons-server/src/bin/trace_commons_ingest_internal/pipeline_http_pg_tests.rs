@@ -3203,6 +3203,145 @@ async fn pipeline_product_admin_reads_and_score_attestation_are_scoped_to_their_
 }
 
 // ---------------------------------------------------------------------------
+// The pipeline review routes' refusals (Ruling T3-9(b), Ruling F-M1).
+// ---------------------------------------------------------------------------
+
+/// A Medium-risk receipt by `principal`, not yet run through Review: the run
+/// is `pending` at Review as a quarantine, with no assessment, so a reviewer
+/// may claim it.
+async fn quarantined_pipeline_run(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    service
+        .register_default_bundle(tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            tenant_id: tenant,
+            actor_principal_ref: principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "quarantine");
+    assert_eq!(created.state, PipelineRunState::Pending);
+    created
+}
+
+/// The review routes through the router, against a real runtime:
+///
+/// - Another reviewer's live claim answers a second reviewer's claim `409`.
+/// - An approval that does not resolve the run's quarantine reason answers
+///   `422`.
+/// - A claim on a run whose submission is no longer operable (withdrawn
+///   after the receipt, while the run still waits at Review) answers `404`,
+///   "not waiting for review", as for any run a reviewer cannot claim
+///   (Ruling T3-9(b)): `409` means only that another reviewer holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_review_routes_answer_409_422_and_404_for_an_inoperable_run() {
+    let Some(mut fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-review-{suffix}");
+    let other_reviewer = format!("token-review-other-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    insert_token(
+        &mut tokens,
+        &fixture.tenant,
+        &other_reviewer,
+        TokenRole::Reviewer,
+    );
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let principal = "principal_sha256:review-routes";
+    let claim_uri = |run_id: Uuid| format!("/v1/review/pipeline/runs/{run_id}/claim");
+
+    let held = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &claim_uri(held.run_id),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    let (status, refused) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &claim_uri(held.run_id),
+        auth_headers(&other_reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(
+        refused["error"],
+        "pipeline review claim is held by another reviewer"
+    );
+    let (status, refused) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", held.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "approve",
+            "reason": "privacy_review_required",
+            "resolved_quarantine_reasons": [],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["error"], "quarantine reason is unresolved");
+
+    let inoperable = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    tx.execute(
+        "INSERT INTO trace_withdrawals (
+            tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+         ) VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')",
+        &[&fixture.tenant, &inoperable.submission_id],
+    )
+    .await
+    .expect("withdraw the submission after its receipt");
+    tx.commit().await.unwrap();
+    drop(client);
+    let (status, refused) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &claim_uri(inoperable.run_id),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    assert_eq!(refused["error"], "pipeline run is not waiting for review");
+}
+
+// ---------------------------------------------------------------------------
 // The compatibility bundle's Trace Credit, read by `main`'s credit readers.
 // ---------------------------------------------------------------------------
 

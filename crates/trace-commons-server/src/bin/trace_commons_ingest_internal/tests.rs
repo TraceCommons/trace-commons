@@ -102306,6 +102306,79 @@ async fn pipeline_product_routes_are_not_found_without_a_pipeline_runtime() {
             "{method} {uri}"
         );
     }
+    // The three review routes answer the same with the review credential.
+    assert!(state.pipeline_service.is_none());
+    for (method, uri, body) in pipeline_review_route_requests(run) {
+        let (status, body) = pipeline_product_request(
+            state.clone(),
+            method,
+            &uri,
+            Some("review-token-a"),
+            None,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(
+            body["error"], "pipeline runtime not configured",
+            "{method} {uri}"
+        );
+    }
+}
+
+/// The three pipeline review routes for `run`, each with a body its
+/// extractor accepts: the quarantine queue, the claim, and the assessment.
+fn pipeline_review_route_requests(
+    run: Uuid,
+) -> [(&'static str, String, Option<serde_json::Value>); 3] {
+    [
+        ("GET", "/v1/review/pipeline/quarantine".to_string(), None),
+        (
+            "POST",
+            format!("/v1/review/pipeline/runs/{run}/claim"),
+            None,
+        ),
+        (
+            "POST",
+            format!("/v1/review/pipeline/runs/{run}/assessment"),
+            Some(serde_json::json!({
+                "lease_token": Uuid::new_v4(),
+                "recommendation": "approve",
+                "reason": "privacy_review_required",
+                "resolved_quarantine_reasons": ["privacy_review_required"],
+            })),
+        ),
+    ]
+}
+
+/// The three pipeline review routes need a reviewer credential: a
+/// contributor or an export worker gets 403, and no credential 401, before
+/// the runtime is looked up.
+#[tokio::test]
+async fn pipeline_review_routes_refuse_a_caller_who_is_not_a_reviewer() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    for (method, uri, body) in pipeline_review_route_requests(Uuid::new_v4()) {
+        let (status, _) =
+            pipeline_product_request(state.clone(), method, &uri, None, None, body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} without a credential"
+        );
+        for token in ["token-a", "export-worker-token-a"] {
+            let (status, _) = pipeline_product_request(
+                state.clone(),
+                method,
+                &uri,
+                Some(token),
+                None,
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} with {token}");
+        }
+    }
 }
 
 /// The operational summary and the forensic trace need an admin credential
