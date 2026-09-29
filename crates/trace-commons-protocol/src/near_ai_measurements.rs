@@ -47,6 +47,10 @@ pub struct NearAiMeasurementPins {
     /// Lowercase hex SHA-256 over `state` and `sets` ([`Self::digest_of`]).
     /// A client compares it to tell that the set changed, and refuses a
     /// document whose digest does not match its own contents.
+    ///
+    /// A change detector, not an integrity guarantee: it is unkeyed and
+    /// unsigned, so anyone able to alter the document can recompute it. What
+    /// the document is worth rests on the TLS connection to ingest.
     pub digest: String,
 }
 
