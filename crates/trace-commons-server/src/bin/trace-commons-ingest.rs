@@ -3850,7 +3850,7 @@ impl AppState {
             pipeline_receipts_tenants_routed,
             pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
-            parse_near_credit_outbox_scheduler_interval_from_env()?,
+            pipeline_near_confirmation_interval_from_env(pipeline_runtime_assembler.is_some())?,
             &pipeline_novelty_utility_checks,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
@@ -6500,6 +6500,23 @@ fn parse_near_credit_outbox_scheduler_interval_from_env() -> anyhow::Result<StdD
         5,
         86_400,
     )?))
+}
+
+/// The confirmation interval an assembled pipeline runtime's payout polls at:
+/// `main`'s NEAR outbox scheduler cadence (Ruling T10-10). `main` reads that
+/// variable only for an enabled scheduler, so it is read here only when a
+/// pipeline runtime is assembled (Ruling F-I2): with no pipeline, a value
+/// `main` would refuse does not stop startup. Without a pipeline nothing uses
+/// the interval, and the default stands in for it.
+fn pipeline_near_confirmation_interval_from_env(
+    pipeline_runtime_assembled: bool,
+) -> anyhow::Result<StdDuration> {
+    if !pipeline_runtime_assembled {
+        return Ok(StdDuration::from_secs(
+            TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        ));
+    }
+    parse_near_credit_outbox_scheduler_interval_from_env()
 }
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()

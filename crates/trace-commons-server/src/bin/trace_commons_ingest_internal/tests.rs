@@ -10354,6 +10354,60 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
     }
 }
 
+/// Ruling F-I2: startup reads
+/// `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS` for the
+/// pipeline only when a pipeline runtime is assembled. With no pipeline, a
+/// value `main` would refuse (below the five-second floor, or not a number)
+/// does not stop startup, as on `main`, where only an enabled NEAR scheduler
+/// reads it. With a pipeline, the same value is refused, and a valid one is
+/// the payout's confirmation interval.
+#[test]
+fn the_near_scheduler_interval_is_read_only_for_an_assembled_pipeline() {
+    // SAFETY: env mutation in tests is OK here -- no other test in this
+    // suite reads this variable (only startup and the NEAR scheduler's own
+    // configuration parser do, and no test calls either).
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+            "3",
+        )
+    };
+    assert_eq!(
+        pipeline_near_confirmation_interval_from_env(false)
+            .expect("no pipeline: the interval is not read"),
+        StdDuration::from_secs(TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS)
+    );
+    pipeline_near_confirmation_interval_from_env(true)
+        .expect_err("a pipeline runtime refuses an interval below the floor");
+
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+            "not-a-number",
+        )
+    };
+    assert_eq!(
+        pipeline_near_confirmation_interval_from_env(false)
+            .expect("no pipeline: the interval is not read"),
+        StdDuration::from_secs(TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS)
+    );
+    pipeline_near_confirmation_interval_from_env(true)
+        .expect_err("a pipeline runtime refuses an interval that is not a number");
+
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+            "120",
+        )
+    };
+    assert_eq!(
+        pipeline_near_confirmation_interval_from_env(true).expect("120 seconds is in range"),
+        StdDuration::from_secs(120)
+    );
+
+    unsafe { std::env::remove_var(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS) };
+}
+
 #[test]
 fn pipeline_receipt_tenants_require_an_injected_runtime() {
     let gates = TraceTenantRolloutGates::for_feature(
