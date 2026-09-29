@@ -7930,6 +7930,14 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
         )
+        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
+        // beside the login it drives: a plain page whose one script calls the
+        // routes above and the authenticated passkey and payout routes, so a
+        // weak native session's owner can get a strong cookie session.
+        .route(
+            step_up_page::STEP_UP_PATH,
+            get(step_up_page::step_up_page_handler),
+        )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
         // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
         // IS the credential. No RPC at login — the signature is verified offline.
@@ -17726,6 +17734,9 @@ use native_passkey::{
     native_passkey_create_finish_handler, native_passkey_create_start_handler,
     native_passkey_login_finish_handler, native_passkey_login_start_handler,
 };
+
+#[path = "trace_commons_ingest_internal/step_up_page.rs"]
+mod step_up_page;
 
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;

@@ -19,6 +19,8 @@ mod public_run_lifecycle_tests;
 mod public_run_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
+#[path = "tests/step_up_page_tests.rs"]
+mod step_up_page_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
