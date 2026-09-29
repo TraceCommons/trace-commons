@@ -2869,21 +2869,33 @@ impl PgPipelineStore {
         limit: usize,
     ) -> Result<Vec<Uuid>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
-        Self::list_runs_with_pending_payout_on(&mut client, tenant_id, limit).await
+        Ok(
+            Self::list_payout_work_on(&mut client, tenant_id, limit, std::time::Duration::ZERO)
+                .await?
+                .into_iter()
+                .map(|(run_id, _)| run_id)
+                .collect(),
+        )
     }
 
-    /// `list_runs_with_pending_payout` on the caller's connection, so the
-    /// payout pass reads its work list on the connection that holds its lock.
-    async fn list_runs_with_pending_payout_on(
+    /// The payout pass's work list, with each leg's payout state:
+    /// `list_runs_with_pending_payout`, except that a `submitted` leg is
+    /// listed only once `confirmation_interval` has passed since its
+    /// `updated_at`. Every payout write sets `updated_at`, confirmation polls
+    /// included, so a `submitted` leg is polled at most once per interval
+    /// (Ruling T10-10). A `pending` leg is always listed.
+    async fn list_payout_work_on(
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
         limit: usize,
-    ) -> Result<Vec<Uuid>, DatabaseError> {
+        confirmation_interval: std::time::Duration,
+    ) -> Result<Vec<(Uuid, String)>, DatabaseError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let confirmation_interval_seconds = confirmation_interval.as_secs_f64();
         let tx = Self::tenant_transaction(client, tenant_id).await?;
         let rows = tx
             .query(
-                "SELECT s.run_id
+                "SELECT s.run_id, s.payout_state
                    FROM pipeline_run_settlements s
                    JOIN pipeline_runs r
                      ON r.tenant_id = s.tenant_id AND r.run_id = s.run_id
@@ -2893,14 +2905,28 @@ impl PgPipelineStore {
                     AND s.operation_state = 'complete'
                     AND s.payout_rail = 'near'
                     AND s.settlement_batch_id IS NOT NULL
-                    AND s.payout_state IN ('pending', 'submitted')
+                    AND (
+                        s.payout_state = 'pending'
+                        OR (
+                            s.payout_state = 'submitted'
+                            AND s.updated_at <= NOW() - make_interval(secs => $3)
+                        )
+                    )
                   ORDER BY s.updated_at, s.run_id
-                  LIMIT $3",
-                &[&tenant_id, &InstrumentId::trace_credit().as_str(), &limit],
+                  LIMIT $4",
+                &[
+                    &tenant_id,
+                    &InstrumentId::trace_credit().as_str(),
+                    &confirmation_interval_seconds,
+                    &limit,
+                ],
             )
             .await?;
         tx.commit().await?;
-        Ok(rows.iter().map(|row| row.get("run_id")).collect())
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("run_id"), row.get("payout_state")))
+            .collect())
     }
 
     /// Advances one instrument leg (port 2160 to 2211). Gated on the run's
@@ -4219,11 +4245,17 @@ pub struct PipelineCaps {
 /// (`TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, Ruling T10-4); ingest
 /// hands it to the assembly and refuses a runtime whose enabled payout
 /// names another. An enabled payout requires one.
+///
+/// `confirmation_interval` is how often a `submitted` payout is polled for
+/// its NEAR confirmation: `main`'s NEAR outbox scheduler cadence
+/// (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`, 60
+/// seconds by default), which ingest hands to the assembly (Ruling T10-10).
 #[derive(Debug, Clone)]
 pub struct PipelinePayoutConfig {
     pub enabled: bool,
     pub require_confirmation_evidence: bool,
     pub near_contract_id: Option<String>,
+    pub confirmation_interval: std::time::Duration,
 }
 
 /// The submission-operability check Settle runs before deciding index
@@ -4560,6 +4592,16 @@ impl PipelineService {
         self.payout
             .as_ref()
             .is_some_and(|(_, config)| config.enabled)
+    }
+
+    /// How often an enabled payout polls a `submitted` payout for its
+    /// confirmation (`PipelinePayoutConfig::confirmation_interval`); `None`
+    /// while payout is disabled.
+    pub fn payout_confirmation_interval(&self) -> Option<std::time::Duration> {
+        self.payout
+            .as_ref()
+            .filter(|(_, config)| config.enabled)
+            .map(|(_, config)| config.confirmation_interval)
     }
 
     /// The NEAR credit contract an enabled payout names
@@ -7515,24 +7557,30 @@ impl PipelineService {
     }
 
     /// The payout pass (P3-D11): pays out the settled Trace Credit of up
-    /// to `limit` of `tenant_id`'s complete runs
-    /// (`PgPipelineStore::list_runs_with_pending_payout`) and returns how
-    /// many runs it processed. Nothing at all unless payout is enabled.
-    /// Payout runs after Settle, outside any run lease, and never writes a
-    /// phase outcome.
+    /// to `limit` of `tenant_id`'s complete runs and returns how many runs
+    /// it processed. Nothing at all unless payout is enabled. Payout runs
+    /// after Settle, outside any run lease, and never writes a phase
+    /// outcome.
     ///
-    /// Finding I1: the pass holds the tenant's NEAR submit lock -- the
-    /// session advisory lock `main`'s NEAR outbox submitter takes
-    /// (`Database::try_acquire_near_credit_submit_lock`, same key) -- from
-    /// its work list through every external call, so no two payout passes
-    /// (two ingest replicas, or a pass and a direct `process_payout`), and no
-    /// payout pass and `main`'s submitter, ever submit for one tenant at
-    /// once. A pass that finds the lock held does nothing and returns 0; the
-    /// next pass tries again. The lock is taken only when the work list is
-    /// not empty, so an idle pass never holds up `main`'s submitter. The lock
-    /// sits on one pooled connection, and the pass does all its own database
-    /// work on that connection, never taking a second (the pool-size-one
-    /// rule).
+    /// The work list (`PgPipelineStore::list_payout_work_on`) is split in
+    /// two:
+    ///
+    /// - A `submitted` leg only needs its confirmation looked up, which can
+    ///   submit nothing, so it is polled without the tenant's NEAR submit
+    ///   lock (Ruling T10-10), on one pooled connection, and at most once per
+    ///   `PipelinePayoutConfig::confirmation_interval` -- `main`'s NEAR
+    ///   outbox scheduler cadence.
+    /// - A `pending` leg has a line to submit. Those legs are paid under the
+    ///   tenant's NEAR submit lock -- the session advisory lock `main`'s NEAR
+    ///   outbox submitter takes (`Database::try_acquire_near_credit_submit_lock`,
+    ///   same key) -- held across every external submit, so no two payout
+    ///   passes (two ingest replicas, or a pass and a direct
+    ///   `process_payout`), and no payout pass and `main`'s submitter, ever
+    ///   submit for one tenant at once (Finding I1). When the lock is held,
+    ///   those legs wait for the next pass. The lock is taken only when there
+    ///   is something to submit, and the locked work runs on the lock's own
+    ///   connection, never on a second one (the pool-size-one rule). Every
+    ///   path to `NearPayoutAdapter::submit` runs under this lock.
     ///
     /// Ruling T10-5: an error in one run's payout -- a missing batch, a
     /// call that cannot be built, confirmation evidence that is not
@@ -7542,35 +7590,58 @@ impl PipelineService {
     /// Only a database error ends the pass, as does an injected crash (a
     /// test's stand-in for the process dying).
     pub async fn process_payouts(&self, tenant_id: &str, limit: usize) -> anyhow::Result<usize> {
-        if !self.payout_enabled() {
-            return Ok(0);
-        }
-        if self
-            .store
-            .list_runs_with_pending_payout(tenant_id, limit)
-            .await?
-            .is_empty()
-        {
-            return Ok(0);
-        }
-        let Some(mut lock) = self.try_lock_payouts(tenant_id).await? else {
+        let Some((_, config)) = self.payout.as_ref().filter(|(_, config)| config.enabled) else {
             return Ok(0);
         };
+        let mut client = self.backend.trace_pool().get().await?;
+        let work = PgPipelineStore::list_payout_work_on(
+            &mut client,
+            tenant_id,
+            limit,
+            config.confirmation_interval,
+        )
+        .await?;
+        let (to_confirm, to_submit): (Vec<_>, Vec<_>) = work
+            .into_iter()
+            .partition(|(_, payout_state)| payout_state == "submitted");
+        let to_confirm = to_confirm
+            .into_iter()
+            .map(|(run_id, _)| run_id)
+            .collect::<Vec<_>>();
+        let to_submit = to_submit
+            .into_iter()
+            .map(|(run_id, _)| run_id)
+            .collect::<Vec<_>>();
+        let mut processed = self
+            .pay_out_runs_on(&mut client, tenant_id, &to_confirm, false)
+            .await?;
+        drop(client);
+        if to_submit.is_empty() {
+            return Ok(processed);
+        }
+        let Some(mut lock) = self.try_lock_payouts(tenant_id).await? else {
+            return Ok(processed);
+        };
         let result = match lock.client_mut() {
-            Some(client) => self.process_payouts_on(client, tenant_id, limit).await,
+            Some(client) => {
+                self.pay_out_runs_on(client, tenant_id, &to_submit, true)
+                    .await
+            }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
         lock.release().await?;
-        result
+        processed += result?;
+        Ok(processed)
     }
 
     /// Pays out one run's settled Trace Credit (`dispatch_near_settlements`)
-    /// once the run is complete, under the same tenant lock as the pass
-    /// (Finding I1): while a pass or `main`'s submitter holds it, this is
-    /// refused with `payout_lock_held`. `None` when the run does not exist; a
-    /// run that is not complete is returned untouched. Unlike the pass, this
-    /// also takes up a `failed` payout again, re-checking the guard first,
-    /// and returns a per-run error to its caller instead of recording it.
+    /// once the run is complete, under the same tenant lock as the pass's
+    /// submits (Finding I1): while a pass or `main`'s submitter holds it,
+    /// this is refused with `payout_lock_held`. `None` when the run does not
+    /// exist; a run that is not complete is returned untouched. Unlike the
+    /// pass, this also takes up a `failed` payout again, re-checking the
+    /// guard first, does not wait for the confirmation interval, and returns
+    /// a per-run error to its caller instead of recording it.
     pub async fn process_payout(
         &self,
         tenant_id: &str,
@@ -7583,7 +7654,10 @@ impl PipelineService {
             anyhow::bail!(PIPELINE_PAYOUT_LOCK_HELD_LABEL);
         };
         let result = match lock.client_mut() {
-            Some(client) => self.process_payout_on(client, tenant_id, run_id).await,
+            Some(client) => {
+                self.process_payout_on(client, tenant_id, run_id, true)
+                    .await
+            }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
         lock.release().await?;
@@ -7603,18 +7677,22 @@ impl PipelineService {
         .await?)
     }
 
-    /// The pass's body, on the connection that holds the lock.
-    async fn process_payouts_on(
+    /// Pays out `run_ids` on `client`, recording a per-run error on its leg
+    /// and going on (Ruling T10-5). `may_submit` is true only on the
+    /// connection that holds the tenant's NEAR submit lock.
+    async fn pay_out_runs_on(
         &self,
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
-        limit: usize,
+        run_ids: &[Uuid],
+        may_submit: bool,
     ) -> anyhow::Result<usize> {
         let mut processed = 0;
-        for run_id in
-            PgPipelineStore::list_runs_with_pending_payout_on(client, tenant_id, limit).await?
-        {
-            match self.process_payout_on(client, tenant_id, run_id).await {
+        for &run_id in run_ids {
+            match self
+                .process_payout_on(client, tenant_id, run_id, may_submit)
+                .await
+            {
                 Ok(run) => {
                     if run.is_some() {
                         processed += 1;
@@ -7642,12 +7720,14 @@ impl PipelineService {
         Ok(processed)
     }
 
-    /// `process_payout`'s body, on the connection that holds the lock.
+    /// `process_payout`'s body, on `client`. `may_submit` as in
+    /// `pay_out_runs_on`.
     async fn process_payout_on(
         &self,
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
         run_id: Uuid,
+        may_submit: bool,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
@@ -7661,7 +7741,8 @@ impl PipelineService {
             return Ok(None);
         };
         if run.state == PipelineRunState::Complete {
-            self.dispatch_near_settlements(client, &run).await?;
+            self.dispatch_near_settlements(client, &run, may_submit)
+                .await?;
         }
         Ok(Some(run))
     }
@@ -7671,10 +7752,13 @@ impl PipelineService {
     /// `submitted`, or `failed`, pays each line of the leg's finalized batch
     /// through one `trace_near_credit_outbox` row, keyed by
     /// `pipeline_near_outbox_line_id` and tagged `instrument_id =
-    /// 'trace_credit'`, then records the leg's payout state. Runs on the
-    /// connection that holds the tenant's NEAR submit lock (Finding I1).
-    /// Every outbox read and write is tenant-scoped, and every write is
-    /// conditional on the line's current status, so a repeat is a no-op.
+    /// 'trace_credit'`, then records the leg's payout state. It submits only
+    /// when `may_submit` -- only on the connection that holds the tenant's
+    /// NEAR submit lock (Finding I1); without it, a line that still needs a
+    /// submit is left for a locked pass, and only confirmations are looked
+    /// up (Ruling T10-10). Every outbox read and write is tenant-scoped,
+    /// and every write is conditional on the line's current status, so a
+    /// repeat is a no-op.
     ///
     /// - A leg without a batch (a compatibility `NoveltyUtility` event) is
     ///   never paid (Ruling S8).
@@ -7710,6 +7794,7 @@ impl PipelineService {
         &self,
         client: &mut deadpool_postgres::Client,
         run: &PipelineRunRecord,
+        may_submit: bool,
     ) -> anyhow::Result<()> {
         let Some((adapter, config)) = self.payout.as_ref() else {
             return Ok(());
@@ -7820,6 +7905,9 @@ impl PipelineService {
                     Some("confirmed") | Some("disabled") => continue,
                     Some("submitted") => {}
                     _ => {
+                        if !may_submit {
+                            continue;
+                        }
                         if call.contract_id != near_contract_id {
                             contract_changed = true;
                             continue;

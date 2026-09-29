@@ -3834,6 +3834,7 @@ impl AppState {
             pipeline_receipts_tenants_routed,
             pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
+            parse_near_credit_outbox_scheduler_interval_from_env()?,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
@@ -6473,6 +6474,19 @@ fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
     }
 }
 
+/// The NEAR credit outbox scheduler's tick interval: how often `main`
+/// submits and confirms its NEAR outbox, 60 seconds unless configured. The
+/// versioned pipeline's NEAR payout polls a submitted payout for its
+/// confirmation at this same cadence (Ruling T10-10).
+fn parse_near_credit_outbox_scheduler_interval_from_env() -> anyhow::Result<StdDuration> {
+    Ok(StdDuration::from_secs(parse_optional_scheduler_u64_env(
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
+        TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        5,
+        86_400,
+    )?))
+}
+
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceNearCreditOutboxSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED);
@@ -6485,12 +6499,7 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
             "{TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN}"
         );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
-        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS,
-        TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
-    )?;
+    let interval = parse_near_credit_outbox_scheduler_interval_from_env()?;
     let submit_limit = parse_optional_scheduler_u32_env(
         TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT,
         TRACE_NEAR_CREDIT_OUTBOX_SUBMIT_DEFAULT_LIMIT,
@@ -6509,7 +6518,7 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
         .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
     Ok(Some(TraceNearCreditOutboxSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         submit_limit,
         confirm_limit,
         dry_run: env_truthy(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN),

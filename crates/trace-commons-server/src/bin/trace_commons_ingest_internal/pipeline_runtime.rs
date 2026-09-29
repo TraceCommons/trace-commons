@@ -22,12 +22,19 @@ use super::*;
 /// `PipelinePayoutConfig::near_contract_id` (Ruling T10-4);
 /// `assemble_ingest_pipeline_runtime` refuses an enabled payout that names
 /// another contract, or any contract when none is configured.
+///
+/// `near_confirmation_interval` is `main`'s NEAR outbox scheduler cadence
+/// (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`, 60 seconds
+/// unless configured). An assembly that enables payout passes it as
+/// `PipelinePayoutConfig::confirmation_interval` (Ruling T10-10), and
+/// `assemble_ingest_pipeline_runtime` refuses one that does not.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
     pub object_store_name: String,
     pub lease_config: PipelineLeaseConfig,
     pub near_contract_id: Option<String>,
+    pub near_confirmation_interval: StdDuration,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -63,8 +70,9 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// `pipeline_test_dependencies_not_allowed_when_required`, regardless of
 /// qualification. The caller resolves both booleans from the environment (or
 /// from the tenant rollout gates); this function reads neither directly.
-/// `near_contract_id` is `main`'s configured NEAR credit contract, handed to
-/// the assembly in its context.
+/// `near_contract_id` is `main`'s configured NEAR credit contract and
+/// `near_confirmation_interval` its NEAR outbox scheduler cadence, both
+/// handed to the assembly in its context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -75,6 +83,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     tenants_routed: bool,
     allow_test_dependencies: bool,
     near_contract_id: Option<&str>,
+    near_confirmation_interval: StdDuration,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -99,6 +108,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         object_store_name: object_store_name.clone(),
         lease_config,
         near_contract_id: near_contract_id.map(str::to_string),
+        near_confirmation_interval,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
@@ -119,6 +129,13 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     anyhow::ensure!(
         !service.payout_enabled() || service.payout_near_contract_id() == near_contract_id,
         "pipeline_runtime_near_contract_mismatch"
+    );
+    // Ruling T10-10: an enabled payout polls a submitted payout at `main`'s
+    // NEAR outbox scheduler cadence.
+    anyhow::ensure!(
+        !service.payout_enabled()
+            || service.payout_confirmation_interval() == Some(near_confirmation_interval),
+        "pipeline_runtime_near_confirmation_interval_mismatch"
     );
     if (production_required || tenants_routed)
         && !pipeline_runtime_is_production_qualified(&service)

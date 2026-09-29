@@ -339,6 +339,7 @@ fn assemble_test_pipeline_service(
         true,
         true,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .expect("assemble the injected pipeline runtime")
     .expect("an assembler was given, so a service is returned")

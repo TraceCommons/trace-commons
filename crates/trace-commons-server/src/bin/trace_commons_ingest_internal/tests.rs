@@ -10283,6 +10283,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         false,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .err()
     .unwrap();
@@ -10520,6 +10521,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         false,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10539,6 +10541,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         false,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .unwrap()
     .unwrap();
@@ -10984,6 +10987,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         true,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .err()
     .expect("an unqualified dependency with routed tenants and no opt-in is refused");
@@ -11009,6 +11013,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         true,
         true,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .expect("the opt-in lets an unqualified dependency start")
     .expect("an assembler was given, so a service is returned");
@@ -11032,6 +11037,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         false,
         true,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .err()
     .expect("the test opt-in never combines with the required flag");
@@ -11058,6 +11064,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         true,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
@@ -11084,6 +11091,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         true,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .err()
     .expect("a missing authority provider with routed tenants and no opt-in is refused");
@@ -11109,6 +11117,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         true,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .err()
     .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
@@ -11155,6 +11164,10 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
 /// The NEAR credit contract the payout tests configure.
 const TEST_PAYOUT_NEAR_CONTRACT: &str = "trace-credits.testnet";
 
+/// `main`'s NEAR outbox scheduler cadence as the assembly tests configure it
+/// (its default).
+const TEST_NEAR_CONFIRMATION_INTERVAL: StdDuration = StdDuration::from_secs(60);
+
 /// A payout configuration with confirmation evidence required.
 fn payout_test_config(
     enabled: bool,
@@ -11164,14 +11177,17 @@ fn payout_test_config(
         enabled,
         require_confirmation_evidence: true,
         near_contract_id: near_contract_id.map(str::to_string),
+        confirmation_interval: TEST_NEAR_CONFIRMATION_INTERVAL,
     }
 }
 
-/// Builds a qualified service whose payout is enabled on `near_contract_id`,
-/// or, when that is `None`, on the contract ingest hands the assembly in
-/// its context (what a correct assembly does, Ruling T10-4).
+/// Builds a qualified service whose payout is enabled on `near_contract_id`
+/// and polls at `confirmation_interval`, or, for either left `None`, on
+/// what ingest hands the assembly in its context (what a correct assembly
+/// does, Rulings T10-4 and T10-10).
 struct PayoutAssembler {
     near_contract_id: Option<&'static str>,
+    confirmation_interval: Option<StdDuration>,
 }
 
 impl IngestPipelineRuntimeAssembler for PayoutAssembler {
@@ -11183,6 +11199,10 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
             .near_contract_id
             .map(str::to_string)
             .or(context.near_contract_id);
+        let mut config = payout_test_config(true, near_contract_id.as_deref());
+        config.confirmation_interval = self
+            .confirmation_interval
+            .unwrap_or(context.near_confirmation_interval);
         qualified_pipeline_service(
             context.backend,
             context.artifact_store,
@@ -11193,7 +11213,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
                 Arc::new(QualifiedTestNearAdapter(
                     trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::new(),
                 )),
-                payout_test_config(true, near_contract_id.as_deref()),
+                config,
             )),
         )
     }
@@ -11216,12 +11236,14 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             true,
             false,
             configured,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
         )
     };
 
     let service = assemble(
         &PayoutAssembler {
             near_contract_id: None,
+            confirmation_interval: None,
         },
         Some(TEST_PAYOUT_NEAR_CONTRACT),
     )
@@ -11237,6 +11259,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
         let error = assemble(
             &PayoutAssembler {
                 near_contract_id: Some("other-credits.testnet"),
+                confirmation_interval: None,
             },
             configured,
         )
@@ -11248,6 +11271,50 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             "configured {configured:?}"
         );
     }
+}
+
+/// Ruling T10-10: an enabled payout polls a submitted payout at `main`'s
+/// NEAR outbox scheduler cadence. Ingest hands that cadence to the assembly
+/// and refuses a runtime whose payout polls at another one.
+#[tokio::test]
+async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |assembler: &PayoutAssembler| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            true,
+            false,
+            Some(TEST_PAYOUT_NEAR_CONTRACT),
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+        )
+    };
+
+    let service = assemble(&PayoutAssembler {
+        near_contract_id: None,
+        confirmation_interval: None,
+    })
+    .expect("a payout at main's cadence starts")
+    .expect("an assembler was given, so a service is returned");
+    assert_eq!(
+        service.payout_confirmation_interval(),
+        Some(TEST_NEAR_CONFIRMATION_INTERVAL)
+    );
+
+    let error = assemble(&PayoutAssembler {
+        near_contract_id: None,
+        confirmation_interval: Some(StdDuration::from_secs(5)),
+    })
+    .err()
+    .expect("a payout polling at another cadence is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_near_confirmation_interval_mismatch"
+    );
 }
 
 /// Task 10: the NEAR payout adapter counts toward production qualification
@@ -11313,6 +11380,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         false,
         false,
         None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")
     .expect("an assembler was given, so a service is returned");

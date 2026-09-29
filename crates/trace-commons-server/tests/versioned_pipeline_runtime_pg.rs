@@ -14138,6 +14138,7 @@ async fn compatibility_test_service_with_payout(
                 enabled: true,
                 require_confirmation_evidence: true,
                 near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+                confirmation_interval: std::time::Duration::ZERO,
             },
         ),
         None => service,
@@ -16403,7 +16404,8 @@ async fn payout_test_service(
     .await
 }
 
-/// `payout_test_service` with the payout configured on `near_contract_id`.
+/// `payout_test_service` with the payout configured on `near_contract_id`,
+/// polling a `submitted` payout on every pass.
 async fn payout_test_service_on_contract(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -16412,6 +16414,33 @@ async fn payout_test_service_on_contract(
     near: Arc<dyn NearPayoutAdapter>,
     crash_point: Option<PipelineCrashPoint>,
     near_contract_id: &str,
+) -> Arc<PipelineService> {
+    payout_test_service_with_config(
+        backend,
+        artifact_store,
+        config,
+        adapters,
+        near,
+        crash_point,
+        PipelinePayoutConfig {
+            enabled: true,
+            require_confirmation_evidence: true,
+            near_contract_id: Some(near_contract_id.to_string()),
+            confirmation_interval: std::time::Duration::ZERO,
+        },
+    )
+    .await
+}
+
+/// `payout_test_service` with the payout configured as `payout`.
+async fn payout_test_service_with_config(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+    payout: PipelinePayoutConfig,
 ) -> Arc<PipelineService> {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
@@ -16433,14 +16462,7 @@ async fn payout_test_service_on_contract(
     .with_embedder(embedder)
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
-    .with_payout(
-        near,
-        PipelinePayoutConfig {
-            enabled: true,
-            require_confirmation_evidence: true,
-            near_contract_id: Some(near_contract_id.to_string()),
-        },
-    );
+    .with_payout(near, payout);
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
@@ -16454,6 +16476,7 @@ async fn payout_test_service_on_contract(
 struct CountingNearAdapter {
     inner: Arc<RecordingNearAdapter>,
     submits: AtomicUsize,
+    confirmations: AtomicUsize,
 }
 
 impl CountingNearAdapter {
@@ -16461,11 +16484,17 @@ impl CountingNearAdapter {
         Arc::new(Self {
             inner,
             submits: AtomicUsize::new(0),
+            confirmations: AtomicUsize::new(0),
         })
     }
 
     fn submits(&self) -> usize {
         self.submits.load(Ordering::SeqCst)
+    }
+
+    /// Every `confirmation` lookup, whether or not it found one.
+    fn confirmations(&self) -> usize {
+        self.confirmations.load(Ordering::SeqCst)
     }
 }
 
@@ -16484,6 +16513,7 @@ impl NearPayoutAdapter for CountingNearAdapter {
     }
 
     async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        self.confirmations.fetch_add(1, Ordering::SeqCst);
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
 }
@@ -17027,6 +17057,7 @@ async fn payout_calls_name_the_configured_near_contract() {
             enabled: true,
             require_confirmation_evidence: true,
             near_contract_id: None,
+            confirmation_interval: std::time::Duration::ZERO,
         },
     )
     .build()
@@ -17686,4 +17717,119 @@ async fn a_compatibility_leg_is_never_a_pending_payout() {
             .iter()
             .all(|instrument| instrument.payout_state != "pending")
     );
+}
+
+/// Ruling T10-10 (a): polling a `submitted` payout for its confirmation can
+/// submit nothing, so it does not take the tenant's NEAR submit lock: while
+/// `main`'s submitter holds that lock, a pass still confirms the payout.
+#[tokio::test]
+async fn confirmation_polling_does_not_take_the_near_submit_lock() {
+    use trace_commons_server::db::Database;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-poll-unlocked-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    confirm_every_near_request(&recording);
+
+    let mains = backend
+        .try_acquire_near_credit_submit_lock(&tenant)
+        .await
+        .unwrap()
+        .expect("main's submitter takes the tenant lock");
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed",
+        "the pass confirms the payout while main holds the lock"
+    );
+    assert_eq!(near.submits(), 1);
+    mains.release().await.unwrap();
+}
+
+/// Ruling T10-10 (b): a `submitted` payout is polled for its confirmation at
+/// most once per confirmation interval (`main`'s NEAR outbox scheduler
+/// cadence), measured from the leg's `updated_at`, which every payout write
+/// sets. Two passes inside one interval look the confirmation up once.
+#[tokio::test]
+async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service_with_config(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+        PipelinePayoutConfig {
+            enabled: true,
+            require_confirmation_evidence: true,
+            near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+            confirmation_interval: std::time::Duration::from_secs(60),
+        },
+    )
+    .await;
+    let tenant = format!("payout-poll-cadence-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    let after_submit = near.confirmations();
+
+    // The interval since the submit has passed: the next pass polls once.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements
+            SET updated_at = NOW() - INTERVAL '61 seconds'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.confirmations(), after_submit + 1);
+
+    // A second pass inside the same interval does not look it up again.
+    let second = service.process_payouts(&tenant, 32).await.unwrap();
+    assert_eq!(
+        near.confirmations(),
+        after_submit + 1,
+        "one confirmation lookup per interval"
+    );
+    assert_eq!(second, 0, "the payout is not due in the second pass");
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(near.submits(), 1);
 }
