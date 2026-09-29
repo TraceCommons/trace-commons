@@ -107,13 +107,14 @@ pub const PIPELINE_PAYOUT_NEAR_CONTRACT_INVALID_LABEL: &str = "payout_near_contr
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
-/// An index invalidation attempt that did not remove the revision: the
-/// index answered `Failed` or `Uncertain`, or the run's committed Score
-/// evidence names no index. The invalidation stays `pending` and is retried.
+/// An index invalidation attempt that did not remove the revision, while
+/// the invalidation stays `pending` and is retried: an index outage (the
+/// index answered `Failed` or `Uncertain`; uncharged), or a charged failure
+/// with an attempt left.
 pub const PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL: &str = "index_invalidation_unavailable";
-/// An index invalidation whose last attempt did not remove the revision: it
-/// is `failed` for good, and the revision's entries may still be in the
-/// index.
+/// An index invalidation whose attempts ran out on failures that waiting
+/// cannot heal (`PgPipelineStore::fail_index_invalidation`): it is `failed`
+/// for good, and the revision's entries may still be in the index.
 pub const PIPELINE_INDEX_INVALIDATION_FAILED_LABEL: &str = "index_invalidation_failed";
 pub const PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL: &str = "bundle_store_unavailable";
 /// The `trace_object_refs.object_store` label a service records when its
@@ -2254,11 +2255,11 @@ impl PgPipelineStore {
     /// longer due, so only one gets it. `None` when the row is not due,
     /// not `pending`, out of attempts, or not `tenant_id`'s.
     ///
-    /// The claim charges no attempt: `fail_index_invalidation` charges one
-    /// for an attempt that did not remove the revision. An attempt that
-    /// never reports back (the worker died) is not charged, and the row is
-    /// due again once the lease has passed, the way a run's expired lease
-    /// is.
+    /// The claim charges no attempt: only `fail_index_invalidation` charges
+    /// one, for a failure that waiting cannot heal. An index outage
+    /// (`retry_index_invalidation`) is not charged, and neither is an
+    /// attempt that never reports back (the worker died): the row is due
+    /// again once the lease has passed, the way a run's expired lease is.
     pub async fn claim_index_invalidation(
         &self,
         tenant_id: &str,
@@ -2360,14 +2361,74 @@ impl PgPipelineStore {
         Ok(Some(run))
     }
 
-    /// Records that `claim`'s attempt did not remove the revision, charging
-    /// it one attempt. With an attempt left, the invalidation stays
-    /// `pending` under `index_invalidation_unavailable` and is due again
-    /// after the charged-retry backoff `mark_retry` uses (50 ms, doubling
-    /// with each charged attempt, capped at 50 ms x 2^9); the run's
+    /// Records that the index was unavailable for `claim`'s attempt (it
+    /// answered `Failed` or `Uncertain`): an uncharged retry (Ruling T8-2).
+    /// The invalidation stays `pending` with its attempt count unchanged,
+    /// under `index_invalidation_unavailable`, and is due again after the
+    /// FR3 backoff `mark_transient_retry` uses, measured from the row's own
+    /// `requested_at` instead of a run's `phase_started_at`: the wait is the
+    /// invalidation's age, at least one second and at most one hour, so each
+    /// retry lands when the invalidation is about twice as old as at the one
+    /// before -- the delay doubles -- until, once it is an hour old, it is
+    /// retried once an hour. There is no terminal bound: an outage never
+    /// ends a queued invalidation, so the revision is removed once the index
+    /// answers again (Review Focus 1). The run's `index_invalidation_state`
+    /// stays `pending`.
+    ///
+    /// Fenced as `fail_index_invalidation` is: `None`, with nothing written,
+    /// unless `claim` still holds the row.
+    pub async fn retry_index_invalidation(
+        &self,
+        claim: &PipelineIndexInvalidationClaim,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
+        if !Self::lock_invalidation_run_on_tx(&tx, claim).await? {
+            return Ok(None);
+        }
+        let retried = tx
+            .execute(
+                "UPDATE pipeline_index_invalidations
+                    SET last_error_label = $3,
+                        next_attempt_at = NOW() + LEAST(
+                            GREATEST(NOW() - requested_at, INTERVAL '1 second'),
+                            INTERVAL '1 hour'
+                        )
+                  WHERE tenant_id = $1 AND run_id = $2
+                    AND state = 'pending' AND next_attempt_at = $4",
+                &[
+                    &claim.tenant_id,
+                    &claim.run_id,
+                    &PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL,
+                    &claim.lease_expires_at,
+                ],
+            )
+            .await?;
+        if retried == 0 {
+            return Ok(None);
+        }
+        let row = tx
+            .query_one(
+                "SELECT * FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+                &[&claim.tenant_id, &claim.run_id],
+            )
+            .await?;
+        let run = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(Some(run))
+    }
+
+    /// Records that `claim`'s attempt failed in a way waiting cannot heal
+    /// (the run's committed Score evidence names no index, or the index
+    /// broke its contract and answered `ContentConflict`), charging it one
+    /// attempt. With an attempt left, the invalidation stays `pending`
+    /// under `index_invalidation_unavailable` and is due again after the
+    /// charged-retry backoff `mark_retry` uses (50 ms, doubling with each
+    /// charged attempt, capped at 50 ms x 2^9); the run's
     /// `index_invalidation_state` stays `pending`. The attempt that uses the
     /// last one leaves the invalidation and the run's state `failed` under
-    /// `index_invalidation_failed`.
+    /// `index_invalidation_failed`. An index outage is never recorded here
+    /// (`retry_index_invalidation`).
     ///
     /// Only the current claim records a failure: the invalidation must be
     /// `pending` with `next_attempt_at` still at `claim`'s lease end. A
@@ -4945,8 +5006,13 @@ impl PipelineService {
     /// removes the queued revision from the index under the tenant's
     /// storage reference and the index id of the run's committed Score
     /// evidence, and records the result. `Ok(true)` or `Ok(false)` from the
-    /// index completes the invalidation; any error, or Score evidence that
-    /// names no index, is a charged failure (`fail_index_invalidation`).
+    /// index completes the invalidation. An index outage (`Failed` or
+    /// `Uncertain`) is an uncharged retry with backoff
+    /// (`retry_index_invalidation`, Ruling T8-2), so an outage never ends
+    /// the invalidation. Only a failure waiting cannot heal is charged
+    /// (`fail_index_invalidation`), and ends `failed` once the attempts run
+    /// out: Score evidence that names no index, or a `ContentConflict`,
+    /// which the `invalidate_revision` contract rules out.
     ///
     /// Returns the run as the recorded result left it, or `None` when this
     /// call recorded nothing: the invalidation was not due or not claimed,
@@ -4965,21 +5031,22 @@ impl PipelineService {
         else {
             return Ok(None);
         };
-        let removed = match self.committed_index_id(tenant_id, run_id).await? {
-            Some(index_id) => self
-                .index_writer
-                .invalidate_revision(
-                    &pipeline_tenant_storage_ref(tenant_id),
-                    &index_id,
-                    claim.registry_revision_id,
-                )
-                .is_ok(),
-            None => false,
+        let Some(index_id) = self.committed_index_id(tenant_id, run_id).await? else {
+            return Ok(self.store.fail_index_invalidation(&claim).await?);
         };
-        Ok(if removed {
-            self.store.complete_index_invalidation(&claim).await?
-        } else {
-            self.store.fail_index_invalidation(&claim).await?
+        let result = self.index_writer.invalidate_revision(
+            &pipeline_tenant_storage_ref(tenant_id),
+            &index_id,
+            claim.registry_revision_id,
+        );
+        Ok(match result {
+            Ok(_) => self.store.complete_index_invalidation(&claim).await?,
+            Err(IndexWriteError::Failed | IndexWriteError::Uncertain) => {
+                self.store.retry_index_invalidation(&claim).await?
+            }
+            Err(IndexWriteError::ContentConflict) => {
+                self.store.fail_index_invalidation(&claim).await?
+            }
         })
     }
 

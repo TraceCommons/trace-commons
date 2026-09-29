@@ -15762,16 +15762,54 @@ async fn invalidation_removes_the_revision_after_withdrawal() {
     );
 }
 
-/// Ruling T8-1: the isolated index's faults are one-shot, so the fault is
-/// armed again before each attempt, and the row is made due between
-/// attempts. Every attempt fails before it removes anything. Each failure
-/// but the last leaves the invalidation `pending`, charged one attempt,
-/// under `index_invalidation_unavailable`; the one that uses the last
-/// attempt leaves it `failed` under `index_invalidation_failed`, and the
-/// run's `index_invalidation_state` follows. A failed invalidation is never
-/// claimed again, even when due.
+/// How long a run's invalidation still waits before it is due, in
+/// milliseconds, against the database clock.
+async fn invalidation_wait_ms(backend: &PgBackend, tenant_id: &str, run_id: uuid::Uuid) -> f64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let wait: f64 = tx
+        .query_one(
+            "SELECT (EXTRACT(EPOCH FROM next_attempt_at - NOW()) * 1000)::float8
+               FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    wait
+}
+
+/// Moves a run's invalidation `requested_at` back by `hours`, as the owner:
+/// a time shortcut, so the invalidation is that much older.
+async fn age_invalidation(tenant_id: &str, run_id: uuid::Uuid, hours: i32) {
+    owner_client()
+        .await
+        .execute(
+            "UPDATE pipeline_index_invalidations
+                SET requested_at = requested_at - make_interval(hours => $3)
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id, &hours],
+        )
+        .await
+        .expect("age the invalidation");
+}
+
+/// Review Focus 1 and Ruling T8-2: an index outage never ends a queued
+/// invalidation. The index fails (`IndexFault::FailBeforeApply`, one-shot, so
+/// it is armed again before each attempt, and the row is made due between
+/// attempts) on more attempts than `max_attempts`. Each outage is an
+/// uncharged retry: the row stays `pending` with its attempt count
+/// unchanged, under `index_invalidation_unavailable`, and waits out the FR3
+/// backoff: the invalidation's age, at least one second (the first outage)
+/// and at most one hour (the last outage, on an invalidation aged three
+/// hours), each wait ending later than the one before; the run's
+/// `index_invalidation_state` stays `pending` and every entry stays where
+/// it was. When the index answers again, the invalidation completes and the
+/// revision's entries are gone.
 #[tokio::test]
-async fn invalidation_retries_then_fails_with_a_label() {
+async fn an_index_outage_keeps_the_invalidation_pending_until_it_completes() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -15783,17 +15821,20 @@ async fn invalidation_retries_then_fails_with_a_label() {
         None,
     )
     .await;
-    let tenant = format!("invalidate-fails-{}", uuid::Uuid::new_v4());
+    let tenant = format!("invalidate-outage-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (run, entries) = complete_indexed_run(&service, &tenant).await;
     let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
     withdraw(&service, &tenant, run.submission_id).await;
-    let max_attempts = invalidation_detail(&backend, &tenant, run.run_id)
-        .await
-        .max_attempts;
-    assert!(max_attempts > 1, "the retry path is exercised");
+    let queued = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(queued.attempt_count, 0);
+    let outages = queued.max_attempts + 2;
 
-    for attempt in 1..=max_attempts {
+    let mut previous_wait_end = None;
+    for outage in 1..=outages {
+        if outage == outages {
+            age_invalidation(&tenant, run.run_id, 3).await;
+        }
         index.set_fault(IndexFault::FailBeforeApply);
         make_invalidation_due(&tenant, run.run_id).await;
         assert_eq!(
@@ -15802,55 +15843,77 @@ async fn invalidation_retries_then_fails_with_a_label() {
                 .await
                 .unwrap(),
             1,
-            "attempt {attempt} is processed"
+            "outage {outage} is processed"
         );
         let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
-        assert_eq!(detail.attempt_count, attempt, "each failure is charged");
-        assert!(!detail.completed);
-        if attempt < max_attempts {
-            assert_eq!(detail.state, "pending", "attempt {attempt}");
-            assert_eq!(
-                detail.last_error_label.as_deref(),
-                Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL),
-                "attempt {attempt}"
+        assert_eq!(detail.state, "pending", "outage {outage}");
+        assert_eq!(
+            detail.attempt_count, 0,
+            "outage {outage} consumed no attempt"
+        );
+        assert_eq!(
+            detail.last_error_label.as_deref(),
+            Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL),
+            "outage {outage}"
+        );
+        assert!(!detail.completed, "outage {outage}");
+        assert_eq!(detail.run_state, "pending", "outage {outage}");
+        let wait_ms = invalidation_wait_ms(&backend, &tenant, run.run_id).await;
+        assert!(
+            wait_ms > 0.0 && wait_ms <= 3_600_000.0,
+            "outage {outage} waits out a bounded backoff ({wait_ms} ms)"
+        );
+        if outage == 1 {
+            assert!(
+                wait_ms > 500.0 && wait_ms <= 1_000.0,
+                "the first outage waits the one-second floor ({wait_ms} ms)"
             );
-            assert_eq!(detail.run_state, "pending", "attempt {attempt}");
-        } else {
-            assert_eq!(detail.state, "failed");
-            assert_eq!(
-                detail.last_error_label.as_deref(),
-                Some(PIPELINE_INDEX_INVALIDATION_FAILED_LABEL)
-            );
-            assert_eq!(detail.run_state, "failed");
         }
+        if outage == outages {
+            assert!(
+                wait_ms > 3_540_000.0,
+                "an outage of an old invalidation waits the one-hour cap ({wait_ms} ms)"
+            );
+        }
+        if let Some(previous) = previous_wait_end {
+            assert!(
+                detail.next_attempt_at > previous,
+                "outage {outage} waits until later than the outage before it"
+            );
+        }
+        previous_wait_end = Some(detail.next_attempt_at);
         assert_eq!(
             visible_revision_entries(&index, &tenant_ref, &entries),
             all,
-            "a failed attempt removed nothing (attempt {attempt})"
+            "an outage removed nothing (outage {outage})"
         );
     }
 
-    let failed = invalidation_detail(&backend, &tenant, run.run_id).await;
     make_invalidation_due(&tenant, run.run_id).await;
     assert_eq!(
         service
             .process_index_invalidations(&tenant, 32)
             .await
             .unwrap(),
-        0,
-        "a failed invalidation is not claimed again"
+        1
     );
-    let after = invalidation_detail(&backend, &tenant, run.run_id).await;
-    assert_eq!(
-        (after.state, after.attempt_count, after.last_error_label),
-        (failed.state, failed.attempt_count, failed.last_error_label)
+    let complete = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(complete.state, "complete");
+    assert_eq!(complete.attempt_count, 0);
+    assert_eq!(complete.last_error_label, None);
+    assert!(complete.completed);
+    assert_eq!(complete.run_state, "complete");
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "no entry of the withdrawn revision stays visible"
     );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }
 
-/// Ruling T8-1: an `Uncertain` answer (`IndexFault::LostAfterApply`: the
-/// entries are removed, but the index cannot say so) is a charged retry,
-/// not a completion. The next attempt removes nothing, gets `Ok(false)`, and
-/// completes the invalidation.
+/// Rulings T8-1 and T8-2: an `Uncertain` answer (`IndexFault::LostAfterApply`:
+/// the entries are removed, but the index cannot say so) is an uncharged
+/// retry, not a completion. The next attempt removes nothing, gets
+/// `Ok(false)`, and completes the invalidation.
 #[tokio::test]
 async fn an_uncertain_invalidation_is_retried_and_then_completes() {
     let Some(backend) = runtime_backend(4).await else {
@@ -15883,7 +15946,7 @@ async fn an_uncertain_invalidation_is_retried_and_then_completes() {
     );
     let uncertain = invalidation_detail(&backend, &tenant, run.run_id).await;
     assert_eq!(uncertain.state, "pending");
-    assert_eq!(uncertain.attempt_count, 1);
+    assert_eq!(uncertain.attempt_count, 0, "an outage is not charged");
     assert_eq!(
         uncertain.last_error_label.as_deref(),
         Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL)
@@ -15901,11 +15964,126 @@ async fn an_uncertain_invalidation_is_retried_and_then_completes() {
     );
     let complete = invalidation_detail(&backend, &tenant, run.run_id).await;
     assert_eq!(complete.state, "complete");
-    assert_eq!(complete.attempt_count, 1, "a success is not charged");
+    assert_eq!(complete.attempt_count, 0, "a success is not charged");
     assert_eq!(complete.last_error_label, None);
     assert!(complete.completed);
     assert_eq!(complete.run_state, "complete");
     assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// Removes `index_id` from a run's stored Score evidence, as the owner, with
+/// the immutability trigger off for the one statement: stored data that no
+/// longer says which index the run's Settle wrote to. No service write can
+/// produce this (`phase_outcomes` rows are immutable).
+async fn tamper_stored_score_index_id_away(tenant_id: &str, run_id: uuid::Uuid) {
+    let mut client = owner_client().await;
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("disable the immutability trigger");
+    let updated = tx
+        .execute(
+            "UPDATE phase_outcomes SET evidence = evidence - 'index_id'
+              WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'
+                AND evidence ? 'index_id'",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("tamper the stored Score evidence");
+    assert_eq!(updated, 1, "one stored Score evidence named an index");
+    tx.batch_execute("ALTER TABLE phase_outcomes ENABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("enable the immutability trigger");
+    tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// Ruling T8-2, the terminal path: a failure that waiting cannot heal is
+/// charged, and ends the invalidation. Here the run's stored Score evidence
+/// no longer names the index its Settle wrote to (only corrupted stored data
+/// can do this). Each attempt is charged one attempt; each but the last
+/// leaves the invalidation `pending` under `index_invalidation_unavailable`;
+/// the last leaves it, and the run's `index_invalidation_state`, `failed`
+/// under `index_invalidation_failed`. Nothing was removed, so the entries
+/// stay, and the failure is on record for an operator. A failed
+/// invalidation is never claimed again, even when due.
+#[tokio::test]
+async fn an_invalidation_whose_index_cannot_be_read_fails_after_its_attempts() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-unreadable-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    withdraw(&service, &tenant, run.submission_id).await;
+    tamper_stored_score_index_id_away(&tenant, run.run_id).await;
+    let max_attempts = invalidation_detail(&backend, &tenant, run.run_id)
+        .await
+        .max_attempts;
+    assert!(max_attempts > 1, "the charged retry is exercised");
+
+    for attempt in 1..=max_attempts {
+        make_invalidation_due(&tenant, run.run_id).await;
+        assert_eq!(
+            service
+                .process_index_invalidations(&tenant, 32)
+                .await
+                .unwrap(),
+            1,
+            "attempt {attempt} is processed"
+        );
+        let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+        assert_eq!(detail.attempt_count, attempt, "each failure is charged");
+        assert!(!detail.completed);
+        if attempt < max_attempts {
+            assert_eq!(detail.state, "pending", "attempt {attempt}");
+            assert_eq!(
+                detail.last_error_label.as_deref(),
+                Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL),
+                "attempt {attempt}"
+            );
+            assert_eq!(detail.run_state, "pending", "attempt {attempt}");
+        } else {
+            assert_eq!(detail.state, "failed");
+            assert_eq!(
+                detail.last_error_label.as_deref(),
+                Some(PIPELINE_INDEX_INVALIDATION_FAILED_LABEL)
+            );
+            assert_eq!(detail.run_state, "failed");
+        }
+        assert_eq!(
+            visible_revision_entries(&index, &tenant_ref, &entries),
+            all,
+            "nothing was removed (attempt {attempt})"
+        );
+    }
+
+    let failed = invalidation_detail(&backend, &tenant, run.run_id).await;
+    make_invalidation_due(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a failed invalidation is not claimed again"
+    );
+    let after = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        (after.state, after.attempt_count, after.last_error_label),
+        (failed.state, failed.attempt_count, failed.last_error_label)
+    );
 }
 
 /// A pending invalidation of tenant A is not processed by tenant B's pass:
@@ -15981,7 +16159,8 @@ async fn invalidation_is_tenant_scoped() {
 /// `next_attempt_at` moves to the lease's end), so a second claim, or two
 /// claims at once, get it only once. Once the lease has passed, another
 /// worker can claim it; the first claim can then no longer record a
-/// failure (it no longer holds the lease), while the new one can.
+/// failure or an outage (it no longer holds the lease), while the new one
+/// can.
 #[tokio::test]
 async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
     let Some(backend) = runtime_backend(4).await else {
@@ -16054,9 +16233,14 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
         "the first claim no longer holds the invalidation"
     );
     assert_eq!(
+        store.retry_index_invalidation(&first).await.unwrap(),
+        None,
+        "nor can it record an outage"
+    );
+    assert_eq!(
         invalidation_detail(&backend, &tenant, run.run_id).await,
         reclaimed,
-        "the stale failure changed nothing"
+        "the stale failure and outage changed nothing"
     );
     let failed = store
         .fail_index_invalidation(&second)
@@ -16076,7 +16260,8 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
 
 /// The pass never holds two pooled connections at once: on a pool of one,
 /// a second checkout would wait for the first forever, and each pass is
-/// bounded. Both the failure path and the completion path.
+/// bounded. Both the outage path (an uncharged retry) and the completion
+/// path.
 #[tokio::test]
 async fn the_invalidation_pass_never_holds_two_pooled_connections() {
     let Some(backend) = runtime_backend(1).await else {
@@ -16108,7 +16293,7 @@ async fn the_invalidation_pass_never_holds_two_pooled_connections() {
         service.process_index_invalidations(&tenant, 32),
     )
     .await
-    .expect("the failure path never waits for a second connection")
+    .expect("the outage path never waits for a second connection")
     .unwrap();
     assert_eq!(processed, 1);
     assert_eq!(
