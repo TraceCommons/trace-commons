@@ -27,7 +27,7 @@ the link.
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
-| Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
+| Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
 | Running the versioned pipeline lab (design stage) | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate (design stage) | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Activating or containing the versioned pipeline (design stage) | [`./pipeline-activation.md`](./pipeline-activation.md) |
