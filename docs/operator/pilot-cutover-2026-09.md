@@ -197,7 +197,7 @@ pilot notes on `/proc/<MainPID>/environ`.
    - **V60 is an edit, not a new migration** (#1114). The pilot has it
      recorded, so neither the runner nor Route B applies it. Confirm
      `SELECT name FROM _trace_commons_migrations WHERE version = 60` returns
-     `V60__onboarding_retention`.
+     `onboarding_retention`, the name in `MIGRATIONS` (`db/postgres.rs`), not the file stem.
    - If the diff lists any file other than these seventeen, `main` has moved:
      stop, and redo the scope and the pins.
    - A plain install over unapplied migrations crash-loops the pilot, because
