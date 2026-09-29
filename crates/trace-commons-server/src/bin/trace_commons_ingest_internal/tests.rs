@@ -101097,3 +101097,60 @@ async fn account_trace_withdraw_reports_forfeited_unsettled_credit() {
         "a retry reports the same forfeiture"
     );
 }
+
+// -- Device-authenticated settlement posture (#1118 Z3a) --------------------
+
+/// `GET /v1/contributors/me/settlement-posture` reports the live settlement
+/// mode label to a device bearer, and the label matches what
+/// `GET /v1/account/credit-summary` reports for the same deployment, because
+/// both go through `credit_numbers::credit_posture`. `Disabled` is the
+/// fail-safe and must read as `disabled`, not as an absence.
+#[tokio::test]
+async fn settlement_posture_handler_reports_each_mode_to_a_device_bearer() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    for (mode, label) in [
+        (NearSettlementMode::Http, "http"),
+        (NearSettlementMode::DryRun, "dry_run"),
+        (NearSettlementMode::Disabled, "disabled"),
+    ] {
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).near_settlement_mode = mode;
+
+        let Json(posture) =
+            settlement_posture_handler(State(state.clone()), auth_headers("token-a"))
+                .await
+                .expect("device bearer reads the posture");
+
+        assert_eq!(posture.settlement, label);
+        assert!(!posture.graded, "the pipeline is shadow-mode");
+        assert_eq!(
+            posture,
+            trace_commons_server::credit_numbers::credit_posture(
+                state.near_settlement_mode_label(),
+                false
+            ),
+            "the account route derives its posture from the same function"
+        );
+        let body = serde_json::to_string(&posture).expect("posture serializes");
+        assert!(
+            !body.contains("://"),
+            "label-only: no URL in the body {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn settlement_posture_handler_refuses_without_a_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = settlement_posture_handler(State(state.clone()), HeaderMap::new())
+        .await
+        .expect_err("no bearer is refused");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    let err = settlement_posture_handler(State(state), auth_headers("not-a-token"))
+        .await
+        .expect_err("an unknown bearer is refused");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+}

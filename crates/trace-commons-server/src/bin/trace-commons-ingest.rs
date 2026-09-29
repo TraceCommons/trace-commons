@@ -7869,6 +7869,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/contributors/me/credit", get(credit_handler))
         .route(
+            "/v1/contributors/me/settlement-posture",
+            get(settlement_posture_handler),
+        )
+        .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
         )
@@ -15674,6 +15678,26 @@ async fn credit_handler(
     ))
 }
 
+/// `GET /v1/contributors/me/settlement-posture`
+///
+/// The deployment's settlement posture for a caller holding a device
+/// credential. `GET /v1/account/credit-summary` reports the same object but is
+/// an account route that refuses device bearers, so a contributor daemon
+/// cannot read it. The posture is deployment-wide and label-only (`settlement`
+/// is `http`, `dry_run` or `disabled`; no URL, account or transaction
+/// reference), so any authenticated caller may read it. Both routes derive it
+/// through `credit_numbers::credit_posture`, so they cannot disagree.
+async fn settlement_posture_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_server::credit_numbers::CreditPosture>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(trace_commons_server::credit_numbers::credit_posture(
+        state.near_settlement_mode_label(),
+        false,
+    )))
+}
+
 async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -16816,10 +16840,7 @@ async fn account_credit_summary_handler(
             earned_this_period,
             rate.as_ref(),
         ),
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
         period: AccountCreditPeriod {
             start: period_start,
             end: period_end,
@@ -52142,10 +52163,7 @@ fn register_stats_response(
         withheld,
         scope: REGISTER_STATS_SCOPE,
         as_of: row.as_of,
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
     }
 }
 
