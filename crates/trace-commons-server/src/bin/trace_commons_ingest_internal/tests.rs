@@ -1742,6 +1742,7 @@ async fn confirm_login_issues_single_use_session_cookie() {
     );
     assert_set_cookies_are_host_bound(response.headers());
     assert_clears_legacy_session_cookie(response.headers());
+    assert_clears_login_ceremony_cookie(response.headers());
     assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
     assert!(set_cookie.contains("Secure"), "cookie must be Secure");
     assert!(
@@ -1975,6 +1976,31 @@ fn assert_clears_legacy_session_cookie(headers: &HeaderMap) {
     assert_eq!(clear.secure(), Some(true));
     assert_eq!(clear.http_only(), Some(true));
     assert_eq!(clear.same_site(), Some(cookie::SameSite::Strict));
+}
+
+/// A successful confirm spends the sign-in link ceremony, so the response
+/// expires its cookie exactly once rather than leaving a spent nonce on every
+/// path until its ten-minute lifetime runs out.
+fn assert_clears_login_ceremony_cookie(headers: &HeaderMap) {
+    let clears: Vec<cookie::Cookie<'static>> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| cookie::Cookie::parse(v.to_string()).ok())
+        .filter(|c| c.name() == LOGIN_CEREMONY_COOKIE)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "exactly one Set-Cookie must expire the login ceremony cookie"
+    );
+    let clear = &clears[0];
+    assert_eq!(clear.value(), "", "the ceremony clear carries no value");
+    assert_eq!(
+        clear.max_age(),
+        Some(cookie::time::Duration::ZERO),
+        "the ceremony clear must be Max-Age=0"
+    );
 }
 
 /// `export_job_request_metadata` records the request filters only. The

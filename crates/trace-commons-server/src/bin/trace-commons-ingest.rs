@@ -18620,6 +18620,22 @@ const LOGIN_CEREMONY_COOKIE: &str = "__Host-tc_login_ceremony";
 /// standing credential.
 const LOGIN_CEREMONY_TTL_SECONDS: i64 = 600;
 
+/// Expire the sign-in link ceremony cookie once a confirm has spent it. The
+/// nonce is single-use, and since the `__Host-` prefix put it on `Path=/` it
+/// would otherwise ride along on every request until its lifetime ran out.
+fn append_login_ceremony_clear(headers: &mut HeaderMap) {
+    let clear = cookie::Cookie::build((LOGIN_CEREMONY_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+    if let Ok(value) = HeaderValue::from_str(&clear.to_string()) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
+}
+
 /// A fresh, unguessable ceremony nonce.
 fn new_login_ceremony_nonce() -> String {
     use base64::Engine as _;
@@ -18979,6 +18995,7 @@ async fn confirm_login_inner(
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
             append_legacy_account_session_clear(resp_headers);
+            append_login_ceremony_clear(resp_headers);
         }
         Err(_) => return redeem_generic_deny(),
     }
