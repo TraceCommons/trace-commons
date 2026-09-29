@@ -1227,6 +1227,80 @@ async fn pg_native_register_adds_only_the_first_passkey() {
     drop_tenant(&admin, &tenant).await;
 }
 
+/// Every native registration `start` parks a ceremony in the in-process
+/// store, so starts are capped per account: a session that may add its first
+/// passkey cannot park ceremonies without bound. Past the cap it gets a plain
+/// `429`, and a different account is unaffected.
+#[tokio::test]
+async fn pg_native_register_starts_are_capped_per_account() {
+    let Some((backend, state)) = pg_state(None).await else {
+        return;
+    };
+    let admin = pg_admin(&backend).await;
+    let tenant = trace_commons_server::near_account_identity::random_near_ai_tenant_id();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .expect("tenant");
+    // Accounts with no strong authenticator, so the Slice 3a gate lets a
+    // weak native session start a registration.
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let account = Uuid::new_v4();
+        admin
+            .execute(
+                "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+                &[&tenant, &account],
+            )
+            .await
+            .expect("account");
+        let secret = format!("register-cap-{}", Uuid::new_v4());
+        admin
+            .execute(
+                "INSERT INTO trace_sessions
+                    (tenant_id, session_id, account_id, token_hash, client_kind, expires_at)
+                 VALUES ($1, $2, $3, $4, 'native', now() + interval '1 day')",
+                &[&tenant, &Uuid::new_v4(), &account, &hash_secret(&secret)],
+            )
+            .await
+            .expect("session");
+        tokens.push(native_token_value(&tenant, &secret));
+    }
+
+    let mut accepted = 0;
+    let mut limited = 0;
+    for _ in 0..100 {
+        let reply = send(
+            &state,
+            post(REGISTER_START, &serde_json::json!({}), Some(&tokens[0])),
+        )
+        .await;
+        match reply.status {
+            StatusCode::OK => accepted += 1,
+            StatusCode::TOO_MANY_REQUESTS => limited += 1,
+            other => panic!("unexpected {other}"),
+        }
+    }
+    assert_eq!(
+        accepted,
+        crate::native_passkey::NATIVE_PASSKEY_REGISTER_PER_ACCOUNT_LIMIT,
+        "one account parked {accepted} ceremonies in a window"
+    );
+    assert_eq!(accepted + limited, 100);
+    // The cap is per account: another account still starts.
+    let other = send(
+        &state,
+        post(REGISTER_START, &serde_json::json!({}), Some(&tokens[1])),
+    )
+    .await;
+    assert_eq!(other.status, StatusCode::OK);
+
+    drop_tenant(&admin, &tenant).await;
+}
+
 /// The count definer function sees every tenant's unbound rows and nothing
 /// else, and the runtime role can call it but cannot read the table across
 /// tenants itself.
