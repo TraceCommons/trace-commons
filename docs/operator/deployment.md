@@ -230,9 +230,80 @@ export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authe
   exact origin the browser sees (scheme + host + port). A mismatch makes every
   ceremony fail verification at the authenticator. `RP_ID` must be a registrable
   suffix of that origin's host.
+- **Several origins.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` may be a
+  comma-separated list, e.g. `https://tracecommons.ai,https://ingest.tracecommons.ai`.
+  The first entry is the primary origin; every entry is accepted. A single value
+  means what it always did. Every entry must be the `RP_ID` host or a subdomain
+  of it, or startup fails. Subdomains are never implied: list each origin.
 - The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
   in-process soft-authenticator used by the passkey tests). It is **not** compiled
   into or shipped with the production binaries; no production env var enables it.
+
+### Native passkey creation (Z2 S2)
+
+The native app creates a passkey, and with it an `unbound` account, through the
+unauthenticated `POST /v1/account/native/passkey/create/{start,finish}`. Because
+anyone can call it, and attestation is `none`, creation is capped by:
+
+```sh
+export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value; there is no default
+```
+
+- **Unset disables creation.** Every `create` request gets the uniform deny.
+  A value that is not a non-negative integer fails startup.
+- The cap is on accounts in state `unbound`, counted across every tenant. It is
+  checked at `create/start` and again inside the `create/finish` transaction.
+- When the count reaches the cap, ingest logs the label
+  `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
+  again only after the count has dropped below and reached it a second time.
+  Alert on it.
+- Each client IP (as the per-IP rate limiter reads it) may make at most
+  `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` successful
+  `create/finish` calls in a rolling 24 hours; the next gets the uniform deny.
+  Unset means **10**; `0` refuses every creation; a value that is not a
+  non-negative integer fails startup. The count is held in process, like the
+  per-minute limits, and holds only a salted hash of each IP: nothing about
+  the caller's address is written to the database. A restart clears it, and
+  with more than one ingest instance each keeps its own count.
+- Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
+  capped and needs no new setting; like the browser sign-in it needs the
+  login-resolver pool above.
+
+V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
+`EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`
+function owned by the new NOLOGIN role `trace_unbound_account_count_guard`.
+An ingest login that holds its grants some other way than through
+`trace_ingest_runtime` needs both, or every `create` is refused:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'INSERT'),
+       has_function_privilege('<ingest runtime login>', 'public.trace_unbound_passkey_account_count()', 'EXECUTE');
+```
+
+### Connect near.ai: binding a passkey account (Z2 S3)
+
+An unbound account attaches its NEAR AI identity through
+`POST /v1/account/near-ai/provision/bind/{start,finish}`, behind the account
+middleware with a native (`tcn1_`) session. It runs the NEAR AI login
+provisioning ceremony and needs exactly what that path needs (the provisioning
+switch, the admission gate, the NEAR account identity, the published issuer,
+and the login-resolver pool); there is no new setting. It uses the v2
+readiness, so no witness JSON is required.
+
+V100 grants `trace_ingest_runtime` `UPDATE (state, bound_at)` on
+`trace_account_bindings` and nothing else. An ingest login that holds its
+grants some other way needs it, or every bind fails and leaves the account
+`unbound`:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'state', 'UPDATE'),
+       has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'bound_at', 'UPDATE');
+```
+
+When the NEAR AI account already belongs to another commons account, the bind
+is refused: the passkey account is closed (its sessions and passkey revoked)
+and the response carries the existing account's session. Nothing moves between
+the two accounts; folding the passkey into the existing account is not built.
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -605,6 +676,19 @@ missing them, and the pipeline -- like the legacy path -- fails closed with
 `permission denied` until it does. Only a deployment carrying both, the
 pilot's V62-era grants and V90's own, has nothing left to do by hand for the
 pipeline.
+
+### V97: account bindings
+
+V97 (`trace_account_bindings`, native passkey identity) grants
+`trace_ingest_runtime` `SELECT` on the new table and nothing else. Session
+validation joins it on every authenticated `/v1/account/*` request, so an
+ingest login that holds its grants some other way than through
+`trace_ingest_runtime` fails those requests with a 500 until it can read the
+table. Check before deploying:
+
+```sql
+SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
+```
 
 ### Build and install
 

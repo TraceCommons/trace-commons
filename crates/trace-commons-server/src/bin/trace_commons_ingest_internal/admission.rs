@@ -787,7 +787,18 @@ async fn reserve_account(
 pub(super) async fn account_status_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
+    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
 ) -> ApiResult<axum::response::Response> {
+    // Z2 S1: an unbound account holds no anchor, principal or device, so it
+    // cannot contribute whatever admission says. Answer with the existing
+    // label, so the client's contribution check stays on, rather than the
+    // generic denial the principal lookup below would produce.
+    if binding.is_gated() {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            AdmissionRefusal::AccountIdentityUnlinked.label(),
+        ));
+    }
     let mut response = if let Some(config) = state.account_admission.as_ref() {
         if !is_anchored_tenant(&ctx.tenant_id) {
             return Err(api_error(

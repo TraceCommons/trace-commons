@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 
+#[path = "postgres_account_binding.rs"]
+mod account_binding;
 #[path = "postgres_account_onboarding.rs"]
 mod account_onboarding;
 #[path = "postgres_account_trust.rs"]
@@ -221,6 +223,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_legacy_invite_links",
     "trace_legacy_invite_link_conflicts",
     "trace_legacy_invite_link_devices",
+    "trace_account_bindings",
     "trace_account_admission_budget",
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
@@ -1528,6 +1531,26 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         95,
         "versioned_pipeline_receipt_content",
         include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+    ),
+    // V96 is claimed by a pull request in flight; V97 depends only on V30
+    // (trace_accounts) and V90 (trace_ingest_runtime).
+    (
+        97,
+        "account_bindings",
+        include_str!("../../../../migrations/V97__account_bindings.sql"),
+    ),
+    // Z2 S2: the binding-row INSERT grant and the unbound-account count.
+    (
+        98,
+        "native_passkey_creation",
+        include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
+    ),
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V99 is claimed
+    // by S5 (the unbound reaper) in flight; V100 depends only on V97 and V90.
+    (
+        100,
+        "near_ai_bind",
+        include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
 ];
 
@@ -3630,6 +3653,43 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn store_near_ai_bind_ceremony(
+        &self,
+        ceremony_hash: &str,
+        pending: &crate::account_onboarding::NearAiBindPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_ai_bind_store_ceremony(ceremony_hash, pending, expires_at)
+            .await
+    }
+
+    async fn take_near_ai_bind_ceremony(
+        &self,
+        ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
+        self.near_ai_bind_take_ceremony(ceremony_hash).await
+    }
+
+    async fn bind_near_ai_login(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        self.near_ai_login_bind(
+            tenant_id,
+            account_id,
+            login,
+            device_public_key,
+            session,
+            identity,
+        )
+        .await
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         tenant: &str,
@@ -3777,11 +3837,17 @@ impl Database for PgBackend {
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
                         (s.token_hash = $1) AS matched_current,
-                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate
+                        (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
+                        b.state AS binding_state
                    FROM trace_sessions s
                    JOIN trace_accounts a
                      ON a.tenant_id = s.tenant_id
                     AND a.account_id = s.account_id
+                   -- Z2 S1: the unbound gate's input, folded into this query.
+                   -- LEFT JOIN because no row means a legacy account.
+                   LEFT JOIN trace_account_bindings b
+                     ON b.tenant_id = s.tenant_id
+                    AND b.account_id = s.account_id
                   WHERE s.tenant_id = trace_current_tenant_id()
                     AND a.closed_at IS NULL
                     AND (s.token_hash = $1
@@ -3822,6 +3888,12 @@ impl Database for PgBackend {
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
+        // A state this build does not know refuses the session (the error
+        // drops the transaction before any write) rather than guessing.
+        let binding_state: Option<String> = row.get("binding_state");
+        let binding =
+            crate::account_binding::AccountBindingState::from_stored(binding_state.as_deref())
+                .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
 
         // Rotate only on a CURRENT-token match that has aged past the interval. A
         // prev-token (within-grace) request slides the idle window forward but must
@@ -3886,6 +3958,7 @@ impl Database for PgBackend {
             auth_credential_id,
             client_kind,
             rotated_secret,
+            binding,
         }))
     }
 
@@ -4315,6 +4388,17 @@ impl Database for PgBackend {
         account_id: Uuid,
         credential_id: &str,
     ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
+        self.revoke_account_credential_sparing_session(tenant_id, account_id, credential_id, None)
+            .await
+    }
+
+    async fn revoke_account_credential_sparing_session(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+        caller_token_hash: Option<&str>,
+    ) -> Result<crate::db::RevokeCredentialResult, DatabaseError> {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
@@ -4332,6 +4416,30 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
+        if removed > 0 {
+            // Z2 S2: every live session this credential minted -- a browser
+            // `passkey` cookie or a native `tcn1_` from passkey create or
+            // sign-in -- dies with it, in the same transaction, EXCEPT the
+            // session making the removal request (`caller_token_hash`). The
+            // caller is matched on its current token or its within-grace
+            // previous one, since rotation may have fired on this very
+            // request. A session with no recorded credential (loopback, NEAR
+            // AI, device-link, or one minted before credentials were recorded)
+            // is not touched.
+            tx.execute(
+                "UPDATE trace_sessions
+                    SET revoked_at = now()
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND auth_credential_id = $2
+                    AND revoked_at IS NULL
+                    AND ($3::text IS NULL
+                         OR NOT (token_hash = $3 OR COALESCE(prev_token_hash, '') = $3))",
+                &[&account_id, &credential_id, &caller_token_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
         let remaining_row = tx
             .query_one(
                 "SELECT count(*) AS remaining
@@ -4573,6 +4681,25 @@ impl Database for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(row.get("strong_count"))
+    }
+
+    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
+        self.unbound_passkey_account_count().await
+    }
+
+    async fn create_passkey_origin_account(
+        &self,
+        account: crate::db::NewPasskeyOriginAccount<'_>,
+    ) -> Result<crate::db::PasskeyOriginAccountOutcome, DatabaseError> {
+        self.create_passkey_origin_account_in_tx(account).await
+    }
+
+    async fn account_binding_state(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
+        self.binding_state_for_account(tenant_id, account_id).await
     }
 
     async fn designate_payout_near_identity(
@@ -7515,6 +7642,7 @@ mod tests {
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+            include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
@@ -7549,6 +7677,7 @@ mod tests {
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
+            include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {
