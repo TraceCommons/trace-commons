@@ -631,6 +631,11 @@ async fn sign_in_through(
 ) -> Reply {
     let start = send(state, page_fetch("POST", start_uri, None, None)).await;
     assert_eq!(start.status, StatusCode::OK, "login/start");
+    assert_step_up_cookies_are_host_bound(
+        &start,
+        &[ACCOUNT_PASSKEY_CEREMONY_COOKIE],
+        "login/start",
+    );
     let ceremony = start
         .cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE)
         .expect("ceremony cookie");
@@ -651,6 +656,65 @@ async fn sign_in_through(
         ),
     )
     .await
+}
+
+/// Every `Set-Cookie` on `reply` is host-bound, and each of `expected` is
+/// among them: `Secure`, `Path=/`, no `Domain`, `HttpOnly` and
+/// `SameSite=Strict` -- the attributes a browser demands before it accepts a
+/// `__Host-` name, plus the two the account cookies always carry. Names are
+/// the constants, never a literal, so this holds whatever prefix they carry.
+/// It is the step-up flow's copy of the shared host-bound check that #1138
+/// adds, and folds into it once both land.
+fn assert_step_up_cookies_are_host_bound(reply: &Reply, expected: &[&str], what: &str) {
+    let values: Vec<&str> = reply
+        .headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii Set-Cookie"))
+        .collect();
+    for name in expected {
+        assert!(
+            values
+                .iter()
+                .any(|raw| raw.starts_with(&format!("{name}="))),
+            "{what}: no Set-Cookie for {name}"
+        );
+    }
+    for raw in values {
+        let parsed = cookie::Cookie::parse(raw.to_string()).expect("Set-Cookie parses");
+        // The name only: the value is a live secret and stays out of output.
+        let name = parsed.name();
+        assert!(
+            [ACCOUNT_SESSION_COOKIE, ACCOUNT_PASSKEY_CEREMONY_COOKIE].contains(&parsed.name()),
+            "{what}: unexpected cookie {}",
+            parsed.name()
+        );
+        assert_eq!(
+            parsed.secure(),
+            Some(true),
+            "{what}: must be Secure: {name}"
+        );
+        assert_eq!(parsed.path(), Some("/"), "{what}: must be Path=/: {name}");
+        assert_eq!(
+            parsed.domain(),
+            None,
+            "{what}: must not carry a Domain: {name}"
+        );
+        assert!(
+            !raw.to_ascii_lowercase().contains("domain="),
+            "{what}: must not carry a Domain: {name}"
+        );
+        assert_eq!(
+            parsed.http_only(),
+            Some(true),
+            "{what}: must be HttpOnly: {name}"
+        );
+        assert_eq!(
+            parsed.same_site(),
+            Some(cookie::SameSite::Strict),
+            "{what}: must be SameSite=Strict: {name}"
+        );
+    }
 }
 
 /// The S7 end-to-end: the session the page's sign-in mints, from the ingest
@@ -787,6 +851,7 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
         "{}",
         signed_in.text()
     );
+    assert_step_up_cookies_are_host_bound(&signed_in, &[ACCOUNT_SESSION_COOKIE], "login/finish");
     let session = signed_in
         .cookie_pair(ACCOUNT_SESSION_COOKIE)
         .expect("session cookie");
@@ -812,6 +877,11 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
     )
     .await;
     assert_eq!(register.status, StatusCode::OK, "{}", register.text());
+    assert_step_up_cookies_are_host_bound(
+        &register,
+        &[ACCOUNT_PASSKEY_CEREMONY_COOKIE],
+        "register/start",
+    );
     let ceremony = register
         .cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE)
         .expect("ceremony cookie");
@@ -834,6 +904,7 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
     )
     .await;
     assert_eq!(finished.status, StatusCode::OK, "{}", finished.text());
+    assert_step_up_cookies_are_host_bound(&finished, &[], "register/finish");
     let second_id = finished.json()["credential_id"]
         .as_str()
         .expect("credential id")
@@ -1256,6 +1327,7 @@ async fn pg_rotation_cannot_extend_a_step_up_session() {
         .expect("age the token");
     let rotated = passkeys_with(&state, &session).await;
     assert_eq!(rotated.status, StatusCode::OK);
+    assert_step_up_cookies_are_host_bound(&rotated, &[ACCOUNT_SESSION_COOKIE], "rotation");
     let (rotated_line, rotated_session) =
         session_set_cookie(&rotated).expect("rotation set a new session cookie");
     assert_ne!(rotated_session, session, "the secret rotated");
