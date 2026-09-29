@@ -3,9 +3,28 @@
 --
 -- Cancel leaves an unbound passkey account inert. This function is what
 -- eventually reclaims it: it deletes accounts whose binding is still
--- `unbound`, whose binding is older than the TTL, and that have no session
--- activity inside the TTL. Bound, closed and legacy accounts (no binding row)
--- are never candidates.
+-- `unbound`, that hold no live session, and that are idle past a TTL. Bound,
+-- closed and legacy accounts (no binding row) are never candidates.
+--
+-- TWO WINDOWS. An account that was NEVER USED AGAIN after creation is reaped
+-- after the short window (p_never_used_ttl_seconds, default 7 days). One that
+-- signed in again keeps the long idle window (p_ttl_seconds, default 30 days).
+-- The short window may not exceed the long one; the function refuses it.
+--
+-- "NEVER USED AGAIN" is decided from the rows S2's create/finish leaves
+-- behind: one binding row (created_at = the transaction's now()) and exactly
+-- one native session, inserted in the same transaction with created_at =
+-- last_seen_at = that same now(). The account is USED AGAIN when either
+--   (a) it has more than one session row (any later sign-in mints a new row,
+--       and sessions are never deleted, only revoked), or
+--   (b) some session's last_seen_at is more than one hour after the binding's
+--       created_at (the creation session was presented again later).
+-- The one-hour grace exists because the app legitimately presents the creation
+-- session in the minutes after creation (bind start, step-up); that must not
+-- promote the account to the long window. It is a fixed constant here, not a
+-- parameter. Everything else is never used again. Both tests read only
+-- trace_sessions columns the reaper already may select; the rule does not
+-- depend on session created_at, which a test or backfill could set freely.
 --
 -- Renumbering: S1 is V97 and S2 takes V98, so this is V99. It depends only on
 -- V30 (accounts, sessions), V32 (credentials), V97 (bindings) and the tables
@@ -14,7 +33,8 @@
 -- LAST ACTIVITY is the newest trace_sessions.last_seen_at for the account, or
 -- the binding's created_at when there is no session. Neither column is new.
 -- A session that is unrevoked and unexpired also blocks deletion, whatever
--- its last_seen_at, so a live session is never reaped from under its holder.
+-- its last_seen_at and whichever window applies, so a live session is never
+-- reaped from under its holder.
 --
 -- CROSS-TENANT, SO A DEFINER FUNCTION. The sweep spans tenants, and the
 -- runtime pool is tenant-scoped under forced RLS, so nothing here grants the
@@ -48,12 +68,16 @@
 --      inserting a session holds a key-share lock on it through the foreign
 --      key, so the candidate is skipped; one that commits earlier is seen by
 --      step 3.
---   3. activity is re-checked in a fresh statement, under both locks.
+--   3. usage and activity are re-checked in a fresh statement, under both
+--      locks, so a sign-in that commits mid-sweep turns a never-used account
+--      into a used-again one (more than one session) and it survives.
 -- Nothing waits on a lock the reaper cannot take, so it cannot deadlock with
 -- bind or sign-in. A foreign-key refusal (an account that somehow holds a row
 -- in a non-cascading table) rolls that candidate back and counts it skipped.
 -- Batches are bounded twice: at most p_limit accounts are deleted, and at most
--- 10 * p_limit candidates are examined.
+-- 10 * p_limit candidates are examined. Candidates are chosen by the same
+-- window rule the re-check applies, so a used-again account that is not yet
+-- idle past the long window never occupies a scan slot.
 --
 -- SKIPPED CANDIDATES DO NOT STALL THE BATCH. Candidates come in a fixed order
 -- (oldest first). A candidate whose delete is refused every time (a foreign
@@ -69,7 +93,9 @@
 --
 -- Idempotent where it can be, and applied by a non-superuser CREATEROLE
 -- migrator, following V85: the migrator holds the owning guard just long
--- enough to own the function and to grant EXECUTE, then drops it.
+-- enough to own the function and to grant EXECUTE, then drops it. The
+-- two-argument form this function briefly had while unreleased is dropped
+-- first so no stale overload with the single-window behavior remains.
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_unbound_account_reaper_guard') THEN
@@ -134,35 +160,54 @@ DROP POLICY IF EXISTS trace_unbound_reaper_delete ON trace_tenants;
 CREATE POLICY trace_unbound_reaper_delete ON trace_tenants
     FOR DELETE TO trace_unbound_account_reaper_guard USING (TRUE);
 
-CREATE OR REPLACE FUNCTION trace_reap_unbound_accounts(p_ttl_seconds BIGINT, p_limit INTEGER)
+DROP FUNCTION IF EXISTS trace_reap_unbound_accounts(BIGINT, INTEGER);
+
+CREATE OR REPLACE FUNCTION trace_reap_unbound_accounts(
+    p_ttl_seconds BIGINT, p_never_used_ttl_seconds BIGINT, p_limit INTEGER)
 RETURNS TABLE(reaped BIGINT, skipped BIGINT)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
     v_now     TIMESTAMPTZ := clock_timestamp();
     v_cutoff  TIMESTAMPTZ;
+    v_short_cutoff TIMESTAMPTZ;
     v_reaped  BIGINT := 0;
     v_skipped BIGINT := 0;
+    v_used_again BOOLEAN;
     c         RECORD;
 BEGIN
     -- A one-day floor is defense in depth against a misconfigured TTL of a
     -- few seconds deleting every idle account.
     IF p_ttl_seconds IS NULL OR p_ttl_seconds < 86400
+       OR p_never_used_ttl_seconds IS NULL OR p_never_used_ttl_seconds < 86400
+       OR p_never_used_ttl_seconds > p_ttl_seconds
        OR p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
         RAISE EXCEPTION 'unbound_reaper_refused';
     END IF;
     PERFORM set_config('lock_timeout', '3s', true);
     v_cutoff := v_now - (p_ttl_seconds * interval '1 second');
+    v_short_cutoff := v_now - (p_never_used_ttl_seconds * interval '1 second');
 
     FOR c IN
-        SELECT b.tenant_id, b.account_id
+        SELECT b.tenant_id, b.account_id, b.created_at
           FROM public.trace_account_bindings b
          WHERE b.state = 'unbound'
-           AND b.created_at < v_cutoff
+           AND b.created_at < v_short_cutoff
            AND NOT EXISTS (
                 SELECT 1 FROM public.trace_sessions s
                  WHERE s.tenant_id = b.tenant_id AND s.account_id = b.account_id
-                   AND (s.last_seen_at >= v_cutoff
-                        OR (s.revoked_at IS NULL AND s.expires_at > v_now)))
+                   AND s.revoked_at IS NULL AND s.expires_at > v_now)
+           AND (
+                -- never used again: the short window (already applied above)
+                NOT (SELECT count(*) > 1
+                            OR coalesce(max(s.last_seen_at) > b.created_at + interval '1 hour', FALSE)
+                       FROM public.trace_sessions s
+                      WHERE s.tenant_id = b.tenant_id AND s.account_id = b.account_id)
+                -- used again: the long idle window
+                OR (b.created_at < v_cutoff
+                    AND NOT EXISTS (
+                        SELECT 1 FROM public.trace_sessions s
+                         WHERE s.tenant_id = b.tenant_id AND s.account_id = b.account_id
+                           AND s.last_seen_at >= v_cutoff)))
          ORDER BY b.created_at, b.tenant_id, b.account_id
          LIMIT p_limit::BIGINT * 10
     LOOP
@@ -184,11 +229,29 @@ BEGIN
                 v_skipped := v_skipped + 1;
                 CONTINUE;
             END IF;
+            -- Re-check under both locks with the same rule as the scan.
             IF EXISTS (
                 SELECT 1 FROM public.trace_sessions s
                  WHERE s.tenant_id = c.tenant_id AND s.account_id = c.account_id
-                   AND (s.last_seen_at >= v_cutoff
-                        OR (s.revoked_at IS NULL AND s.expires_at > clock_timestamp()))) THEN
+                   AND s.revoked_at IS NULL AND s.expires_at > clock_timestamp()) THEN
+                v_skipped := v_skipped + 1;
+                CONTINUE;
+            END IF;
+            SELECT (SELECT count(*) > 1
+                           OR coalesce(max(s.last_seen_at) > b.created_at + interval '1 hour', FALSE)
+                      FROM public.trace_sessions s
+                     WHERE s.tenant_id = b.tenant_id AND s.account_id = b.account_id)
+              INTO v_used_again
+              FROM public.trace_account_bindings b
+             WHERE b.tenant_id = c.tenant_id AND b.account_id = c.account_id;
+            IF v_used_again AND EXISTS (
+                SELECT 1 FROM public.trace_sessions s
+                 WHERE s.tenant_id = c.tenant_id AND s.account_id = c.account_id
+                   AND s.last_seen_at >= v_cutoff) THEN
+                v_skipped := v_skipped + 1;
+                CONTINUE;
+            END IF;
+            IF v_used_again AND c.created_at >= v_cutoff THEN
                 v_skipped := v_skipped + 1;
                 CONTINUE;
             END IF;
@@ -211,10 +274,10 @@ BEGIN
 END $$;
 
 GRANT CREATE ON SCHEMA public TO trace_unbound_account_reaper_guard;
-ALTER FUNCTION trace_reap_unbound_accounts(BIGINT, INTEGER)
+ALTER FUNCTION trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER)
     OWNER TO trace_unbound_account_reaper_guard;
 REVOKE CREATE ON SCHEMA public FROM trace_unbound_account_reaper_guard;
-REVOKE ALL ON FUNCTION trace_reap_unbound_accounts(BIGINT, INTEGER) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION trace_reap_unbound_accounts(BIGINT, INTEGER)
+REVOKE ALL ON FUNCTION trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER)
     TO trace_unbound_account_reaper;
 REVOKE trace_unbound_account_reaper_guard FROM CURRENT_USER;

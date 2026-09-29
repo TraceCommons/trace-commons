@@ -4,7 +4,8 @@
 //! The unbound-account reaper (Z2, slice S5; V99).
 //!
 //! Cancel leaves an unbound passkey account inert; this is what reclaims it
-//! after it has sat unbound and unused for the TTL. The delete is a
+//! after it has sat unbound and unused: 7 days for an account never used
+//! again after creation, 30 days for one that signed in again. The delete is a
 //! cross-tenant sweep, so it runs through `trace_reap_unbound_accounts`, a
 //! `SECURITY DEFINER` function, on its own small pool whose login holds only
 //! the `trace_unbound_account_reaper` role. It never touches the runtime pool.
@@ -16,8 +17,12 @@ use deadpool_postgres::{Manager, Pool};
 
 use crate::error::DatabaseError;
 
-/// The decided default: 30 days with no session activity.
+/// The decided default for an account that signed in again after creation:
+/// 30 days with no session activity.
 pub const DEFAULT_TTL_DAYS: i64 = 30;
+/// The decided default for an account never used again after creation (one
+/// session row, last seen within an hour of creation; see V99): 7 days.
+pub const DEFAULT_NEVER_USED_TTL_DAYS: i64 = 7;
 /// The SQL function refuses anything under one day, whatever is configured.
 pub const MIN_TTL_DAYS: i64 = 1;
 pub const MAX_TTL_DAYS: i64 = 3650;
@@ -54,17 +59,27 @@ impl UnboundAccountReaper {
         Ok(Self { pool })
     }
 
-    /// Delete up to `limit` unbound accounts idle for `ttl_days`. Idempotent:
-    /// a second call finds nothing the first one left eligible.
-    pub async fn reap(&self, ttl_days: i64, limit: i32) -> Result<ReapSummary, DatabaseError> {
-        let ttl_seconds = ttl_days
-            .checked_mul(86_400)
-            .ok_or_else(|| DatabaseError::Pool("unbound_reaper_ttl_out_of_range".into()))?;
+    /// Delete up to `limit` unbound accounts: those idle for `ttl_days`, and
+    /// those never used again after creation for `never_used_ttl_days`, which
+    /// may not exceed `ttl_days` (the SQL function refuses it). Idempotent: a
+    /// second call finds nothing the first one left eligible.
+    pub async fn reap(
+        &self,
+        ttl_days: i64,
+        never_used_ttl_days: i64,
+        limit: i32,
+    ) -> Result<ReapSummary, DatabaseError> {
+        let to_seconds = |days: i64| {
+            days.checked_mul(86_400)
+                .ok_or_else(|| DatabaseError::Pool("unbound_reaper_ttl_out_of_range".into()))
+        };
+        let ttl_seconds = to_seconds(ttl_days)?;
+        let never_used_ttl_seconds = to_seconds(never_used_ttl_days)?;
         let client = self.pool.get().await?;
         let row = client
             .query_one(
-                "SELECT reaped, skipped FROM trace_reap_unbound_accounts($1, $2)",
-                &[&ttl_seconds, &limit],
+                "SELECT reaped, skipped FROM trace_reap_unbound_accounts($1, $2, $3)",
+                &[&ttl_seconds, &never_used_ttl_seconds, &limit],
             )
             .await?;
         let reaped: i64 = row.get(0);

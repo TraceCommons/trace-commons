@@ -942,6 +942,8 @@ const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
 const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
 const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
 const TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS: &str = "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS";
+const TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS: &str =
+    "TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS";
 const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
 const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
@@ -2114,6 +2116,7 @@ struct PiiBackstopDriverConfig {
 struct UnboundAccountReaperConfig {
     interval: StdDuration,
     ttl_days: i64,
+    never_used_ttl_days: i64,
     batch_size: i32,
     reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
 }
@@ -6965,13 +6968,15 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
 ///
 /// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
 /// missing-control label rather than silently leaving the reaper off. The
-/// error text never includes the URL. The TTL defaults to 30 days and cannot
-/// be set under one day; the V99 function refuses that too.
+/// error text never includes the URL. The idle TTL defaults to 30 days and the
+/// never-used TTL to 7 (clamped to the idle TTL when only that is lowered);
+/// neither can be set under one day, and an explicit never-used TTL above the
+/// idle TTL refuses boot. The V99 function refuses both too.
 fn parse_unbound_account_reaper_config_from_env()
 -> anyhow::Result<Option<UnboundAccountReaperConfig>> {
     use trace_commons_server::account_reaper::{
-        DEFAULT_BATCH, DEFAULT_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS, MIN_TTL_DAYS,
-        UnboundAccountReaper,
+        DEFAULT_BATCH, DEFAULT_NEVER_USED_TTL_DAYS, DEFAULT_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS,
+        MIN_TTL_DAYS, UnboundAccountReaper,
     };
     if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
         return Ok(None);
@@ -6987,6 +6992,18 @@ fn parse_unbound_account_reaper_config_from_env()
         MIN_TTL_DAYS,
         MAX_TTL_DAYS,
     )?;
+    let never_used_ttl_days = parse_optional_scheduler_i64_env(
+        TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS,
+        DEFAULT_NEVER_USED_TTL_DAYS.min(ttl_days),
+        MIN_TTL_DAYS,
+        MAX_TTL_DAYS,
+    )?;
+    // Fail closed: the never-used window may not outlast the idle window.
+    if never_used_ttl_days > ttl_days {
+        anyhow::bail!(
+            "{TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS} must not exceed {TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS}"
+        );
+    }
     let interval_seconds = parse_optional_scheduler_u64_env(
         TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
         TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
@@ -7004,6 +7021,7 @@ fn parse_unbound_account_reaper_config_from_env()
     Ok(Some(UnboundAccountReaperConfig {
         interval: StdDuration::from_secs(interval_seconds),
         ttl_days,
+        never_used_ttl_days,
         batch_size: batch_size as i32,
         reaper,
     }))
@@ -10381,6 +10399,7 @@ fn spawn_unbound_account_reaper_task(
     tracing::info!(
         interval_seconds = config.interval.as_secs(),
         ttl_days = config.ttl_days,
+        never_used_ttl_days = config.never_used_ttl_days,
         batch_size = config.batch_size,
         "Trace Commons unbound account reaper enabled"
     );
@@ -10397,7 +10416,11 @@ fn spawn_unbound_account_reaper_task(
                 for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
                     let summary = config
                         .reaper
-                        .reap(config.ttl_days, config.batch_size)
+                        .reap(
+                            config.ttl_days,
+                            config.never_used_ttl_days,
+                            config.batch_size,
+                        )
                         .await
                         .context("unbound account reaper batch failed")?;
                     reaped += summary.reaped;
@@ -10410,6 +10433,7 @@ fn spawn_unbound_account_reaper_task(
                     reaped,
                     skipped,
                     ttl_days = config.ttl_days,
+                    never_used_ttl_days = config.never_used_ttl_days,
                     "Trace Commons unbound account reaper tick completed"
                 );
                 Ok(())
