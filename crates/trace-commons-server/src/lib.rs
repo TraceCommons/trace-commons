@@ -56,6 +56,10 @@ pub mod trace_session_identity;
 pub mod trace_upload_claim_allowlist;
 pub mod trace_upload_claim_issuer;
 pub mod trace_upload_claim_issuer_admin;
+pub mod versioned_pipeline;
+pub mod versioned_pipeline_bundle;
+pub mod versioned_pipeline_credit;
+pub mod versioned_pipeline_index;
 pub mod witness_service;
 
 pub const TRACE_COMMONS_SERVER_EXTRACTION_STAGE: &str = "server-storage-owned";

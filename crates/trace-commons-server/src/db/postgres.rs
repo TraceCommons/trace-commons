@@ -17,6 +17,8 @@ mod account_trust_growth;
 mod legacy_invite_link;
 #[path = "postgres_mission_catalog.rs"]
 mod mission_catalog;
+#[cfg(test)]
+mod pipeline_upgrade_tests;
 #[path = "postgres_public_run.rs"]
 mod public_run;
 #[path = "postgres_reward_participant.rs"]
@@ -241,6 +243,14 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_near_provisioned_devices",
     "trace_account_merge_proposals",
     "trace_community_withdrawal_evictions",
+    "pipeline_runs",
+    "phase_outcomes",
+    "pipeline_bundle_packages",
+    "pipeline_active_bundles",
+    "pipeline_bundle_policy_status",
+    "pipeline_receipt_artifacts",
+    "pipeline_run_settlements",
+    "pipeline_admission_usage",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1499,7 +1509,30 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_invite_link_devices",
         include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
     ),
-    // V92-V96 are claimed by pull requests in flight; V97 depends only on V30
+    // V92 to V95 add the versioned pipeline's run queue, fenced leases,
+    // retained bundles, instrument operations, and receipt content. Every
+    // table forces RLS; there is no cross-tenant claim function.
+    (
+        92,
+        "versioned_pipeline_runs",
+        include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+    ),
+    (
+        93,
+        "versioned_pipeline_durability",
+        include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+    ),
+    (
+        94,
+        "versioned_pipeline_settlement",
+        include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+    ),
+    (
+        95,
+        "versioned_pipeline_receipt_content",
+        include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+    ),
+    // V96 is claimed by a pull request in flight; V97 depends only on V30
     // (trace_accounts) and V90 (trace_ingest_runtime).
     (
         97,
@@ -6810,6 +6843,10 @@ mod tests {
         (54, 2),
         (55, 3),
         (56, 4),
+        (92, 4),
+        (93, 4),
+        (94, 4),
+        (95, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7580,6 +7617,10 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7607,6 +7648,10 @@ mod tests {
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7678,6 +7723,79 @@ mod tests {
             TRACE_COMMONS_RLS_TABLES.len(),
             "central RLS policy migration and diagnostics registry drifted"
         );
+    }
+
+    #[test]
+    fn versioned_pipeline_migration_shape_is_pinned() {
+        let runs = include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql");
+        let durability =
+            include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql");
+        let settlement =
+            include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql");
+        let content =
+            include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
+        for required in [
+            "UNIQUE (tenant_id, request_idempotency_key)",
+            "UNIQUE (tenant_id, run_id, phase)",
+            "CREATE TRIGGER phase_outcomes_reject_update",
+            "CREATE TRIGGER phase_outcomes_reject_delete",
+            "admission_decision TEXT NOT NULL",
+        ] {
+            assert!(runs.contains(required), "V92 is missing `{required}`");
+        }
+        for required in [
+            "pipeline_runs_lease_shape",
+            "pipeline_runs_attempt_limit",
+            "reject_pipeline_run_identity_mutation",
+            "CREATE TABLE pipeline_bundle_packages",
+            "CREATE TABLE pipeline_receipt_artifacts",
+            // One staging row per receipt attempt, each naming
+            // its own object, and at most one committed attempt per run.
+            "PRIMARY KEY (tenant_id, run_id, attempt_id)",
+            "UNIQUE (tenant_id, object_key)",
+            "ciphertext_sha256 TEXT NOT NULL",
+            "ON pipeline_receipt_artifacts (tenant_id, run_id)\n    WHERE state = 'committed'",
+        ] {
+            assert!(durability.contains(required), "V93 is missing `{required}`");
+        }
+        for forbidden in [
+            "claim_pipeline_run",
+            "pipeline_claimer",
+            "SECURITY DEFINER",
+            // A per-key unique row would make two attempts for one key
+            // share (and overwrite) one staging record.
+            "UNIQUE (tenant_id, request_idempotency_key)",
+        ] {
+            assert!(
+                !durability.contains(forbidden),
+                "V93 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_run_settlements",
+            "PRIMARY KEY (tenant_id, run_id, instrument_id)",
+            "UNIQUE (tenant_id, operation_ref_hash)",
+            "'forfeited'",
+            "pipeline_run_settlements_result_shape",
+            "pipeline_run_settlements_external_receipt_shape",
+            "external_receipt_hash ~ '^sha256:[0-9a-f]{64}$'",
+            "ON pipeline_run_settlements (tenant_id, external_receipt_hash)\n    WHERE external_receipt_hash IS NOT NULL",
+            "pipeline_run_settlements_atomic_units_bound",
+            "atomic_units <= 340282366920938463463374607431768211455",
+            "settle_selection JSONB",
+            "ALTER TABLE pipeline_run_settlements FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(settlement.contains(required), "V94 is missing `{required}`");
+        }
+        for required in [
+            "approved_object_ref_id UUID",
+            "approved_content_hash TEXT",
+            "CREATE TABLE pipeline_admission_usage",
+            "principal_ref_hash TEXT NOT NULL",
+            "ALTER TABLE pipeline_admission_usage FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(content.contains(required), "V95 is missing `{required}`");
+        }
     }
 
     /// The eviction drain is the one write path on

@@ -20,6 +20,10 @@
 //! Everything here lives in a scratch schema of its own and is dropped again,
 //! so the shared test database keeps whatever migration state it already had.
 
+#[path = "support/pilot_runtime_grants.rs"]
+mod pilot_runtime_grants;
+
+use pilot_runtime_grants::{PILOT_V62_RUNTIME_GRANTS, PILOT_V74_RUNTIME_GRANT};
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{
@@ -981,23 +985,6 @@ async fn tenant_is_cleared_inside_and_restored_after(url: &str, database: &str) 
     problems
 }
 
-/// The pilot's hand-made runtime grants, taken once when the schema was at V62
-/// (from the cutover rehearsal harness). `pg_default_acl` is empty there, so
-/// every table a later migration creates is invisible to the group until
-/// something grants on it.
-const PILOT_V62_RUNTIME_GRANTS: &str = "
-    GRANT USAGE ON SCHEMA public TO trace_ingest_runtime;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trace_ingest_runtime;
-    REVOKE ALL ON trace_admission_receipts, trace_admission_global_budget FROM trace_ingest_runtime;
-    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trace_ingest_runtime;
-    GRANT EXECUTE ON FUNCTION
-        trace_reserve_admission(TEXT,TEXT,UUID,TEXT,TEXT,TEXT,BIGINT,BIGINT,BIGINT,BIGINT,UUID,BIGINT),
-        trace_transition_admission(TEXT,UUID,UUID,TEXT)
-        TO trace_ingest_runtime;
-    GRANT EXECUTE ON FUNCTION trace_prune_onboarding_expiry(TEXT,INTEGER,BOOLEAN)
-        TO trace_ingest_runtime;
-    GRANT CREATE ON SCHEMA public TO trace_ingest_runtime;";
-
 /// The migration under test: the first one that grants to `trace_ingest_runtime`.
 const RUNTIME_GRANTS_VERSION: i32 = 90;
 
@@ -1198,7 +1185,7 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
     }
     // The one runtime grant the pilot took at V74, per deployment.md.
     owner
-        .batch_execute("GRANT trace_public_run_runtime TO trace_ingest_runtime;")
+        .batch_execute(PILOT_V74_RUNTIME_GRANT)
         .await
         .expect("the pilot's V74 runtime grant");
 

@@ -1574,6 +1574,18 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V91__legacy_invite_link_devices.sql"
     ));
     sql.push_str(include_str!(
+        "../../../migrations/V92__versioned_pipeline_runs.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V93__versioned_pipeline_durability.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V94__versioned_pipeline_settlement.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V95__versioned_pipeline_receipt_content.sql"
+    ));
+    sql.push_str(include_str!(
         "../../../migrations/V97__account_bindings.sql"
     ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
@@ -1690,6 +1702,18 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     assert!(sql.contains("RETURNS TEXT"));
     assert!(sql.contains("current_setting('trace_commons.trace_tenant_id', true)"));
+    sql.push_str(include_str!(
+        "../../../migrations/V92__versioned_pipeline_runs.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V93__versioned_pipeline_durability.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V94__versioned_pipeline_settlement.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V95__versioned_pipeline_receipt_content.sql"
+    ));
     for table in expected_trace_rls_tables()
         .into_iter()
         .chain(["trace_pii_backstop"])

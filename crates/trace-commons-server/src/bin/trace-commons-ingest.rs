@@ -61,12 +61,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse,
-    TraceContributionEnvelope, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
+    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -98,6 +98,7 @@ use trace_commons_server::account_passkey::{
 };
 use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
+use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
     CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
     TraceCorpusRlsDiagnostics,
@@ -251,6 +252,11 @@ use trace_commons_server::trace_gate_service::{
 use trace_commons_server::trace_score_attestation::{
     AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
+};
+use trace_commons_server::versioned_pipeline::{
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineService,
 };
 use uuid::Uuid;
 
@@ -651,6 +657,30 @@ const TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_REPLAY_EXPORT_TENANT_IDS";
 const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
+const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
+    "TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS";
+/// Fails ingest startup closed when no pipeline runtime was injected (or an
+/// injected one is not production-qualified) rather than booting without one.
+/// See `assemble_ingest_pipeline_runtime`.
+const TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED: &str = "TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED";
+/// Test-and-local-development-only opt-in that lets an injected pipeline
+/// runtime start with a non-production-qualified dependency even though
+/// tenants are routed to it or `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` is
+/// set. Production must never set this. Refused together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` (see
+/// `assemble_ingest_pipeline_runtime`). Documented in
+/// `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES: &str =
+    "TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES";
+/// Whole-seconds overrides for the per-phase claim lease; see
+/// `parse_pipeline_lease_config_from_env`. Unset keeps
+/// `PipelineLeaseConfig::default()`'s value for that phase.
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE";
+const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE: &str =
+    "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -1222,6 +1252,24 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    run_ingest(None).await
+}
+
+/// Starts ingest with an optional production pipeline assembly.
+///
+/// The repository build deliberately passes `None`: proprietary scorer,
+/// index, settlement, and payout implementations do not live in this tree. A
+/// production distribution must pass an assembler and set
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED=true`. Startup then fails closed
+/// if assembly is absent or an injected dependency is not production
+/// qualified -- and fails closed on a non-production-qualified dependency
+/// even without that flag once tenants are routed to the pipeline
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`), unless the test-only
+/// `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` opt-in is set. See
+/// `assemble_ingest_pipeline_runtime`.
+pub async fn run_ingest(
+    pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+) -> anyhow::Result<()> {
     // Choose the rustls crypto provider before anything can open a TLS
     // connection.
     //
@@ -1306,7 +1354,9 @@ async fn main() -> anyhow::Result<()> {
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let state = Arc::new(AppState::from_env().await?);
+    let state = Arc::new(
+        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?,
+    );
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     validate_trace_near_credit_outbox_scheduler_config(
@@ -1414,18 +1464,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
     tracing::info!(%addr, "Trace Commons ingestion service listening");
-    let shutdown_grace_seconds = parse_usize_env(
-        TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
-        TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS,
-    )? as u64;
     let shutdown_state = Arc::clone(&state);
-    let result = serve_ingest_with_graceful_shutdown(
-        listener,
-        app(state),
-        shutdown_grace_seconds,
-        wait_for_shutdown_signal(),
-    )
-    .await;
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
     // Runs on the way out of BOTH a clean drain and an aborted one: the
     // novelty corpus is the gate's memory of what "duplicate" means, and a
     // restart that drops it silently re-scores every subsequent trace against
@@ -1566,6 +1606,19 @@ struct AppState {
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
+    pipeline_service: Option<Arc<PipelineService>>,
+    /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
+    /// / `pipeline_runtime_required_but_not_injected`) instead of silently
+    /// running ingest without a pipeline runtime. See
+    /// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` and
+    /// `validate_pipeline_receipt_rollout`.
+    pipeline_runtime_required: bool,
+    /// Set by the owned pipeline worker loop (`spawn_pipeline_worker`) once
+    /// its first readiness probe succeeds, and cleared on a failing one.
+    /// `GET /v1/pipeline/readiness` reads this same `Arc` -- it is `false`
+    /// unconditionally when no worker is running at all (no runtime
+    /// injected).
+    pipeline_worker_ready: Arc<std::sync::atomic::AtomicBool>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -2156,10 +2209,16 @@ enum TraceTenantRolloutFeature {
     ObjectPrimarySubmitReview,
     ObjectPrimaryReplayExport,
     ObjectPrimaryDerivedExports,
+    /// Tenants whose new receipts are routed to the versioned pipeline
+    /// instead of the legacy corpus path. Unlike every other feature here,
+    /// there is no paired "globally enabled" `AppState` bool -- this rollout
+    /// is tenant-list-only, and additionally requires an injected pipeline
+    /// runtime (`validate_pipeline_receipt_rollout`).
+    PipelineReceipts,
 }
 
 impl TraceTenantRolloutFeature {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::DbContributorReads,
         Self::DbReviewerReads,
         Self::DbReviewerRequireObjectRefs,
@@ -2171,6 +2230,7 @@ impl TraceTenantRolloutFeature {
         Self::ObjectPrimarySubmitReview,
         Self::ObjectPrimaryReplayExport,
         Self::ObjectPrimaryDerivedExports,
+        Self::PipelineReceipts,
     ];
 
     fn env_key(self) -> &'static str {
@@ -2198,6 +2258,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimaryDerivedExports => {
                 TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS
             }
+            Self::PipelineReceipts => TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS,
         }
     }
 
@@ -2214,6 +2275,7 @@ impl TraceTenantRolloutFeature {
             Self::ObjectPrimarySubmitReview => "object_primary_submit_review",
             Self::ObjectPrimaryReplayExport => "object_primary_replay_export",
             Self::ObjectPrimaryDerivedExports => "object_primary_derived_exports",
+            Self::PipelineReceipts => "pipeline_receipts",
         }
     }
 }
@@ -3544,7 +3606,9 @@ impl AppState {
         )
     }
 
-    async fn from_env() -> anyhow::Result<Self> {
+    async fn from_env_with_pipeline_runtime_assembler(
+        pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    ) -> anyhow::Result<Self> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -3573,7 +3637,10 @@ impl AppState {
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
-        let db_mirror = trace_corpus_db_mirror_from_env().await?;
+        let db_connections = trace_corpus_db_mirror_from_env().await?;
+        let db_mirror = db_connections
+            .as_ref()
+            .map(|connections| connections.database.clone());
         let postgres_runtime_role_sha256 = parse_postgres_runtime_role_sha256_from_env()?;
         let require_postgres_trace_rls_ready =
             env_truthy(TRACE_COMMONS_REQUIRE_POSTGRES_TRACE_RLS_READY);
@@ -3748,6 +3815,23 @@ impl AppState {
             require_object_store_versioning,
             artifact_store.as_ref(),
         )?;
+        let pipeline_runtime_required = env_truthy(TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED);
+        let pipeline_allow_test_dependencies =
+            env_truthy(TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES);
+        let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
+        let pipeline_receipts_tenants_routed =
+            tenant_rollout_gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) > 0;
+        let pipeline_service = assemble_ingest_pipeline_runtime(
+            pipeline_runtime_assembler,
+            db_connections.as_ref(),
+            artifact_store.as_ref(),
+            pipeline_runtime_required,
+            pipeline_lease_config,
+            pipeline_receipts_tenants_routed,
+            pipeline_allow_test_dependencies,
+        )?;
+        validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
             .as_ref()
@@ -4220,6 +4304,9 @@ impl AppState {
             tenant_policies: Arc::new(tenant_policies),
             require_tenant_submission_policy,
             db_mirror,
+            pipeline_service,
+            pipeline_runtime_required,
+            pipeline_worker_ready,
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4526,6 +4613,22 @@ fn enforce_db_mirror_write_result(
         ))),
         Err(_) => Ok(()),
     }
+}
+
+/// Refuses to start ingest with `pipeline_receipts_configured_without_runtime`
+/// when `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` names tenants but no
+/// pipeline runtime was injected -- a configured tenant would otherwise fall
+/// straight through `route_pipeline_receipt` to the legacy path with no
+/// indication the rollout gate did nothing (D3).
+fn validate_pipeline_receipt_rollout(
+    gates: &TraceTenantRolloutGates,
+    runtime_present: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        runtime_present || gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) == 0,
+        "pipeline_receipts_configured_without_runtime"
+    );
+    Ok(())
 }
 
 fn validate_rollout_gate_dependency(
@@ -7243,7 +7346,16 @@ fn parse_optional_scheduler_i64_env(
     Ok(value)
 }
 
-async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Database>>> {
+/// The DB-mirror connection pair: the type-erased `Database` mirror ingest's
+/// existing DB-mirror paths use, and the concrete `PgBackend` the pipeline
+/// runtime needs (`assemble_ingest_pipeline_runtime`). Both wrap the same
+/// PostgreSQL pool.
+struct TraceCorpusDbConnections {
+    database: Arc<dyn Database>,
+    postgres: Arc<PgBackend>,
+}
+
+async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusDbConnections>> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
         return Ok(None);
     }
@@ -7255,11 +7367,18 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<Arc<dyn Data
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(5);
     let config = DatabaseConfig::from_postgres_url(&url, pool_size);
-    let db = trace_commons_server::db::connect_from_config(&config)
+    let postgres = Arc::new(
+        PgBackend::new(&config)
+            .await
+            .context("failed to connect Trace Commons DB dual-write mirror")?,
+    );
+    postgres
+        .run_migrations()
         .await
-        .context("failed to connect Trace Commons DB dual-write mirror")?;
+        .context("failed to migrate Trace Commons DB dual-write mirror")?;
+    let database = postgres.clone() as Arc<dyn Database>;
     tracing::info!("Trace Commons PostgreSQL DB dual-write mirror enabled");
-    Ok(Some(db))
+    Ok(Some(TraceCorpusDbConnections { database, postgres }))
 }
 
 async fn validate_required_postgres_trace_rls_ready(
@@ -7795,6 +7914,7 @@ fn app(state: Arc<AppState>) -> Router {
             axum::routing::put(token_bundles::put).get(token_bundles::read),
         )
         .route("/health", get(health_handler))
+        .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
         .route("/v1/source", get(source_offer_handler))
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
@@ -7820,6 +7940,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(recompute_community_snapshot_handler),
         )
         .route("/v1/contributors/me/credit", get(credit_handler))
+        .route(
+            "/v1/contributors/me/settlement-posture",
+            get(settlement_posture_handler),
+        )
         .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
@@ -9220,6 +9344,52 @@ fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> 
         Err(error) => Err(error).with_context(|| {
             format!("failed to read {TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS}")
         }),
+    }
+}
+
+/// The per-phase claim lease from
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_{REVIEW,SCORE,SETTLE}` (whole
+/// seconds each; unset keeps `PipelineLeaseConfig::default()`'s value for
+/// that phase). Fails closed with the single safe label
+/// `pipeline_lease_config_invalid` for either failure mode -- a value that
+/// does not parse as a non-negative integer, or one that parses but falls
+/// outside `PipelineLeaseConfig::new`'s [1 second, 2 hours] bound -- rather
+/// than two different messages for what is, from an operator's point of
+/// view, the same misconfiguration.
+fn parse_pipeline_lease_config_from_env() -> anyhow::Result<PipelineLeaseConfig> {
+    let defaults = PipelineLeaseConfig::default();
+    let review = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW,
+        defaults.review(),
+    )?;
+    let score = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+        defaults.score(),
+    )?;
+    let settle = parse_pipeline_lease_seconds_env(
+        TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE,
+        defaults.settle(),
+    )?;
+    PipelineLeaseConfig::new(review, score, settle)
+}
+
+fn parse_pipeline_lease_seconds_env(
+    var: &'static str,
+    default: chrono::Duration,
+) -> anyhow::Result<chrono::Duration> {
+    match optional_trimmed_env(var)? {
+        Some(raw) => {
+            let seconds: i64 = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))?;
+            // `chrono::Duration::seconds` panics above
+            // `i64::MAX / 1_000`; `try_seconds` reports that the same way
+            // every other malformed value is reported here, rather than
+            // taking the process down on an operator typo.
+            chrono::Duration::try_seconds(seconds)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_LEASE_CONFIG_INVALID_LABEL))
+        }
+        None => Ok(default),
     }
 }
 
@@ -11992,6 +12162,9 @@ struct TraceCommonsObjectStoreConfigStatus {
 struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
+    pipeline_runtime_configured: bool,
+    pipeline_runtime_required: bool,
+    pipeline_runtime_production_qualified: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -12253,6 +12426,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
+        pipeline_runtime_configured: state.pipeline_service.is_some(),
+        pipeline_runtime_required: state.pipeline_runtime_required,
+        pipeline_runtime_production_qualified: state
+            .pipeline_service
+            .as_deref()
+            .is_some_and(pipeline_runtime_is_production_qualified),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -13517,6 +13696,164 @@ async fn reject_conflicting_witness_retry(
     Ok(())
 }
 
+/// The pipeline runtime for a tenant routed to `PipelineReceipts`, if any.
+///
+/// `Some` only when the tenant is in the `PipelineReceipts` rollout set AND a
+/// runtime was injected -- the same two conditions `route_pipeline_receipt`
+/// and the completed-admission branch of `submit_trace_handler` both gate
+/// on; shared here so the two cannot drift. A tenant listed without an
+/// injected runtime is refused at startup instead
+/// (`validate_pipeline_receipt_rollout`), so it can never reach either
+/// caller with `state.pipeline_service` still `None`.
+fn pipeline_runtime_for_tenant<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+) -> Option<&'a Arc<PipelineService>> {
+    if !state.tenant_rollout_gates.enabled_for(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        false,
+        tenant.tenant_id(),
+    ) {
+        return None;
+    }
+    state.pipeline_service.as_ref()
+}
+
+/// The fixed receipt a pipeline-routed submission returns for `Created` and
+/// `Replayed` alike -- shared between `route_pipeline_receipt` (a fresh
+/// submission or its ordinary retry) and the completed-admission branch of
+/// `submit_trace_handler` (a retry that `admission::reserve` already found
+/// terminal), so the two describe the exact same outcome the exact same way.
+fn pipeline_processing_receipt() -> TraceSubmissionReceipt {
+    TraceSubmissionReceipt {
+        status: "processing".to_string(),
+        credit_points_pending: None,
+        credit_points_final: None,
+        explanation: vec!["Accepted for pipeline processing.".to_string()],
+    }
+}
+
+/// The 409 a pipeline-routed submission returns when its idempotency key is
+/// reused with different content -- shared between `route_pipeline_receipt`
+/// and the completed-admission branch of `submit_trace_handler`, which reach
+/// `PipelineReceiptResult::ContentConflict` from `submit` and
+/// `PipelineService::replay_receipt` respectively.
+fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
+    api_error(
+        StatusCode::CONFLICT,
+        "receipt id reused with different content",
+    )
+}
+
+/// Routes a receipt to the versioned pipeline instead of the legacy corpus
+/// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
+///
+/// Called from `submit_trace_handler` only after the legacy handler's
+/// authentication, submit rate limit, admission reservation,
+/// tenant-access-grant check, envelope validation, and server re-scrub have
+/// all already run (D15) -- this function does none of that itself and
+/// trusts its caller for it. `envelope` is that re-scrubbed envelope.
+/// Returns `Ok(None)` -- meaning "stay on the legacy path" -- unless the
+/// tenant is in the `PipelineReceipts` rollout set AND a runtime was
+/// injected; a tenant listed without an injected runtime is refused at
+/// startup instead (`validate_pipeline_receipt_rollout`), so it can never
+/// reach this function.
+///
+/// A `Replayed` outcome always means a run already exists for this key. A
+/// `ContentConflict` outcome usually does too, but not always: it can also
+/// come from an attempt staged with different content for which no run was
+/// ever created, in which case `replay_receipt` returns `None` below, no
+/// ownership check runs, and the generic content-conflict response is
+/// returned as-is. When a run does exist, this checks that the caller is
+/// the principal who created it, the same way the completed-admission
+/// branch of `submit_trace_handler` checks a replay it finds there. A
+/// pipeline-routed tenant never writes the legacy file record the ordinary
+/// `can_access_submission` check reads, so without this check here that
+/// check would never run against a receipt key at all.
+async fn route_pipeline_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    envelope: &TraceContributionEnvelope,
+    raw_body: &[u8],
+    residual_risk_basis: &[ResidualRiskCondition],
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
+        return Ok(None);
+    };
+    let idempotency_key = envelope.submission_id.to_string();
+    let result = pipeline_service
+        .submit(PipelineReceiptRequest {
+            tenant_id: tenant.tenant_id(),
+            actor_principal_ref: tenant.principal_ref(),
+            counts_toward_quota: tenant.role() == TokenRole::Contributor,
+            request_idempotency_key: &idempotency_key,
+            request_bytes: raw_body,
+            server_envelope: envelope,
+            residual_risk_basis,
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: state.submission_quota.max_per_tenant_per_hour,
+                max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
+            },
+        })
+        .await
+        .map_err(internal_error)?;
+    match result {
+        PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
+        replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
+        | PipelineReceiptResult::ContentConflict) => {
+            // A replay means a run already exists for this key, created by
+            // a submission from some principal -- possibly not this one. A
+            // content conflict usually means the same, but not always: it
+            // can also come from an attempt staged with different content
+            // for which no run was ever created, in which case
+            // `replay_receipt` below returns `None` and there is no owner
+            // to check. `read_submission_record` finds no legacy file
+            // record for a pipeline-routed tenant (the pipeline never
+            // writes one), so the legacy `can_access_submission` check --
+            // which already ran earlier, in `submit_trace_handler`, before
+            // this function was ever called -- never ran against this key;
+            // apply the same ownership predicate here, against the
+            // principal the pipeline recorded when it first created the
+            // run.
+            if let Some(replay) = pipeline_service
+                .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+                .await
+                .map_err(internal_error)?
+            {
+                if !can_access_submission_ref(tenant.auth(), &replay.auth_principal_ref) {
+                    return Err(api_error(
+                        StatusCode::CONFLICT,
+                        "submission id already belongs to another principal",
+                    ));
+                }
+            }
+            match replayed_or_conflicting {
+                PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+                PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+                _ => unreachable!("matched above to be Replayed or ContentConflict"),
+            }
+        }
+        // Same message as the legacy `ensure_not_revoked_by_tombstone` check
+        // this bypasses -- the pipeline keeps its own tombstone record, but
+        // the caller-visible refusal is the same one.
+        PipelineReceiptResult::Tombstoned => Err(api_error(
+            StatusCode::CONFLICT,
+            "trace content was previously revoked for this tenant",
+        )),
+        // Same messages as the legacy `enforce_submission_quota` check: the
+        // pipeline enforces its own quota over pipeline receipts only (D10;
+        // see the "Submission quota at switch-over" operator doc section).
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Tenant) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution tenant submission quota exceeded",
+        )),
+        PipelineReceiptResult::QuotaExceeded(PipelineQuotaScope::Principal) => Err(api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "trace contribution principal submission quota exceeded",
+        )),
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13601,6 +13938,74 @@ async fn submit_trace_handler(
             &raw_body,
         )
         .await?;
+        // A pipeline-routed tenant never writes the legacy file record
+        // `read_submission_record` below looks for, so a retried upload that
+        // already completed admission must ask the pipeline for its receipt
+        // first.
+        //
+        // A principal check is still required on this pipeline lookup:
+        // `admission::reserve`'s completed-lookup binds a retry to the
+        // account's admission anchor, not to one principal. An anchor
+        // covers every device the account has provisioned (one principal per
+        // device, `trace_near_provisioned_devices` keyed on
+        // `(tenant_id, principal_ref)` under the same `anchor_hash`), so a
+        // second device on the same account can retry the first device's
+        // submission id and reach this branch as a `completed` retry too.
+        // `replay_receipt` returns the principal the pipeline recorded when
+        // it first created the run (`trace_submissions.auth_principal_ref`),
+        // and the same ownership predicate the legacy fallback below applies
+        // (`can_access_submission`, here via its principal-ref form) is
+        // applied to it before either pipeline outcome is returned.
+        if let Some(pipeline_service) = pipeline_runtime_for_tenant(state.as_ref(), &tenant) {
+            let idempotency_key = envelope.submission_id.to_string();
+            if let Some(PipelineReplayReceipt {
+                result,
+                auth_principal_ref,
+            }) = pipeline_service
+                .replay_receipt(tenant.tenant_id(), &idempotency_key, &raw_body)
+                .await
+                .map_err(internal_error)?
+            {
+                if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+                    return Err(api_error(
+                        StatusCode::CONFLICT,
+                        "admission_identity_conflict",
+                    ));
+                }
+                match result {
+                    PipelineReceiptResult::Replayed(_) => {
+                        return Ok(Json(pipeline_processing_receipt()));
+                    }
+                    // Defensive, not reachable over HTTP today:
+                    // `admission::reserve`'s own completed-lookup is keyed on
+                    // the request body's hash, so a retry with different
+                    // content for a submission id that is already
+                    // `completed` never reaches this branch as a completed
+                    // retry in the first place -- `reserve` answers it
+                    // first, either refusing a new submission outright (no
+                    // evidence) or with its own identity-conflict decision
+                    // (with evidence). See the third POST in
+                    // `real_http_pipeline_receipt_replays_on_retry`.
+                    PipelineReceiptResult::ContentConflict => {
+                        return Err(pipeline_content_conflict());
+                    }
+                    // `replay_receipt` only ever builds a `Replayed` or a
+                    // `ContentConflict` result (`replay_result`, over a run
+                    // `existing_receipt_run` already found); a read-only
+                    // replay lookup neither creates a run, stages an
+                    // attempt, checks a tombstone, nor counts a quota, so
+                    // none of these three variants can come from it. Kept
+                    // only so this match stays exhaustive against the
+                    // shared `PipelineReceiptResult` enum.
+                    PipelineReceiptResult::Created(_)
+                    | PipelineReceiptResult::Tombstoned
+                    | PipelineReceiptResult::QuotaExceeded(_) => {}
+                }
+            }
+            // No run under this key: a submission that completed admission
+            // on the legacy path before this tenant was routed to the
+            // pipeline. Fall back to the legacy read below, unchanged.
+        }
         let existing = tenant
             .read_submission_record(&state.root, envelope.submission_id)
             .map_err(internal_error)?
@@ -13751,6 +14156,26 @@ async fn submit_trace_handler(
         // the ranker exports read them) and holds `credit_points_pending` at
         // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
+
+        // Tenant rollout gate (D3, D15): every legacy check above --
+        // authentication, the submit rate limit, admission reservation, the
+        // tenant-access-grant check, envelope validation, and the server
+        // re-scrub -- has already run, so a `PipelineReceipts`-listed tenant
+        // with an injected runtime can be hived off to the pipeline here.
+        // Every other tenant falls through unchanged to the legacy path
+        // below.
+        if let Some(receipt) = route_pipeline_receipt(
+            state.as_ref(),
+            &tenant,
+            &envelope,
+            &raw_body,
+            &residual_risk_basis,
+        )
+        .await?
+        {
+            return Ok(Json(receipt));
+        }
+
         let corpus_status = status_for_risk(
             envelope.privacy.residual_pii_risk,
             state.accept_medium_risk_submissions,
@@ -15355,6 +15780,26 @@ async fn credit_handler(
     ))
 }
 
+/// `GET /v1/contributors/me/settlement-posture`
+///
+/// The deployment's settlement posture for a caller holding a device
+/// credential. `GET /v1/account/credit-summary` reports the same object but is
+/// an account route that refuses device bearers, so a contributor daemon
+/// cannot read it. The posture is deployment-wide and label-only (`settlement`
+/// is `http`, `dry_run` or `disabled`; no URL, account or transaction
+/// reference), so any authenticated caller may read it. Both routes derive it
+/// through `credit_numbers::credit_posture`, so they cannot disagree.
+async fn settlement_posture_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_server::credit_numbers::CreditPosture>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(trace_commons_server::credit_numbers::credit_posture(
+        state.near_settlement_mode_label(),
+        false,
+    )))
+}
+
 async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -16620,10 +17065,7 @@ async fn account_credit_summary_handler(
             earned_this_period,
             rate.as_ref(),
         ),
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
         period: AccountCreditPeriod {
             start: period_start,
             end: period_end,
@@ -17775,6 +18217,13 @@ mod near_provisioning;
 use near_provisioning::{
     near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
     near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
+};
+
+#[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
+mod pipeline_runtime;
+use pipeline_runtime::{
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and
@@ -46981,6 +47430,9 @@ fn rollout_feature_global_enabled(state: &AppState, feature: TraceTenantRolloutF
         TraceTenantRolloutFeature::ObjectPrimaryDerivedExports => {
             state.object_primary_derived_exports
         }
+        // Tenant-list-only: no paired "globally enabled" `AppState` bool (see
+        // the variant's doc comment).
+        TraceTenantRolloutFeature::PipelineReceipts => false,
     }
 }
 
@@ -52040,10 +52492,7 @@ fn register_stats_response(
         withheld,
         scope: REGISTER_STATS_SCOPE,
         as_of: row.as_of,
-        posture: trace_commons_server::credit_numbers::CreditPosture::current(
-            settlement_mode,
-            false,
-        ),
+        posture: trace_commons_server::credit_numbers::credit_posture(settlement_mode, false),
     }
 }
 
@@ -57752,6 +58201,19 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
     auth.role.can_review() || principal_owns_submission(auth, record)
 }
 
+/// The same predicate `can_access_submission` applies, taking the stored
+/// owner's principal ref directly rather than a full
+/// `TraceCommonsSubmissionRecord` -- for a caller whose only record of a
+/// submission's ownership is that one field, such as the pipeline's
+/// `trace_submissions.auth_principal_ref` read for a completed-admission
+/// retry (`submit_trace_handler`). Built from the same
+/// `principal_owns_submission_ref` predicate `can_access_submission` itself
+/// resolves to (through `principal_owns_submission`), so the two can never
+/// drift apart.
+fn can_access_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+    auth.role.can_review() || principal_owns_submission_ref(auth, auth_principal_ref)
+}
+
 /// Owned quarantined submissions may be superseded by a corrected envelope on
 /// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
 /// classic-idempotent; reviewers use the dedicated rescrub route instead.
@@ -57768,8 +58230,12 @@ fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmiss
 }
 
 fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
-    record.auth_principal_ref == legacy_principal_ref()
-        || auth.matches_stored_principal(&record.auth_principal_ref)
+    principal_owns_submission_ref(auth, &record.auth_principal_ref)
+}
+
+fn principal_owns_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+    auth_principal_ref == legacy_principal_ref()
+        || auth.matches_stored_principal(auth_principal_ref)
 }
 
 fn principal_owns_storage_submission(
