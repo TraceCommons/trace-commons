@@ -353,8 +353,13 @@ sessions.
 1. `login --invite https://issuer…/onboard#CODE --default` succeeds and prints
    the tenant.
 2. `submit --source trajectory --trajectory t.jsonl --yes` gives
-   `outcome: submitted, status: accepted`.
-3. `status` lists the submission.
+   `outcome: submitted`. On a deployment with the PII backstop, which the pilot
+   runs, the status is `awaiting_pii_backstop`, not `accepted`. The submission
+   is held until the backstop's verdict. The local rehearsals had no backstop,
+   which is why the earlier text said `accepted`. Either status passes this step.
+3. `status` lists the submission. It moves to `accepted` once the backstop
+   clears it. On the live cutover this took under a minute, and the step 4
+   re-POST already reported `accepted`.
 4. Re-POST: move `receipts.jsonl` aside, submit the same file, and restore the
    file. Expect `submitted`, with the same `submission_id`.
 5. `account login --no-browser`. 0.12.6 prints `…/v1/traces/account/login?…`,
@@ -363,9 +368,34 @@ sessions.
    only in clients built from `main`; no release carries it yet.
 6. With `daemon run --dry-run` running, `daemon withdraw <id>` returns
    `withdrawn: true`. The server status becomes `revoked`.
-7. Run the drills. **Gate on `audit-chain`, `rollback` and `postgres-rls`**:
-   each should be `ready`. `audit-chain` counts the pre-cutover rows as a
-   legacy prefix (row 4 of What breaks).
+7. Run the drills. **Gate on `audit-chain`, `rollback` and `postgres-rls`**.
+   `audit-chain` and `postgres-rls` should be `ready` for every tenant.
+   `audit-chain` counts the pre-cutover rows as a legacy prefix (row 4 of What
+   breaks).
+
+   **`rollback` is gated against a recorded baseline, not against `ready`.** A
+   tenant that has been live for a long time can carry file-versus-DB drift
+   from before the cutover. The drill then reports it as `db_*_not_in_file_fallback`
+   and `missing_file_*_in_db` counts, and a cutover cannot clear those. To tell
+   old drift from new:
+   - Drill a **fresh tenant** created by this smoke test. It has only
+     post-cutover data, so any gap there comes from the new build.
+   - For each long-lived tenant, run the rollback drill twice, at least 10
+     minutes apart. Identical counts are baseline drift: record them. Growing
+     counts mean new writes are reaching only one side, which is a regression.
+
+   On the live cutover, the fresh tenant's submissions and audit events
+   matched on both sides. One long-lived tenant carried stable pre-cutover
+   drift: 1 submission, 142 file-only and 1321 DB-only audit events. A
+   **known defect in `d8fb248b`**: an account-route withdrawal (step 6) writes
+   the file tombstone (#1112) but no DB tombstone row. The rollback drill then
+   reports `missing_file_tombstones_in_db=1` for the smoke tenant, and
+   db-reconciliation does not flag it. A fix and a backfill repair are being
+   made as a follow-up.
+
+   **db-reconciliation can take minutes on a large tenant.** On a tenant with
+   about 1,200 submissions and 7,400 audit events it ran longer than 300 s.
+   Give the drill request a timeout of 900 s or more.
 
    **Do not expect `db-reconciliation` to be `ready` right after the cutover.**
    Its `blocking_gaps` can carry three expected entries. Anything else in it
