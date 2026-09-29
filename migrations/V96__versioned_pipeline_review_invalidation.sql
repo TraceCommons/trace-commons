@@ -1,6 +1,12 @@
--- Review claims and assessments, index invalidations, and the
--- pipeline_runs index-invalidation state for the versioned pipeline
--- (delivery PR 3).
+-- Review claims and assessments, index invalidations, the pipeline_runs
+-- index-invalidation state, and the NEAR payout work index for the
+-- versioned pipeline (delivery PR 3).
+--
+-- The NEAR payout needs no grant here: it reads and writes
+-- trace_near_credit_outbox and reads trace_credit_settlement_batches, both
+-- older than V62 (the pilot's runtime holds table-wide privileges on them,
+-- as V94 notes), and it updates only pipeline_run_settlements columns V94
+-- already grants (payout_state, last_error_label, updated_at).
 --
 -- pipeline_runs.admission_reason already exists (V92,
 -- pipeline_runs_admission_reason_shape); this migration does not touch it.
@@ -87,6 +93,16 @@ CREATE INDEX idx_pipeline_index_invalidations_work
     ON pipeline_index_invalidations (
         state, next_attempt_at, requested_at, run_id
     );
+
+-- The NEAR payout pass's work list (PgPipelineStore::
+-- list_runs_with_pending_payout): a tenant's batched Trace Credit legs on
+-- the `near` rail whose payout is still to make or to confirm, least
+-- recently updated first.
+CREATE INDEX idx_pipeline_run_settlements_payout_work
+    ON pipeline_run_settlements (tenant_id, updated_at, run_id)
+    WHERE payout_rail = 'near'
+      AND payout_state IN ('pending', 'submitted')
+      AND settlement_batch_id IS NOT NULL;
 
 -- Assessments are append-only, the same shape as `phase_outcomes` (V92) and
 -- `pipeline_bundle_packages` (V93): neither an UPDATE nor a direct DELETE is

@@ -10791,13 +10791,18 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
 /// `include_privacy` let a caller build an otherwise fully qualified
 /// service that is missing just one of those two controls, to isolate
 /// T2-2's own contribution to the overall qualification check from the
-/// pre-existing scorer/embedder/index/settlement checks.
+/// pre-existing scorer/embedder/index/settlement checks. `payout`, when
+/// given, is the NEAR payout adapter and whether payout is enabled.
 fn qualified_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
     include_authority: bool,
     include_privacy: bool,
+    payout: Option<(
+        Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
+        bool,
+    )>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -10851,6 +10856,15 @@ fn qualified_pipeline_service(
     if include_privacy {
         builder = builder.with_privacy(Arc::new(QualifiedTestPrivacy));
     }
+    if let Some((adapter, enabled)) = payout {
+        builder = builder.with_payout(
+            adapter,
+            trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
+                enabled,
+                require_confirmation_evidence: true,
+            },
+        );
+    }
     Ok(Arc::new(builder.build()?))
 }
 
@@ -10888,6 +10902,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             Some(context.object_store_name),
             true,
             true,
+            None,
         )
     }
 }
@@ -10910,6 +10925,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
             Some(context.object_store_name),
             false,
             true,
+            None,
         )
     }
 }
@@ -10930,6 +10946,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
             Some(context.object_store_name),
             true,
             false,
+            None,
         )
     }
 }
@@ -11096,6 +11113,84 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         error.to_string(),
         "pipeline_runtime_dependencies_not_production_qualified"
     );
+}
+
+/// A `RecordingNearAdapter` that reports itself production-qualified, for
+/// the payout qualification test below. Never submits anything there.
+struct QualifiedTestNearAdapter(
+    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter,
+);
+
+#[async_trait::async_trait]
+impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
+    for QualifiedTestNearAdapter
+{
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_near"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter::submit(&self.0, call)
+            .await
+    }
+
+    async fn confirmation(
+        &self,
+        idempotency_key: &str,
+    ) -> Option<trace_commons_server::versioned_pipeline_credit::NearConfirmationEvidence> {
+        self.0.confirmation(idempotency_key)
+    }
+}
+
+/// Task 10: the NEAR payout adapter counts toward production qualification
+/// only when payout is enabled. An otherwise fully qualified service is
+/// refused with an enabled payout on the unqualified `RecordingNearAdapter`,
+/// qualified with an enabled payout on a qualified adapter, and qualified
+/// with the unqualified adapter while payout is disabled.
+#[tokio::test]
+async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled() {
+    use trace_commons_server::versioned_pipeline_credit::{
+        NearPayoutAdapter, RecordingNearAdapter,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let service = |adapter: Arc<dyn NearPayoutAdapter>, enabled: bool| {
+        qualified_pipeline_service(
+            backend.clone(),
+            test_artifact_store(dir.path()),
+            None,
+            true,
+            true,
+            Some((adapter, enabled)),
+        )
+        .expect("build the pipeline service")
+    };
+
+    let unqualified_enabled = service(Arc::new(RecordingNearAdapter::new()), true);
+    assert!(!unqualified_enabled.dependency_qualification().payout);
+    assert!(!pipeline_runtime_is_production_qualified(
+        &unqualified_enabled
+    ));
+
+    let qualified_enabled = service(
+        Arc::new(QualifiedTestNearAdapter(RecordingNearAdapter::new())),
+        true,
+    );
+    assert!(qualified_enabled.dependency_qualification().payout);
+    assert!(pipeline_runtime_is_production_qualified(&qualified_enabled));
+
+    let unqualified_disabled = service(Arc::new(RecordingNearAdapter::new()), false);
+    assert!(pipeline_runtime_is_production_qualified(
+        &unqualified_disabled
+    ));
 }
 
 /// No routed tenants, no required flag, an unqualified

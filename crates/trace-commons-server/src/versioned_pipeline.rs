@@ -57,9 +57,10 @@ use crate::versioned_pipeline_bundle::{
     pipeline_operation_ref, pipeline_result_ref,
 };
 use crate::versioned_pipeline_credit::{
-    PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry,
-    credit_account_hash, issuer_approval_hash, microcredits_to_settled_i64,
-    pipeline_credit_event_id, pipeline_ledger_source_key, pipeline_settlement_batch_id,
+    NearPayoutAdapter, PIPELINE_CREDIT_REASON, PIPELINE_SETTLEMENT_POLICY_VERSION,
+    SettlementAdapterRegistry, credit_account_hash, disabled_near_call, issuer_approval_hash,
+    microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
+    pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_settlement_batch_id,
     source_list_hash,
 };
 
@@ -81,6 +82,9 @@ pub const PIPELINE_INDEX_CONFLICT_LABEL: &str = "index_key_conflict";
 pub const PIPELINE_CREDIT_HELD_LABEL: &str = "credit_held";
 pub const PIPELINE_CREDIT_CAP_LABEL: &str = "credit_cap_exceeded";
 pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
+/// A Trace Credit leg's payout label when the NEAR adapter refused or
+/// failed its submit; the payout is then `failed`.
+pub const PIPELINE_NEAR_SUBMIT_FAILED_LABEL: &str = "near_submit_failed";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
@@ -404,6 +408,12 @@ pub enum PipelineCrashPoint {
     AfterCreditLedgerInsert,
     AfterCreditBatchFinalize,
     AfterSettleCommit,
+    /// In the payout pass, right after the outbox line records the NEAR
+    /// submit (`submitted`).
+    AfterNearSubmit,
+    /// In the payout pass, right after the outbox line records the NEAR
+    /// confirmation (`confirmed`).
+    AfterNearConfirm,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1866,12 +1876,19 @@ impl PgPipelineStore {
     /// an instrument that `payout_rails` does not cover fails the whole
     /// commit with the safe label `settlement_adapter_missing`.
     ///
+    /// A leg's payout starts `pending` only on the `near` rail of a service
+    /// whose NEAR payout is enabled (`payout_enabled`); every other leg
+    /// starts `disabled` (Ruling T10-2), so a payout that nothing will ever
+    /// make never reads as pending. A leg seeded `disabled` is not paid
+    /// later, even if payout is enabled afterwards.
+    ///
     /// Score read its input (`load_approved_bytes`) in an earlier
     /// transaction that has committed, so a withdrawal can land between
     /// that read and this commit. This re-checks the submission under this
     /// transaction (`submission_guard_on_tx`, after the run row's lock) and
     /// refuses the whole commit with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`:
     /// no outcome, no settlement rows, no run update.
+    #[allow(clippy::too_many_arguments)]
     pub async fn commit_score(
         &self,
         run: &PipelineRunRecord,
@@ -1880,6 +1897,7 @@ impl PgPipelineStore {
         command: Option<(&str, &str)>,
         neighbor: Option<(&str, &str)>,
         payout_rails: &BTreeMap<String, String>,
+        payout_enabled: bool,
     ) -> Result<PipelineRunRecord, DatabaseError> {
         if outcome.phase != Phase::Score || run.next_phase != Some(Phase::Score) {
             return Err(DatabaseError::Constraint(
@@ -1913,10 +1931,10 @@ impl PgPipelineStore {
             let payout_rail = payout_rails.get(instrument_id).ok_or_else(|| {
                 DatabaseError::Constraint(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL.to_string())
             })?;
-            let payout_state = if payout_rail == "none" {
-                "disabled"
-            } else {
+            let payout_state = if payout_rail == "near" && payout_enabled {
                 "pending"
+            } else {
+                "disabled"
             };
             let atomic_units = award.atomic_units().to_string();
             let operation_ref_hash = pipeline_operation_ref(run.run_id, award);
@@ -2811,6 +2829,43 @@ impl PgPipelineStore {
             .await?;
         tx.commit().await?;
         rows.iter().map(pipeline_settlement_from_row).collect()
+    }
+
+    /// The payout pass's work list (P3-D11): up to `limit` complete runs of
+    /// `tenant_id` whose completed `trace_credit` leg is on the `near` rail,
+    /// carries its settlement batch, and has a payout still to make
+    /// (`pending`) or to confirm (`submitted`), least recently updated
+    /// first. A leg without a batch -- a compatibility run's
+    /// `NoveltyUtility` event, which `main` never pays -- is never listed
+    /// (Ruling S8), nor is a `disabled`, `confirmed`, or `failed` payout.
+    pub async fn list_runs_with_pending_payout(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT s.run_id
+                   FROM pipeline_run_settlements s
+                   JOIN pipeline_runs r
+                     ON r.tenant_id = s.tenant_id AND r.run_id = s.run_id
+                  WHERE s.tenant_id = $1
+                    AND r.state = 'complete'
+                    AND s.instrument_id = $2
+                    AND s.operation_state = 'complete'
+                    AND s.payout_rail = 'near'
+                    AND s.settlement_batch_id IS NOT NULL
+                    AND s.payout_state IN ('pending', 'submitted')
+                  ORDER BY s.updated_at, s.run_id
+                  LIMIT $3",
+                &[&tenant_id, &InstrumentId::trace_credit().as_str(), &limit],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get("run_id")).collect())
     }
 
     /// Advances one instrument leg (port 2160 to 2211). Gated on the run's
@@ -4118,6 +4173,16 @@ pub struct PipelineCaps {
     pub per_instrument_atomic_units: BTreeMap<String, AtomicUnits>,
 }
 
+/// NEAR payout of settled Trace Credit (P3-D11). Disabled unless a service
+/// is built `with_payout` and `enabled`. Confirmation evidence cannot be
+/// turned off while payout is enabled (`PipelineServiceBuilder::build`
+/// refuses that combination).
+#[derive(Debug, Clone)]
+pub struct PipelinePayoutConfig {
+    pub enabled: bool,
+    pub require_confirmation_evidence: bool,
+}
+
 /// The submission-operability check Settle runs before deciding index
 /// membership and again immediately before it dispatches to the index
 /// (`PipelineService::submission_guard`).
@@ -4133,7 +4198,8 @@ pub struct SubmissionGuard {
 /// `authority` and `privacy` follow the same shape (Ruling T2-2): true only
 /// when the held object is `production_qualified()`, false when the service
 /// holds none at all (`submit` already fails closed on that case before any
-/// dependency check runs).
+/// dependency check runs). `payout` is the same for the NEAR payout adapter:
+/// true only when the service holds one and it is `production_qualified()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineDependencyQualification {
     pub scorer: bool,
@@ -4143,6 +4209,7 @@ pub struct PipelineDependencyQualification {
     pub settlement_adapters: BTreeMap<String, bool>,
     pub authority: bool,
     pub privacy: bool,
+    pub payout: bool,
 }
 
 /// The per-tenant and per-principal hourly receipt limits. A limit of `0` is
@@ -4222,6 +4289,7 @@ pub struct PipelineServiceBuilder {
     crash_point: Option<PipelineCrashPoint>,
     authority: Option<Arc<dyn PipelineAuthorityProvider>>,
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
+    payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
 }
 
 impl PipelineServiceBuilder {
@@ -4250,6 +4318,7 @@ impl PipelineServiceBuilder {
             crash_point: None,
             authority: None,
             privacy: None,
+            payout: None,
         }
     }
 
@@ -4308,10 +4377,29 @@ impl PipelineServiceBuilder {
         self
     }
 
+    /// The NEAR adapter and configuration the payout pass
+    /// (`PipelineService::process_payouts`) uses. A service built without
+    /// this, or with `enabled: false`, pays nothing out, and Score seeds
+    /// every leg's payout as `disabled`.
+    pub fn with_payout(
+        mut self,
+        adapter: Arc<dyn NearPayoutAdapter>,
+        config: PipelinePayoutConfig,
+    ) -> Self {
+        self.payout = Some((adapter, config));
+        self
+    }
+
     /// Resolves the default package once, so a service that cannot run its
     /// own default bundle fails at construction rather than on the first
     /// receipt.
     pub fn build(self) -> anyhow::Result<PipelineService> {
+        anyhow::ensure!(
+            self.payout
+                .as_ref()
+                .is_none_or(|(_, config)| !config.enabled || config.require_confirmation_evidence),
+            "payout confirmation evidence cannot be disabled"
+        );
         let service = PipelineService {
             store: PgPipelineStore::new(self.backend.clone()),
             backend: self.backend,
@@ -4331,6 +4419,7 @@ impl PipelineServiceBuilder {
             settle_evaluations: AtomicUsize::new(0),
             authority: self.authority,
             privacy: self.privacy,
+            payout: self.payout,
         };
         service
             .construct(service.default_package.clone())
@@ -4358,6 +4447,7 @@ pub struct PipelineService {
     settle_evaluations: AtomicUsize,
     authority: Option<Arc<dyn PipelineAuthorityProvider>>,
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
+    payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
 }
 
 impl PipelineService {
@@ -4404,7 +4494,20 @@ impl PipelineService {
                 .privacy
                 .as_ref()
                 .is_some_and(|privacy| privacy.production_qualified()),
+            payout: self
+                .payout
+                .as_ref()
+                .is_some_and(|(adapter, _)| adapter.production_qualified()),
         }
+    }
+
+    /// Whether this service pays settled Trace Credit out through NEAR: it
+    /// holds a payout adapter (`with_payout`) whose configuration is
+    /// enabled.
+    pub fn payout_enabled(&self) -> bool {
+        self.payout
+            .as_ref()
+            .is_some_and(|(_, config)| config.enabled)
     }
 
     /// Connectivity probe: a bare `SELECT 1` through the trace pool. Not
@@ -6178,6 +6281,7 @@ impl PipelineService {
                 command_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
                 neighbor_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
                 &self.settlement_adapters.payout_rails(),
+                self.payout_enabled(),
             )
             .await
             .map_err(|error| match &error {
@@ -7345,6 +7449,366 @@ impl PipelineService {
         );
         self.inject_crash(PipelineCrashPoint::AfterCreditBatchFinalize)?;
         Ok(batch_id)
+    }
+
+    /// The payout pass (P3-D11): pays out the settled Trace Credit of up
+    /// to `limit` of `tenant_id`'s complete runs
+    /// (`PgPipelineStore::list_runs_with_pending_payout`) and returns how
+    /// many runs it processed. Nothing at all unless payout is enabled.
+    /// Payout runs after Settle, outside any run lease, and never writes a
+    /// phase outcome.
+    pub async fn process_payouts(&self, tenant_id: &str, limit: usize) -> anyhow::Result<usize> {
+        let Some((_, config)) = self.payout.as_ref() else {
+            return Ok(0);
+        };
+        if !config.enabled {
+            return Ok(0);
+        }
+        let mut processed = 0;
+        for run_id in self
+            .store
+            .list_runs_with_pending_payout(tenant_id, limit)
+            .await?
+        {
+            if self.process_payout(tenant_id, run_id).await?.is_some() {
+                processed += 1;
+            }
+        }
+        Ok(processed)
+    }
+
+    /// Pays out one run's settled Trace Credit (`dispatch_near_settlements`)
+    /// once the run is complete. `None` when the run does not exist; a run
+    /// that is not complete is returned untouched. Unlike the pass, this
+    /// also takes up a `failed` payout again, re-checking the guard first.
+    pub async fn process_payout(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        let Some(run) = self.store.get_run(tenant_id, run_id).await? else {
+            return Ok(None);
+        };
+        if run.state == PipelineRunState::Complete {
+            self.dispatch_near_settlements(&run).await?;
+        }
+        Ok(Some(run))
+    }
+
+    /// Port lines 5114 to 5309, for PR 3. For each completed `trace_credit`
+    /// leg of `run` on the `near` rail whose payout is `pending`,
+    /// `submitted`, or `failed`, pays each line of the leg's finalized batch through one
+    /// `trace_near_credit_outbox` row, keyed by
+    /// `pipeline_near_outbox_line_id` and tagged `instrument_id =
+    /// 'trace_credit'`, then records the leg's payout state. Every outbox
+    /// read and write is tenant-scoped, and every write is conditional on
+    /// the line's current status, so a repeat is a no-op.
+    ///
+    /// - A leg without a batch (a compatibility `NoveltyUtility` event) is
+    ///   never paid (Ruling S8).
+    /// - Before any submit, the submission guard is read again
+    ///   (`submission_guard`). An inoperable submission submits nothing,
+    ///   writes no outbox row, and ends the leg's payout `failed` under
+    ///   `submission_inoperable`; the settled credit itself stays
+    ///   (withdrawal is not a clawback).
+    /// - A line already `submitted` is never submitted again: only its
+    ///   confirmation is looked up. The submit is recorded after the
+    ///   adapter returns, so a crash between the two repeats the call on
+    ///   the next pass, under the same idempotency key
+    ///   (`NearPayoutAdapter::submit`).
+    /// - A failed submit marks the line and the payout `failed` under
+    ///   `near_submit_failed`; the pass does not list it again.
+    /// - Confirmation evidence is hash-only; the evidence and the
+    ///   `confirmed` status commit together.
+    async fn dispatch_near_settlements(&self, run: &PipelineRunRecord) -> anyhow::Result<()> {
+        let Some((adapter, config)) = self.payout.as_ref() else {
+            return Ok(());
+        };
+        if !config.enabled {
+            return Ok(());
+        }
+        let settlements = self
+            .store
+            .list_settlements(&run.tenant_id, run.run_id)
+            .await?;
+        for settlement in settlements.into_iter().filter(|settlement| {
+            settlement.instrument_id == InstrumentId::trace_credit().as_str()
+                && settlement.operation_state == "complete"
+                && settlement.payout_rail == "near"
+                && matches!(
+                    settlement.payout_state.as_str(),
+                    "pending" | "submitted" | "failed"
+                )
+        }) {
+            let Some(batch_id) = settlement.settlement_batch_id else {
+                continue;
+            };
+            let (batch_source_list_hash, lines) =
+                self.load_payout_batch(run, &settlement, batch_id).await?;
+            let mut operable = None;
+            for line in lines
+                .iter()
+                .filter(|line| line.settled_credit_delta_micros > 0)
+            {
+                let call = disabled_near_call(
+                    batch_id,
+                    &line.credit_account_hash,
+                    &batch_source_list_hash,
+                    line.settled_credit_delta_micros,
+                )?;
+                let outbox_id = pipeline_near_outbox_line_id(
+                    &run.tenant_id,
+                    batch_id,
+                    &line.credit_account_hash,
+                );
+                let status = self.near_outbox_status(run, outbox_id).await?;
+                match status.as_deref() {
+                    Some("confirmed") | Some("disabled") => continue,
+                    Some("submitted") => {}
+                    _ => {
+                        if operable.is_none() {
+                            operable = Some(self.submission_guard(run).await?.operable);
+                        }
+                        if operable == Some(false) {
+                            continue;
+                        }
+                        if status.is_none() {
+                            self.insert_near_outbox_line(
+                                run,
+                                &settlement,
+                                batch_id,
+                                outbox_id,
+                                &line.credit_account_hash,
+                                &call,
+                            )
+                            .await?;
+                        }
+                        match adapter.submit(&call).await {
+                            Ok(transaction_ref) => {
+                                self.backend
+                                    .update_trace_near_credit_outbox_status(
+                                        &run.tenant_id,
+                                        outbox_id,
+                                        TraceCreditSettlementNearStatus::Submitted,
+                                        Some(sha256_prefixed(transaction_ref.as_bytes())),
+                                        None,
+                                        Some(vec![
+                                            TraceCreditSettlementNearStatus::Pending,
+                                            TraceCreditSettlementNearStatus::Failed,
+                                        ]),
+                                    )
+                                    .await?;
+                                self.inject_crash(PipelineCrashPoint::AfterNearSubmit)?;
+                            }
+                            Err(_) => {
+                                self.backend
+                                    .update_trace_near_credit_outbox_status(
+                                        &run.tenant_id,
+                                        outbox_id,
+                                        TraceCreditSettlementNearStatus::Failed,
+                                        None,
+                                        Some(sha256_prefixed(
+                                            PIPELINE_NEAR_SUBMIT_FAILED_LABEL.as_bytes(),
+                                        )),
+                                        Some(vec![
+                                            TraceCreditSettlementNearStatus::Pending,
+                                            TraceCreditSettlementNearStatus::Failed,
+                                        ]),
+                                    )
+                                    .await?;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let Some(evidence) = adapter.confirmation(&call.idempotency_key).await else {
+                    continue;
+                };
+                anyhow::ensure!(
+                    evidence.transaction_hash_hash.starts_with("sha256:")
+                        && evidence.receipt_hash.starts_with("sha256:"),
+                    "NEAR confirmation evidence is incomplete"
+                );
+                let mut client = self.backend.trace_pool().get().await?;
+                let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+                tx.execute(
+                    "UPDATE trace_near_credit_outbox
+                        SET near_call_json = jsonb_set(
+                                near_call_json,
+                                '{confirmation_evidence}',
+                                jsonb_build_object(
+                                    'transaction_hash_hash', $3::TEXT,
+                                    'receipt_hash', $4::TEXT
+                                ),
+                                TRUE
+                            ),
+                            status = 'confirmed',
+                            near_transaction_hash = $3,
+                            confirmed_at = NOW(),
+                            last_error_hash = NULL
+                      WHERE tenant_id = $1 AND near_outbox_id = $2
+                        AND status = 'submitted'",
+                    &[
+                        &run.tenant_id,
+                        &outbox_id,
+                        &evidence.transaction_hash_hash,
+                        &evidence.receipt_hash,
+                    ],
+                )
+                .await?;
+                tx.commit().await?;
+                self.inject_crash(PipelineCrashPoint::AfterNearConfirm)?;
+            }
+            self.record_payout_state(run, &settlement, batch_id, operable == Some(false))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The source list hash and line items of the finalized batch that
+    /// carries a completed Trace Credit leg, read in a tenant transaction.
+    async fn load_payout_batch(
+        &self,
+        run: &PipelineRunRecord,
+        settlement: &PipelineSettlementRecord,
+        batch_id: Uuid,
+    ) -> anyhow::Result<(String, Vec<TraceCreditAccountSettlementLineItem>)> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT source_list_hash, line_items_json
+                   FROM trace_credit_settlement_batches
+                  WHERE tenant_id = $1 AND settlement_batch_id = $2
+                    AND instrument_id = $3 AND status = 'finalized'",
+                &[&run.tenant_id, &batch_id, &settlement.instrument_id],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("payout_batch_missing"))?;
+        tx.commit().await?;
+        let lines = serde_json::from_value(row.get("line_items_json"))
+            .map_err(|_| anyhow::anyhow!("payout_batch_missing"))?;
+        Ok((row.get("source_list_hash"), lines))
+    }
+
+    /// The status of one outbox line, or `None` when it has no row yet.
+    async fn near_outbox_status(
+        &self,
+        run: &PipelineRunRecord,
+        outbox_id: Uuid,
+    ) -> anyhow::Result<Option<String>> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let status = tx
+            .query_opt(
+                "SELECT status FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1 AND near_outbox_id = $2",
+                &[&run.tenant_id, &outbox_id],
+            )
+            .await?
+            .map(|row| row.get("status"));
+        tx.commit().await?;
+        Ok(status)
+    }
+
+    /// Writes one outbox line `pending`, for `instrument_id =
+    /// 'trace_credit'`; a line that already exists is left as it is.
+    async fn insert_near_outbox_line(
+        &self,
+        run: &PipelineRunRecord,
+        settlement: &PipelineSettlementRecord,
+        batch_id: Uuid,
+        outbox_id: Uuid,
+        credit_account_hash: &str,
+        call: &crate::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<()> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        tx.execute(
+            "INSERT INTO trace_near_credit_outbox (
+                tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+                near_call_json, status, payout_near_account_id, instrument_id
+             ) VALUES ($1,$2,$3,$4,$5,'pending',NULL,$6)
+             ON CONFLICT (tenant_id, near_outbox_id) DO NOTHING",
+            &[
+                &run.tenant_id,
+                &outbox_id,
+                &batch_id,
+                &credit_account_hash,
+                &serde_json::to_value(call)?,
+                &settlement.instrument_id,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Records a leg's payout state from its batch's outbox lines: every
+    /// line `confirmed` is `confirmed`, any `failed` line is `failed` under
+    /// `near_submit_failed`, every line `submitted` or `confirmed` is
+    /// `submitted`, and otherwise (no line yet, or one still `pending`)
+    /// `pending`. `refused` (the guard found the submission inoperable
+    /// before a submit) is `failed` under `submission_inoperable`. A
+    /// `disabled` or `confirmed` payout is never changed.
+    async fn record_payout_state(
+        &self,
+        run: &PipelineRunRecord,
+        settlement: &PipelineSettlementRecord,
+        batch_id: Uuid,
+        refused: bool,
+    ) -> anyhow::Result<()> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let statuses = tx
+            .query(
+                "SELECT status
+                   FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1 AND settlement_batch_id = $2
+                    AND instrument_id = $3",
+                &[&run.tenant_id, &batch_id, &settlement.instrument_id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get::<_, String>("status"))
+            .collect::<Vec<_>>();
+        let (payout, label) = if refused {
+            (
+                TraceCreditSettlementNearStatus::Failed,
+                Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+            )
+        } else if !statuses.is_empty() && statuses.iter().all(|status| status == "confirmed") {
+            (TraceCreditSettlementNearStatus::Confirmed, None)
+        } else if statuses.iter().any(|status| status == "failed") {
+            (
+                TraceCreditSettlementNearStatus::Failed,
+                Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL),
+            )
+        } else if !statuses.is_empty()
+            && statuses
+                .iter()
+                .all(|status| status == "submitted" || status == "confirmed")
+        {
+            (TraceCreditSettlementNearStatus::Submitted, None)
+        } else {
+            (TraceCreditSettlementNearStatus::Pending, None)
+        };
+        tx.execute(
+            "UPDATE pipeline_run_settlements
+                SET payout_state = $4, last_error_label = $5, updated_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = $3
+                AND payout_state IN ('pending', 'submitted', 'failed')",
+            &[
+                &run.tenant_id,
+                &run.run_id,
+                &settlement.instrument_id,
+                &payout_state_label(payout),
+                &label,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 }
 

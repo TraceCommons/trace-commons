@@ -57,7 +57,8 @@ use trace_commons_server::versioned_pipeline_bundle::{
 };
 use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
 use trace_commons_server::versioned_pipeline_credit::{
-    RecordingSettlementAdapter, SettlementAdapterRegistry, credit_account_hash,
+    NearConfirmationEvidence, NearPayoutAdapter, RecordingNearAdapter, RecordingSettlementAdapter,
+    SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
@@ -16329,4 +16330,579 @@ async fn export_item_count_is_bounded() {
 
     let one = create("one", 1).await.expect("create a one-item snapshot");
     assert_eq!(item_runs(&one), vec![older.run_id], "the older run first");
+}
+
+// NEAR payout after Settle (Task 10, P3-D11).
+
+/// One `trace_credit` award of 1,000,000 atomic units (one Trace Credit).
+fn trace_credit_only_config() -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(1_000_000),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: false,
+        variant: None,
+    }
+}
+
+/// A recording Trace Credit adapter on payout rail `near`.
+fn near_rail_trace_credit_adapter() -> Arc<dyn SettlementAdapter> {
+    RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "near",
+    )
+}
+
+/// Like `test_service_with_adapters`, with NEAR payout enabled through
+/// `near`, and an optional crash point.
+async fn payout_test_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
+        .expect("build minimal bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry =
+        SettlementAdapterRegistry::new(adapters).expect("build settlement adapter registry");
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        uncapped_caps(&["storage_rebate", InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_payout(
+        near,
+        PipelinePayoutConfig {
+            enabled: true,
+            require_confirmation_evidence: true,
+        },
+    );
+    if let Some(crash_point) = crash_point {
+        builder = builder.with_crash_point(crash_point);
+    }
+    Arc::new(builder.build().expect("build pipeline service"))
+}
+
+/// A NEAR adapter that counts every `submit` call and delegates to a shared
+/// `RecordingNearAdapter`. The recording adapter collapses a repeated
+/// idempotency key into one logical request; this count shows a repeated
+/// submit that the collapse would hide.
+struct CountingNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    submits: AtomicUsize,
+}
+
+impl CountingNearAdapter {
+    fn new(inner: Arc<RecordingNearAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submits: AtomicUsize::new(0),
+        })
+    }
+
+    fn submits(&self) -> usize {
+        self.submits.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for CountingNearAdapter {
+    fn dependency_identity(&self) -> &str {
+        "counting_near_test_only"
+    }
+
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        self.submits.fetch_add(1, Ordering::SeqCst);
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Records a hash-only confirmation for every request `near` has received.
+fn confirm_every_near_request(near: &RecordingNearAdapter) {
+    for request in near.requests() {
+        near.record_confirmation(
+            &request.idempotency_key,
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .expect("confirm a submitted NEAR request");
+    }
+}
+
+/// The run's `trace_credit` settlement row.
+async fn trace_credit_settlement(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> PipelineSettlementRecord {
+    service
+        .store()
+        .list_settlements(tenant_id, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|settlement| settlement.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the run has a trace_credit settlement row")
+}
+
+/// One `trace_near_credit_outbox` row, as the payout tests read it.
+#[derive(Debug)]
+struct NearOutboxRow {
+    near_outbox_id: uuid::Uuid,
+    settlement_batch_id: uuid::Uuid,
+    status: String,
+    instrument_id: Option<String>,
+    amount_micros: Option<i64>,
+}
+
+/// Every `trace_near_credit_outbox` row of `tenant_id`.
+async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<NearOutboxRow> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for near_outbox_rows");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
+                    (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros
+               FROM trace_near_credit_outbox
+              WHERE tenant_id = $1
+              ORDER BY created_at, near_outbox_id",
+            &[&tenant_id],
+        )
+        .await
+        .expect("read near outbox rows");
+    tx.commit().await.expect("commit near_outbox_rows");
+    rows.iter()
+        .map(|row| NearOutboxRow {
+            near_outbox_id: row.get("near_outbox_id"),
+            settlement_batch_id: row.get("settlement_batch_id"),
+            status: row.get("status"),
+            instrument_id: row.get("instrument_id"),
+            amount_micros: row.get("amount_micros"),
+        })
+        .collect()
+}
+
+/// Every `phase_outcomes` row of the run, each as the text of its whole
+/// row, ordered by phase: a byte-for-byte snapshot of the recorded
+/// outcomes.
+async fn outcome_row_texts(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Vec<String> {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("client for outcome_row_texts");
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT to_jsonb(o)::TEXT AS row_text
+               FROM phase_outcomes o
+              WHERE tenant_id = $1 AND run_id = $2
+              ORDER BY phase",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("read outcome rows");
+    tx.commit().await.expect("commit outcome_row_texts");
+    rows.iter().map(|row| row.get("row_text")).collect()
+}
+
+/// With no `with_payout` (the default), Score seeds the `near` leg's payout
+/// as `disabled`, and nothing is ever submitted: `process_payouts` does
+/// nothing, and neither does a direct `process_payout` of the run.
+#[tokio::test]
+async fn payout_disabled_by_default_submits_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = test_service_with_adapters(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+    )
+    .await;
+    let tenant = format!("payout-disabled-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_credit_settled_once(&backend, &service, &tenant, run.run_id, "payout disabled").await;
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_rail, "near");
+    assert_eq!(settlement.payout_state, "disabled");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+}
+
+/// Payout enabled: one pass submits the run's settled Trace Credit once,
+/// through one outbox line keyed by `pipeline_near_outbox_line_id`, for the
+/// settled amount; once the confirmation is recorded, the next pass
+/// confirms it, and a confirmed payout is not listed again.
+#[tokio::test]
+async fn payout_submits_once_and_confirms() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-confirm-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "pending");
+    let batch_id = settlement
+        .settlement_batch_id
+        .expect("the settled leg carries its batch");
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let requests = near.requests();
+    assert_eq!(requests.len(), 1, "one logical NEAR request");
+    assert_eq!(requests[0].method_name, "settle_credit_receipt");
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "one outbox line");
+    assert_eq!(
+        outbox[0].near_outbox_id,
+        pipeline_near_outbox_line_id(&tenant, batch_id, &credit_account_hash(RECEIPT_PRINCIPAL))
+    );
+    assert_eq!(outbox[0].settlement_batch_id, batch_id);
+    assert_eq!(outbox[0].status, "submitted");
+    assert_eq!(
+        outbox[0].instrument_id.as_deref(),
+        Some(InstrumentId::trace_credit().as_str())
+    );
+    assert_eq!(outbox[0].amount_micros, Some(1_000_000));
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+
+    confirm_every_near_request(&near);
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "confirmed");
+    assert_eq!(near.requests().len(), 1, "still one logical NEAR request");
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a confirmed payout is not listed again"
+    );
+}
+
+/// Review Focus 5: a crash right after the outbox records the submit
+/// (`AfterNearSubmit`), or right after it records the confirmation
+/// (`AfterNearConfirm`), leaves one outbox line and one submit. A second
+/// service without the crash point, sharing the NEAR adapter, finishes the
+/// payout without submitting again, and the run's recorded outcomes --
+/// Settle's included -- stay byte-identical.
+#[tokio::test]
+async fn payout_crash_between_submit_and_confirm_submits_once() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for point in [
+        PipelineCrashPoint::AfterNearSubmit,
+        PipelineCrashPoint::AfterNearConfirm,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = Arc::new(RecordingNearAdapter::new());
+        let near = CountingNearAdapter::new(recording.clone());
+        let crashing = payout_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            Some(point),
+        )
+        .await;
+        let tenant = format!("payout-crash-{point:?}-{}", uuid::Uuid::new_v4());
+        let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(run.state, PipelineRunState::Complete);
+        let outcomes_before = outcome_row_texts(&backend, &tenant, run.run_id).await;
+        assert_eq!(outcomes_before.len(), 4, "the run recorded every phase");
+
+        if point == PipelineCrashPoint::AfterNearConfirm {
+            assert_eq!(crashing.process_payouts(&tenant, 32).await.unwrap(), 1);
+            confirm_every_near_request(&recording);
+        }
+        let error = crashing
+            .process_payouts(&tenant, 32)
+            .await
+            .expect_err("the payout pass crashes at its crash point");
+        assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH, "{point:?}");
+        assert_eq!(near.submits(), 1, "{point:?}");
+        let recorded = near_outbox_rows(&backend, &tenant).await;
+        assert_eq!(recorded.len(), 1, "{point:?}");
+        assert_eq!(
+            recorded[0].status,
+            if point == PipelineCrashPoint::AfterNearSubmit {
+                "submitted"
+            } else {
+                "confirmed"
+            },
+            "the crash came after the outbox recorded the step ({point:?})"
+        );
+
+        let restarted = payout_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+        if point == PipelineCrashPoint::AfterNearSubmit {
+            assert_eq!(
+                trace_credit_settlement(&restarted, &tenant, run.run_id)
+                    .await
+                    .payout_state,
+                "submitted"
+            );
+            confirm_every_near_request(&recording);
+            assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+        }
+        assert_eq!(
+            trace_credit_settlement(&restarted, &tenant, run.run_id)
+                .await
+                .payout_state,
+            "confirmed",
+            "{point:?}"
+        );
+        assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 0);
+
+        let outbox = near_outbox_rows(&backend, &tenant).await;
+        assert_eq!(outbox.len(), 1, "one outbox line ({point:?})");
+        assert_eq!(outbox[0].status, "confirmed", "{point:?}");
+        assert_eq!(
+            recording.requests().len(),
+            1,
+            "one logical request ({point:?})"
+        );
+        assert_eq!(near.submits(), 1, "one submit ({point:?})");
+        assert_eq!(
+            outcome_row_texts(&backend, &tenant, run.run_id).await,
+            outcomes_before,
+            "payout never writes an outcome ({point:?})"
+        );
+    }
+}
+
+/// A withdrawal after Settle keeps the settled Trace Credit (withdrawal is
+/// not a clawback), but the payout re-checks the submission guard before it
+/// submits: nothing reaches the outbox or the NEAR adapter, the payout ends
+/// `failed` under `submission_inoperable`, and it is not listed again.
+#[tokio::test]
+async fn payout_rechecks_the_guard_before_submit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-guard-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert!(
+        !outcome.trace_credit_forfeited,
+        "the Trace Credit leg had already settled"
+    );
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert!(near.requests().is_empty(), "nothing is submitted");
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert_credit_settled_once(
+        &backend,
+        &service,
+        &tenant,
+        run.run_id,
+        "settled before the withdrawal",
+    )
+    .await;
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_ne!(settlement.payout_state, "confirmed");
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+    );
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a refused payout is not listed again"
+    );
+    assert!(near.requests().is_empty());
+}
+
+/// NEAR ownership: only a `trace_credit` leg on the `near` rail is paid. A
+/// run with only a `storage_rebate` award (rail `none`) writes no outbox row
+/// and sends no NEAR request, even with payout enabled and a direct
+/// `process_payout` of the run.
+#[tokio::test]
+async fn other_instruments_never_touch_the_outbox() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let storage_rebate: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::new("storage_rebate").unwrap(),
+        "recording_storage_rebate_test_only",
+        "none",
+    );
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: false,
+            variant: None,
+        },
+        vec![storage_rebate, near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-other-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].instrument_id, "storage_rebate");
+    assert_eq!(settlements[0].operation_state, "complete");
+    assert_eq!(settlements[0].payout_state, "disabled");
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty());
+}
+
+/// A NEAR submit that fails ends the payout `failed` under
+/// `near_submit_failed`, and the pass does not list it again (Ruling S8),
+/// so an outage does not resubmit on every pass. A direct `process_payout`
+/// of the run takes it up again and submits it once.
+#[tokio::test]
+async fn a_failed_near_submit_fails_the_payout_until_the_run_is_paid_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-failed-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+
+    near.fail_next();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert!(near.requests().is_empty());
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL)
+    );
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a failed payout is not listed again"
+    );
+
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.requests().len(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1, "the retry reuses the outbox line");
+    assert_eq!(outbox[0].status, "submitted");
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "submitted");
+    assert_eq!(settlement.last_error_label, None);
 }

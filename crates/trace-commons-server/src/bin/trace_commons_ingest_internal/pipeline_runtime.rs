@@ -124,8 +124,9 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
 /// `PipelineDependencyQualification`), and now `authority` and `privacy`
 /// (Ruling T2-2): an unqualified authority provider or privacy boundary
 /// fails closed the same way an unqualified scorer or index does, whenever
-/// tenants are routed. Payout qualification is not part of this
-/// bundle-runtime dependency set.
+/// tenants are routed. The NEAR payout adapter counts only when payout is
+/// enabled (`PipelineService::payout_enabled`): a service that pays nothing
+/// out holds no payout dependency to qualify.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
     let qualification = service.dependency_qualification();
     qualification.scorer
@@ -139,6 +140,7 @@ pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService
             .all(|ready| *ready)
         && qualification.authority
         && qualification.privacy
+        && (!service.payout_enabled() || qualification.payout)
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is
@@ -211,6 +213,11 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 /// pass (`PipelineService::sweep_staged_receipts`), after draining its runs.
 /// The rest wait for the next pass.
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
+
+/// How many of one tenant's complete runs the worker pays out per pass
+/// (`PipelineService::process_payouts`), right after draining its runs. The
+/// rest wait for the next pass.
+const PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT: usize = 32;
 
 /// How long the worker sleeps between iterations when `stop` does not fire
 /// first.
@@ -298,11 +305,14 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// never the tenant id or the error's own text -- and ends this tenant's
 /// batch for the pass.
 ///
-/// Then, whatever the runs did, it sweeps up to
+/// Then, whatever the runs did, it pays out up to
+/// `PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT` of the tenant's complete runs
+/// (`process_payouts`, which does nothing unless payout is enabled; Ruling
+/// S7 puts it right after the runs), and sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
 /// attempts that never committed: each staged object whose
-/// row's `cleanup_after` has passed is deleted with its row. A sweep failure
-/// is logged the same way.
+/// row's `cleanup_after` has passed is deleted with its row. A payout or
+/// sweep failure is logged the same way.
 async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
         match service.process_one(&tenant_id).await {
@@ -318,6 +328,17 @@ async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String)
                 break;
             }
         }
+    }
+    if let Err(error) = service
+        .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
+        .await
+    {
+        tracing::warn!(
+            error_class = "pipeline_worker_payout_failed",
+            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "pipeline worker payout failed"
+        );
     }
     if let Err(error) = service
         .sweep_staged_receipts(&tenant_id, PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT)
