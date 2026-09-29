@@ -1722,6 +1722,38 @@ pub async fn status(
     Ok(updates)
 }
 
+/// The NEAR AI measurement pins ingest enforces, read with this device's own
+/// credential (`GET /v1/contributors/me/near-ai-measurements`).
+///
+/// The same empty-scope mint as [`status`]: a device-authenticated read that
+/// does not depend on the scopes chosen for submission. The document carries
+/// pins only; what a client may pin from it is
+/// [`NearAiMeasurementPins::usable_sets`], never the raw `sets`.
+///
+/// [`NearAiMeasurementPins::usable_sets`]: trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins::usable_sets
+pub async fn near_ai_measurement_pins(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins> {
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for the measurement read")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_json::<(), _>(
+            Method::GET,
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            &[],
+            None,
+        )
+        .await
+        .context("fetching NEAR AI measurement pins")
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CommunityProfilePutRequest<'a> {
     display_handle: &'a str,
