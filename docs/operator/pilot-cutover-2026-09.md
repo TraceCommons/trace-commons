@@ -542,6 +542,11 @@ Read the dry run before applying:
   count here is a status difference; read it with db-reconciliation's
   `status_mismatches`.
 
+Rows written by the repair record the repairing admin as
+`created_by_principal_ref`, not the account that withdrew. Rows written by
+the withdraw route itself (on a build with #1142) record that account's
+audit principal ref.
+
 The response is hash-only: counts and `purpose_hash`, with no submission ids
 and no revocation reasons. The log line (`Trace Commons tombstone repair`)
 carries the same counts and the tenant's `tenant_storage_ref`. An apply

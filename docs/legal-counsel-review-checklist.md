@@ -40,6 +40,7 @@ should not have made it alone.
 | Deleted objects purged from soft-delete after 7 days | Bucket `softDeletePolicy.retentionDurationSeconds = 604800` |
 | Aggregates: minimum cell of 2, suppression only, no noise | `COMMUNITY_MIN_CELL_COUNT_FLOOR = 2`; `TRACE_COMMONS_COMMUNITY_ANALYTICS_PUBLICATION_BASIS=suppression_only`; noise seed is the placeholder `v1:no_noise_yet`, refused on recompute and serve |
 | Withdrawal deletes artifact, file record, object refs, status-derived paths, and errors propagate | `delete_withdrawn_trace_objects`, `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` |
+| An account withdrawal keeps a tombstone row indefinitely, and uses it to refuse re-contribution of identical content | A `trace_tombstones` row per withdrawn submission, written by the account withdraw route (#1142) with `trace_id`, `redaction_hash`, `canonical_summary_hash` and the actor ref (`created_by_principal_ref`). It is not deleted by the withdrawal. On PipelineReceipts tenants `receipt_is_tombstoned` (`versioned_pipeline.rs`) matches on `trace_id` or `redaction_hash`, so a re-upload of identical content under a new submission is refused. This is consistent with the legacy path since #1112. See also #1117. |
 | Snapshots refuse to serve when older than 15 minutes | `COMMUNITY_SNAPSHOT_MAX_AGE = 900` seconds |
 | Credits compute but do not settle | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled` |
 
