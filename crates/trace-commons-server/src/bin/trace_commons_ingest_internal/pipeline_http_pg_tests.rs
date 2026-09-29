@@ -47,7 +47,7 @@ use trace_commons_server::versioned_pipeline_authority::{
     PipelinePrivacyBoundary, StaticPipelineAuthorityProvider,
 };
 use trace_commons_server::versioned_pipeline_bundle::{
-    MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
+    MINIMAL_INDEX_ID, MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry,
@@ -2290,6 +2290,61 @@ async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
     assert_eq!(
         queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
         (1, "pending".to_string())
+    );
+}
+
+/// Review Focus 1 through the worker: the worker's tenant drain
+/// (`drain_pipeline_tenant`, one tenant's share of a worker pass) processes
+/// the index invalidation a withdrawal queued, with no direct call into the
+/// invalidation pass, so the withdrawn revision's entries leave the index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let index = IsolatedPipelineIndex::new();
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        index.clone(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_worker_drain_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-worker-invalidation-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-worker-invalidation-{suffix}"));
+    let tenant_ref = trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+    assert!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
+        "Settle wrote the revision's entries"
+    );
+    service
+        .withdraw_submission(&tenant, run.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    assert_eq!(
+        queued_index_invalidation(&runtime, &tenant, run.run_id).await,
+        (1, "pending".to_string())
+    );
+
+    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone()).await;
+
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "no entry of the withdrawn revision stays in the index"
+    );
+    assert_eq!(
+        queued_index_invalidation(&runtime, &tenant, run.run_id)
+            .await
+            .1,
+        "complete"
     );
 }
 

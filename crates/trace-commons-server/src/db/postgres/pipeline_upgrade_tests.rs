@@ -182,6 +182,17 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     // V96
     ("pipeline_index_invalidations", "SELECT", &[]),
     ("pipeline_index_invalidations", "INSERT", &[]),
+    (
+        "pipeline_index_invalidations",
+        "UPDATE",
+        &[
+            "state",
+            "completed_at",
+            "attempt_count",
+            "next_attempt_at",
+            "last_error_label",
+        ],
+    ),
     ("pipeline_review_claims", "SELECT", &[]),
     ("pipeline_review_claims", "INSERT", &[]),
     ("pipeline_review_claims", "DELETE", &[]),

@@ -26,7 +26,7 @@ use trace_commons_gate_api::pipeline::{
 use trace_commons_gate_api::{
     Embedder, IdentifiedEmbedder, IdentifiedIndexWriter, IndexEntryKey, IndexUpsertResult,
     IndexWriteError, ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter,
-    SettlementError, SettlementReceipt, SettlementRequest, VectorIndexWriter,
+    SettlementError, SettlementReceipt, SettlementRequest, VectorIndexReader, VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
@@ -8044,10 +8044,9 @@ async fn index_invalidation_rows(
 /// retries under `index_unavailable` with `pending` kept and the entry
 /// live. A withdrawal then commits. The retry's guard reads the submission
 /// inoperable and records `cancelled`, and in the same transaction it
-/// queues an invalidation of the revision (due at once), so the entry the
-/// earlier attempt wrote does not stay visible. The queue itself is
-/// processed elsewhere; this test checks only that the work is queued, and
-/// that queueing it again changes nothing.
+/// queues an invalidation of the revision (due at once); queueing it again
+/// changes nothing. `process_index_invalidations` then removes the entry the
+/// earlier attempt wrote, so it does not stay visible.
 #[tokio::test]
 async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8121,6 +8120,34 @@ async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
         index_invalidation_rows(&backend, &tenant, run.run_id).await,
         (rows, run_state)
     );
+
+    // The queued invalidation removes the entry the earlier attempt wrote.
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "the partly written entry does not stay visible"
+    );
+    let (processed_rows, processed_run_state) =
+        index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        processed_rows
+            .iter()
+            .map(|(revision, reason, state, _)| (*revision, reason.as_str(), state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(
+            revision_id,
+            PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+            "complete"
+        )]
+    );
+    assert_eq!(processed_run_state, "complete");
 }
 
 /// Amendments-971 A9: each instrument settles as an independent leg with no
@@ -14578,9 +14605,9 @@ async fn wait_for_a_waiter_on<T>(
 /// dispatch's transaction, and the withdrawal has not finished 300 ms later.
 /// Only then is the write released. The withdrawal therefore reads the run
 /// after the dispatch committed `complete`, and it queues an invalidation of
-/// the revision, so the entries the write left do not stay visible (Task 8
-/// removes them). Neither side fails: a deadlock would fail the withdrawal
-/// or send Settle to `retry` as `database_unavailable`.
+/// the revision; `process_index_invalidations` then removes the entries the
+/// write left, so none stays visible. Neither side fails: a deadlock would
+/// fail the withdrawal or send Settle to `retry` as `database_unavailable`.
 ///
 /// It cannot pass by luck: the release waits for PostgreSQL's own report of
 /// the lock wait, not for a sleep, so the order of the two commits is fixed
@@ -14675,6 +14702,30 @@ async fn withdrawal_blocks_until_the_index_commit_and_then_invalidates() {
         .unwrap()
         .unwrap();
     assert_eq!(current.index_write_state, "complete");
+
+    // The queued invalidation removes every entry the write left.
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "no entry of the withdrawn revision stays visible"
+    );
+    let (processed_rows, processed_run_state) =
+        index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        processed_rows
+            .iter()
+            .map(|(revision, reason, state, _)| (*revision, reason.as_str(), state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(revision_id, "withdrawn", "complete")]
+    );
+    assert_eq!(processed_run_state, "complete");
 }
 
 /// Ruling T7-2: the withdrawal locks the run rows before the submission
@@ -15531,6 +15582,558 @@ async fn withdrawal_of_either_session_submission_withdraws_the_session() {
             "a later upload of the session is refused"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Index invalidation (`PipelineService::process_index_invalidations`)
+// ---------------------------------------------------------------------------
+
+/// One index entry a run's Settle wrote: its entry id and its embedding.
+type RevisionEntry = (uuid::Uuid, Vec<f32>);
+
+/// Runs a receipt through Review, Score, and Settle with the index included,
+/// and returns the complete run and the entries its Settle wrote, read from
+/// the run's stored index command.
+async fn complete_indexed_run(
+    service: &PipelineService,
+    tenant: &str,
+) -> (PipelineRunRecord, Vec<RevisionEntry>) {
+    let (run, evidence) = run_to_settle_ready(service, tenant).await;
+    let command = service
+        .load_index_command(&run, &evidence)
+        .await
+        .unwrap()
+        .expect("Score proposed a command");
+    let tenant_ref = pipeline_tenant_storage_ref(tenant);
+    let entries: Vec<RevisionEntry> = command
+        .keyed_entries(&tenant_ref)
+        .map(|(key, entry)| (key.entry_id(), entry.embedding.clone()))
+        .collect();
+    assert!(!entries.is_empty(), "the command has at least one entry");
+    let settled = service
+        .process_run(tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_write_state, "complete");
+    (settled, entries)
+}
+
+/// The ids among `entries` that a `nearest` query by any of their own
+/// embeddings returns: the revision's entries a reader can still see.
+fn visible_revision_entries(
+    index: &IsolatedPipelineIndex,
+    tenant_ref: &TenantStorageRef,
+    entries: &[RevisionEntry],
+) -> BTreeSet<uuid::Uuid> {
+    let ids: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    let mut visible = BTreeSet::new();
+    for (_, embedding) in entries {
+        for neighbor in index
+            .nearest(tenant_ref, MINIMAL_INDEX_ID, embedding, 64, None)
+            .unwrap()
+        {
+            if ids.contains(&neighbor.entry_id) {
+                visible.insert(neighbor.entry_id);
+            }
+        }
+    }
+    visible
+}
+
+/// A run's `pipeline_index_invalidations` row and the run's
+/// `index_invalidation_state`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InvalidationDetail {
+    state: String,
+    attempt_count: i32,
+    max_attempts: i32,
+    last_error_label: Option<String>,
+    next_attempt_at: chrono::DateTime<chrono::Utc>,
+    completed: bool,
+    run_state: String,
+}
+
+async fn invalidation_detail(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> InvalidationDetail {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT i.state, i.attempt_count, i.max_attempts, i.last_error_label,
+                    i.next_attempt_at, i.completed_at IS NOT NULL,
+                    r.index_invalidation_state
+               FROM pipeline_index_invalidations i
+               JOIN pipeline_runs r ON r.tenant_id = i.tenant_id AND r.run_id = i.run_id
+              WHERE i.tenant_id = $1 AND i.run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("the run has an invalidation row");
+    tx.commit().await.unwrap();
+    InvalidationDetail {
+        state: row.get(0),
+        attempt_count: row.get(1),
+        max_attempts: row.get(2),
+        last_error_label: row.get(3),
+        next_attempt_at: row.get(4),
+        completed: row.get(5),
+        run_state: row.get(6),
+    }
+}
+
+/// Makes a run's invalidation due now: a time shortcut, as the owner, not a
+/// processor call.
+async fn make_invalidation_due(tenant_id: &str, run_id: uuid::Uuid) {
+    owner_client()
+        .await
+        .execute(
+            "UPDATE pipeline_index_invalidations SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("make the invalidation due");
+}
+
+/// Review Focus 1: a run's revision is in the index and a reader finds its
+/// entries; the submission is withdrawn, which queues an invalidation; one
+/// pass of `process_index_invalidations` processes it, and after that no
+/// `nearest` query returns any entry of the revision. The invalidation and
+/// the run's `index_invalidation_state` are `complete`, and a second pass
+/// finds nothing to do.
+#[tokio::test]
+async fn invalidation_removes_the_revision_after_withdrawal() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-withdrawn-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        visible_revision_entries(&index, &tenant_ref, &entries),
+        all,
+        "a reader finds every entry of the revision"
+    );
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "no entry of the withdrawn revision stays visible"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+    let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(detail.state, "complete");
+    assert!(detail.completed);
+    assert_eq!(detail.last_error_label, None);
+    assert_eq!(detail.run_state, "complete");
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a complete invalidation is not processed again"
+    );
+}
+
+/// Ruling T8-1: the isolated index's faults are one-shot, so the fault is
+/// armed again before each attempt, and the row is made due between
+/// attempts. Every attempt fails before it removes anything. Each failure
+/// but the last leaves the invalidation `pending`, charged one attempt,
+/// under `index_invalidation_unavailable`; the one that uses the last
+/// attempt leaves it `failed` under `index_invalidation_failed`, and the
+/// run's `index_invalidation_state` follows. A failed invalidation is never
+/// claimed again, even when due.
+#[tokio::test]
+async fn invalidation_retries_then_fails_with_a_label() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-fails-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    withdraw(&service, &tenant, run.submission_id).await;
+    let max_attempts = invalidation_detail(&backend, &tenant, run.run_id)
+        .await
+        .max_attempts;
+    assert!(max_attempts > 1, "the retry path is exercised");
+
+    for attempt in 1..=max_attempts {
+        index.set_fault(IndexFault::FailBeforeApply);
+        make_invalidation_due(&tenant, run.run_id).await;
+        assert_eq!(
+            service
+                .process_index_invalidations(&tenant, 32)
+                .await
+                .unwrap(),
+            1,
+            "attempt {attempt} is processed"
+        );
+        let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+        assert_eq!(detail.attempt_count, attempt, "each failure is charged");
+        assert!(!detail.completed);
+        if attempt < max_attempts {
+            assert_eq!(detail.state, "pending", "attempt {attempt}");
+            assert_eq!(
+                detail.last_error_label.as_deref(),
+                Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL),
+                "attempt {attempt}"
+            );
+            assert_eq!(detail.run_state, "pending", "attempt {attempt}");
+        } else {
+            assert_eq!(detail.state, "failed");
+            assert_eq!(
+                detail.last_error_label.as_deref(),
+                Some(PIPELINE_INDEX_INVALIDATION_FAILED_LABEL)
+            );
+            assert_eq!(detail.run_state, "failed");
+        }
+        assert_eq!(
+            visible_revision_entries(&index, &tenant_ref, &entries),
+            all,
+            "a failed attempt removed nothing (attempt {attempt})"
+        );
+    }
+
+    let failed = invalidation_detail(&backend, &tenant, run.run_id).await;
+    make_invalidation_due(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "a failed invalidation is not claimed again"
+    );
+    let after = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        (after.state, after.attempt_count, after.last_error_label),
+        (failed.state, failed.attempt_count, failed.last_error_label)
+    );
+}
+
+/// Ruling T8-1: an `Uncertain` answer (`IndexFault::LostAfterApply`: the
+/// entries are removed, but the index cannot say so) is a charged retry,
+/// not a completion. The next attempt removes nothing, gets `Ok(false)`, and
+/// completes the invalidation.
+#[tokio::test]
+async fn an_uncertain_invalidation_is_retried_and_then_completes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-uncertain-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, entries) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+
+    index.set_fault(IndexFault::LostAfterApply);
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        visible_revision_entries(&index, &tenant_ref, &entries).is_empty(),
+        "the uncertain attempt removed the entries"
+    );
+    let uncertain = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(uncertain.state, "pending");
+    assert_eq!(uncertain.attempt_count, 1);
+    assert_eq!(
+        uncertain.last_error_label.as_deref(),
+        Some(PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL)
+    );
+    assert!(!uncertain.completed);
+    assert_eq!(uncertain.run_state, "pending");
+
+    make_invalidation_due(&tenant, run.run_id).await;
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    let complete = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(complete.state, "complete");
+    assert_eq!(complete.attempt_count, 1, "a success is not charged");
+    assert_eq!(complete.last_error_label, None);
+    assert!(complete.completed);
+    assert_eq!(complete.run_state, "complete");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+}
+
+/// A pending invalidation of tenant A is not processed by tenant B's pass:
+/// B's pass returns 0 and A's row, and A's entries, are unchanged. A's own
+/// pass then processes it, so the row was due all along.
+#[tokio::test]
+async fn invalidation_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant_a = format!("invalidate-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("invalidate-tenant-b-{}", uuid::Uuid::new_v4());
+    let tenant_a_ref = pipeline_tenant_storage_ref(&tenant_a);
+    let (run, entries) = complete_indexed_run(&service, &tenant_a).await;
+    let all: BTreeSet<uuid::Uuid> = entries.iter().map(|(id, _)| *id).collect();
+    withdraw(&service, &tenant_a, run.submission_id).await;
+    service.register_default_bundle(&tenant_b).await.unwrap();
+    let before = invalidation_detail(&backend, &tenant_a, run.run_id).await;
+    assert_eq!(before.state, "pending");
+
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_b, 32)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        service
+            .store()
+            .list_due_index_invalidations(&tenant_b, 32)
+            .await
+            .unwrap(),
+        Vec::<uuid::Uuid>::new()
+    );
+    assert_eq!(
+        service
+            .store()
+            .claim_index_invalidation(&tenant_b, run.run_id, chrono::Duration::minutes(5))
+            .await
+            .unwrap(),
+        None,
+        "tenant B cannot claim tenant A's invalidation by its run id"
+    );
+    assert_eq!(
+        invalidation_detail(&backend, &tenant_a, run.run_id).await,
+        before
+    );
+    assert_eq!(
+        visible_revision_entries(&index, &tenant_a_ref, &entries),
+        all
+    );
+
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant_a, 32)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(visible_revision_entries(&index, &tenant_a_ref, &entries).is_empty());
+}
+
+/// A claim is exclusive: it holds the invalidation for its lease (the row's
+/// `next_attempt_at` moves to the lease's end), so a second claim, or two
+/// claims at once, get it only once. Once the lease has passed, another
+/// worker can claim it; the first claim can then no longer record a
+/// failure (it no longer holds the lease), while the new one can.
+#[tokio::test]
+async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-claim-{}", uuid::Uuid::new_v4());
+    let (run, _) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    let store = service.store();
+    let lease = chrono::Duration::minutes(5);
+
+    // Two claims at once: exactly one gets it.
+    let (left, right) = tokio::join!(
+        store.claim_index_invalidation(&tenant, run.run_id, lease),
+        store.claim_index_invalidation(&tenant, run.run_id, lease),
+    );
+    let claims: Vec<PipelineIndexInvalidationClaim> = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(
+        claims.len(),
+        1,
+        "exactly one of two claims at once succeeds"
+    );
+    let first = claims.into_iter().next().unwrap();
+    assert_eq!(first.run_id, run.run_id);
+    assert_eq!(Some(first.registry_revision_id), run.approved_revision_id);
+    assert_eq!(first.attempt_count, 0);
+    let held = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(held.next_attempt_at, first.lease_expires_at);
+    assert!(
+        store
+            .list_due_index_invalidations(&tenant, 32)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a claimed invalidation is not due"
+    );
+    assert_eq!(
+        store
+            .claim_index_invalidation(&tenant, run.run_id, lease)
+            .await
+            .unwrap(),
+        None,
+        "a later claim within the lease gets nothing"
+    );
+
+    // The lease passes; another worker claims it.
+    make_invalidation_due(&tenant, run.run_id).await;
+    let second = store
+        .claim_index_invalidation(&tenant, run.run_id, lease)
+        .await
+        .unwrap()
+        .expect("a claim after the lease gets it");
+    assert_ne!(second.lease_expires_at, first.lease_expires_at);
+    let reclaimed = invalidation_detail(&backend, &tenant, run.run_id).await;
+
+    assert_eq!(
+        store.fail_index_invalidation(&first).await.unwrap(),
+        None,
+        "the first claim no longer holds the invalidation"
+    );
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id).await,
+        reclaimed,
+        "the stale failure changed nothing"
+    );
+    let failed = store
+        .fail_index_invalidation(&second)
+        .await
+        .unwrap()
+        .expect("the current claim records its failure");
+    assert_eq!(failed.run_id, run.run_id);
+    let detail = invalidation_detail(&backend, &tenant, run.run_id).await;
+    assert_eq!(detail.state, "pending");
+    assert_eq!(detail.attempt_count, 1);
+    assert_eq!(
+        store.fail_index_invalidation(&second).await.unwrap(),
+        None,
+        "one claim records one result"
+    );
+}
+
+/// The pass never holds two pooled connections at once: on a pool of one,
+/// a second checkout would wait for the first forever, and each pass is
+/// bounded. Both the failure path and the completion path.
+#[tokio::test]
+async fn the_invalidation_pass_never_holds_two_pooled_connections() {
+    let Some(backend) = runtime_backend(1).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-pool-one-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = tokio::time::timeout(HELD_CALL_BOUND, complete_indexed_run(&service, &tenant))
+        .await
+        .expect("the run completes on a pool of one");
+    tokio::time::timeout(
+        HELD_CALL_BOUND,
+        withdraw(&service, &tenant, run.submission_id),
+    )
+    .await
+    .expect("the withdrawal finishes on a pool of one");
+
+    index.set_fault(IndexFault::FailBeforeApply);
+    let processed = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.process_index_invalidations(&tenant, 32),
+    )
+    .await
+    .expect("the failure path never waits for a second connection")
+    .unwrap();
+    assert_eq!(processed, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "pending"
+    );
+
+    make_invalidation_due(&tenant, run.run_id).await;
+    let processed = tokio::time::timeout(
+        HELD_CALL_BOUND,
+        service.process_index_invalidations(&tenant, 32),
+    )
+    .await
+    .expect("the completion path never waits for a second connection")
+    .unwrap();
+    assert_eq!(processed, 1);
+    assert_eq!(
+        invalidation_detail(&backend, &tenant, run.run_id)
+            .await
+            .state,
+        "complete"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }
 
 // ---------------------------------------------------------------------------

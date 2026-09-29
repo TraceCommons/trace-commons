@@ -251,8 +251,13 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 /// The rest wait for the next pass.
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
 
+/// How many of one tenant's due index invalidations the worker processes
+/// per pass (`PipelineService::process_index_invalidations`), right after
+/// draining its runs. The rest wait for the next pass.
+const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
+
 /// How many of one tenant's complete runs the worker pays out per pass
-/// (`PipelineService::process_payouts`), right after draining its runs. The
+/// (`PipelineService::process_payouts`), after its index invalidations. The
 /// rest wait for the next pass.
 const PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT: usize = 32;
 
@@ -342,15 +347,21 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// never the tenant id or the error's own text -- and ends this tenant's
 /// batch for the pass.
 ///
-/// Then, whatever the runs did, it pays out up to
+/// Then, whatever the runs did, it processes up to
+/// `PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT` of the tenant's due
+/// index invalidations (`process_index_invalidations`, which removes a
+/// withdrawn or cancelled revision from the index), pays out up to
 /// `PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT` of the tenant's complete runs
 /// (`process_payouts`, which does nothing unless payout is enabled; Ruling
-/// S7 puts it right after the runs), and sweeps up to
+/// S7 puts the invalidations right after the runs and the payouts after
+/// them), and sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
 /// attempts that never committed: each staged object whose
-/// row's `cleanup_after` has passed is deleted with its row. A payout or
-/// sweep failure is logged the same way.
-async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
+/// row's `cleanup_after` has passed is deleted with its row. An
+/// invalidation, payout, or sweep failure is logged the same way, and the
+/// drain goes on to the next step. All of it runs in the pass's supervised
+/// task for the tenant (`run_pipeline_worker_pass`).
+pub(crate) async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
         match service.process_one(&tenant_id).await {
             Ok(Some(_)) => {}
@@ -365,6 +376,20 @@ async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String)
                 break;
             }
         }
+    }
+    if let Err(error) = service
+        .process_index_invalidations(
+            &tenant_id,
+            PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT,
+        )
+        .await
+    {
+        tracing::warn!(
+            error_class = "pipeline_worker_index_invalidation_failed",
+            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+            error_hash = %safe_display_error_hash(&error),
+            "pipeline worker index invalidation failed"
+        );
     }
     if let Err(error) = service
         .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)

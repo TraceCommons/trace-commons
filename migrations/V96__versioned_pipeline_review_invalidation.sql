@@ -165,11 +165,19 @@ END $$;
 -- pipeline_index_invalidations: stopping an index write that may have
 -- written entries queues the revision's removal (INSERT ... ON CONFLICT DO
 -- NOTHING), and the lifecycle and operational summaries count the tenant's
--- pending and failed invalidations.
+-- pending and failed invalidations. The invalidation worker lists the due
+-- rows, claims one by moving next_attempt_at to its lease's end, and
+-- records the attempt: a removal sets state, completed_at and
+-- last_error_label; a failure charges attempt_count and sets state,
+-- last_error_label and next_attempt_at. Nothing updates an invalidation's
+-- run, submission, revision, reason, requested_at or max_attempts.
 GRANT SELECT, INSERT ON pipeline_index_invalidations TO trace_ingest_runtime;
+GRANT UPDATE (state, completed_at, attempt_count, next_attempt_at, last_error_label)
+    ON pipeline_index_invalidations TO trace_ingest_runtime;
 
 -- pipeline_runs: queueing an invalidation marks the run's
--- index_invalidation_state pending.
+-- index_invalidation_state pending, and the invalidation worker marks it
+-- complete or failed.
 GRANT UPDATE (index_invalidation_state) ON pipeline_runs TO trace_ingest_runtime;
 
 -- pipeline_review_claims: a reviewer's claim inserts the row, or takes over

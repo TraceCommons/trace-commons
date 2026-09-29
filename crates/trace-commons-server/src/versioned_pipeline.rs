@@ -107,6 +107,14 @@ pub const PIPELINE_PAYOUT_NEAR_CONTRACT_INVALID_LABEL: &str = "payout_near_contr
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
+/// An index invalidation attempt that did not remove the revision: the
+/// index answered `Failed` or `Uncertain`, or the run's committed Score
+/// evidence names no index. The invalidation stays `pending` and is retried.
+pub const PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL: &str = "index_invalidation_unavailable";
+/// An index invalidation whose last attempt did not remove the revision: it
+/// is `failed` for good, and the revision's entries may still be in the
+/// index.
+pub const PIPELINE_INDEX_INVALIDATION_FAILED_LABEL: &str = "index_invalidation_failed";
 pub const PIPELINE_BUNDLE_STORE_UNAVAILABLE_LABEL: &str = "bundle_store_unavailable";
 /// The `trace_object_refs.object_store` label a service records when its
 /// builder is not told the configured store's name
@@ -557,6 +565,20 @@ pub struct PipelineReviewClaim {
     pub run_id: Uuid,
     pub reviewer_principal_ref: String,
     pub lease_token: Uuid,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+/// A worker's exclusive, time-boxed claim on one queued index invalidation
+/// (`PgPipelineStore::claim_index_invalidation`). The claim moves the row's
+/// `next_attempt_at` to `lease_expires_at`, so no other claim gets the row
+/// before then. `attempt_count` is the number of attempts charged before
+/// this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineIndexInvalidationClaim {
+    pub tenant_id: String,
+    pub run_id: Uuid,
+    pub registry_revision_id: Uuid,
+    pub attempt_count: u32,
     pub lease_expires_at: DateTime<Utc>,
 }
 
@@ -2196,6 +2218,218 @@ impl PgPipelineStore {
         )
         .await?;
         Ok(())
+    }
+
+    /// Up to `limit` (clamped to 1..=500) of `tenant_id`'s index
+    /// invalidations that are due: `pending`, not held by a claim's lease
+    /// or waiting out a retry's backoff, and with an attempt left. Oldest
+    /// due first.
+    pub async fn list_due_index_invalidations(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT run_id FROM pipeline_index_invalidations
+                  WHERE tenant_id = $1 AND state = 'pending'
+                    AND next_attempt_at <= NOW() AND attempt_count < max_attempts
+                  ORDER BY next_attempt_at, run_id
+                  LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get("run_id")).collect())
+    }
+
+    /// Claims `run_id`'s index invalidation for one attempt, if it is due
+    /// (as `list_due_index_invalidations` defines it), and holds it for
+    /// `lease`: the claim moves `next_attempt_at` to the lease's end in the
+    /// same statement that checks the row is due. Two claims at once
+    /// serialize on the row lock, and the second then finds the row no
+    /// longer due, so only one gets it. `None` when the row is not due,
+    /// not `pending`, out of attempts, or not `tenant_id`'s.
+    ///
+    /// The claim charges no attempt: `fail_index_invalidation` charges one
+    /// for an attempt that did not remove the revision. An attempt that
+    /// never reports back (the worker died) is not charged, and the row is
+    /// due again once the lease has passed, the way a run's expired lease
+    /// is.
+    pub async fn claim_index_invalidation(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        lease: Duration,
+    ) -> Result<Option<PipelineIndexInvalidationClaim>, DatabaseError> {
+        let lease_milliseconds = lease.num_milliseconds().max(1);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_index_invalidations
+                    SET next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 millisecond')
+                  WHERE tenant_id = $1 AND run_id = $2
+                    AND state = 'pending'
+                    AND next_attempt_at <= NOW()
+                    AND attempt_count < max_attempts
+                  RETURNING registry_revision_id, attempt_count, next_attempt_at",
+                &[&tenant_id, &run_id, &lease_milliseconds],
+            )
+            .await?;
+        tx.commit().await?;
+        row.map(|row| {
+            Ok(PipelineIndexInvalidationClaim {
+                tenant_id: tenant_id.to_string(),
+                run_id,
+                registry_revision_id: row.get("registry_revision_id"),
+                attempt_count: u32::try_from(row.get::<_, i32>("attempt_count")).map_err(|_| {
+                    DatabaseError::Serialization(
+                        "invalid index invalidation attempt count".to_string(),
+                    )
+                })?,
+                lease_expires_at: row.get("next_attempt_at"),
+            })
+        })
+        .transpose()
+    }
+
+    /// Locks the claimed invalidation's run row, on the caller's
+    /// transaction, before its invalidation row: the order a withdrawal
+    /// and Settle's cancelled dispatch use (the run row, then the `INSERT`
+    /// into this queue), and the order a run's deletion cascades in, so
+    /// recording a result does not deadlock with them. `false` when the run
+    /// is gone (its invalidation row went with it).
+    async fn lock_invalidation_run_on_tx(
+        tx: &Transaction<'_>,
+        claim: &PipelineIndexInvalidationClaim,
+    ) -> Result<bool, DatabaseError> {
+        Ok(tx
+            .query_opt(
+                "SELECT 1 FROM pipeline_runs
+                  WHERE tenant_id = $1 AND run_id = $2
+                  FOR NO KEY UPDATE",
+                &[&claim.tenant_id, &claim.run_id],
+            )
+            .await?
+            .is_some())
+    }
+
+    /// Records that `claim`'s attempt removed the revision from the index:
+    /// the invalidation and the run's `index_invalidation_state` become
+    /// `complete`, in one transaction. The invalidation must still be
+    /// `pending`; the claim's lease need not be current, since a removal
+    /// that succeeded is a fact about the index whoever holds the row now
+    /// (`invalidate_revision` is idempotent, and nothing writes the
+    /// revision again once its invalidation is queued). `None`, with
+    /// nothing written, when the invalidation is no longer `pending`.
+    pub async fn complete_index_invalidation(
+        &self,
+        claim: &PipelineIndexInvalidationClaim,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
+        if !Self::lock_invalidation_run_on_tx(&tx, claim).await? {
+            return Ok(None);
+        }
+        let completed = tx
+            .execute(
+                "UPDATE pipeline_index_invalidations
+                    SET state = 'complete', completed_at = NOW(), last_error_label = NULL
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'pending'",
+                &[&claim.tenant_id, &claim.run_id],
+            )
+            .await?;
+        if completed == 0 {
+            return Ok(None);
+        }
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                    SET index_invalidation_state = 'complete', updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING *",
+                &[&claim.tenant_id, &claim.run_id],
+            )
+            .await?;
+        let run = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(Some(run))
+    }
+
+    /// Records that `claim`'s attempt did not remove the revision, charging
+    /// it one attempt. With an attempt left, the invalidation stays
+    /// `pending` under `index_invalidation_unavailable` and is due again
+    /// after the charged-retry backoff `mark_retry` uses (50 ms, doubling
+    /// with each charged attempt, capped at 50 ms x 2^9); the run's
+    /// `index_invalidation_state` stays `pending`. The attempt that uses the
+    /// last one leaves the invalidation and the run's state `failed` under
+    /// `index_invalidation_failed`.
+    ///
+    /// Only the current claim records a failure: the invalidation must be
+    /// `pending` with `next_attempt_at` still at `claim`'s lease end. A
+    /// claim whose lease passed and whose row another worker claimed, or a
+    /// claim that already recorded its result, gets `None` and writes
+    /// nothing.
+    pub async fn fail_index_invalidation(
+        &self,
+        claim: &PipelineIndexInvalidationClaim,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let exponent = claim.attempt_count.min(9);
+        let retry_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(1_i64 << exponent);
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
+        if !Self::lock_invalidation_run_on_tx(&tx, claim).await? {
+            return Ok(None);
+        }
+        let Some(row) = tx
+            .query_opt(
+                "UPDATE pipeline_index_invalidations
+                    SET attempt_count = attempt_count + 1,
+                        state = CASE
+                            WHEN attempt_count + 1 >= max_attempts THEN 'failed'
+                            ELSE 'pending'
+                        END,
+                        last_error_label = CASE
+                            WHEN attempt_count + 1 >= max_attempts THEN $4
+                            ELSE $3
+                        END,
+                        next_attempt_at = CASE
+                            WHEN attempt_count + 1 >= max_attempts THEN next_attempt_at
+                            ELSE NOW() + ($5::bigint * INTERVAL '1 millisecond')
+                        END
+                  WHERE tenant_id = $1 AND run_id = $2
+                    AND state = 'pending' AND next_attempt_at = $6
+                  RETURNING state",
+                &[
+                    &claim.tenant_id,
+                    &claim.run_id,
+                    &PIPELINE_INDEX_INVALIDATION_UNAVAILABLE_LABEL,
+                    &PIPELINE_INDEX_INVALIDATION_FAILED_LABEL,
+                    &retry_milliseconds,
+                    &claim.lease_expires_at,
+                ],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let state: String = row.get("state");
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                    SET index_invalidation_state = $3, updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING *",
+                &[&claim.tenant_id, &claim.run_id, &state],
+            )
+            .await?;
+        let run = pipeline_run_from_row(&row)?;
+        tx.commit().await?;
+        Ok(Some(run))
     }
 
     /// Whether the submission behind `run` is operable for Score and Settle:
@@ -4676,6 +4910,97 @@ impl PipelineService {
             .store
             .withdraw_submission(tenant_id, submission_id, actor_principal_ref, account_id)
             .await?)
+    }
+
+    /// Processes up to `limit` of `tenant_id`'s due index invalidations
+    /// (`process_index_invalidation` each) and returns how many it recorded
+    /// a result for. Only `tenant_id`'s own queue is read. A database error
+    /// ends the pass; the invalidation it was on waits out its claim's
+    /// lease, uncharged.
+    pub async fn process_index_invalidations(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<usize> {
+        let mut processed = 0;
+        for run_id in self
+            .store
+            .list_due_index_invalidations(tenant_id, limit)
+            .await?
+        {
+            if self
+                .process_index_invalidation(tenant_id, run_id)
+                .await?
+                .is_some()
+            {
+                processed += 1;
+            }
+        }
+        Ok(processed)
+    }
+
+    /// One attempt at `run_id`'s queued index invalidation: claims it
+    /// (`PgPipelineStore::claim_index_invalidation`, leased for the Settle
+    /// phase's lease, since Settle is the phase that writes the index),
+    /// removes the queued revision from the index under the tenant's
+    /// storage reference and the index id of the run's committed Score
+    /// evidence, and records the result. `Ok(true)` or `Ok(false)` from the
+    /// index completes the invalidation; any error, or Score evidence that
+    /// names no index, is a charged failure (`fail_index_invalidation`).
+    ///
+    /// Returns the run as the recorded result left it, or `None` when this
+    /// call recorded nothing: the invalidation was not due or not claimed,
+    /// or another claim recorded a result first. Each step checks out its
+    /// own pooled connection and returns it before the next, and none is
+    /// held across the index call.
+    pub async fn process_index_invalidation(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> anyhow::Result<Option<PipelineRunRecord>> {
+        let Some(claim) = self
+            .store
+            .claim_index_invalidation(tenant_id, run_id, self.lease_config.settle())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let removed = match self.committed_index_id(tenant_id, run_id).await? {
+            Some(index_id) => self
+                .index_writer
+                .invalidate_revision(
+                    &pipeline_tenant_storage_ref(tenant_id),
+                    &index_id,
+                    claim.registry_revision_id,
+                )
+                .is_ok(),
+            None => false,
+        };
+        Ok(if removed {
+            self.store.complete_index_invalidation(&claim).await?
+        } else {
+            self.store.fail_index_invalidation(&claim).await?
+        })
+    }
+
+    /// The index id the run's committed Score evidence names: the index its
+    /// Settle wrote to. `None` when there is no Score outcome, or its
+    /// evidence does not decode or names no index.
+    async fn committed_index_id(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let Some(outcome) = self
+            .store
+            .outcome_for_phase(tenant_id, run_id, Phase::Score)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_value::<ScoreEvidence>(outcome.evidence)
+            .ok()
+            .and_then(|evidence| evidence.index_id))
     }
 
     /// Registers this service's default bundle for `tenant_id` and, if the
