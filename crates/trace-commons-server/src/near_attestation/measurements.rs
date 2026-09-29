@@ -41,6 +41,31 @@ pub fn expected_measurements_from_env()
     ExpectedMeasurements::from_env_value(std::env::var(EXPECTED_MEASUREMENTS_ENV).ok().as_deref())
 }
 
+/// What `GET /v1/contributors/me/near-ai-measurements` publishes: the set
+/// this deployment enforces, as [`expected_measurements_from_env`] loaded it.
+///
+/// Takes the loader's result rather than reading the environment itself, so
+/// the route and the checks that enforce the pins read one parse of one
+/// variable, and so this is testable without mutating process-global state.
+/// Nothing configured is [`PinState::Unconfigured`] and a value that does not
+/// parse is [`PinState::Invalid`]; neither carries a set, so neither can be
+/// read by a client as "no constraint".
+///
+/// [`PinState::Unconfigured`]: trace_commons_protocol::near_ai_measurements::PinState::Unconfigured
+/// [`PinState::Invalid`]: trace_commons_protocol::near_ai_measurements::PinState::Invalid
+pub fn published_pins(
+    loaded: Result<Option<ExpectedMeasurements>, ExpectedMeasurementsError>,
+) -> trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins {
+    use trace_commons_protocol::near_ai_measurements::{NearAiMeasurementPins, PinState};
+    match loaded {
+        Ok(Some(set)) => {
+            NearAiMeasurementPins::new(PinState::Configured, vec![set.to_pin_string()])
+        }
+        Ok(None) => NearAiMeasurementPins::new(PinState::Unconfigured, Vec::new()),
+        Err(_) => NearAiMeasurementPins::new(PinState::Invalid, Vec::new()),
+    }
+}
+
 /// The value of a register as a NEAR AI report *claims* it in unsigned JSON,
 /// or `None` where the report makes no such claim.
 ///
@@ -117,6 +142,44 @@ pub fn json_claim_anomalies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use trace_commons_protocol::near_ai_measurements::PinState;
+
+    /// Ingest publishes exactly the set it enforces, in the syntax a client
+    /// parses back to the same set.
+    #[test]
+    fn the_published_pins_are_exactly_the_enforced_set() {
+        let raw = format!("mrconfigid={},mrtd={}", "aa".repeat(48), "bb".repeat(48));
+        let enforced = ExpectedMeasurements::from_env_value(Some(&raw)).unwrap();
+        let published = published_pins(Ok(enforced.clone()));
+        assert_eq!(published.state, PinState::Configured);
+        assert_eq!(published.sets.len(), 1);
+        assert_eq!(
+            ExpectedMeasurements::from_env_value(Some(&published.sets[0])).unwrap(),
+            enforced,
+            "the client pins what ingest pins"
+        );
+        assert_eq!(published.usable_sets(), published.sets.as_slice());
+    }
+
+    /// Nothing configured is published as that, with no sets -- never as an
+    /// empty set a client could read as "no constraint".
+    #[test]
+    fn nothing_configured_publishes_unconfigured_and_no_sets() {
+        let published = published_pins(Ok(None));
+        assert_eq!(published.state, PinState::Unconfigured);
+        assert!(published.sets.is_empty());
+        assert!(published.usable_sets().is_empty());
+    }
+
+    #[test]
+    fn a_configuration_that_does_not_parse_publishes_invalid_and_no_sets() {
+        let loaded = ExpectedMeasurements::from_env_value(Some("mrtd=nothex"));
+        assert!(loaded.is_err());
+        let published = published_pins(loaded);
+        assert_eq!(published.state, PinState::Invalid);
+        assert!(published.usable_sets().is_empty());
+    }
     use crate::near_attestation::AttestationReport;
     use crate::near_attestation::quote::{parse_collateral, verify_quote};
 
