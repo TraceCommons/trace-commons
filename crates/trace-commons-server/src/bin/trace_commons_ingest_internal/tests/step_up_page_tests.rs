@@ -167,6 +167,13 @@ fn assert_strict_headers(reply: &Reply, csp: &str, what: &str) {
         Some("DENY"),
         "{what}: frame options"
     );
+    // A page that opened this one in a popup keeps no handle to it, so it
+    // cannot navigate the window once the person has signed in.
+    assert_eq!(
+        reply.header("cross-origin-opener-policy"),
+        Some("same-origin"),
+        "{what}: opener policy"
+    );
     assert!(
         reply
             .header(axum::http::header::CONTENT_TYPE)

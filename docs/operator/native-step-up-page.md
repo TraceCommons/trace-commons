@@ -108,6 +108,8 @@ Every response from `/account/step-up`, whatever it renders:
 - `Referrer-Policy: no-referrer`
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
+- `Cross-Origin-Opener-Policy: same-origin`: a page that opened this one in
+  a popup keeps no handle to it and cannot navigate it after the sign-in.
 
 No external script, style, font or image is loaded.
 

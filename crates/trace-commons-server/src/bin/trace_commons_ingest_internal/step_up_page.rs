@@ -43,8 +43,9 @@
 //! **Headers.** Every response carries [`CSP_WITH_SCRIPT`] or
 //! [`CSP_WITHOUT_SCRIPT`] (no `'unsafe-inline'`: the one script and the one
 //! style block are pinned by SHA-256), `frame-ancestors 'none'` plus
-//! `X-Frame-Options: DENY`, `Cache-Control: no-store`,
-//! `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
+//! `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`,
+//! `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and
+//! `X-Content-Type-Options: nosniff`.
 //!
 //! **Logs and audit.** Label-only log lines; no query value, cookie, IP or
 //! account detail. The page itself is unauthenticated and has no tenant, so it
@@ -59,7 +60,7 @@
 use std::sync::LazyLock;
 
 use axum::extract::{Query, State, rejection::QueryRejection};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
@@ -340,6 +341,12 @@ fn page(status: StatusCode, html: String, csp: &str) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    // Severs `window.opener` both ways: a page that opened this one in a popup
+    // cannot navigate it after the sign-in, and this page cannot reach back.
+    headers.insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
     match HeaderValue::from_str(csp) {
         Ok(value) => {
             headers.insert(header::CONTENT_SECURITY_POLICY, value);
