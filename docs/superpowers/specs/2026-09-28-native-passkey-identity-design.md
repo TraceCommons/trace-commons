@@ -1,9 +1,12 @@
 # Native Passkey Identity for the macOS App (Z2) — Design
 
 Date: 2026-09-28
-Status: design proposed. The five decisions Zaki made on 2026-09-28 are
-implemented here, not reopened. The items under "Decisions needed" are new.
-Implementation not started
+Status: server slices S1-S5 and S7 are built and open for review, as a stack:
+S1 in #1122, S2 in #1131, S3 in #1135, S4 in #1124, S5 in #1127 and S7 in
+#1136 (also #1137, the pilot env template's RP ID pin, and #1138, the
+`__Host-` cookies). S6 (the fold) is deferred. C1, the macOS client, is not
+built. The decisions Zaki made on 2026-09-28 and 2026-09-29 are implemented
+here, not reopened; the original six are resolved under "Decisions".
 Item: Z2 in #1118 ("Native passkey identity: account-less passkey creation, a
 native bearer from passkey login, AASA/webcredentials, the passkey-to-near.ai
 binding"), gap 1
@@ -22,31 +25,38 @@ migrations), `trace-commons-protocol` (one preimage function), the community
 site (`community/public`), and the IPC surface the macOS client needs. No
 production code in this PR.
 
-In this document **F** is `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`
-and **NP** is `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/near_provisioning.rs`.
-Line numbers are against `origin/main` at the time of writing.
+Code is referenced by function, type and constant names, not line numbers,
+which rot. An unqualified name is in
+`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`, except the NEAR AI
+provisioning handlers (`near_ai_start`, `near_ai_finish` and their request
+types), which are in
+`crates/trace-commons-server/src/bin/trace_commons_ingest_internal/near_provisioning.rs`.
 
 ## Problem
+
+This is the state of the tree on 2026-09-28, when the design was written; the
+slices below address it. Since #1138 the cookies named here carry the `__Host-`
+prefix (`__Host-tc_passkey_ceremony`, `__Host-tc_account_session`).
 
 The WYSIWYG design's join screen offers "Sign in with a passkey: Create a
 passkey that can be connected later." Nothing on the server can do that today:
 
 - **Passkey registration needs an account first.** `register/start` sits
-  behind `account_auth_middleware` (F:7609-7616, layer at F:7661-7664), takes
-  `Extension<AccountCtx>` (F:18725-18728), and uses the existing account's
-  UUID as the WebAuthn user id (F:18756-18764). "Create a passkey, connect
+  behind `account_auth_middleware` (registered in `authenticated_account_routes`), takes
+  `Extension<AccountCtx>` (`account_passkey_register_start_handler`), and uses the existing account's
+  UUID as the WebAuthn user id (`account_passkey_register_start_handler`). "Create a passkey, connect
   later" has no account to attach to.
 - **Ceremonies are bound by a cookie.** Both registration and login stash
   server state under an opaque id carried in the `tc_passkey_ceremony` cookie
-  (F:18642, 3-minute max-age F:18647), `Secure; HttpOnly; SameSite=Strict`
-  (F:18778-18786, F:19837-19845). A native client has no cookie jar for this.
+  (`ACCOUNT_PASSKEY_CEREMONY_COOKIE`, 3-minute max-age `ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS`), `Secure; HttpOnly; SameSite=Strict`
+  (`account_passkey_register_start_handler`, `account_passkey_login_start_handler`). A native client has no cookie jar for this.
 - **Login issues a browser cookie, not a native bearer.** Passkey login
-  finish mints `client_kind='passkey'` (F:20019-20023) and returns the
-  `tc_account_session` cookie with a 303 (F:20042-20086). The native app
+  finish mints `client_kind='passkey'` (`account_passkey_login_finish_inner`) and returns the
+  `tc_account_session` cookie with a 303 (`account_passkey_login_finish_inner`). The native app
   authenticates `/v1/account/*` with a `tcn1_` bearer
-  (F:15965-15971, `account_native_auth.rs:96`), which it can currently obtain
-  only through the loopback PKCE redeem (F:17368-17389) or the NEAR AI
-  provisioning finish (NP:1238-1257).
+  (`resolve_account_ctx_with_rotation`; the `tcn1_` prefix is `NATIVE_TOKEN_PREFIX` in `account_native_auth.rs`), which it can currently obtain
+  only through the loopback PKCE redeem (the loopback sign-in section of `trace-commons-ingest.rs`, ending in `native_token_handler`) or the NEAR AI
+  provisioning finish (`near_ai_finish`).
 - **There is no `apple-app-site-association`.** Nothing in the repo serves
   `/.well-known/apple-app-site-association`, and nothing in the repo calls
   `navigator.credentials` or `ASAuthorization*` (a `git grep` finds only this
@@ -65,8 +75,8 @@ These are inputs. The spec implements them.
    domain. No existing session is needed. The account can watch and preview; it
    cannot contribute or earn until it is bound.
 2. **"Verify passkey" binds that account to near.ai through the existing NEAR
-   AI login provisioning** (`/v1/account/near-ai/provision/*`, F:7818-7833,
-   NP:971-1258). near.ai performs no WebAuthn verification. The design's
+   AI login provisioning** (`/v1/account/near-ai/provision/*`, routed in `app`; handlers
+   `near_ai_start` and `near_ai_finish`). near.ai performs no WebAuthn verification. The design's
    "Verify" semantics and copy are rewritten below, and the copy is marked as
    proposed.
 3. **A native session from passkey login is weak**, the same class as `tcn1_`.
@@ -78,6 +88,48 @@ These are inputs. The spec implements them.
 5. **The native macOS app is decided**, and `ASAuthorization` passkeys are in
    scope.
 
+## Decisions made after the first draft (2026-09-28 and 2026-09-29)
+
+Also inputs. They are numbered P1 to P10 so they are not confused with the first list. Where one changes a section below, the section says so.
+
+P1. **Cancel** signs out and leaves the unbound account inert, and a reaper (S5)
+   reclaims it. The reap rule is P4.
+P2. **S6 (the fold)** is deferred. Refuse-only ships first; the cross-tenant
+   fold is not scheduled.
+P3. **Unbound-account ceiling: 5,000** on the pilot
+   (`TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000`), with an alert on the
+   `unbound_account_ceiling_reached` log line. A **per-IP daily cap** on native
+   passkey creation, at most 10 per IP per day, backs it (#1131).
+P4. **The reap window is keyed on bound versus unbound, not on used versus
+   unused** (decided 2026-09-29, after review of #1127). Any account still
+   unbound 7 days after it was created is reaped, whether or not it signed in
+   again, once it has no live session. The 30-day idle window for an unbound
+   account that signed in again is removed. An account that completes Connect
+   near.ai is bound and is unaffected. Holding the ceiling therefore takes
+   fresh creations every week, at no more than 10 per IP per day.
+   **Closed passkey-origin accounts** (the refuse branch of "Binding to an
+   account that already exists") are also deleted by the S5 reaper, 30 days
+   after they were closed, so they do not accumulate. Both rules are being
+   implemented in #1127.
+P5. **Cookie.** Every account cookie is `__Host-`-prefixed (#1138). This is a
+   one-time sign-out for existing browser sessions.
+P6. **Step-up sessions are short-lived, about 15 minutes**, not 7 days.
+P7. **Binding a stolen unbound token is accepted as specified.** An unbound
+   account holds nothing, and binding attaches it to the binder's own near.ai
+   identity.
+P8. **Passkey removal revokes the sessions that passkey minted, except the
+   session making the request** (#1131).
+P9. **RP origin is a list** (`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN`, comma
+   separated), and the AASA file is served from the community site's own
+   repository (see "Where it is deployed").
+P10. **Two decisions on adjacent #1118 work**, recorded here so they are not
+    lost. The embedded IronWire proof checker (#1128) requires Intel TCB
+    status `UpToDate`, matching the server drill. The invite-lookup pay range
+    (#1121) is shown to code holders only, labelled an estimate that is not yet
+    settled, and is to be listed in the counsel checklist
+    (`docs/legal-counsel-review-checklist.md`); #1121 does not carry that row
+    yet.
+
 ## Repo invariants this design must honor
 
 - PostgreSQL-only; forced RLS through `trace_current_tenant_id()`.
@@ -85,11 +137,11 @@ These are inputs. The spec implements them.
 - Fail-closed with a safe missing-control name.
 - Tenant scoping is auth-derived. No client-supplied account, tenant or
   principal input; the NEAR AI finish body already refuses one at the parse
-  boundary with `deny_unknown_fields` (NP:1050-1068).
+  boundary with `deny_unknown_fields` (`NearAiStartRequest` and `NearAiFinishRequest`).
 - No `ensure_trace_tenant` on a pre-verification, client-supplied tenant
-  (the Slice 1 bug class; see the note at `db/postgres.rs:4110-4116`).
+  (the Slice 1 bug class; see the note near `issue_passkey_session` in `db/postgres.rs`).
 - The unauthenticated surfaces keep the uniform deny, the timing floor and the
-  rate limiter (F:19745-19764, F:19867-19876, F:17460-17477).
+  rate limiter (`passkey_login_generic_deny`, `account_passkey_login_finish_handler`, `native_generic_deny`).
 
 ## Summary of the design
 
@@ -103,7 +155,7 @@ These are inputs. The spec implements them.
 
 The browser routes (`/account/passkey/login/*`, `/v1/account/passkeys/*`) are
 unchanged. The native routes are siblings, not modes, for the same reason the
-NEAR AI ceremony is a sibling of the wallet one (NP:971-981): a mode flag would
+NEAR AI ceremony is a sibling of the wallet one (`near_provisioning.rs`): a mode flag would
 put a branch inside a path that has none.
 
 ## The account's binding state
@@ -120,7 +172,8 @@ put a branch inside a path that has none.
                                   │
             bind/finish (anchor already has an account) ──► closed (see "existing account")
                                   │
-            reaper (unbound past TTL, no live session) ──► deleted
+            reaper (unbound 7 days after creation, no live session) ──► deleted
+            reaper (closed 30 days) ──► deleted
 ```
 
 - **unbound.** Created by passkey `create/finish`. Holds exactly: its tenant
@@ -135,7 +188,8 @@ put a branch inside a path that has none.
   is `bound`, or none of them exist and the state is `unbound`.
 - **bound.** Terminal. There is no unbind. From here the account is an
   ordinary `nearai-` account and every existing rule applies to it.
-- **closed.** Only reached through the existing-account path below.
+- **closed.** Only reached through the existing-account path below. The S5
+  reaper deletes a closed account 30 days after it was closed.
 - **Legacy accounts have no binding row** and are never subject to the
   unbound gate. Absence of a row means "not a passkey-origin account", not
   "unbound". This matters: device-link accounts in `tenant-…` namespaces have
@@ -144,7 +198,7 @@ put a branch inside a path that has none.
 ### Storage (migration M1)
 
 A new table, forced RLS, registered in `TRACE_COMMONS_RLS_TABLES`
-(`db/postgres.rs:173`) and the migration-policy coverage arrays:
+(`db/postgres.rs`) and the migration-policy coverage arrays:
 
 ```
 trace_account_bindings
@@ -166,18 +220,18 @@ database, per the migration-numbering note).
 ### Tenant: created at passkey creation, reused at bind
 
 The tenant is minted at `create/finish`, with the same generator the NEAR AI
-login uses: `random_near_ai_tenant_id()` (`near_account_identity.rs:453-465`),
+login uses: `random_near_ai_tenant_id()` (`near_account_identity.rs`),
 a `nearai-` prefix plus 32 random bytes. It is **not** created at bind. Three
 reasons, each sufficient:
 
 1. **The WebAuthn user handle is the account UUID, and it cannot change.**
    The authenticator stores the user id it was given at registration, and
    login refuses an assertion whose handle differs from the credential's
-   account (F:19967-19973). Minting a new account at bind would strand the
+   account (`account_passkey_login_finish_inner`). Minting a new account at bind would strand the
    passkey. So the account must exist at creation, and an account needs a
    tenant (`trace_accounts` PK and FK, `migrations/V30__trace_accounts.sql`).
 2. **A tenant outside the anchored namespaces is on a different admission
-   path.** `is_anchored_tenant` (`crates/trace-commons-protocol/src/admission.rs:206-222`)
+   path.** `is_anchored_tenant` (`crates/trace-commons-protocol/src/admission.rs`)
    decides which path a request is on by prefix. An unbound account in a
    `nearai-` tenant sits in the namespace that account admission governs, and
    with no anchor and no provisioned device it fails closed there. A new prefix
@@ -190,7 +244,7 @@ At bind, the NEAR AI provisioning writes the anchor **into the existing
 tenant and account** instead of minting either. The V58/V63 tables it writes
 (`trace_near_account_anchors`, `trace_near_provisioned_devices`,
 `device_keys`, `trace_account_principals`) are the same ones the unauthenticated
-provisioning writes today (`db/postgres_account_onboarding.rs:544-573`). Only
+provisioning writes today (`near_ai_login_provision_in_tenant` in `db/postgres_account_onboarding.rs`). Only
 the tenant and account decision differs.
 
 ## Flow 1 — Create a passkey (unauthenticated)
@@ -199,22 +253,22 @@ the tenant and account decision differs.
 
 Unauthenticated. Body: `{ "label": "<optional, <= 64 chars>" }`.
 
-1. Per-IP and global rate limits (new constants beside F:17402-17414), and the
+1. Per-IP and global rate limits (new constants beside `NATIVE_TOKEN_PER_CODE_LIMIT`), and the
    **unbound-account ceiling** (below). Any refusal is `native_generic_deny`
-   (F:17466-17477).
+   (`native_generic_deny`).
 2. `account_webauthn` unconfigured -> uniform deny (as login start does,
-   F:19817-19822).
+   `account_passkey_login_start_handler`).
 3. Draw a fresh `account_id = Uuid::new_v4()`. Call
    `start_passkey_registration(account_id, name, name, None)` with
    `name` = the trimmed label or the fixed `ACCOUNT_PASSKEY_USER_LABEL`
-   (F:18654). The label becomes the name the macOS sheet and the keychain show,
+   (`ACCOUNT_PASSKEY_USER_LABEL`). The label becomes the name the macOS sheet and the keychain show,
    which is what the design's P-2 ("My trace passkey") is for. A user-typed
    label is theirs to show on their own device; the fixed-label rationale at
-   F:18649-18653 was about not leaking an account identifier, which a
+   `ACCOUNT_PASSKEY_USER_LABEL` was about not leaking an account identifier, which a
    user-chosen label is not.
 4. Store `CeremonyState::NativeCreate { reg_state, account_id, label }` under a
-   new ceremony id in the in-process store (`account_passkey.rs:90`, TTL
-   `CEREMONY_TTL` = 3 minutes at `account_passkey.rs:65`).
+   new ceremony id in the in-process store (`account_passkey.rs`, TTL
+   `CEREMONY_TTL` = 3 minutes at `account_passkey.rs`).
 5. Return `{ ceremony_id, expires_in_secs, public_key: CreationChallengeResponse }`
    with `Cache-Control: no-store`. **No row is written anywhere.** An abandoned
    ceremony costs one in-memory entry until its TTL.
@@ -222,11 +276,11 @@ Unauthenticated. Body: `{ "label": "<optional, <= 64 chars>" }`.
 ### `POST /v1/account/native/passkey/create/finish`
 
 Unauthenticated. Timing floor over the whole handler, as `native_token_handler`
-does (F:17584-17596). Body:
+does (`native_token_handler`). Body:
 `{ "ceremony_id", "credential": RegisterPublicKeyCredential }`. The label is
 not accepted here; it was fixed at start.
 
-1. Rate limits; per-ceremony-id ceiling (as F:17627-17632 does for codes).
+1. Rate limits; per-ceremony-id ceiling (as `native_token_inner` does for codes).
 2. `take` the ceremony (single use). It must be the `NativeCreate` variant; a
    browser `Registration` or `DiscoverableAuthentication` entry is refused, so
    a ceremony started on one surface can never be finished on the other.
@@ -242,7 +296,7 @@ not accepted here; it was fixed at start.
    Writing the tenant here is not the Slice 1 bug: the tenant id is
    server-minted from the OS RNG after the attestation verified, never
    client-supplied.
-6. Return the same shape as `NativeTokenResponse` (F:17447-17458) plus
+6. Return the same shape as `NativeTokenResponse` plus
    `"binding_state": "unbound"`. The raw token appears only in this body.
 
 `credential_id` is globally unique (`V32`), so a replayed attestation fails
@@ -252,36 +306,36 @@ the insert even if the ceremony store were bypassed.
 
 ### `POST /v1/account/native/passkey/login/start`
 
-Identical to `account_passkey_login_start_handler` (F:19796-19860) except the
+Identical to `account_passkey_login_start_handler` except the
 ceremony is stored as `CeremonyState::NativeDiscoverable` and the id is
 returned in the body (`{ ceremony_id, expires_in_secs, public_key }`) instead of
-a cookie. No timing floor, for the reason given at F:19800-19804.
+a cookie. No timing floor, for the reason given in that handler's comments.
 
 ### `POST /v1/account/native/passkey/login/finish`
 
 Body `{ ceremony_id, credential: PublicKeyCredential }`. The verification is
-`account_passkey_login_finish_inner` (F:19880-20006) step for step: rate
+`account_passkey_login_finish_inner` step for step: rate
 limits, single-use take (variant must be `NativeDiscoverable`), identify, the
-per-credential ceiling (F:19931-19938), `resolve_credential_tenant` on the
-narrow resolver with no tenant write (F:19940-19946), load under RLS, the
-handle binding check (F:19967-19973), `finish_discoverable_authentication`
-with its counter check, the counter update. It should be factored so both
-handlers share that core and differ only in how the ceremony is recovered and
-what is issued; two copies of a login verifier are two places for the checks
-to drift.
+per-credential ceiling (`account_passkey_login_finish_inner`), `resolve_credential_tenant` on the
+narrow resolver with no tenant write (`account_passkey_login_finish_inner`), load under RLS, the
+handle binding check (`account_passkey_login_finish_inner`), `finish_discoverable_authentication`
+with its counter check, the counter update. It is factored so both
+handlers share that core (`verify_discoverable_passkey_assertion`, built in
+#1131) and differ only in how the ceremony is recovered and what is issued;
+two copies of a login verifier are two places for the checks to drift.
 
 What is issued differs:
 
 - `client_kind = 'native'` (`NATIVE_SESSION_CLIENT_KIND`,
-  `account_native_auth.rs:75`), **not** `'passkey'`. That is decision 3, and it
+  `account_native_auth.rs`), **not** `'passkey'`. That is decision 3, and it
   is also what makes the token resolvable at all: `resolve_account_ctx_native`
-  refuses any session row whose `client_kind` is not `'native'` (F:16032-16034)
-  and pins the resulting context weak (F:16005-16008, F:16058).
-- TTL `NATIVE_SESSION_TTL_HOURS` = 12 (`account_native_auth.rs:68`).
+  refuses any session row whose `client_kind` is not `'native'` (`resolve_account_ctx_native`)
+  and pins the resulting context weak (`resolve_account_ctx_native`).
+- TTL `NATIVE_SESSION_TTL_HOURS` = 12 (`account_native_auth.rs`).
 - `auth_credential_id = credential_id`, so the passkey list can mark
-  `this_device`. `resolve_account_ctx_native` currently drops it
-  (`auth_credential_id: None`, F:16057); it should carry the session row's
-  value. The id is public (F:18889-18890).
+  `this_device`. `resolve_account_ctx_native` used to drop it
+  (`auth_credential_id: None`); #1131 now carries the session row's
+  value. The id is public (`account_passkey_register_finish_handler`).
 - Audit `account_passkey_native_login` `{ "client_kind": "native" }`.
 - Response: the `NativeTokenResponse` shape plus `binding_state`
   (`unbound`, `bound`, or `legacy` for an account with no binding row).
@@ -289,7 +343,7 @@ What is issued differs:
 ### Why no PKCE here
 
 The loopback flow needs PKCE because its code travels over a redirect that any
-local process can race (`account_native_auth.rs:22-38`). Here the credential
+local process can race (`account_native_auth.rs` module docs). Here the credential
 is the assertion itself, and the token comes back in the HTTP response body to
 the caller that sent the assertion. There is no second channel to intercept.
 
@@ -299,7 +353,7 @@ The cookie in the browser flow binds a ceremony to the browser that started
 it. The native replacement binds it to the challenge:
 
 - The ceremony id is a 160-bit CSPRNG value (`new_ceremony_id`,
-  `account_passkey.rs:113`), returned in the start body and presented in the
+  `account_passkey.rs`), returned in the start body and presented in the
   finish body.
 - The stored state holds the challenge; `webauthn-rs` refuses a response whose
   `clientDataJSON.challenge` differs. Holding the id without an authenticator
@@ -322,16 +376,23 @@ A passkey-minted native session **is** a `trace_sessions` row with
 `client_kind='native'`, so it inherits everything that governs `tcn1_` today:
 
 - **Rotation-on-use**, handed back in `ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER`
-  (F:17394-17395) by `account_auth_middleware` (F:15875-15896).
-- **Logout** revokes exactly that row (F:18553-18558); **revoke-all** revokes
+  (`ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER`) by `account_auth_middleware`.
+- **Logout** revokes exactly that row (`account_logout_handler`); **revoke-all** revokes
   every session of the account.
 - **The idle cap and absolute expiry** in `validate_session`.
 
-One addition: removing a passkey (`DELETE /v1/account/passkeys/{id}`) should
-also revoke the account's live sessions whose `auth_credential_id` is that
-credential. Slice 2 did not tie these together (its residual risk 5); a native
-session minted by a now-removed passkey outliving the removal is the case where
-it matters most.
+One addition, built in #1131: removing a passkey
+(`DELETE /v1/account/passkeys/{id}`) also revokes, in the same transaction,
+the account's live sessions whose `auth_credential_id` is that credential,
+browser `passkey` cookies and native `tcn1_` tokens alike, **except the session
+that makes the removal request**. Slice 2 did not tie these together (its
+residual risk 5); a native session minted by a now-removed passkey outliving
+the removal is the case where it matters most. The caller is spared so the
+request that removes a passkey is not itself cut off mid-response; it is
+identified by the token hash its request presented, matched against the
+session's current or within-grace previous hash. Sessions with no recorded
+credential (loopback native, NEAR AI provisioning, device-link `web`, legacy
+rows) are left alone.
 
 **Renewal.** A 12-hour token means a Touch ID prompt when it lapses. For a
 **bound** account the daemon can renew silently the way it does today, by
@@ -345,28 +406,31 @@ watch until it is bound.
 
 A native session is weak, and a passkey-origin account always holds at least
 one strong authenticator (its passkey), so the Slice 3a gate
-(`require_authenticator_change_allowed`, F:18675-18704) refuses every
+(`require_authenticator_change_allowed`) refuses every
 authenticator change and every payout change from it
-(payout: F:19563-19564). No new check is needed for that.
+(payout: `account_near_identity_payout_handler`). No new check is needed for that.
 
-The step-up path is a **browser** passkey sign-in: the app opens a page on an
+The step-up path is a **browser** passkey sign-in, and the session it mints is
+short-lived, about **15 minutes** (decided 2026-09-29), not the 7 days of an
+ordinary browser session: the app opens a page on an
 allowed RP origin (in `ASWebAuthenticationSession` or the default browser),
 the page runs the existing `/account/passkey/login/{start,finish}` ceremony,
-which mints a strong `client_kind='passkey'` cookie session (F:20013-20037),
+which mints a strong `client_kind='passkey'` cookie session (`account_passkey_login_finish_inner`),
 and the change is made there through the existing routes. The native token is
 never upgraded; nothing crosses from the browser session into the app.
 
-**That page does not exist.** No file in the repo calls
-`navigator.credentials`. Slice S7 below builds a minimal one, served by ingest.
-Until it ships, a passkey-origin account cannot change authenticators or
-payout at all, which fails closed.
+**That page is S7** (#1136): a minimal page served by ingest, at
+`/account/step-up`. No file in the repo called `navigator.credentials` before
+it. Until S7 ships, a passkey-origin account cannot change authenticators or
+payout at all, which fails closed. The URL contract for the native client is in
+`docs/operator/native-step-up-page.md`.
 
 ### Adding a passkey to a signed-in account
 
 `POST /v1/account/passkeys/native/register/{start,finish}`, behind
 `account_auth_middleware`, is the existing authenticated registration
-(F:18725-18892) with the body-borne ceremony id instead of the cookie. It keeps
-the Slice 3a gate on both halves (F:18731-18733, F:18831-18833), so a weak
+(`account_passkey_register_start_handler` and `account_passkey_register_finish_handler`) with the body-borne ceremony id instead of the cookie. It keeps
+the Slice 3a gate on both halves (`account_passkey_register_start_handler`, `account_passkey_register_finish_handler`), so a weak
 native session can add the **first** strong authenticator (the carve-out) and
 nothing after that. This is what a contributor who signed in with near.ai
 first uses to add a passkey, and what "Other sign-in options" needs in
@@ -379,9 +443,9 @@ reverse. It is refused for unbound accounts (one passkey per unbound account).
 The bind proves that the holder of this passkey account also holds a live
 NEAR AI session for subject S, by the same means the existing provisioning
 uses: the commons introspects a NEAR AI access token
-(`near_ai_login.rs`, `introspect_login` called at NP:1230-1236), bound to a
+(`near_ai_login.rs`, `introspect_login` called at `near_ai_finish`), bound to a
 server nonce, a PKCE challenge and a device signature over
-`near_ai_provisioning_device_bytes` (`crates/trace-commons-protocol/src/onboarding.rs:232-252`).
+`near_ai_provisioning_device_bytes` (`crates/trace-commons-protocol/src/onboarding.rs`).
 near.ai verifies nothing about the passkey, and the passkey does not sign
 anything for near.ai. After the bind, S's anchor names this account, so a
 later NEAR AI sign-in on any Mac lands in it.
@@ -390,13 +454,13 @@ later NEAR AI sign-in on any Mac lands in it.
 
 Behind `account_auth_middleware`, native token only (a cookie session is
 refused: the device key lives in the daemon). Body is `NearAiStartRequest`
-(NP:1042-1048). Refused with `account_already_bound` unless the account's
+(`NearAiStartRequest`). Refused with `account_already_bound` unless the account's
 binding row is `unbound`. Otherwise identical to `near_ai_start`
-(NP:1091-1143), with two differences:
+(`near_ai_start`), with two differences:
 
 - The stored pending row carries `purpose: "bind"` and the caller's
   `(tenant_id, account_id)`. The row lives in the same ceremony table
-  (`store_ceremony_payload`, `db/postgres_account_onboarding.rs:198-214`).
+  (`store_ceremony_payload`, `db/postgres_account_onboarding.rs`).
 - The device signs a **bind** preimage, a new
   `near_ai_bind_device_bytes` in the protocol crate with its own domain string
   (`trace_commons.near_ai_bind_device.v1`) and the account id as an extra
@@ -409,18 +473,18 @@ Audit `account_binding_started` `{}`.
 
 ### `POST /v1/account/near-ai/provision/bind/finish`
 
-Behind `account_auth_middleware`. Body is `NearAiFinishRequest` (NP:1058-1068),
+Behind `account_auth_middleware`. Body is `NearAiFinishRequest`,
 unchanged, still `deny_unknown_fields`: the account comes from the session, not
-the body. Every check of `near_ai_finish` (NP:1166-1236) runs in the same
+the body. Every check of `near_ai_finish` runs in the same
 order: bounds, single-use take, PKCE, device key match, device signature (bind
 preimage), then introspection last. Additionally the pending row's
 `(tenant_id, account_id)` must equal the session's; a bind ceremony started by
 account A cannot be finished by account B.
 
 Then the anchor decides, under the existing race handling
-(`provision_against_anchor`, `db/postgres_account_onboarding.rs:333-362`, which
+(`provision_against_anchor`, `db/postgres_account_onboarding.rs`, which
 takes a `pg_advisory_xact_lock` on the anchor and relies on the global
-`UNIQUE (anchor_hash)`, lines 534-561):
+`UNIQUE (anchor_hash)` in `near_ai_login_provision_in_tenant`):
 
 **(a) The anchor is unclaimed: bind in place.** One transaction in the
 account's own tenant: insert the anchor (`identity_source='near_ai_login'`)
@@ -428,16 +492,16 @@ for **this** account, claim the device key (`near_ai` origin), link the
 principal, insert the provisioned-device row, insert a fresh native session,
 flip the binding row to `bound` with `bound_at = now()`, and audit
 `account_bound` `{ "identity": "near_ai_login" }`. This is
-`near_ai_login_provision_in_tenant` (lines 515-581) with the tenant and
+`near_ai_login_provision_in_tenant` with the tenant and
 account supplied instead of minted: the `SELECT … existing` / `INSERT
-trace_accounts` branch (lines 544-562) becomes "use the given account", and
+trace_accounts` branch becomes "use the given account", and
 everything after it is shared. If `ON CONFLICT (anchor_hash) DO NOTHING`
 reports the anchor was claimed meanwhile, the transaction rolls back and the
 handler takes path (b).
 
 **(b) The anchor already belongs to account X.** See the next section.
 
-Response: the provisioning shape (NP:1253-1257) plus
+Response: the provisioning shape (`near_ai_finish`) plus
 `"outcome": "bound" | "existing_account"` and `binding_state`.
 
 ### Binding to an account that already exists (decision 4)
@@ -460,11 +524,11 @@ So:
 
 - **X has one or more active strong authenticators: refuse to move the
   passkey.** A NEAR AI login alone must not add an authenticator to an account
-  that already has one; that is exactly what the gate at F:18675-18704 exists
+  that already has one; that is exactly what the gate at `require_authenticator_change_allowed` exists
   to stop. P is closed (binding `closed`, sessions revoked, credential
   revoked). The response still carries X's native session: the NEAR AI login
   proved X, and the existing unauthenticated provisioning grants that session
-  on the same proof today (NP:1237-1257), so this confers nothing new. The app
+  on the same proof today (`near_ai_finish`), so this confers nothing new. The app
   tells the contributor the passkey was not added and that they can add one
   from the account's existing passkey (browser step-up).
 - **X has zero strong authenticators: fold P's passkey into X** (slice S6).
@@ -480,7 +544,7 @@ So:
     same way the resolver does (Slice 2, "Resolver extension").
   - **A stored user handle.** The moved passkey's handle is P's UUID, and the
     login check compares the handle with the credential's account
-    (F:19967-19973). Add `trace_webauthn_credentials.user_handle UUID NULL`,
+    (`account_passkey_login_finish_inner`). Add `trace_webauthn_credentials.user_handle UUID NULL`,
     set on the moved row to P's UUID, and compare against
     `COALESCE(user_handle, account_id)`. The check keeps its purpose (the
     handle must match what was bound at registration); it just stops assuming
@@ -506,10 +570,11 @@ attached to P and stranded when P closes.
 
 **Decision: Cancel signs out and leaves the unbound account inert.** Server
 side, Cancel is the existing `POST /v1/account/logout` with the native token
-(F:18553-18558), and the app deletes its stored token. The account, its
+(`account_logout_handler`), and the app deletes its stored token. The account, its
 passkey and its binding row stay `unbound`. Signing in again with the passkey
-returns to the Verify step. A reaper deletes unbound accounts that stay unbound
-and unused past a TTL (slice S5).
+returns to the Verify step. A reaper deletes an account that is still unbound 7
+days after creation and has no live session, and a closed account 30 days
+after it was closed (slice S5, P4 above).
 
 Why inert rather than deleted:
 
@@ -519,7 +584,7 @@ Why inert rather than deleted:
   lives in the contributor's keychain. Deleting the server row turns the next
   "Use existing passkey" into a uniform deny with no explanation. Inert keeps
   the passkey meaningful; the reaper produces the same dead credential, but
-  only after a long idle period rather than on a tap of Cancel.
+  only after a week rather than on a tap of Cancel.
 - **Nothing is half-linked either way.** An unbound account holds no anchor,
   device, principal or grant, so there is nothing to unwind. "No half-linked
   accounts" is guaranteed by the single bind transaction, not by Cancel.
@@ -541,7 +606,7 @@ Allowed while unbound:
 
 | Route | Why |
 |---|---|
-| `GET /v1/account/contribution-status` | answers `account_identity_unlinked` (the existing `AdmissionRefusal` label, `admission.rs:792-797`), so the client's R3 check stays on |
+| `GET /v1/account/contribution-status` | answers `account_identity_unlinked` (the existing `AdmissionRefusal` label, `admission.rs`), so the client's R3 check stays on |
 | `GET /v1/account/passkeys`, `PATCH /v1/account/passkeys/{id}` | see and rename its one passkey |
 | `POST /v1/account/logout`, `POST /v1/account/sessions/revoke-all` | Cancel and sign-out |
 | `POST /v1/account/near-ai/provision/bind/{start,finish}` | the only way forward |
@@ -549,7 +614,7 @@ Allowed while unbound:
 
 Refused while unbound, among others: invites and legacy-link redeem, the
 inference-connection routes, the reward reservation routes
-(`rewards.rs:48-67`, which consume finite offers), NEAR wallet enroll and
+(`rewards.rs`, which consume finite offers), NEAR wallet enroll and
 payout, merge, passkey add and remove, traces and credit (empty anyway).
 
 The gate reads the binding row inside the request's tenant transaction. A read
@@ -565,20 +630,42 @@ create unbound accounts at the rate the limits allow. What can they consume?
 
 | Resource | Exposure | Bound |
 |---|---|---|
-| Ceremony memory | one entry per `create/start` | per-IP and global limits, 3-minute TTL, single-host store (`account_passkey.rs:12-22`) |
+| Ceremony memory | one entry per `create/start` | per-IP and global limits, 3-minute TTL, single-host store (`account_passkey.rs` module docs) |
 | Database rows | tenant, account, binding, credential, session, audit per `create/finish` | per-IP and global limits on finish; the **unbound ceiling**; the reaper |
 | Uploads, admission | none | no device key and no anchor: admission in `nearai-` fails closed; the gate refuses the routes |
 | Credit, trust | none | trust facts come only from accepted submissions (earned-trust spec, "Facts, not scores"), which need a bound account |
 | Invites, rewards, inference funding | none | unbound gate |
-| NEAR AI introspection (outbound) | one call per bind attempt | bind requires a live NEAR AI token and a device signature before introspection runs (NP:1226-1229); existing `limited()` and per-ceremony limits (NP:1172, NP:1190) |
+| NEAR AI introspection (outbound) | one call per bind attempt | bind requires a live NEAR AI token and a device signature before introspection runs (`near_ai_finish`); existing `limited()` and per-ceremony limits (`near_ai_finish`) |
 
 **The unbound ceiling.** A new config value,
 `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`: when the count of `unbound`
 rows reaches it, `create/start` and `create/finish` refuse with the uniform
 deny, and ingest logs the label `unbound_account_ceiling_reached` once per
 crossing. Unset means passkey creation is **disabled** (fail closed), so a
-deployment opts in with a number. The count is a cross-tenant read, so it goes
+deployment opts in with a number. The pilot's is 5,000. The count is a cross-tenant read, so it goes
 through a definer function or the resolver role, not the runtime pool.
+
+**What holds the ceiling down, and what it costs.** The ceiling can be held
+full on purpose, so what matters is the price of doing it:
+
+- The per-IP daily cap (at most 10 creations per IP per day) means filling
+  5,000 in a day takes about 500 source IPs, against about 9 minutes with no
+  cap.
+- The reaper is keyed on bound versus unbound (P4), so signing in
+  again, or presenting the creation token after the first hour, does not move
+  an account into a longer window. Every unbound account is gone 7 days after
+  creation once it has no live session, so an attacker with a proxy pool must
+  make fresh creations every week to keep the ceiling full; a single sign-in
+  does not buy an account a longer life.
+- Closed passkey-origin accounts leave both the ceiling count (which counts
+  `unbound` rows) and, without the closed-account rule, the reaper. The reaper
+  deletes them 30 days after closing, so they do not accumulate without bound.
+- **Limits of the per-IP key** (found in review of #1131). The key is the
+  leftmost `X-Forwarded-For` hop. That is safe on the pilot only because the
+  reverse proxy (Caddy) overwrites the header, so an operator must keep that
+  true: a deployment whose proxy appends to a client-supplied header lets the
+  client choose its own key. IPv6 addresses are not grouped by /64, so one
+  IPv6 allocation can present many keys.
 
 **The sybil unit does not change.** Earned trust's sybil analysis ("Sybil
 accounts" in the earned-trust spec) counts anchored NEAR accounts: each is one
@@ -595,12 +682,12 @@ nothing in this design is a trust fact.
 Bind accepts a NEAR AI token on the same terms as the existing provisioning,
 so it inherits that path's exposure and adds none. Today, anyone holding a
 live NEAR AI access token for S can provision their own device into S's
-account (NP:1230-1257), receive a weak native session, and, if S's account
+account (`near_ai_finish`), receive a weak native session, and, if S's account
 has no strong authenticator, add the first one through the carve-out. With
 bind, the same attacker could instead bind S's anchor to a passkey account
 they created: S would later sign in with near.ai and land in an account where
 the attacker holds a passkey. That is the same outcome as the existing path.
-Neither path logs, stores or returns the token (NP:1065-1067,
+Neither path logs, stores or returns the token (`NearAiFinishRequest`,
 `near_ai_login.rs` module docs), and the token is short-lived. If NEAR AI later
 offers a sender-constrained or audience-bound token, both paths should adopt
 it together.
@@ -623,40 +710,46 @@ Apple's CDN. That host must be the RP ID exactly, and the file must be:
 ```
 
 The bundle id in the tree is `ai.tracecommons.shell`
-(`macos/scripts/info-plist.sh:58`). The Team ID is the one in the Developer
+(`macos/scripts/info-plist.sh`). The Team ID is the one in the Developer
 ID certificate that `make-release-dmg.sh` signs with (`MACOS_SIGNING_IDENTITY`,
-`macos/scripts/make-release-dmg.sh:39-40`). It is not a secret: every signed
+`macos/scripts/make-release-dmg.sh`). It is not a secret: every signed
 binary carries it.
 
 ### Where it is deployed
 
-The apex `tracecommons.ai` is the community site on Cloudflare Pages
-(`community/wrangler.toml`, `community/public`); ingest is
-`ingest.tracecommons.ai` (`community/public/_worker.js:1`). So the file lives
-in the Pages project:
+The apex `tracecommons.ai` is the community site, on Cloudflare Pages; ingest
+is `ingest.tracecommons.ai`. The community site's source lives in the
+**`trace-commons-community` repository**, and that repository, not this one, is
+where the association file is deployed from. #1124 first built the pieces
+below under `community/` in this repository and is being moved to the
+community repository. The design is unchanged by the move:
 
-- `community/public/.well-known/apple-app-site-association`, rendered at
-  deploy time from `TC_APPLE_TEAM_ID` and `TC_MACOS_BUNDLE_ID` (default
-  `ai.tracecommons.shell`) by a step the `deploy:pages` script runs before
-  `wrangler pages deploy`. With `TC_APPLE_TEAM_ID` unset the step writes no
-  file and the deploy says so: no association means the app's passkey calls
-  fail, which is closed.
-- `community/scripts/check-community-site.mjs` validates the rendered file's
-  shape (one `webcredentials.apps` entry matching `^[A-Z0-9]{10}\.`).
-- **`_worker.js` must answer this path itself.** `serveAsset`
-  (`_worker.js:55-68`) falls back to `index.html` with `200` for any `GET`
-  404 whose last segment has no dot. `apple-app-site-association` has no dot,
-  so a missing file would be served as the site's HTML with a `200`. The worker
-  should route `/.well-known/*` before that fallback: return the asset with an
-  explicit `content-type: application/json`, or a real `404`. Setting the
-  header in the worker rather than relying on `_headers` removes any question
-  about whether `_headers` applies to responses from an advanced-mode worker.
-- A deploy smoke: `curl -sS -D - https://tracecommons.ai/.well-known/apple-app-site-association`
+- an association file rendered at deploy time from `TC_APPLE_TEAM_ID` and
+  `TC_MACOS_BUNDLE_ID` (default `ai.tracecommons.shell`), served at
+  `/.well-known/apple-app-site-association`, by a step the `deploy:pages`
+  script runs before `wrangler pages deploy`. With `TC_APPLE_TEAM_ID` unset the
+  step writes no file and the deploy says so: no association means the app's
+  passkey calls fail, which is closed. For the native launch deploy set
+  `TC_AASA_REQUIRED=1` so an unset Team ID stops the deploy.
+- a check script that validates the rendered file's shape (one
+  `webcredentials.apps` entry matching `^[A-Z0-9]{10}\.`).
+- **The Pages worker must answer this path itself.** `serveAsset` falls back
+  to `index.html` with `200` for any `GET` 404 whose last segment has no dot.
+  `apple-app-site-association` has no dot, so a missing file would be served as
+  the site's HTML with a `200`. The worker routes `/.well-known/*` before that
+  fallback: it returns the asset with an explicit `content-type:
+  application/json`, or a real `404`. Setting the header in the worker rather
+  than relying on `_headers` removes any question about whether `_headers`
+  applies to responses from an advanced-mode worker.
+- a deploy smoke: `curl -sS -D - https://tracecommons.ai/.well-known/apple-app-site-association`
   must show `200`, `content-type: application/json`, no `location`, and the
   expected app id.
 
+The Team ID is `KXSWJN7WY8` (Iqlusion Inc, decided 2026-09-28), so the app id
+is `KXSWJN7WY8.ai.tracecommons.shell`. It is not a secret.
+
 If the RP ID were ever `ingest.tracecommons.ai`, ingest would serve the file
-instead, from an unauthenticated route beside `/v1/source` (F:7726). The
+instead, from an unauthenticated route beside `/v1/source` (in `app`). The
 recommendation below keeps it on the apex.
 
 ### The RP ID, and whether it changes
@@ -667,16 +760,16 @@ to be true.
 
 What the tree says the pilot runs:
 
-- `deploy/pilot-gcp/ingest.env.template:170-172` sets
+- `deploy/pilot-gcp/ingest.env.template` sets
   `TRACE_COMMONS_WEBAUTHN_RP_ID=${TC_PUBLIC_HOST}` and
   `RP_ORIGIN=https://${TC_PUBLIC_HOST}`.
-- `docs/operator/pilot-gcp-deployment.md:120` sets `TC_PUBLIC_HOST=tracecommons.ai`.
+- `docs/operator/pilot-gcp-deployment.md` sets `TC_PUBLIC_HOST=tracecommons.ai`.
 
 So **if the pilot was deployed from the template, its RP ID is already
 `tracecommons.ai` and nothing changes.** This spec cannot confirm that: the
 pilot's configuration lives in the running process's environment, not in the
 tree. Changing the RP ID invalidates every existing passkey
-(`docs/operator/deployment.md:220`; `config.rs:181-183`).
+(`docs/operator/deployment.md`; `WebauthnConfig` in `config.rs`).
 
 Options, if the live value differs:
 
@@ -694,6 +787,13 @@ Options, if the live value differs:
 **Recommendation:** option 1, then set the RP ID to `tracecommons.ai` if it
 is not already.
 
+**Resolved (S0, 2026-09-28).** The running ingest process's environment has
+`TRACE_COMMONS_WEBAUTHN_RP_ID=tracecommons.ai` and
+`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://tracecommons.ai`. The RP ID already
+matches, so no RP change is needed and no existing passkey is invalidated; the
+count only mattered for an RP change and was skipped. #1137 pins the env
+template's RP ID to the apex so a fresh deployment cannot differ.
+
 ### Origins
 
 `webauthn-rs` checks `clientDataJSON.origin` against the configured origins.
@@ -708,22 +808,39 @@ Three origins matter:
   origin* from `RP_ORIGIN`.
 - **The apex**, if a page there ever runs a ceremony.
 
-So `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` becomes a comma-separated list, the first
+So `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` is a comma-separated list (built in
+#1131), the first
 entry passed to `WebauthnBuilder::new` and the rest to
 `append_allowed_origin` (present in the pinned `webauthn-rs` 0.5.5,
-`src/lib.rs:332`). `allow_subdomains(true)` is **not** used: it would accept
-any future subdomain, including one served by a third party.
+`src/lib.rs`). `allow_subdomains(true)` is **not** used: it would accept
+any future subdomain, including one served by a third party. Every entry must
+be the RP ID host or a subdomain of it, or startup fails, because `webauthn-rs`
+checks only the primary. The pilot's list must gain the step-up page's origin:
+`https://tracecommons.ai,https://ingest.tracecommons.ai`. Without the second
+entry the page loads but every sign-in there gets the uniform deny.
 
 ### Client prerequisites (not server work)
 
 - The app needs the `com.apple.developer.associated-domains` entitlement with
   `webcredentials:tracecommons.ai`, which requires a real Team signature and an
   embedded provisioning profile. Development bundles are ad-hoc signed
-  (`macos/scripts/make-app-bundle.sh:171-183`), and the release signing script
-  has never run (`macos/scripts/make-release-dmg.sh:55-62`). **Nothing
+  (`macos/scripts/make-app-bundle.sh`), and the release signing script
+  has never run (`macos/scripts/make-release-dmg.sh`). **Nothing
   passkey-related can be exercised end to end until a signed build with that
   entitlement exists.** Apple's `?mode=developer` association can shorten the
   CDN cache during development.
+- **Pin C1 to `ASAuthorizationPlatformPublicKeyCredentialProvider`.** Do not
+  offer the security-key provider. Creation does not require a resident
+  (discoverable) key, so a security key can make a credential that cannot be
+  found by the discoverable sign-in this design uses: an account that can never
+  sign in again. The platform provider creates discoverable credentials.
+- **Deploy gate.** S3 and every later slice must not be deployed until C1's
+  signed-build check passes: a build signed with the associated-domains
+  entitlement, run against a staging ingest, records the
+  `clientDataJSON.origin` Apple sends and shows it equals an entry in the
+  origin list. Apple-side Associated Domains is now granted and a Developer ID
+  provisioning profile exists (2026-09-29); signing the app with the entitlement
+  is not done, so the gate is not yet met.
 - The Tauri app is not in scope (decision 5).
 
 ## Audit
@@ -739,14 +856,14 @@ AI subject or provider label.
 | `account_binding_started` | `{}` | bind/start |
 | `account_bound` | `{ "identity": "near_ai_login" }` | bind/finish (a) |
 | `account_binding_refused` | `{ "reason": "anchor_claimed_strong" \| "anchor_claimed" }` | bind/finish (b), in P's tenant |
-| `near_ai_login_provisioned` | existing shape (`db/postgres_account_onboarding.rs:573`) | bind/finish (b), in X's tenant |
+| `near_ai_login_provisioned` | existing shape (`near_ai_login_provision_in_tenant`) | bind/finish (b), in X's tenant |
 | `account_passkey_folded` | `{ "authenticators_moved": 1 }` | S6, both tenants |
 | `account_unbound_gate_denied` | `{}` | the gate |
 
 Nothing is written for an abandoned or failed create or login: there is no
 tenant to write it under, which is the "no account row for abandoned
 ceremonies" property. Failed unauthenticated attempts stay invisible, as the
-existing login is (F:19737-19742).
+existing login is (`passkey_login_generic_deny`).
 
 **The reaper cannot audit into the tenant it deletes** (the cascade removes
 the row). It reports counts in its worker response and one label-only log line
@@ -764,7 +881,7 @@ per run.
    a route added later is refused for unbound accounts unless someone adds it.
 3. **Weak native sessions.** Passkey-minted native tokens are weak like every
    `tcn1_`: a stolen one can read and withdraw
-   (`account_native_auth.rs:70-75`), not change authenticators or payout. This
+   (see `NATIVE_SESSION_CLIENT_KIND` in `account_native_auth.rs`), not change authenticators or payout. This
    is unchanged risk for bound accounts and less for unbound ones, which cannot
    withdraw what they never submitted.
 4. **Ceremony binding moves from a cookie to the challenge.** See "Ceremony
@@ -777,10 +894,41 @@ per run.
    the app shows an error. A wrong `200` HTML body (the worker fallback) is the
    failure worth guarding, hence the worker route and the smoke.
 7. **RP ID change** is a one-time, operator-visible loss of existing passkeys,
-   decided under "Decisions needed".
+   settled by S0 (see "Decisions").
 8. **Single-host ceremony store.** The native ceremonies use the in-process
-   store, with the limitation documented at `account_passkey.rs:12-22`. The
+   store, with the limitation documented in the `account_passkey.rs` module docs. The
    bind ceremony is in the database already.
+9. **Synced passkeys and iCloud Keychain.** Passkey attestation is `none` and
+   the server accepts backup-eligible (synced) credentials. A platform passkey therefore lives in the
+   contributor's iCloud Keychain, and whoever compromises that Keychain, or the
+   Apple ID behind it, holds the passkey with its full power: a native or
+   browser sign-in, and on a bound account the browser step-up that changes
+   authenticators and payout. This is the exposure of any synced passkey. It is
+   **accepted residual risk**: nothing server-side can distinguish a stolen
+   synced credential from its owner, and recovery is authenticator-only by
+   design (Slice 2). The 15-minute step-up session limits how long a stolen
+   step-up lasts, not whether it can be obtained.
+
+## Invariants for the native routes and the ingest origin
+
+Two rules that nothing in the code enforces today, so a later change can break
+them without a test failing. They are decided invariants, not options.
+
+1. **Never add CORS to `/v1/account/native/passkey/*`.** The native origin
+   Apple reports equals the web origin (`https://tracecommons.ai`, see
+   "Origins"), so nothing server-side can tell a native assertion from a
+   browser one. What keeps a web page from driving these unauthenticated routes
+   and reading their responses (which carry the `tcn1_` token in the body) is
+   the browser's same-origin policy. A CORS allowance on these routes removes
+   that, and the routes have no cookie for `SameSite` to protect.
+2. **Keep a strict CSP on any page served from the ingest origin.**
+   `https://ingest.tracecommons.ai` is an allowed WebAuthn origin (S7 needs it).
+   Script running on any allowed origin can run a ceremony and call these
+   routes same-origin. The S7 page ships with `default-src 'none'`, its one
+   script and style pinned by hash, no `unsafe-inline`, `frame-ancestors
+   'none'` and Trusted Types required. Any later page on the ingest origin
+   must carry a CSP at least that strict, and must not add a third-party
+   script.
 
 ## Proposed copy (needs Zaki's approval)
 
@@ -793,7 +941,7 @@ replacements; none of these should ship without approval.
 | P-1 | "A passkey is your sign-in for Trace Commons and near.ai." | the passkey does not sign in to near.ai (post-cut-off in #1118) | "A passkey is how you sign in to Trace Commons on this Mac. Nothing about your sessions is sent by signing in." |
 | P-2 | "Losing it means losing access to your account and any credit in it." | once near.ai is connected, a NEAR AI sign-in reaches the same account; before that the account holds no credit | "Until you connect near.ai, this passkey is the only way back into this account. After that, signing in with near.ai works too." |
 | P-5 title | "Verify your passkey" | nothing verifies the passkey here | "Connect near.ai" |
-| P-5 body | "Sign a message to prove the passkey is yours and unlock contributing and credit." | the step is a near.ai sign-in, not a signature | "Sign in to near.ai to connect it to this account. That unlocks contributing and credit. Trace Commons keeps no email or name from near.ai." (true: introspection keeps only the subject id and a provider label, `near_ai_login.rs:62-90`) |
+| P-5 body | "Sign a message to prove the passkey is yours and unlock contributing and credit." | the step is a near.ai sign-in, not a signature | "Sign in to near.ai to connect it to this account. That unlocks contributing and credit. Trace Commons keeps no email or name from near.ai." (true: introspection keeps only the subject id and a provider label, `near_ai_login.rs`) |
 | P-5 buttons | "Verify" / "Cancel" | | "Continue to near.ai" / "Not now" |
 | P-5 footnote | "Cancelling signs you out." | | "Not now signs you out. Your passkey keeps working, and you can connect near.ai next time." |
 | Lane | "near.ai verifies the signature · account linked" | near.ai verifies no signature | "near.ai sign-in checked · account connected" |
@@ -805,15 +953,20 @@ replacements; none of these should ship without approval.
 
 Each slice is independently shippable and leaves `main` safe with the
 following slices absent. Server slices first; the client work cannot be
-exercised without S2, S3 and S4 and a signed build.
+exercised without S2, S3 and S4 and a signed build. The slices are built as a
+stack, so they merge top-down, head PR first. **Do not deploy S3 or a later
+slice until C1's signed-build `clientDataJSON.origin` check passes** (see
+"Client prerequisites").
 
 ### S0 — Confirm the pilot RP (operator, no code)
 
-Read the running ingest's `TRACE_COMMONS_WEBAUTHN_RP_ID` and `_RP_ORIGIN`, and
-the active credential count. Record the answer on #1118. Blocks S4's RP change
-only.
+Done 2026-09-28: the RP ID is `tracecommons.ai`, the origin is
+`https://tracecommons.ai`, and no RP change is needed (see "The RP ID, and
+whether it changes").
 
 ### S1 — Binding state and the unbound gate (server)
+
+Built in #1122.
 
 - M1: `trace_account_bindings`, RLS registry, coverage arrays.
 - The allowlist gate in `account_auth_middleware`; `GET /v1/account/binding`;
@@ -829,14 +982,16 @@ only.
 
 ### S2 — Native passkey create and sign-in (server)
 
+Built in #1131, stacked on S1.
+
 - `CeremonyState::{NativeCreate, NativeDiscoverable, NativeRegistration}`;
   `create/{start,finish}`, `login/{start,finish}`,
   `passkeys/native/register/{start,finish}`; the shared login core factored out
-  of F:19880-20006; `auth_credential_id` carried on native contexts; passkey
+  of `account_passkey_login_finish_inner`; `auth_credential_id` carried on native contexts; passkey
   removal revokes that credential's sessions; the unbound ceiling config
-  (unset = disabled); the RP origin list.
+  (unset = disabled) and the per-IP daily creation cap; the RP origin list.
 - Tests, with the `webauthn-authenticator-rs` software authenticator already
-  used by the ingest tests (`crates/trace-commons-server/Cargo.toml:199`):
+  used by the ingest tests (`crates/trace-commons-server/Cargo.toml`):
   create then sign in, token resolves as `NativeToken` and weak; `create/start`
   writes no row; an abandoned ceremony leaves no row; a replayed
   `create/finish` is denied and writes nothing; a browser ceremony id presented
@@ -847,17 +1002,21 @@ only.
   but can register the first on a near.ai-first account; removing a passkey
   revokes its native sessions; `resolve_credential_tenant` under the real
   resolver role via `SET ROLE` for a credential in a freshly minted tenant.
-- **Manual verification before S3 depends on it:** one create and one sign-in
-  from a signed macOS build against a staging ingest, recording the
-  `clientDataJSON.origin` Apple sends.
+- **Deploy gate, not just a manual check.** S3 and every later slice are not
+  deployed until one create and one sign-in from a signed macOS build carrying
+  the associated-domains entitlement, against a staging ingest, record the
+  `clientDataJSON.origin` Apple sends and it matches the origin list. That is
+  C1's check; the build it needs does not exist yet.
 
 ### S3 — Bind through NEAR AI provisioning (server + protocol)
+
+Built in #1135, stacked on S2.
 
 - `near_ai_bind_device_bytes` in `trace-commons-protocol` (permissive crate;
   nothing crosses the license boundary), `deny_unknown_fields` on
   `NearAiLoginPending`, the bind routes, the in-place bind transaction, the
   refuse branch with X's session and P's closure, the audit rows.
-- Tests (real PostgreSQL, the introspection base-URL test hook at NP:1034-1040):
+- Tests (real PostgreSQL, the introspection base-URL test hook at `introspection_base_url`):
   unbound -> bound in one transaction (kill the transaction after the anchor
   insert and assert no anchor, no device, state still `unbound`); a provisioning
   signature is refused by bind finish and a bind signature by provisioning
@@ -871,6 +1030,10 @@ only.
 
 ### S4 — AASA and the relying party (community site + ops)
 
+Built in #1124, which is being moved to the `trace-commons-community`
+repository, where the association file is deployed from. #1137 pins the env
+template's RP ID to the apex.
+
 - The rendered `.well-known` file, the worker route and header, the check
   script, the deploy smoke, env template and `deployment.md` updates for the
   origin list, and the RP change if S0 says one is needed.
@@ -880,15 +1043,35 @@ only.
 
 ### S5 — Unbound-account reaper (server)
 
-- A worker route (admin-gated during rollout, like the earned-trust passes,
-  then a scoped bearer) calling one definer function that deletes tenants whose
-  only account is passkey-origin, `unbound`, older than the TTL, with no live
-  session, and nothing else in the tenant. Returns counts.
-- Tests: an unbound idle account is reaped; a bound one, one with a live
-  session, and a legacy account are not; the function refuses a tenant holding
-  any other row.
+Built in #1127, stacked on S1. Two rules, decided 2026-09-29 (P4), are
+being implemented in #1127; the PR as first pushed had a 30-day idle rule and a
+7-day never-used rule, which the first rule replaces:
+
+- **Unbound.** Delete a passkey-origin account whose binding is still `unbound`
+  7 days after it was created, whether or not it signed in again, once it has no
+  live session. There is no longer a 30-day idle window for an account that
+  signed in again. A bound account is never a candidate, so an account that
+  completes Connect near.ai is unaffected.
+- **Closed.** Delete a closed passkey-origin account 30 days after it was
+  closed.
+
+What #1127 builds around them: a `SECURITY DEFINER` function owned by a NOLOGIN
+NOBYPASSRLS guard that deletes the account and, when it was the tenant's last
+account and the tenant holds no submission, the tenant; refusing any tenant that
+holds anything else. It is driven by an in-process, env-gated loop with its own
+cross-tenant pool (copied from the PII-backstop driver), not by a worker route.
+It reports counts and one label-only log line per run; the audit trail cannot
+be written into a tenant the reaper deletes. Legacy accounts (no binding row)
+are never candidates.
+
+- Tests: an unbound account past 7 days is reaped even if it signed in again; a
+  young one, a bound one, one with a live session, and a legacy account are not;
+  a closed account is reaped after 30 days and not before; the function refuses
+  a tenant holding any other row.
 
 ### S6 — Fold into an existing account (server, optional)
+
+Deferred (P2). Not scheduled; refuse-only ships first.
 
 - `user_handle` column, the cross-tenant definer function, the handle check
   change, and switching the zero-strong-authenticator branch from refuse to
@@ -899,6 +1082,9 @@ only.
   bind finish.
 
 ### S7 — Browser step-up page (server)
+
+Built in #1136, stacked on S3. The session the page mints lasts about 15
+minutes (P6). Its copy is proposed and needs approval.
 
 - A minimal page on ingest (`/account/step-up`) that runs the existing browser
   passkey login and links to the passkey and payout management it already
@@ -911,6 +1097,10 @@ only.
 Not designed here. The surface it needs:
 
 - **Entitlement and signing** as above.
+- **Platform provider only.** Use `ASAuthorizationPlatformPublicKeyCredentialProvider`
+  for both creation and sign-in, and do not offer a security key (see "Client
+  prerequisites"). Creation does not require a resident key, so a security key
+  could make an account that can never sign in.
 - **Daemon IPC** (the daemon holds tokens and the device key; the app only runs
   the `ASAuthorization` UI):
   - `passkey_create_begin {label?}` -> `{ceremony, rp_id, challenge, user_id, user_name}`
@@ -918,7 +1108,7 @@ Not designed here. The surface it needs:
   - `passkey_login_begin {}` -> `{ceremony, rp_id, challenge}`
   - `passkey_login_complete {ceremony, credential_id, raw_client_data_json, raw_authenticator_data, signature, user_handle}` -> `{binding_state}`
   - `account_bind {}` -> reuses `near_ai_account_enroll`'s machinery
-    (`crates/trace-commons-contributor/src/daemon/ipc.rs:3571`) against the
+    (`crates/trace-commons-contributor/src/daemon/ipc.rs`) against the
     bind routes; -> `{outcome, binding_state}`
   - `account_binding` -> `{binding_state}`; `account_sign_out` -> logout.
   - `passkey_add_begin` / `passkey_add_complete` for the authenticated add.
@@ -927,22 +1117,27 @@ Not designed here. The surface it needs:
   belongs in one Rust function in the daemon, not in Swift and Rust both.
 - **C ABI**: the label/tone/action helpers for the new states, following the
   `tc_near_ai_enroll_line` / `_tone` pattern
-  (`crates/trace-commons-contributor-ffi/src/lib.rs:3596-3621`).
+  (`crates/trace-commons-contributor-ffi/src/lib.rs`).
 - **Copy**: the approved version of "Proposed copy".
 
-## Decisions needed from Zaki
+## Decisions (the original six, resolved)
 
-1. **Copy.** Approve or amend the "Proposed copy" table, in particular
-   replacing "Verify your passkey" with "Connect near.ai".
-2. **RP ID.** After S0, confirm `tracecommons.ai` and accept invalidating any
-   existing passkeys if the live value differs.
-3. **Cancel semantics.** This spec chooses inert-plus-reaper over deletion.
-   Confirm, and set the reaper TTL (proposed: 30 days since the last session).
-4. **Existing-account fold (S6).** Ship refuse-only first and add the fold
-   later, or not at all? The fold is the tree's first cross-tenant write.
-5. **Unbound ceiling.** The initial number for the pilot.
-6. **Apple Team ID.** Which developer account signs the macOS app, and so
-   which Team ID goes in the AASA file.
+1. **Copy.** Not yet approved. The "Proposed copy" table stays a proposal, as
+   does the step-up page's copy (#1136); #1118 lists both under "Still open".
+   Nothing ships without approval.
+2. **RP ID.** Resolved 2026-09-28 by S0: the live RP ID is `tracecommons.ai`,
+   so nothing changes and no passkey is invalidated.
+3. **Cancel semantics.** Resolved: inert plus reaper, not deletion. The reaper
+   rule is P4 above (7 days unbound with no live session; closed
+   accounts after 30 days). This replaced the first proposal, 30 days since the
+   last session.
+4. **Existing-account fold (S6).** Resolved 2026-09-28: refuse-only ships
+   first, and the fold is deferred and not scheduled.
+5. **Unbound ceiling.** Resolved 2026-09-28: 5,000 for the pilot, with an alert
+   on `unbound_account_ceiling_reached`. Hardened 2026-09-29 by a per-IP daily
+   cap and the bound-versus-unbound reap rule.
+6. **Apple Team ID.** Resolved 2026-09-28: `KXSWJN7WY8` (Iqlusion Inc), so the
+   association file's app id is `KXSWJN7WY8.ai.tracecommons.shell`.
 
 ## Open questions
 
@@ -951,9 +1146,13 @@ Not designed here. The surface it needs:
   signal an unknown credential (the browser Signal API's counterpart) is
   unverified; if not, the app should tell the contributor they can delete it
   in Passwords.
-- **Associated domains under Developer ID.** Confirm that a Developer ID
-  provisioning profile carries `webcredentials` for a non-App-Store macOS app
-  as expected, before C1 depends on it.
+- **Associated domains under Developer ID.** A Developer ID provisioning
+  profile for `ai.tracecommons.shell` now exists (2026-09-29) and grants
+  `com.apple.developer.associated-domains` as a wildcard. C1 still has to embed
+  it and sign with an entitlement declaring `webcredentials:tracecommons.ai`;
+  `make-release-dmg.sh` currently signs with no entitlements. That the
+  association then validates for a non-App-Store macOS app is confirmed only by
+  C1's signed-build check.
 - **The native origin.** Confirm Apple's `clientDataJSON.origin` for platform
   credentials in S2's manual check.
 - **Label as WebAuthn user name.** The P-2 label becomes `user.name`. Should it
