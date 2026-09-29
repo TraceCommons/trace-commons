@@ -38,7 +38,14 @@ pub mod receipt;
 /// Unknown fields are ignored, so a proxy release that adds a column does not
 /// break us. Missing fields that we need are `Option`, so one that goes away
 /// degrades a row rather than dropping it.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// `Default` exists for code that builds a row by hand (fixtures, mostly):
+/// name the fields you care about and end the literal with
+/// `..Default::default()`, so a field added here later does not break the
+/// build of every crate that constructs one. The default row is not a
+/// meaningful exchange -- epoch start, empty facade and backend -- and nothing
+/// in the load path produces one.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RoutedExchange {
     /// The proxy's rowid for this exchange, and the cursor a reader pages on.
     ///
@@ -111,8 +118,9 @@ pub struct RoutedExchange {
     pub cost_usd: Option<f64>,
     pub status: i64,
     /// Whether the proxy proved which model answered this hop: IronWire's own
-    /// label for the row, read verbatim (`ironwire_proxy::proof`). **This is
-    /// the field the Inference tab consumes** -- it is the stored verdict, not
+    /// label for the row, read verbatim (`ironwire_proxy::proof`). It is the
+    /// field the Inference tab (K8, #1133) should consume once it lands --
+    /// nothing reads it yet -- because it is the stored verdict, not
     /// something to re-derive.
     ///
     /// - `None` means an older proxy, or a row that predates proof tracking,
@@ -255,7 +263,6 @@ mod tests {
 
     fn row(session: &str, offset: i64) -> RoutedExchange {
         RoutedExchange {
-            proof: None,
             id: None,
             started_at: at(offset),
             client_session_id: Some(session.to_string()),
@@ -276,6 +283,7 @@ mod tests {
             output_tokens: Some(200),
             cost_usd: Some(0.02),
             status: 200,
+            ..Default::default()
         }
     }
 

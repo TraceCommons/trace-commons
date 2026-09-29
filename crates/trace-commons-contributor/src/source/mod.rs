@@ -1022,7 +1022,6 @@ mod tests {
         let ledger: Arc<dyn crate::routing::RoutingLedger> =
             Arc::new(crate::routing::FixedLedger::new(vec![
                 crate::routing::RoutedExchange {
-                    proof: None,
                     id: None,
                     started_at: chrono::Utc::now(),
                     client_session_id: Some(session.to_string()),
@@ -1043,6 +1042,7 @@ mod tests {
                     output_tokens: Some(200),
                     cost_usd: Some(0.02),
                     status: 200,
+                    ..Default::default()
                 },
             ]));
         let wrapped_sources = all_sources(
