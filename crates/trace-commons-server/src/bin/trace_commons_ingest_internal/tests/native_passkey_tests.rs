@@ -13,7 +13,7 @@ use super::*;
 use crate::account_routes::ACCOUNT_UNBOUND;
 use axum::body::Body;
 use tower::ServiceExt;
-use trace_commons_server::account_native_passkey::UnboundAccountCeiling;
+use trace_commons_server::account_native_passkey::{PerSourceCreationCap, UnboundAccountCeiling};
 
 type SoftAuthenticator = webauthn_authenticator_rs::WebauthnAuthenticator<
     webauthn_authenticator_rs::softpasskey::SoftPasskey,
@@ -729,6 +729,79 @@ async fn pg_the_ceiling_is_checked_at_start_and_again_at_finish() {
     let refused = create_finish(&unset, &third, &third_credential).await;
     assert_uniform_deny(&refused, "finish with no ceiling configured").await;
     assert_eq!(total_tenants(&admin).await, before - 1);
+}
+
+/// A full creation (start, attestation, finish) from `ip`, as the client
+/// address `client_ip_for_rate_limit` reads. Returns the finish reply.
+async fn create_from(state: &Arc<AppState>, ip: &str) -> Reply {
+    let with_ip = |uri: &str, body: &serde_json::Value| {
+        let mut request = post(uri, body, None);
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(ip).expect("header value"),
+        );
+        request
+    };
+    let start = send(state, with_ip(CREATE_START, &serde_json::json!({}))).await;
+    assert_eq!(start.status, StatusCode::OK, "create/start from {ip}");
+    let start = start.json();
+    let mut authenticator = new_software_authenticator();
+    let credential = softpasskey_register(&mut authenticator, &start["public_key"]);
+    send(
+        state,
+        with_ip(
+            CREATE_FINISH,
+            &serde_json::json!({
+                "ceremony_id": start["ceremony_id"],
+                "credential": credential,
+            }),
+        ),
+    )
+    .await
+}
+
+/// The per-IP daily cap: N successful creations from one address, then the
+/// N+1th is refused with the uniform deny and writes nothing, while another
+/// address still creates.
+#[tokio::test]
+async fn pg_native_creation_is_capped_per_ip_per_day() {
+    const CAP: u32 = 3;
+    let Some((backend, mut state)) = pg_state(Some(i64::from(CAP) + 5)).await else {
+        return;
+    };
+    state.configure(|state| {
+        state.account_native_creation_cap = Arc::new(PerSourceCreationCap::with_limit(CAP));
+    });
+    let admin = pg_admin(&backend).await;
+    let mut tenants = Vec::new();
+    let tenant_of = |reply: &Reply| {
+        native_token_parts(reply.json()["access_token"].as_str().expect("token"))
+            .expect("a tcn1_ token")
+            .0
+    };
+
+    for n in 1..=CAP {
+        let created = create_from(&state, "203.0.113.7").await;
+        assert_eq!(created.status, StatusCode::OK, "creation {n} of {CAP}");
+        tenants.push(tenant_of(&created));
+    }
+    let before = total_tenants(&admin).await;
+    let refused = create_from(&state, "203.0.113.7").await;
+    assert_uniform_deny(&refused, "creation N+1 from one IP").await;
+    assert_eq!(
+        total_tenants(&admin).await,
+        before,
+        "a capped finish writes nothing"
+    );
+
+    let other = create_from(&state, "198.51.100.9").await;
+    assert_eq!(other.status, StatusCode::OK, "another IP is unaffected");
+    tenants.push(tenant_of(&other));
+
+    for tenant in &tenants {
+        drop_tenant(&admin, tenant).await;
+    }
+    reset_account_rate_limiter_for_test();
 }
 
 /// Ceremonies are tagged by surface and single use: a browser ceremony cannot

@@ -12,10 +12,17 @@
 //!   setting, not a default here).
 //! - [`normalize_passkey_label`], the bound on the one client-supplied string
 //!   creation accepts.
+//! - [`PerSourceCreationCap`], the per-client-IP cap on successful creations
+//!   in a rolling 24 hours. The per-minute limits alone would let a handful of
+//!   addresses fill the ceiling in minutes; this makes filling it take many
+//!   addresses and days.
 //!
 //! Every log line here is a fixed label. No count, no identifier.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// The environment variable holding the unbound-account ceiling.
 pub const UNBOUND_PASSKEY_ACCOUNT_CEILING_ENV: &str =
@@ -124,6 +131,198 @@ impl UnboundAccountCeiling {
     }
 }
 
+/// The environment variable holding the per-IP daily creation cap.
+pub const NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY_ENV: &str =
+    "TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY";
+
+/// Successful native passkey creations one client IP may make in
+/// [`NATIVE_PASSKEY_CREATION_CAP_WINDOW`] when the operator sets nothing.
+pub const DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY: u32 = 10;
+
+/// The rolling window the per-IP creation cap counts over.
+pub const NATIVE_PASSKEY_CREATION_CAP_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The most distinct sources the cap tracks at once. Only a SUCCESSFUL
+/// creation adds a source, and successful creations are themselves bounded by
+/// the unbound-account ceiling, so this is a backstop far above what the
+/// ceiling admits in a day. At the bound, after expired entries are dropped,
+/// a new source is refused (fail closed) rather than an old one forgotten.
+pub const NATIVE_PASSKEY_CREATION_CAP_MAX_SOURCES: usize = 100_000;
+
+/// A per-source cap on successful native passkey creations in a rolling
+/// window.
+///
+/// **In process, by design.** Every other limiter on these routes is in
+/// process, and this one shares their single-instance assumption. Keeping it
+/// out of PostgreSQL means nothing derived from a client IP is ever written
+/// anywhere: no migration, no stored keyed hash, no key to provision or
+/// rotate. The cost is that a restart clears it, granting each address at most
+/// one more cap's worth; restarts are operator actions, and the unbound-account
+/// ceiling, which is in the database, stays the hard bound on rows.
+///
+/// Sources are held as a salted SHA-256 of the client IP, with a salt drawn
+/// from the OS RNG per process, so the map never holds an address and the
+/// memory per source is fixed whatever the caller sent. Memory is bounded by
+/// [`NATIVE_PASSKEY_CREATION_CAP_MAX_SOURCES`] sources of at most `limit`
+/// instants each.
+///
+/// A creation takes a [`CreationReservation`] BEFORE its database write and
+/// commits it only on success; a reservation dropped uncommitted gives its
+/// slot back. Concurrent finishes from one source therefore cannot overshoot.
+/// A poisoned lock refuses.
+#[derive(Debug)]
+pub struct PerSourceCreationCap {
+    limit: u32,
+    window: Duration,
+    max_sources: usize,
+    salt: [u8; 32],
+    sources: Mutex<HashMap<[u8; 32], VecDeque<Instant>>>,
+}
+
+impl PerSourceCreationCap {
+    /// A cap of `limit` successful creations per source per window. `0`
+    /// admits none.
+    pub fn with_limit(limit: u32) -> Self {
+        Self::with_bounds(
+            limit,
+            NATIVE_PASSKEY_CREATION_CAP_WINDOW,
+            NATIVE_PASSKEY_CREATION_CAP_MAX_SOURCES,
+        )
+    }
+
+    /// As [`Self::with_limit`] with an explicit window and source bound.
+    pub fn with_bounds(limit: u32, window: Duration, max_sources: usize) -> Self {
+        use rand::RngCore;
+        let mut salt = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        Self {
+            limit,
+            window,
+            max_sources,
+            salt,
+            sources: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Parse the configured value. Unset or blank is
+    /// [`DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`]; a non-negative
+    /// integer is the limit; anything else is an error, so a typo fails
+    /// startup instead of silently lifting (or tightening) the cap.
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        let Some(raw) = value.map(str::trim).filter(|raw| !raw.is_empty()) else {
+            return Ok(Self::with_limit(
+                DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ));
+        };
+        raw.parse::<u32>().map(Self::with_limit).map_err(|_| {
+            format!("{NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY_ENV} must be a non-negative integer")
+        })
+    }
+
+    /// Read [`NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY_ENV`].
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(
+            std::env::var(NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY_ENV)
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    /// The configured per-source limit.
+    pub fn limit(&self) -> u32 {
+        self.limit
+    }
+
+    fn key(&self, source: &str) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.salt);
+        hasher.update(source.as_bytes());
+        hasher.finalize().into()
+    }
+
+    /// Take one slot for `source` at `now`, or `None` when the source has
+    /// already made `limit` creations within the window ending at `now` (or
+    /// the source table is full, or the lock is poisoned). Slots that were
+    /// taken but not committed count until they are dropped.
+    pub fn try_reserve(&self, source: &str, now: Instant) -> Option<CreationReservation<'_>> {
+        let key = self.key(source);
+        let mut sources = self.sources.lock().ok()?;
+        let window = self.window;
+        let live = |at: &Instant| now.saturating_duration_since(*at) < window;
+        if !sources.contains_key(&key) && sources.len() >= self.max_sources {
+            sources.retain(|_, times| {
+                times.retain(live);
+                !times.is_empty()
+            });
+            if sources.len() >= self.max_sources {
+                return None;
+            }
+        }
+        let times = sources.entry(key).or_default();
+        times.retain(live);
+        if times.len() >= self.limit as usize {
+            if times.is_empty() {
+                sources.remove(&key);
+            }
+            return None;
+        }
+        times.push_back(now);
+        Some(CreationReservation {
+            cap: self,
+            key,
+            at: now,
+            committed: false,
+        })
+    }
+
+    /// How many sources are tracked now. For tests and diagnostics; no
+    /// source is identifiable from it.
+    pub fn tracked_sources(&self) -> usize {
+        self.sources.lock().map_or(0, |sources| sources.len())
+    }
+
+    fn release(&self, key: &[u8; 32], at: Instant) {
+        let Ok(mut sources) = self.sources.lock() else {
+            return;
+        };
+        if let Some(times) = sources.get_mut(key) {
+            if let Some(index) = times.iter().position(|taken| *taken == at) {
+                times.remove(index);
+            }
+            if times.is_empty() {
+                sources.remove(key);
+            }
+        }
+    }
+}
+
+/// One slot of a [`PerSourceCreationCap`], held across a creation. Dropped
+/// without [`Self::commit`], it gives the slot back.
+#[derive(Debug)]
+#[must_use = "an uncommitted reservation releases its slot when dropped"]
+pub struct CreationReservation<'a> {
+    cap: &'a PerSourceCreationCap,
+    key: [u8; 32],
+    at: Instant,
+    committed: bool,
+}
+
+impl CreationReservation<'_> {
+    /// The creation succeeded: the slot stays taken for the window.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for CreationReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.cap.release(&self.key, self.at);
+        }
+    }
+}
+
 /// Bound the optional label a caller gives its new passkey.
 ///
 /// Blank is absent. A label longer than [`NATIVE_PASSKEY_LABEL_MAX_CHARS`]
@@ -225,5 +424,109 @@ mod tests {
             normalize_passkey_label(Some("a\u{7f}b")),
             Err(InvalidPasskeyLabel)
         );
+    }
+
+    #[test]
+    fn the_creation_cap_defaults_to_ten_and_refuses_typos() {
+        for value in [None, Some(""), Some("  ")] {
+            let cap = PerSourceCreationCap::parse(value).expect("parses");
+            assert_eq!(cap.limit(), DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY);
+        }
+        assert_eq!(DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY, 10);
+        assert_eq!(PerSourceCreationCap::parse(Some(" 3 ")).unwrap().limit(), 3);
+        for value in ["ten", "-1", "2.5", "1_0"] {
+            assert!(
+                PerSourceCreationCap::parse(Some(value)).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_creation_cap_trips_at_n_plus_one_for_one_source_only() {
+        let cap = PerSourceCreationCap::with_limit(10);
+        let now = Instant::now();
+        for n in 1..=10 {
+            cap.try_reserve("203.0.113.7", now)
+                .unwrap_or_else(|| panic!("creation {n} is within the cap"))
+                .commit();
+        }
+        assert!(
+            cap.try_reserve("203.0.113.7", now).is_none(),
+            "creation 11 from the same source is refused"
+        );
+        assert!(
+            cap.try_reserve("198.51.100.9", now).is_some(),
+            "another source is unaffected"
+        );
+    }
+
+    #[test]
+    fn the_creation_cap_window_rolls() {
+        let window = Duration::from_secs(100);
+        let cap = PerSourceCreationCap::with_bounds(2, window, 16);
+        let t0 = Instant::now();
+        cap.try_reserve("a", t0).expect("first").commit();
+        cap.try_reserve("a", t0 + Duration::from_secs(50))
+            .expect("second")
+            .commit();
+        assert!(
+            cap.try_reserve("a", t0 + Duration::from_secs(99)).is_none(),
+            "both still inside the window"
+        );
+        // The first creation leaves the window; exactly one slot frees.
+        cap.try_reserve("a", t0 + Duration::from_secs(100))
+            .expect("the oldest has rolled out")
+            .commit();
+        assert!(
+            cap.try_reserve("a", t0 + Duration::from_secs(120))
+                .is_none(),
+            "the second and third are still inside"
+        );
+    }
+
+    #[test]
+    fn an_uncommitted_reservation_gives_its_slot_back() {
+        let cap = PerSourceCreationCap::with_limit(1);
+        let now = Instant::now();
+        let held = cap.try_reserve("a", now).expect("first");
+        assert!(
+            cap.try_reserve("a", now).is_none(),
+            "a held slot counts, so concurrent finishes cannot overshoot"
+        );
+        drop(held);
+        assert_eq!(cap.tracked_sources(), 0, "a released source is forgotten");
+        cap.try_reserve("a", now)
+            .expect("the slot came back")
+            .commit();
+        assert!(cap.try_reserve("a", now).is_none());
+    }
+
+    #[test]
+    fn the_source_table_is_bounded_and_fails_closed() {
+        let window = Duration::from_secs(100);
+        let cap = PerSourceCreationCap::with_bounds(5, window, 2);
+        let t0 = Instant::now();
+        cap.try_reserve("a", t0).expect("a").commit();
+        cap.try_reserve("b", t0).expect("b").commit();
+        assert!(
+            cap.try_reserve("c", t0).is_none(),
+            "full: a new source is refused"
+        );
+        cap.try_reserve("a", t0)
+            .expect("a known source still counts")
+            .commit();
+        // Once the old entries expire they are dropped to make room.
+        cap.try_reserve("c", t0 + window)
+            .expect("expired sources are collected")
+            .commit();
+        assert_eq!(cap.tracked_sources(), 1);
+    }
+
+    #[test]
+    fn a_zero_cap_admits_none() {
+        let cap = PerSourceCreationCap::with_limit(0);
+        assert!(cap.try_reserve("a", Instant::now()).is_none());
+        assert_eq!(cap.tracked_sources(), 0);
     }
 }

@@ -35,7 +35,10 @@
 //! finishes sit behind the same timing floor as `native/token`, `start` writes
 //! nothing anywhere, and an abandoned ceremony costs one in-memory entry.
 //! Creation is additionally bounded by the unbound-account ceiling, which is
-//! checked at `start` and again inside the `finish` transaction.
+//! checked at `start` and again inside the `finish` transaction, and by a
+//! per-IP cap on successful creations in a rolling 24 hours
+//! ([`PerSourceCreationCap`](trace_commons_server::account_native_passkey::PerSourceCreationCap)),
+//! checked at `finish`.
 //!
 //! Nothing is logged or audited but fixed labels: no ceremony id, credential
 //! id, challenge, token or label.
@@ -294,6 +297,16 @@ async fn native_passkey_create_finish_inner(
     let Ok(db) = account_db(state.as_ref()) else {
         return native_generic_deny();
     };
+    // The per-IP daily cap, counted in successful creations. The slot is
+    // taken before the write so concurrent finishes from one address cannot
+    // overshoot, and given back (by dropping the reservation) on any refusal
+    // below.
+    let Some(reservation) = state.account_native_creation_cap.try_reserve(
+        &client_ip_for_rate_limit(&headers),
+        std::time::Instant::now(),
+    ) else {
+        return native_generic_deny();
+    };
 
     // Server-minted, from the OS RNG, after the attestation verified. The
     // same generator and namespace as a NEAR AI login, so the account sits on
@@ -317,7 +330,7 @@ async fn native_passkey_create_finish_inner(
         })
         .await;
     match outcome {
-        Ok(PasskeyOriginAccountOutcome::Created) => {}
+        Ok(PasskeyOriginAccountOutcome::Created) => reservation.commit(),
         Ok(PasskeyOriginAccountOutcome::CeilingReached) => {
             state.account_unbound_ceiling.note_reached();
             return native_generic_deny();
