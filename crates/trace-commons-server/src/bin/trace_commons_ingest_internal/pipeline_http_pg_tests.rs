@@ -2290,3 +2290,505 @@ async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
         (1, "pending".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline product routes through the router: the status block, the score
+// attestation, exports, and the administrator reads, with the product store
+// on the runtime role.
+// ---------------------------------------------------------------------------
+
+/// `withdrawal_fixture`, with the product store on the runtime role, an
+/// export-worker and an admin token for the fixture's tenant, and an admin
+/// and an export-worker token for another tenant.
+struct ProductFixture {
+    base: WithdrawalFixture,
+    export_token: String,
+    admin_token: String,
+    other_tenant_admin_token: String,
+    other_tenant_export_token: String,
+}
+
+async fn product_fixture() -> Option<ProductFixture> {
+    let mut base = withdrawal_fixture().await?;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let other_tenant = format!("tenant-product-other-{suffix}");
+    let export_token = format!("token-export-{suffix}");
+    let admin_token = format!("token-admin-{suffix}");
+    let other_tenant_admin_token = format!("token-admin-other-{suffix}");
+    let other_tenant_export_token = format!("token-export-other-{suffix}");
+    let mut tokens = (*base.state.tokens).clone();
+    insert_token(
+        &mut tokens,
+        &base.tenant,
+        &export_token,
+        TokenRole::ExportWorker,
+    );
+    insert_token(&mut tokens, &base.tenant, &admin_token, TokenRole::Admin);
+    insert_token(
+        &mut tokens,
+        &other_tenant,
+        &other_tenant_admin_token,
+        TokenRole::Admin,
+    );
+    insert_token(
+        &mut tokens,
+        &other_tenant,
+        &other_tenant_export_token,
+        TokenRole::ExportWorker,
+    );
+    let runtime = base.runtime.clone();
+    let state = Arc::make_mut(&mut base.state);
+    state.tokens = Arc::new(tokens);
+    state.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime)));
+    Some(ProductFixture {
+        base,
+        export_token,
+        admin_token,
+        other_tenant_admin_token,
+        other_tenant_export_token,
+    })
+}
+
+/// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
+async fn create_pipeline_export(
+    state: &Arc<AppState>,
+    token: &str,
+    key: &str,
+    limit: usize,
+) -> (StatusCode, serde_json::Value) {
+    pipeline_product_request(
+        state.clone(),
+        "POST",
+        "/v1/pipeline/exports",
+        Some(token),
+        Some(key),
+        Some(serde_json::json!({
+            "allowed_use": "evaluation",
+            "purpose": "benchmark refresh",
+            "limit": limit,
+        })),
+    )
+    .await
+}
+
+/// `POST /v1/pipeline/exports/{snapshot_id}/complete`.
+async fn complete_pipeline_export(
+    state: &Arc<AppState>,
+    token: &str,
+    snapshot_id: &serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let snapshot_id = snapshot_id.as_str().expect("a snapshot id");
+    pipeline_product_request(
+        state.clone(),
+        "POST",
+        &format!("/v1/pipeline/exports/{snapshot_id}/complete"),
+        Some(token),
+        None,
+        None,
+    )
+    .await
+}
+
+/// The export routes, with the export credential. Creation snapshots the
+/// tenant's approved revision; the same request key with the same body
+/// returns that snapshot, and with another item limit is refused (the limit
+/// is part of the request the key names). Another tenant's export
+/// credential does not find the snapshot. Completion delivers it, and
+/// again returns it unchanged. The response never carries the tenant id.
+///
+/// Also recorded here, for the owner's decision and without changing
+/// `main`: a delivered pipeline snapshot's manifest has kind
+/// `export_artifact` and the requested use as its purpose code, so `main`'s
+/// replay-dataset manifest list (`GET /v1/datasets/replay/manifests`)
+/// returns it as a replay dataset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+
+    let (status, created) = create_pipeline_export(state, &fixture.export_token, "key-1", 10).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["state"], "ready");
+    assert_eq!(created["allowed_use"], "evaluation");
+    let items = created["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "{created}");
+    assert_eq!(items[0]["run_id"], run.run_id.to_string());
+    assert_eq!(items[0]["submission_id"], run.submission_id.to_string());
+    assert_eq!(
+        items[0]["source_content_hash"],
+        run.approved_content_hash.clone().expect("an approved hash")
+    );
+    assert!(created.get("tenant_id").is_none());
+    assert!(!created.to_string().contains(tenant), "{created}");
+
+    let (status, again) = create_pipeline_export(state, &fixture.export_token, "key-1", 10).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again, created, "the same request returns the same snapshot");
+    let (status, conflict) =
+        create_pipeline_export(state, &fixture.export_token, "key-1", 11).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"], "export_idempotency_conflict");
+
+    let snapshot_id = &created["snapshot_id"];
+    let (status, other) =
+        complete_pipeline_export(state, &fixture.other_tenant_export_token, snapshot_id).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{other}");
+    assert_eq!(other["error"], "export_snapshot_not_found");
+    let (status, completed) =
+        complete_pipeline_export(state, &fixture.export_token, snapshot_id).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "complete");
+    assert_eq!(&completed["export_manifest_id"], snapshot_id);
+    assert_eq!(completed["items"], created["items"]);
+    let (status, completed_again) =
+        complete_pipeline_export(state, &fixture.export_token, snapshot_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed_again, completed);
+
+    let (status, manifests) = pipeline_product_request(
+        state.clone(),
+        "GET",
+        "/v1/datasets/replay/manifests",
+        Some(fixture.export_token.as_str()),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{manifests}");
+    let manifests = manifests.as_array().expect("a manifest list");
+    assert_eq!(
+        manifests.len(),
+        1,
+        "main's replay list returns the pipeline manifest: {manifests:?}"
+    );
+    let manifest = &manifests[0];
+    assert_eq!(&manifest["export_manifest_id"], snapshot_id);
+    assert_eq!(manifest["artifact_kind"], "export_artifact");
+    assert_eq!(manifest["purpose_code"], "evaluation");
+    assert_eq!(
+        manifest["source_submission_ids"],
+        serde_json::json!([run.submission_id])
+    );
+    assert_eq!(manifest["item_count"], 1);
+    assert_eq!(manifest["audit_event_id"], serde_json::Value::Null);
+}
+
+/// The export route passes the caller's consent-scope allowlists to the
+/// store, as `main`'s export path filters records by them: the scoped
+/// export credential's and the tenant policy's. The completed submission
+/// consents to debugging and evaluation only. A credential scoped to model
+/// training gets an empty snapshot, and an unscoped one gets the
+/// submission; a tenant policy that allows only model training empties the
+/// snapshot again, and one that allows debugging and evaluation does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_export_route_applies_the_callers_consent_scope_allowlists() {
+    let Some(mut fixture) = product_fixture().await else {
+        return;
+    };
+    let tenant = fixture.base.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, &tenant, &principal).await;
+    let scoped_token = format!("{}-scoped", fixture.export_token);
+    let mut tokens = (*fixture.base.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &scoped_token, TokenRole::ExportWorker);
+    tokens
+        .get_mut(&scoped_token)
+        .unwrap()
+        .allowed_consent_scopes = BTreeSet::from([ConsentScope::ModelTraining]);
+    Arc::make_mut(&mut fixture.base.state).tokens = Arc::new(tokens);
+    let state = fixture.base.state.clone();
+    let with_policy = |scope: ConsentScope| {
+        let mut state = state.clone();
+        Arc::make_mut(&mut state).tenant_policies = Arc::new(BTreeMap::from([(
+            tenant.clone(),
+            TenantSubmissionPolicy {
+                allowed_consent_scopes: BTreeSet::from([scope]),
+                allowed_uses: BTreeSet::new(),
+            },
+        )]));
+        state
+    };
+    let item_runs = |snapshot: &serde_json::Value| {
+        snapshot["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["run_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let (status, scoped) = create_pipeline_export(&state, &scoped_token, "scoped", 10).await;
+    assert_eq!(status, StatusCode::OK, "{scoped}");
+    assert!(item_runs(&scoped).is_empty(), "{scoped}");
+    let (status, unscoped) =
+        create_pipeline_export(&state, &fixture.export_token, "unscoped", 10).await;
+    assert_eq!(status, StatusCode::OK, "{unscoped}");
+    assert_eq!(item_runs(&unscoped), vec![run.run_id.to_string()]);
+    assert_eq!(
+        unscoped["items"][0]["consent_scopes"],
+        serde_json::json!(["debugging_evaluation"])
+    );
+    let (status, training_policy) = create_pipeline_export(
+        &with_policy(ConsentScope::ModelTraining),
+        &fixture.export_token,
+        "training-policy",
+        10,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{training_policy}");
+    assert!(item_runs(&training_policy).is_empty(), "{training_policy}");
+    let (status, debugging_policy) = create_pipeline_export(
+        &with_policy(ConsentScope::DebuggingEvaluation),
+        &fixture.export_token,
+        "debugging-policy",
+        10,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{debugging_policy}");
+    assert_eq!(item_runs(&debugging_policy), vec![run.run_id.to_string()]);
+}
+
+/// A snapshot that can no longer be delivered stays as it is, and the
+/// complete route says to create a new one. A submission that expired
+/// after the snapshot was taken leaves the snapshot `ready` but not
+/// deliverable; a withdrawal invalidates the snapshot. Each answer is a
+/// label, and a new snapshot leaves the expired submission out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_export_complete_route_tells_the_caller_to_create_a_new_snapshot() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let expired = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let withdrawn = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+
+    let (status, first) = create_pipeline_export(state, &fixture.export_token, "first", 10).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    let mut owner = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET expires_at = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &expired.submission_id],
+    )
+    .await
+    .expect("expire the submission");
+    tx.commit().await.unwrap();
+    drop(owner);
+    let (status, stale) =
+        complete_pipeline_export(state, &fixture.export_token, &first["snapshot_id"]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert_eq!(stale["error"], "export_snapshot_stale_create_new_snapshot");
+
+    let (status, second) = create_pipeline_export(state, &fixture.export_token, "second", 10).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let items = second["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{second}");
+    assert_eq!(items[0]["run_id"], withdrawn.run_id.to_string());
+    fixture
+        .base
+        .service
+        .withdraw_submission(tenant, withdrawn.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let (status, invalidated) =
+        complete_pipeline_export(state, &fixture.export_token, &second["snapshot_id"]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{invalidated}");
+    assert_eq!(
+        invalidated["error"],
+        "export_snapshot_invalidated_create_new_snapshot"
+    );
+}
+
+/// `POST /v1/contributors/me/submission-status` reports a pipeline
+/// submission from its run: the owner gets a document with the pipeline
+/// block, whose amounts are decimal strings; another contributor of the
+/// tenant gets nothing for that id; without the product store the
+/// submission is unknown to the route; and when `main`'s own view has the
+/// submission, its document carries the pipeline block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_status_route_reports_the_pipeline_block_to_the_owner() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let request = serde_json::json!({"submission_ids": [run.submission_id, Uuid::new_v4()]});
+    let status_for = |state: Arc<AppState>, token: String| {
+        let request = request.clone();
+        async move {
+            pipeline_product_request(
+                state,
+                "POST",
+                "/v1/contributors/me/submission-status",
+                Some(token.as_str()),
+                None,
+                Some(request),
+            )
+            .await
+        }
+    };
+
+    let (status, documents) = status_for(state.clone(), fixture.base.token.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{documents}");
+    let documents = documents.as_array().expect("a document list").clone();
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    let document = &documents[0];
+    assert_eq!(document["submission_id"], run.submission_id.to_string());
+    assert_eq!(document["status"], "complete");
+    let pipeline = &document["pipeline"];
+    assert_eq!(pipeline["run_id"], run.run_id.to_string());
+    assert_eq!(pipeline["processing_state"], "complete");
+    assert_eq!(
+        pipeline["instruments"],
+        serde_json::json!([{
+            "instrument_id": "storage_rebate",
+            "atomic_units": "5",
+            "operation_state": "complete",
+            "internal_settlement_state": "not_applicable",
+            "payout_rail": "none",
+            "payout_state": "disabled",
+            "reason_label": null,
+        }])
+    );
+    let document: TraceSubmissionStatusUpdate =
+        serde_json::from_value(document.clone()).expect("the protocol type reads the document");
+    assert_eq!(document.pipeline.unwrap().instruments[0].atomic_units, "5");
+
+    let (status, other) = status_for(state.clone(), fixture.base.other_token.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other, serde_json::json!([]), "not the other contributor's");
+    let mut without_product = state.clone();
+    Arc::make_mut(&mut without_product).pipeline_product = None;
+    let (status, legacy) = status_for(without_product, fixture.base.token.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(legacy, serde_json::json!([]));
+
+    // With contributor reads from the database, `main`'s own view also has
+    // the submission: the document is `main`'s, and it carries the pipeline
+    // block.
+    let mut database_reads = state.clone();
+    Arc::make_mut(&mut database_reads).db_contributor_reads = true;
+    let (status, documents) = status_for(database_reads, fixture.base.token.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{documents}");
+    let documents = documents.as_array().expect("a document list").clone();
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    assert_eq!(documents[0]["status"], "accepted", "main's own status");
+    assert_eq!(documents[0]["pipeline"]["run_id"], run.run_id.to_string());
+    assert_eq!(documents[0]["pipeline"]["processing_state"], "complete");
+}
+
+/// The administrator reads and the score attestation, each for its own
+/// caller. The operational summary counts the tenant's complete run, and
+/// another tenant's summary does not; the forensic trace of the run is
+/// hash-only, a run id the tenant does not have is 404, and so is the run
+/// for another tenant's admin. The score attestation, signed with the
+/// versioned-pipeline schema, holds the owner's run, and another
+/// contributor's attestation holds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_product_admin_reads_and_score_attestation_are_scoped_to_their_caller() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = test_state_with_attestation_signing(fixture.base.state.clone());
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let get = |token: String, uri: String| {
+        let state = state.clone();
+        async move {
+            pipeline_product_request(state, "GET", &uri, Some(token.as_str()), None, None).await
+        }
+    };
+
+    let summary_uri = "/v1/admin/pipeline/operational-summary".to_string();
+    let (status, summary) = get(fixture.admin_token.clone(), summary_uri.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let work = summary["work"].as_array().expect("work buckets");
+    assert!(
+        work.iter()
+            .any(|bucket| bucket["state"] == "complete" && bucket["count"] == 1),
+        "{summary}"
+    );
+    assert!(!summary.to_string().contains(tenant));
+    let (status, other_summary) = get(fixture.other_tenant_admin_token.clone(), summary_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_summary["work"], serde_json::json!([]));
+
+    let forensic_uri = format!("/v1/admin/pipeline/runs/{}/forensic", run.run_id);
+    let (status, forensic) = get(fixture.admin_token.clone(), forensic_uri.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{forensic}");
+    assert_eq!(forensic["run_id"], run.run_id.to_string());
+    assert_eq!(forensic["submission_id"], run.submission_id.to_string());
+    let phases = forensic["phases"].as_array().expect("phases");
+    assert_eq!(phases.len(), 4, "{forensic}");
+    assert!(phases.iter().all(|phase| {
+        phase["decision_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    }));
+    let text = forensic.to_string();
+    assert!(
+        !text.contains(tenant) && !text.contains(&principal),
+        "{text}"
+    );
+    let (status, missing) = get(
+        fixture.admin_token.clone(),
+        format!("/v1/admin/pipeline/runs/{}/forensic", Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["error"], "pipeline_run_not_found");
+    let (status, other_forensic) =
+        get(fixture.other_tenant_admin_token.clone(), forensic_uri).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(other_forensic, missing);
+
+    let attestation_uri = "/v1/contributors/me/pipeline-score-attestation".to_string();
+    let decode = |attestation: &serde_json::Value| {
+        let decoding_key = DecodingKey::from_ed_pem(TEST_EDDSA_PUBLIC_KEY_PEM.as_bytes())
+            .expect("test public key parses");
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        jsonwebtoken::decode::<serde_json::Value>(
+            attestation["attestation"].as_str().expect("an attestation"),
+            &decoding_key,
+            &validation,
+        )
+        .expect("the attestation verifies against the published key")
+        .claims
+    };
+    let (status, own) = get(fixture.base.token.clone(), attestation_uri.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    let claims = decode(&own);
+    assert_eq!(
+        claims["schema_version"],
+        trace_commons_server::trace_score_attestation::VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION
+    );
+    assert_eq!(claims["auth_principal_ref"], principal);
+    let submissions = claims["submissions"].as_array().expect("submissions");
+    assert_eq!(submissions.len(), 1, "{claims}");
+    assert_eq!(submissions[0]["run_id"], run.run_id.to_string());
+    assert_eq!(submissions[0]["credit_microcredits"], "0");
+    let (status, other) = get(fixture.base.other_token.clone(), attestation_uri).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(decode(&other)["submissions"], serde_json::json!([]));
+}

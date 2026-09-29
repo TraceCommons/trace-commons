@@ -29,7 +29,7 @@ use trace_commons_gate_api::{
     SettlementError, SettlementReceipt, SettlementRequest, VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
-    DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
+    ConsentScope, DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
     RecordedTraceContributionOptions, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
     TraceContributionEnvelope, TraceRedactor, retention_policy_for_trace,
 };
@@ -61,8 +61,8 @@ use trace_commons_server::versioned_pipeline_credit::{
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
-    PIPELINE_EXPORT_ITEM_MAX, PipelineCreditStatus, PipelineExportSnapshot,
-    PipelineProcessingStatus, PipelineProductStore,
+    PIPELINE_EXPORT_ITEM_MAX, PipelineCreditStatus, PipelineExportConsentScopes,
+    PipelineExportSnapshot, PipelineProcessingStatus, PipelineProductStore,
 };
 
 use pilot_runtime_login::{
@@ -15539,6 +15539,7 @@ async fn create_snapshot(
             EXPORTER,
             &export_hash(key_seed),
             allowed_use,
+            &PipelineExportConsentScopes::default(),
             &export_hash("purpose"),
             PIPELINE_EXPORT_ITEM_MAX,
         )
@@ -15899,6 +15900,7 @@ async fn export_request_key_is_idempotent() {
             EXPORTER,
             &export_hash("idempotent"),
             TraceAllowedUse::Evaluation,
+            &PipelineExportConsentScopes::default(),
             &export_hash("another purpose"),
             PIPELINE_EXPORT_ITEM_MAX,
         )
@@ -15972,6 +15974,112 @@ async fn exports_honor_allowed_uses() {
     );
 }
 
+/// An export applies `main`'s consent-scope rule for each record
+/// (`record_matches_export_policy_abac`): the caller's scoped token and the
+/// tenant policy each hold an allowlist, a submission is selected only when
+/// its consent scopes meet every non-empty one, and an empty allowlist
+/// allows every scope. Three submissions consent to debugging and
+/// evaluation, to model training, and to both. The last one meets a token
+/// allowlist of debugging and a policy allowlist of model training through a
+/// different scope each: the two are checked one by one, not intersected.
+#[tokio::test]
+async fn exports_honor_consent_scope_allowlists() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("export-consent-{}", uuid::Uuid::new_v4());
+    let with_scopes = |scopes: Vec<ConsentScope>| async move {
+        let mut env = envelope(uuid::Uuid::new_v4()).await;
+        env.trace_card.consent_scope = scopes[0];
+        env.consent.scopes = scopes;
+        env
+    };
+    let debugging = with_scopes(vec![ConsentScope::DebuggingEvaluation]).await;
+    let debugging_run =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &debugging).await;
+    let training = with_scopes(vec![ConsentScope::ModelTraining]).await;
+    let training_run =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &training).await;
+    let both = with_scopes(vec![
+        ConsentScope::DebuggingEvaluation,
+        ConsentScope::ModelTraining,
+    ])
+    .await;
+    let both_run = submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &both).await;
+    let product = PipelineProductStore::new(backend.clone());
+    let select = |key_seed: &'static str, token: &[ConsentScope], policy: &[ConsentScope]| {
+        let product = product.clone();
+        let tenant = tenant.clone();
+        let consent_scopes = PipelineExportConsentScopes {
+            token: token.iter().copied().collect(),
+            policy: policy.iter().copied().collect(),
+        };
+        async move {
+            let snapshot = product
+                .create_export_snapshot(
+                    &tenant,
+                    EXPORTER,
+                    &export_hash(key_seed),
+                    TraceAllowedUse::Evaluation,
+                    &consent_scopes,
+                    &export_hash("purpose"),
+                    PIPELINE_EXPORT_ITEM_MAX,
+                )
+                .await
+                .expect("create the export snapshot");
+            item_runs(&snapshot)
+        }
+    };
+    let sorted = |mut runs: Vec<uuid::Uuid>| {
+        runs.sort();
+        runs
+    };
+
+    assert_eq!(
+        select("unrestricted", &[], &[]).await,
+        sorted(vec![
+            debugging_run.run_id,
+            training_run.run_id,
+            both_run.run_id
+        ]),
+        "empty allowlists allow every scope"
+    );
+    assert_eq!(
+        select("token", &[ConsentScope::DebuggingEvaluation], &[]).await,
+        sorted(vec![debugging_run.run_id, both_run.run_id]),
+        "the token's allowlist leaves out the model-training submission"
+    );
+    assert_eq!(
+        select("policy", &[], &[ConsentScope::ModelTraining]).await,
+        sorted(vec![training_run.run_id, both_run.run_id]),
+        "the policy's allowlist leaves out the debugging submission"
+    );
+    assert_eq!(
+        select(
+            "token-and-policy",
+            &[ConsentScope::DebuggingEvaluation],
+            &[ConsentScope::ModelTraining],
+        )
+        .await,
+        vec![both_run.run_id],
+        "a submission must meet both allowlists, each through any of its scopes"
+    );
+    assert!(
+        select("disjoint", &[ConsentScope::BenchmarkOnly], &[])
+            .await
+            .is_empty(),
+        "no submission consents to benchmarks"
+    );
+}
+
 /// A submission withdrawn while export creation waits on it is not exported,
 /// and the two do not deadlock. A transaction here plays a withdrawal, in
 /// the withdrawal's lock order: it holds the run row `FOR UPDATE`, and
@@ -16029,6 +16137,7 @@ async fn export_selection_rechecks_a_submission_revoked_while_it_waits() {
                     EXPORTER,
                     &export_hash("race"),
                     TraceAllowedUse::Evaluation,
+                    &PipelineExportConsentScopes::default(),
                     &export_hash("purpose"),
                     PIPELINE_EXPORT_ITEM_MAX,
                 )
@@ -16162,6 +16271,7 @@ async fn export_item_count_is_bounded() {
                     EXPORTER,
                     &export_hash(key_seed),
                     TraceAllowedUse::Evaluation,
+                    &PipelineExportConsentScopes::default(),
                     &export_hash("purpose"),
                     max_items,
                 )

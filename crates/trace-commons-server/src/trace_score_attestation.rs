@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::trace_upload_claim_issuer::{
     optional_env, validate_eddsa_private_key_pem, validate_eddsa_public_key_pem,
 };
+use crate::versioned_pipeline_product::PipelineScoreAttestationEntry;
 
 /// Schema version stamped into every signed attestation.
 ///
@@ -39,6 +40,11 @@ use crate::trace_upload_claim_issuer::{
 /// reject v2 until they are updated; that is intended, because the meaning of
 /// the document changed. v1 attestations are no longer issued.
 pub const SCORE_ATTESTATION_SCHEMA_VERSION: &str = "trace_commons.score_attestation.v2";
+/// Schema version of a versioned-pipeline score attestation: each entry is
+/// a committed Score outcome, named by its run, outcome, bundle, and outcome
+/// schema, with its Trace Credit award.
+pub const VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION: &str =
+    "trace_commons.pipeline_score_attestation.v1";
 
 pub const TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM_ENV: &str =
     "TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM";
@@ -330,6 +336,18 @@ pub struct ScoreAttestationClaims {
     pub nonce: String,
 }
 
+/// The signed payload of a versioned-pipeline score attestation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionedScoreAttestationClaims {
+    pub schema_version: String,
+    pub tenant_id: String,
+    pub auth_principal_ref: String,
+    pub submissions: Vec<PipelineScoreAttestationEntry>,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub nonce: String,
+}
+
 /// The two extra statements a SCOPED attestation makes, over and above the
 /// scored `submissions` an unscoped one carries.
 ///
@@ -361,6 +379,34 @@ pub fn sign_score_attestation(
     now: DateTime<Utc>,
 ) -> anyhow::Result<String> {
     sign_scoped_score_attestation(state, tenant_id, auth_principal_ref, submissions, None, now)
+}
+
+/// As `sign_score_attestation`, for the caller's versioned-pipeline Score
+/// outcomes. The same non-negotiable applies: `tenant_id` and
+/// `auth_principal_ref` MUST come from the authenticated request context.
+pub fn sign_versioned_score_attestation(
+    state: &AttestationSigningState,
+    tenant_id: &str,
+    auth_principal_ref: &str,
+    submissions: Vec<PipelineScoreAttestationEntry>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<String> {
+    let expires_at = now
+        .checked_add_signed(Duration::seconds(state.ttl_seconds))
+        .context("attestation ttl_seconds overflow")?;
+    let claims = VersionedScoreAttestationClaims {
+        schema_version: VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION.to_string(),
+        tenant_id: tenant_id.to_string(),
+        auth_principal_ref: auth_principal_ref.to_string(),
+        submissions,
+        issued_at: now,
+        expires_at,
+        nonce: Uuid::new_v4().to_string(),
+    };
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(state.kid.clone());
+    jsonwebtoken::encode(&header, &claims, &state.signing_key)
+        .context("failed to sign versioned score attestation")
 }
 
 /// As `sign_score_attestation`, but for a request that named a specific set
@@ -674,6 +720,57 @@ mod tests {
         let keyset = state.keyset_json();
         assert_eq!(keyset["keys"][0]["kid"], "attestation-key-1");
         assert_eq!(keyset["keys"][0]["public_key_pem"], keypair.public_key_pem);
+    }
+
+    #[test]
+    fn versioned_attestation_binds_authenticated_identity_and_outcome_provenance() {
+        let keypair = generate_test_keypair();
+        let state = AttestationSigningState::build(&AttestationConfig {
+            signing_private_key_pem: keypair.private_key_pem.clone(),
+            signing_public_key_pem: keypair.public_key_pem.clone(),
+            signing_kid: "pipeline-attestation-key".to_string(),
+            ttl_seconds: 60,
+        })
+        .unwrap();
+        let entry = PipelineScoreAttestationEntry {
+            submission_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            score_outcome_id: Uuid::new_v4(),
+            bundle_id: format!("sha256:{}", "a".repeat(64)),
+            outcome_schema_id: "trace_commons.pipeline_outcome".to_string(),
+            outcome_schema_version: 1,
+            credit_microcredits: 42,
+            decision: serde_json::json!({
+                "awards": [{"instrument_id": "trace_credit", "atomic_units": "42"}]
+            }),
+        };
+        let token = sign_versioned_score_attestation(
+            &state,
+            "tenant-a",
+            "principal_sha256:owned",
+            vec![entry.clone()],
+            Utc::now(),
+        )
+        .unwrap();
+        let decoding_key = DecodingKey::from_ed_pem(keypair.public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        let claims = jsonwebtoken::decode::<VersionedScoreAttestationClaims>(
+            &token,
+            &decoding_key,
+            &validation,
+        )
+        .unwrap()
+        .claims;
+        assert_eq!(
+            claims.schema_version,
+            VERSIONED_SCORE_ATTESTATION_SCHEMA_VERSION
+        );
+        assert_eq!(claims.tenant_id, "tenant-a");
+        assert_eq!(claims.auth_principal_ref, "principal_sha256:owned");
+        assert!(claims.expires_at > claims.issued_at);
+        assert_eq!(claims.submissions, vec![entry]);
     }
 
     #[test]

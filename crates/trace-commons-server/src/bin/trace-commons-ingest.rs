@@ -61,11 +61,12 @@ use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
     PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
     ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceSubmissionReceipt,
-    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
-    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
-    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
-    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
+    TraceAllowedUse, TraceContributionEnvelope, TraceInstrumentStatusUpdate,
+    TracePipelineStatusUpdate, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
+    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
+    canonical_summary_for_embedding, privacy_filter_backend_from_env,
+    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
+    retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -251,12 +252,20 @@ use trace_commons_server::trace_gate_service::{
 use trace_commons_server::trace_score_attestation::{
     AttestationConfig, AttestationSigningState, ScoreAttestationCoverage, ScoreAttestationScope,
     ScoreAttestationSubmissionEntry, sign_scoped_score_attestation, sign_score_attestation,
+    sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PipelineAdmissionLimits, PipelineLeaseConfig,
-    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
-    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome,
+    PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
+    PipelineAdmissionLimits, PipelineLeaseConfig, PipelineQuotaScope, PipelineReceiptRequest,
+    PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim, PipelineRunState,
+    PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
+};
+use trace_commons_server::versioned_pipeline_product::{
+    PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
+    PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
+    PipelineContributorStatus, PipelineCreditStatus, PipelineExportConsentScopes,
+    PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
+    PipelineProductStore,
 };
 use uuid::Uuid;
 
@@ -1607,6 +1616,10 @@ struct AppState {
     require_tenant_submission_policy: bool,
     db_mirror: Option<Arc<dyn Database>>,
     pipeline_service: Option<Arc<PipelineService>>,
+    /// Product reads over the pipeline's records: the status block, the
+    /// score attestation, exports, and the administrator summaries. Present
+    /// exactly when `pipeline_service` is, on the same PostgreSQL backend.
+    pipeline_product: Option<Arc<PipelineProductStore>>,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -3821,6 +3834,10 @@ impl AppState {
             pipeline_allow_test_dependencies,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        let pipeline_product = pipeline_service
+            .as_ref()
+            .and(db_connections.as_ref())
+            .map(|connections| Arc::new(PipelineProductStore::new(connections.postgres.clone())));
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -4285,6 +4302,7 @@ impl AppState {
             require_tenant_submission_policy,
             db_mirror,
             pipeline_service,
+            pipeline_product,
             pipeline_runtime_required,
             pipeline_worker_ready,
             db_contributor_reads,
@@ -7892,6 +7910,23 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/contributors/me/score-attestation",
             get(score_attestation_handler).post(scoped_score_attestation_handler),
+        )
+        .route(
+            "/v1/contributors/me/pipeline-score-attestation",
+            get(pipeline_score_attestation_handler),
+        )
+        .route("/v1/pipeline/exports", post(create_pipeline_export_handler))
+        .route(
+            "/v1/pipeline/exports/{snapshot_id}/complete",
+            post(complete_pipeline_export_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/operational-summary",
+            get(pipeline_operational_summary_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/runs/{run_id}/forensic",
+            get(pipeline_forensic_trace_handler),
         )
         .route(
             "/.well-known/trace-commons-attestation-keyset.json",
@@ -15792,15 +15827,43 @@ async fn submission_status_handler(
     let gate_decisions = gate_credit_decisions_for_records(state.as_ref(), asked_records)
         .await
         .map_err(internal_error)?;
+    // The pipeline's view of the same ids, for the same principals as the
+    // credit view above: the account's principal set when the caller is
+    // linked to an account, else the caller's own principal.
+    let pipeline_by_submission = match state.pipeline_product.as_ref() {
+        Some(product) => {
+            let principal_refs = account_principals.map_or_else(
+                || vec![tenant.principal_ref().to_string()],
+                AccountPrincipalSet::to_vec,
+            );
+            product
+                .contributor_statuses_for_principals(
+                    tenant.tenant_id(),
+                    &principal_refs,
+                    &body.submission_ids,
+                )
+                .await
+                .map_err(internal_error)?
+                .into_iter()
+                .map(|status| (status.submission_id, status))
+                .collect::<BTreeMap<_, _>>()
+        }
+        None => BTreeMap::new(),
+    };
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
+        let pipeline = pipeline_by_submission.get(&submission_id);
         if let Some(record) = visible_by_submission.get(&submission_id) {
-            statuses.push(submission_status_from_record(
+            let mut status = submission_status_from_record(
                 record,
                 &status_credit_events,
                 state.near_settlement_mode,
                 gate_decisions.get(&submission_id),
-            ));
+            );
+            status.pipeline = pipeline.map(pipeline_status_for_protocol);
+            statuses.push(status);
+        } else if let Some(pipeline) = pipeline {
+            statuses.push(submission_status_from_pipeline(pipeline));
         }
     }
 
@@ -15813,6 +15876,70 @@ async fn submission_status_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(statuses))
+}
+
+/// The snake_case label a pipeline status enum serializes as.
+fn pipeline_status_label<T: Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The protocol's pipeline block for a submission's run. Each field is a
+/// label, an id, or a decimal-string amount; the credit event, settlement
+/// batch, and outcome ids stay on the server.
+fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipelineStatusUpdate {
+    TracePipelineStatusUpdate {
+        run_id: status.run_id,
+        bundle_id: status.bundle_id.clone(),
+        processing_state: pipeline_status_label(status.processing),
+        current_phase: status.current_phase.map(pipeline_status_label),
+        responsible_phase: status.responsible_phase.map(pipeline_status_label),
+        reason_label: status.reason_label.clone(),
+        instruments: status
+            .instruments
+            .iter()
+            .map(|instrument| TraceInstrumentStatusUpdate {
+                instrument_id: instrument.instrument_id.clone(),
+                atomic_units: instrument.atomic_units.to_string(),
+                operation_state: instrument.operation_state.clone(),
+                internal_settlement_state: instrument.internal_settlement_state.clone(),
+                payout_rail: instrument.payout_rail.clone(),
+                payout_state: instrument.payout_state.clone(),
+                reason_label: instrument.reason_label.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The status document of a submission only the pipeline knows. Trace Credit
+/// becomes points as the legacy status computes them, microcredits over one
+/// million: pending from the award, and final only once the leg is
+/// finalized.
+fn submission_status_from_pipeline(
+    status: &PipelineContributorStatus,
+) -> TraceSubmissionStatusUpdate {
+    let trace_credit_points = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == "trace_credit")
+        .map(|instrument| instrument.atomic_units.get() as f32 / 1_000_000.0)
+        .unwrap_or_default();
+    TraceSubmissionStatusUpdate {
+        submission_id: status.submission_id,
+        trace_id: status.trace_id,
+        status: pipeline_status_label(status.processing),
+        credit_points_pending: trace_credit_points,
+        credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
+            .then_some(trace_credit_points),
+        credit_points_ledger: trace_credit_points,
+        credit_points_total: Some(trace_credit_points),
+        explanation: Vec::new(),
+        delayed_credit_explanations: Vec::new(),
+        consent_scopes: Vec::new(),
+        pipeline: Some(pipeline_status_for_protocol(status)),
+    }
 }
 
 /// Cap on submissions bundled into a single score attestation, mirroring the
@@ -16078,6 +16205,240 @@ async fn scoped_score_attestation_handler(
         pending,
         unknown,
     }))
+}
+
+// Versioned pipeline product routes: the score attestation, exports, and the
+// administrator reads over the pipeline's records. Each authenticates as the
+// closest `main` route does, and without a pipeline runtime (no product
+// store) each answers 404, as the pipeline review routes do.
+
+/// 404 when no pipeline runtime was assembled: there is then no product
+/// store, and nothing for a product route to read.
+fn require_pipeline_product(state: &AppState) -> ApiResult<&Arc<PipelineProductStore>> {
+    state
+        .pipeline_product
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline runtime not configured"))
+}
+
+/// `GET /v1/contributors/me/pipeline-score-attestation` -- signs a statement
+/// of the caller's own versioned-pipeline Score outcomes. It authenticates
+/// and resolves the principal exactly as `score_attestation_handler` does:
+/// the tenant and principal come from the authenticated credential alone,
+/// and the route takes no body and no query parameters.
+async fn pipeline_score_attestation_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ScoreAttestationResponse>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let Some(attestation) = state.attestation_signing.as_ref() else {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            trace_commons_server::trace_score_attestation::ATTESTATION_SIGNING_KEY_UNCONFIGURED,
+        ));
+    };
+    let submissions = product
+        .own_score_attestation_entries(tenant.tenant_id(), tenant.principal_ref())
+        .await
+        .map_err(internal_error)?;
+    let item_count = submissions.len();
+    let token = sign_versioned_score_attestation(
+        attestation,
+        tenant.tenant_id(),
+        tenant.principal_ref(),
+        submissions,
+        Utc::now(),
+    )
+    .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "pipeline_score_attestation",
+        item_count,
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(ScoreAttestationResponse { attestation: token }))
+}
+
+/// Body of `POST /v1/pipeline/exports`. The tenant, the requester, and the
+/// consent scopes come from the credential and the tenant policy, never from
+/// the body: any other field is refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineExportRequest {
+    allowed_use: TraceAllowedUse,
+    purpose: String,
+    #[serde(default = "default_pipeline_export_limit")]
+    limit: usize,
+}
+
+const fn default_pipeline_export_limit() -> usize {
+    PIPELINE_EXPORT_ITEM_MAX
+}
+
+/// The hash an export snapshot stores as its purpose: of the purpose and the
+/// item limit, so that the request key's idempotency check, which compares
+/// the requester, the use, and this hash, also refuses the same key with
+/// another limit. The limit is digits only, so the first `:` ends it.
+fn pipeline_export_purpose_hash(purpose: &str, limit: usize) -> String {
+    sha256_prefixed(&format!("{limit}:{purpose}"))
+}
+
+/// `POST /v1/pipeline/exports`: snapshots the tenant's approved pipeline
+/// revisions for `allowed_use`, at most `limit` of them (1 to
+/// `PIPELINE_EXPORT_ITEM_MAX`, by default the most). It authenticates as
+/// `/v1/workers/replay-export` does -- an admin or export-worker credential
+/// -- and applies `main`'s export rules for the caller: the scoped credential
+/// and the tenant policy must allow the use, and a submission must meet
+/// their consent-scope allowlists. The `idempotency-key` header names the
+/// request: the same key with the same use, purpose, and limit returns the
+/// first snapshot, and with any of them different is refused.
+async fn create_pipeline_export_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PipelineExportRequest>,
+) -> ApiResult<Json<PipelineExportSnapshot>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_export_worker_operator(&tenant)?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "idempotency_key_required"))?;
+    if !(1..=PIPELINE_EXPORT_ITEM_MAX).contains(&body.limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "export_item_limit_invalid",
+        ));
+    }
+    let policy = tenant_export_policy_for_request(
+        state.as_ref(),
+        &tenant,
+        "pipeline export",
+        None,
+        body.allowed_use,
+    )
+    .await?;
+    let consent_scopes = PipelineExportConsentScopes {
+        token: tenant.allowed_consent_scopes.clone(),
+        policy: policy
+            .map(|policy| policy.allowed_consent_scopes)
+            .unwrap_or_default(),
+    };
+    let snapshot = product
+        .create_export_snapshot(
+            &tenant.tenant_id,
+            &tenant.principal_ref,
+            &sha256_prefixed(idempotency_key),
+            body.allowed_use,
+            &consent_scopes,
+            &pipeline_export_purpose_hash(&body.purpose, body.limit),
+            body.limit,
+        )
+        .await
+        .map_err(|error| match error {
+            DatabaseError::Constraint(label) if label == PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT => {
+                api_error(StatusCode::CONFLICT, "export_idempotency_conflict")
+            }
+            other => internal_error(other),
+        })?;
+    Ok(Json(snapshot))
+}
+
+/// `POST /v1/pipeline/exports/{snapshot_id}/complete`: delivers the snapshot
+/// the same credential created, recording `main`'s export manifest for it; a
+/// delivered snapshot is returned unchanged. Authenticated as the create
+/// route. A snapshot that can no longer be delivered is refused with a label
+/// that tells the caller to create a new snapshot: a withdrawal invalidated
+/// it, or one of its submissions is no longer exportable (it expired, or was
+/// revoked outside the pipeline), which leaves the snapshot `ready`.
+async fn complete_pipeline_export_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(snapshot_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineExportSnapshot>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_export_worker_operator(&tenant)?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let snapshot = product
+        .complete_export_snapshot(&tenant.tenant_id, &tenant.principal_ref, snapshot_id)
+        .await
+        .map_err(|error| match error {
+            DatabaseError::NotFound { .. } => {
+                api_error(StatusCode::NOT_FOUND, "export_snapshot_not_found")
+            }
+            DatabaseError::Constraint(label)
+                if label == PIPELINE_EXPORT_SNAPSHOT_INVALIDATED
+                    || label == PIPELINE_EXPORT_SOURCE_INVALIDATED =>
+            {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "export_snapshot_invalidated_create_new_snapshot",
+                )
+            }
+            DatabaseError::Constraint(label) if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL => {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "export_snapshot_stale_create_new_snapshot",
+                )
+            }
+            other => internal_error(other),
+        })?;
+    Ok(Json(snapshot))
+}
+
+/// `GET /v1/admin/pipeline/operational-summary`: the tenant's pipeline work
+/// by phase, state, and reason label, with its error, index, credit, payout,
+/// invalidation, and export counts -- labels and counts only. It
+/// authenticates as `/v1/admin/operational-summary` does (an admin
+/// credential), and records the read.
+async fn pipeline_operational_summary_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineOperationalSummary>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let summary = product
+        .operational_summary(tenant.tenant_id())
+        .await
+        .map_err(internal_error)?;
+    append_control_plane_read_audit(
+        state.as_ref(),
+        tenant.auth(),
+        "pipeline_operational_summary",
+        summary.work.len(),
+    )
+    .await
+    .map_err(internal_error)?;
+    Ok(Json(summary))
+}
+
+/// `GET /v1/admin/pipeline/runs/{run_id}/forensic`: one run's phase outcomes
+/// as hashes, with its index, settlement, and payout states -- hashes and
+/// labels only. Authenticated as the operational summary, and the read is
+/// recorded. A run the tenant does not have is 404.
+async fn pipeline_forensic_trace_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+) -> ApiResult<Json<PipelineForensicTrace>> {
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let product = require_pipeline_product(state.as_ref())?;
+    let trace = product
+        .forensic_trace(tenant.tenant_id(), run_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline_run_not_found"))?;
+    append_control_plane_read_audit(state.as_ref(), tenant.auth(), "pipeline_forensic_trace", 1)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(trace))
 }
 
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
@@ -60502,6 +60863,7 @@ fn submission_status_from_record(
         explanation: receipt.explanation,
         delayed_credit_explanations,
         consent_scopes: record.consent_scopes.clone(),
+        pipeline: None,
     }
 }
 

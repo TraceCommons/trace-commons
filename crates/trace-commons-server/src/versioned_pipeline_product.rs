@@ -17,7 +17,7 @@
 //! `complete_export_snapshot` records its delivery as `main`'s export
 //! manifest.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
-use trace_commons_protocol::trace_contribution::TraceAllowedUse;
+use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
@@ -43,6 +43,16 @@ pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
 pub const PIPELINE_EXPORT_ITEM_MAX: usize = 500;
 pub const PIPELINE_EXPORT_SELECTION_POLICY_ID: &str = "trace_commons.pipeline_export_selection.v1";
 pub const PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID: &str = "trace_commons.authorized_trace_view.v1";
+/// `create_export_snapshot`'s refusal of a request key that an earlier,
+/// different request used.
+pub const PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT: &str = "export idempotency content conflict";
+/// `complete_export_snapshot`'s refusal of a snapshot a withdrawal
+/// invalidated.
+pub const PIPELINE_EXPORT_SNAPSHOT_INVALIDATED: &str = "export snapshot is invalidated";
+/// `complete_export_snapshot`'s refusal of a snapshot with an item a
+/// withdrawal invalidated.
+pub const PIPELINE_EXPORT_SOURCE_INVALIDATED: &str =
+    "export snapshot contains an invalidated source";
 
 /// Amounts cross the API as decimal strings, because a JavaScript client
 /// (the Tauri app) cannot hold an integer above `2^53` exactly. `AtomicUnits`
@@ -191,6 +201,20 @@ pub struct PipelineExportSnapshotItem {
     pub consent_scopes: serde_json::Value,
     pub allowed_uses: serde_json::Value,
     pub invalidation_reason: Option<String>,
+}
+
+/// The consent scopes an export may carry, decided for each submission as
+/// `main`'s export path decides them for each record: the caller's scoped
+/// token and the tenant policy each hold an allowlist, and a submission is
+/// selected only when its consent scopes meet every non-empty allowlist,
+/// each through any one of its scopes. An empty allowlist allows every
+/// scope. The two are checked one by one, not intersected: a submission
+/// that consents to scopes A and B meets a token allowlist of A and a
+/// policy allowlist of B.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipelineExportConsentScopes {
+    pub token: BTreeSet<ConsentScope>,
+    pub policy: BTreeSet<ConsentScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,7 +381,9 @@ const EXPORTABLE_SUBMISSION_PREDICATE: &str = "
 /// Review approved revision whose approved object is live, and whose
 /// submission may be exported for `$2` (`EXPORTABLE_SUBMISSION_PREDICATE`),
 /// oldest run first, at most `$4`. `$3`, when not NULL, keeps only those
-/// run ids.
+/// run ids. `$5` and `$6` are the token's and the policy's consent-scope
+/// allowlists (`PipelineExportConsentScopes`), NULL when empty: a
+/// submission must hold at least one scope of each that is not NULL.
 fn export_selection_sql() -> String {
     format!(
         "SELECT r.run_id, r.submission_id, r.trace_id, r.approved_revision_id,
@@ -384,6 +410,8 @@ fn export_selection_sql() -> String {
             AND r.approved_object_ref_id IS NOT NULL
             AND r.approved_content_hash IS NOT NULL
             AND ($3::uuid[] IS NULL OR r.run_id = ANY($3))
+            AND ($5::text[] IS NULL OR s.consent_scopes ?| $5)
+            AND ($6::text[] IS NULL OR s.consent_scopes ?| $6)
             AND {EXPORTABLE_SUBMISSION_PREDICATE}
           ORDER BY r.created_at ASC, r.run_id ASC
           LIMIT $4"
@@ -704,9 +732,9 @@ impl PipelineProductStore {
     /// snapshot back unchanged, or a conflict when the request differs.
     ///
     /// An item is a complete run with a committed Review approved revision
-    /// whose submission is exportable (`EXPORTABLE_SUBMISSION_PREDICATE`).
-    /// The item names the approved object and its `approved_content_hash`,
-    /// never the raw request.
+    /// whose submission is exportable (`EXPORTABLE_SUBMISSION_PREDICATE`)
+    /// and meets `consent_scopes`. The item names the approved object and
+    /// its `approved_content_hash`, never the raw request.
     ///
     /// The selection runs twice. The first run picks the candidates without
     /// a lock. Their run rows are then locked `FOR KEY SHARE` in `run_id`
@@ -720,12 +748,14 @@ impl PipelineProductStore {
     /// submission out. A withdrawal that starts after the locks waits for
     /// this transaction, and then invalidates the new snapshot and items
     /// itself.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_export_snapshot(
         &self,
         tenant_id: &str,
         requester_principal_ref: &str,
         request_idempotency_key: &str,
         allowed_use: TraceAllowedUse,
+        consent_scopes: &PipelineExportConsentScopes,
         purpose_hash: &str,
         max_items: usize,
     ) -> Result<PipelineExportSnapshot, DatabaseError> {
@@ -740,6 +770,8 @@ impl PipelineProductStore {
             ));
         }
         let allowed_use_label = storage_label(allowed_use)?;
+        let token_scopes = consent_allowlist_labels(&consent_scopes.token)?;
+        let policy_scopes = consent_allowlist_labels(&consent_scopes.policy)?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
@@ -755,7 +787,7 @@ impl PipelineProductStore {
                 || existing.purpose_hash != purpose_hash
             {
                 return Err(DatabaseError::Constraint(
-                    "export idempotency content conflict".to_string(),
+                    PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT.to_string(),
                 ));
             }
             tx.commit().await?;
@@ -767,7 +799,14 @@ impl PipelineProductStore {
         let candidates = tx
             .query(
                 &selection,
-                &[&tenant_id, &allowed_use_label, &None::<Vec<Uuid>>, &limit],
+                &[
+                    &tenant_id,
+                    &allowed_use_label,
+                    &None::<Vec<Uuid>>,
+                    &limit,
+                    &token_scopes,
+                    &policy_scopes,
+                ],
             )
             .await?;
         let mut run_ids = candidates
@@ -794,7 +833,14 @@ impl PipelineProductStore {
         let rows = tx
             .query(
                 &selection,
-                &[&tenant_id, &allowed_use_label, &Some(run_ids), &limit],
+                &[
+                    &tenant_id,
+                    &allowed_use_label,
+                    &Some(run_ids),
+                    &limit,
+                    &token_scopes,
+                    &policy_scopes,
+                ],
             )
             .await?;
         let snapshot_id = Uuid::new_v4();
@@ -892,7 +938,7 @@ impl PipelineProductStore {
             })?;
         if snapshot.state == "invalidated" {
             return Err(DatabaseError::Constraint(
-                "export snapshot is invalidated".to_string(),
+                PIPELINE_EXPORT_SNAPSHOT_INVALIDATED.to_string(),
             ));
         }
         if snapshot.state == "complete" {
@@ -905,7 +951,7 @@ impl PipelineProductStore {
             .any(|item| item.invalidation_reason.is_some())
         {
             return Err(DatabaseError::Constraint(
-                "export snapshot contains an invalidated source".to_string(),
+                PIPELINE_EXPORT_SOURCE_INVALIDATED.to_string(),
             ));
         }
         let submission_ids = snapshot
@@ -1633,6 +1679,22 @@ fn storage_label<T: Serialize>(value: T) -> Result<String, DatabaseError> {
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .ok_or_else(|| DatabaseError::Serialization("enum value is not a label".to_string()))
+}
+
+/// A consent-scope allowlist as the stored scope labels the selection
+/// compares with, or `None` for an empty allowlist, which allows every
+/// scope.
+fn consent_allowlist_labels(
+    allowlist: &BTreeSet<ConsentScope>,
+) -> Result<Option<Vec<String>>, DatabaseError> {
+    if allowlist.is_empty() {
+        return Ok(None);
+    }
+    allowlist
+        .iter()
+        .map(|scope| storage_label(*scope))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 /// `storage_label`'s inverse; `what` names the value in the error.

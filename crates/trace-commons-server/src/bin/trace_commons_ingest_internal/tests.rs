@@ -6076,6 +6076,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         require_tenant_submission_policy,
         db_mirror,
         pipeline_service: None,
+        pipeline_product: None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads,
@@ -28541,6 +28542,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         require_tenant_submission_policy: false,
         db_mirror: None,
         pipeline_service: None,
+        pipeline_product: None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads: false,
@@ -101320,4 +101322,487 @@ async fn settlement_posture_handler_refuses_without_a_credential() {
         .await
         .expect_err("an unknown bearer is refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// Versioned pipeline product routes and the pipeline status block, without a
+// database. The PostgreSQL tests of the same routes are in
+// `pipeline_http_pg_tests.rs`.
+// ---------------------------------------------------------------------------
+
+/// A pipeline status whose Trace Credit leg is finalized, with a second
+/// instrument at the largest amount an `AtomicUnits` holds.
+fn pipeline_contributor_status_fixture() -> PipelineContributorStatus {
+    use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
+    use trace_commons_server::versioned_pipeline_product::{
+        PipelineInstrumentStatus, PipelineProcessingStatus,
+    };
+    PipelineContributorStatus {
+        submission_id: Uuid::new_v4(),
+        trace_id: Uuid::new_v4(),
+        run_id: Uuid::new_v4(),
+        bundle_id: format!("sha256:{}", "a".repeat(64)),
+        processing: PipelineProcessingStatus::Complete,
+        current_phase: None,
+        responsible_phase: Some(Phase::Settle),
+        reason_label: None,
+        credit: PipelineCreditStatus::Finalized,
+        score_microcredits: Some(2_500_000),
+        score_outcome_id: Some(Uuid::new_v4()),
+        settlement_batch_id: Some(Uuid::new_v4()),
+        payout: Some("confirmed".to_string()),
+        instruments: vec![
+            PipelineInstrumentStatus {
+                instrument_id: "storage_rebate".to_string(),
+                atomic_units: AtomicUnits::from_raw(u128::MAX),
+                operation_state: "complete".to_string(),
+                internal_settlement_state: "not_applicable".to_string(),
+                credit_event_id: None,
+                settlement_batch_id: None,
+                payout_rail: "none".to_string(),
+                payout_state: "disabled".to_string(),
+                reason_label: None,
+            },
+            PipelineInstrumentStatus {
+                instrument_id: "trace_credit".to_string(),
+                atomic_units: AtomicUnits::from_raw(2_500_000),
+                operation_state: "complete".to_string(),
+                internal_settlement_state: "finalized".to_string(),
+                credit_event_id: Some(Uuid::new_v4()),
+                settlement_batch_id: Some(Uuid::new_v4()),
+                payout_rail: "near".to_string(),
+                payout_state: "confirmed".to_string(),
+                reason_label: None,
+            },
+        ],
+    }
+}
+
+/// A submission only the pipeline knows reads as a status document built
+/// from its run. The operation, internal settlement, and payout states of
+/// each instrument stay separate; each amount is a decimal string; Trace
+/// Credit becomes points the way legacy computes them (microcredits over one
+/// million), final only once finalized; and nothing in the block names a
+/// credit event, a settlement batch, an account, a transaction, or a
+/// principal.
+#[test]
+fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash_only() {
+    let status = pipeline_contributor_status_fixture();
+    let projected = submission_status_from_pipeline(&status);
+    assert_eq!(projected.submission_id, status.submission_id);
+    assert_eq!(projected.trace_id, status.trace_id);
+    assert_eq!(projected.status, "complete");
+    assert_eq!(projected.credit_points_pending, 2.5);
+    assert_eq!(projected.credit_points_final, Some(2.5));
+    let pipeline = projected
+        .pipeline
+        .expect("the document carries a pipeline block");
+    assert_eq!(pipeline.run_id, status.run_id);
+    assert_eq!(pipeline.bundle_id, status.bundle_id);
+    assert_eq!(pipeline.processing_state, "complete");
+    assert_eq!(pipeline.current_phase, None);
+    assert_eq!(pipeline.responsible_phase.as_deref(), Some("settle"));
+    assert_eq!(pipeline.instruments.len(), 2);
+    assert_eq!(pipeline.instruments[0].instrument_id, "storage_rebate");
+    assert_eq!(pipeline.instruments[0].atomic_units, u128::MAX.to_string());
+    assert_eq!(
+        pipeline.instruments[0].internal_settlement_state,
+        "not_applicable"
+    );
+    assert_eq!(pipeline.instruments[0].payout_state, "disabled");
+    assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+    assert_eq!(pipeline.instruments[1].operation_state, "complete");
+    assert_eq!(
+        pipeline.instruments[1].internal_settlement_state,
+        "finalized"
+    );
+    assert_eq!(pipeline.instruments[1].payout_rail, "near");
+    assert_eq!(pipeline.instruments[1].payout_state, "confirmed");
+    let json = serde_json::to_value(&pipeline).unwrap();
+    assert_eq!(
+        json["instruments"][1]["atomic_units"],
+        serde_json::json!("2500000")
+    );
+    let text = json.to_string();
+    for hidden in [
+        status.instruments[1].credit_event_id.unwrap(),
+        status.instruments[1].settlement_batch_id.unwrap(),
+        status.settlement_batch_id.unwrap(),
+        status.score_outcome_id.unwrap(),
+    ] {
+        assert!(!text.contains(&hidden.to_string()), "{text}");
+    }
+    for word in ["account", "transaction", "principal"] {
+        assert!(!text.contains(word), "{text}");
+    }
+
+    let pending = PipelineContributorStatus {
+        credit: PipelineCreditStatus::Pending,
+        ..status
+    };
+    let projected = submission_status_from_pipeline(&pending);
+    assert_eq!(projected.credit_points_pending, 2.5);
+    assert_eq!(
+        projected.credit_points_final, None,
+        "points are final only once the leg is finalized"
+    );
+}
+
+/// A legacy status document still reads, with no pipeline block, and a list
+/// that mixes it with an upgraded one writes the pipeline key only for the
+/// upgraded one, whose amounts are decimal strings; the upgraded document
+/// reads back unchanged.
+#[test]
+fn legacy_and_pipeline_status_documents_remain_wire_compatible() {
+    let legacy_json = serde_json::json!({
+        "submission_id": Uuid::new_v4(),
+        "trace_id": Uuid::new_v4(),
+        "status": "accepted",
+        "credit_points_pending": 0.0,
+        "credit_points_ledger": 0.0,
+        "explanation": [],
+        "delayed_credit_explanations": [],
+        "consent_scopes": []
+    });
+    let legacy: TraceSubmissionStatusUpdate =
+        serde_json::from_value(legacy_json).expect("legacy status remains readable");
+    assert!(legacy.pipeline.is_none());
+
+    let mut upgraded = legacy.clone();
+    upgraded.pipeline = Some(TracePipelineStatusUpdate {
+        run_id: Uuid::new_v4(),
+        bundle_id: format!("sha256:{}", "b".repeat(64)),
+        processing_state: "pending".to_string(),
+        current_phase: Some("review".to_string()),
+        responsible_phase: Some("admission".to_string()),
+        reason_label: None,
+        instruments: vec![TraceInstrumentStatusUpdate {
+            instrument_id: "trace_credit".to_string(),
+            atomic_units: "7".to_string(),
+            operation_state: "pending".to_string(),
+            internal_settlement_state: "pending".to_string(),
+            payout_rail: "near".to_string(),
+            payout_state: "disabled".to_string(),
+            reason_label: None,
+        }],
+    });
+    let mixed = serde_json::to_value(vec![legacy, upgraded.clone()]).unwrap();
+    assert!(mixed[0].get("pipeline").is_none());
+    assert_eq!(mixed[1]["pipeline"]["processing_state"], "pending");
+    assert_eq!(
+        mixed[1]["pipeline"]["instruments"][0]["atomic_units"],
+        serde_json::json!("7")
+    );
+    let read_back: TraceSubmissionStatusUpdate =
+        serde_json::from_value(mixed[1].clone()).expect("the upgraded document reads back");
+    assert_eq!(read_back, upgraded);
+}
+
+/// A product store whose database cannot be reached: a handler that refuses
+/// a request before its first query answers normally, and one that queries
+/// fails with a 500. The pool connects lazily, so building it connects to
+/// nothing.
+async fn unreachable_pipeline_product() -> Arc<PipelineProductStore> {
+    let backend = PgBackend::new(&DatabaseConfig::from_postgres_url(
+        "postgres://unused@127.0.0.1:9/unused",
+        1,
+    ))
+    .await
+    .expect("a lazy pool builds without connecting");
+    Arc::new(PipelineProductStore::new(Arc::new(backend)))
+}
+
+/// Sends one request through the router and returns its status and JSON
+/// body (`Null` when the body is empty).
+async fn pipeline_product_request(
+    state: Arc<AppState>,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    idempotency_key: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+
+    let mut request = axum::http::Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Some(key) = idempotency_key {
+        request = request.header("idempotency-key", key);
+    }
+    let request = match body {
+        Some(body) => request
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .unwrap();
+    let response = app(state).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, body)
+}
+
+/// A valid export request body.
+fn pipeline_export_body() -> serde_json::Value {
+    serde_json::json!({"allowed_use": "evaluation", "purpose": "benchmark refresh"})
+}
+
+/// Without a pipeline runtime there is no product store, and every product
+/// route answers 404 to a caller holding its credential. The body is the
+/// handler's own refusal, not the router's empty fallback for an unknown
+/// path.
+#[tokio::test]
+async fn pipeline_product_routes_are_not_found_without_a_pipeline_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    assert!(state.pipeline_product.is_none());
+    let run = Uuid::new_v4();
+    let snapshot = Uuid::new_v4();
+    let requests = [
+        (
+            "GET",
+            "/v1/contributors/me/pipeline-score-attestation".to_string(),
+            "token-a",
+            None,
+        ),
+        (
+            "POST",
+            "/v1/pipeline/exports".to_string(),
+            "export-worker-token-a",
+            Some(pipeline_export_body()),
+        ),
+        (
+            "POST",
+            format!("/v1/pipeline/exports/{snapshot}/complete"),
+            "export-worker-token-a",
+            None,
+        ),
+        (
+            "GET",
+            "/v1/admin/pipeline/operational-summary".to_string(),
+            "admin-token-a",
+            None,
+        ),
+        (
+            "GET",
+            format!("/v1/admin/pipeline/runs/{run}/forensic"),
+            "admin-token-a",
+            None,
+        ),
+    ];
+    for (method, uri, token, body) in requests {
+        let (status, body) =
+            pipeline_product_request(state.clone(), method, &uri, Some(token), Some("key"), body)
+                .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(
+            body["error"], "pipeline runtime not configured",
+            "{method} {uri}"
+        );
+    }
+}
+
+/// The operational summary and the forensic trace need an admin credential
+/// (401 without a credential, 403 with a contributor, reviewer, or export
+/// worker credential), and the export routes the export credential (401
+/// without one, 403 for a contributor or a reviewer). The score attestation
+/// needs a credential. Each refusal comes before the store is read: the
+/// store here cannot reach its database, so a read would be a 500.
+#[tokio::test]
+async fn pipeline_product_routes_refuse_a_caller_without_their_credential() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).pipeline_product = Some(unreachable_pipeline_product().await);
+    let run = Uuid::new_v4();
+    let snapshot = Uuid::new_v4();
+    let admin_routes = [
+        "/v1/admin/pipeline/operational-summary".to_string(),
+        format!("/v1/admin/pipeline/runs/{run}/forensic"),
+    ];
+    for uri in &admin_routes {
+        let (status, _) =
+            pipeline_product_request(state.clone(), "GET", uri, None, None, None).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{uri} without a credential"
+        );
+        for token in ["token-a", "review-token-a", "export-worker-token-a"] {
+            let (status, _) =
+                pipeline_product_request(state.clone(), "GET", uri, Some(token), None, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} with {token}");
+        }
+    }
+    let export_routes = [
+        (
+            "/v1/pipeline/exports".to_string(),
+            Some(pipeline_export_body()),
+        ),
+        (format!("/v1/pipeline/exports/{snapshot}/complete"), None),
+    ];
+    for (uri, body) in &export_routes {
+        let (status, _) =
+            pipeline_product_request(state.clone(), "POST", uri, None, Some("key"), body.clone())
+                .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{uri} without a credential"
+        );
+        for token in ["token-a", "review-token-a"] {
+            let (status, _) = pipeline_product_request(
+                state.clone(),
+                "POST",
+                uri,
+                Some(token),
+                Some("key"),
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} with {token}");
+        }
+    }
+    let (status, _) = pipeline_product_request(
+        state.clone(),
+        "GET",
+        "/v1/contributors/me/pipeline-score-attestation",
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// An export request is checked before the store is read: the store here
+/// cannot reach its database, so a request that reached it would be a 500.
+/// Refused: no idempotency key; an item limit outside
+/// `1..=PIPELINE_EXPORT_ITEM_MAX`; an unknown body field; a scoped export
+/// credential that does not allow the requested use; a tenant policy that
+/// does not allow it; and, when a tenant policy is required, a tenant with
+/// none. The last three are `main`'s export rules, with its messages.
+#[tokio::test]
+async fn pipeline_product_export_request_is_refused_before_the_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut tokens = BTreeMap::new();
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "export-worker-token-a",
+        TokenRole::ExportWorker,
+    );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "scoped-export-worker-token-a",
+        TokenRole::ExportWorker,
+    );
+    tokens
+        .get_mut("scoped-export-worker-token-a")
+        .unwrap()
+        .allowed_uses = BTreeSet::from([TraceAllowedUse::Debugging]);
+    let mut state = test_state_with_tokens(temp.path().to_path_buf(), tokens);
+    Arc::make_mut(&mut state).pipeline_product = Some(unreachable_pipeline_product().await);
+    let create = |state: Arc<AppState>,
+                  token: &'static str,
+                  key: Option<&'static str>,
+                  body: serde_json::Value| async move {
+        pipeline_product_request(
+            state,
+            "POST",
+            "/v1/pipeline/exports",
+            Some(token),
+            key,
+            Some(body),
+        )
+        .await
+    };
+
+    let (status, body) = create(
+        state.clone(),
+        "export-worker-token-a",
+        None,
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "idempotency_key_required");
+    for limit in [0, PIPELINE_EXPORT_ITEM_MAX + 1] {
+        let mut request = pipeline_export_body();
+        request["limit"] = serde_json::json!(limit);
+        let (status, body) =
+            create(state.clone(), "export-worker-token-a", Some("key"), request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "limit {limit}");
+        assert_eq!(body["error"], "export_item_limit_invalid", "limit {limit}");
+    }
+    let mut unknown_field = pipeline_export_body();
+    unknown_field["requester_principal_ref"] = serde_json::json!("principal_sha256:other");
+    let (status, _) = create(
+        state.clone(),
+        "export-worker-token-a",
+        Some("key"),
+        unknown_field,
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "an unknown field is refused: {status}"
+    );
+
+    let (status, body) = create(
+        state.clone(),
+        "scoped-export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "scoped tenant token does not allow this trace use"
+    );
+
+    let mut restricted = state.clone();
+    Arc::make_mut(&mut restricted).tenant_policies = Arc::new(BTreeMap::from([(
+        "tenant-a".to_string(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::from([TraceAllowedUse::Debugging]),
+        },
+    )]));
+    let (status, body) = create(
+        restricted,
+        "export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "trace export use is not allowed for this tenant"
+    );
+
+    let mut policy_required = state.clone();
+    Arc::make_mut(&mut policy_required).require_tenant_submission_policy = true;
+    let (status, body) = create(
+        policy_required,
+        "export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "trace export tenant does not have a contribution policy"
+    );
 }

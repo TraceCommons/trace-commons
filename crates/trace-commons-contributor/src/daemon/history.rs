@@ -432,6 +432,7 @@ mod tests {
             explanation: vec!["held for privacy review".into()],
             delayed_credit_explanations: vec![],
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            pipeline: None,
         }
     }
 
