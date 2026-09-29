@@ -2525,7 +2525,6 @@ mod tests {
         std::fs::write(dir.path().join(format!("{reference}.res")), response).expect("res");
 
         let row = crate::routing::RoutedExchange {
-            proof: None,
             id: Some(3),
             started_at: chrono::Utc::now(),
             client_session_id: Some("session".to_string()),
@@ -2546,6 +2545,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         };
         let call = crate::routing::attested::attested_final_call(&[row], dir.path())
             .expect("the fixture must actually be attestable, or these tests prove nothing");

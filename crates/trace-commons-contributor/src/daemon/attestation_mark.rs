@@ -396,7 +396,6 @@ mod tests {
 
     fn row() -> RoutedExchange {
         RoutedExchange {
-            proof: None,
             id: Some(1),
             started_at: Utc.with_ymd_and_hms(2026, 9, 8, 12, 0, 0).unwrap(),
             client_session_id: Some("session".to_string()),
@@ -417,6 +416,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         }
     }
 

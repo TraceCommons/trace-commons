@@ -194,7 +194,6 @@ mod tests {
 
     fn row(session: Option<&str>, offset: i64) -> RoutedExchange {
         RoutedExchange {
-            proof: None,
             id: None,
             started_at: at(offset),
             client_session_id: session.map(str::to_string),
@@ -215,6 +214,7 @@ mod tests {
             output_tokens: Some(200),
             cost_usd: Some(0.02),
             status: 200,
+            ..Default::default()
         }
     }
 
