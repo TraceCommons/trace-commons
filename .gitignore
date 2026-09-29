@@ -61,6 +61,3 @@ __pycache__/
 
 # Node tooling under tools/ (trajectory-export)
 node_modules/
-
-# Rendered at deploy time by community/scripts/render-aasa.mjs from TC_APPLE_TEAM_ID.
-/community/public/.well-known/

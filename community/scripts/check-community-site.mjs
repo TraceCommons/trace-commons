@@ -253,25 +253,6 @@ if (
   failures.push("a late route response must not replace the active published workflow");
 }
 
-if (!worker.includes("/.well-known/") || !worker.includes("application/json")) {
-  failures.push("_worker.js must answer /.well-known/* itself, so a missing AASA never falls back to index.html");
-}
-// The AASA file is rendered at deploy time (render-aasa.mjs), so it is absent in
-// a plain checkout. When present it must be well-formed; `deploy:pages` renders
-// it first, and the render step itself fails closed without a Team ID.
-const aasa = await readFile(join(publicDir, ".well-known", "apple-app-site-association"), "utf8").catch(() => null);
-if (aasa !== null) {
-  let apps;
-  try {
-    apps = JSON.parse(aasa)?.webcredentials?.apps;
-  } catch {
-    apps = undefined;
-  }
-  if (!Array.isArray(apps) || apps.length !== 1 || !/^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$/.test(apps[0])) {
-    failures.push("apple-app-site-association must be {\"webcredentials\":{\"apps\":[\"<TEAMID>.<bundle id>\"]}}");
-  }
-}
-
 if (failures.length > 0) {
   console.error(failures.map((failure) => `- ${failure}`).join("\n"));
   process.exit(1);
