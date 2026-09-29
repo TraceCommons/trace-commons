@@ -21,7 +21,7 @@
 //!   to a signed-in account from a native session, behind the Slice 3a gate.
 //!
 //! **Ceremonies are body-bound.** Where the browser carries the ceremony id in
-//! the `tc_passkey_ceremony` cookie, these routes return it in the `start`
+//! the [`ACCOUNT_PASSKEY_CEREMONY_COOKIE`] cookie, these routes return it in the `start`
 //! body and read it from the `finish` body. The id is a 160-bit CSPRNG value;
 //! the stored state holds the challenge, which webauthn-rs requires the
 //! response to have signed; `take` makes it single use; the store's TTL is
