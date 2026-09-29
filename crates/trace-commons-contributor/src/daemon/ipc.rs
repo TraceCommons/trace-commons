@@ -1502,6 +1502,9 @@ impl DaemonShared {
         let automatic_contribution_held = self.gate_held_value();
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
+        // Before the queue lock: it takes the policy lock and then the queue
+        // lock, the order every method above already follows.
+        let decisions_owed = self.decisions_owed_value();
         let queue = self.queue.lock().expect("queue lock");
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
@@ -1512,6 +1515,15 @@ impl DaemonShared {
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
+            // Additive (K6). The badge's exact count: `Pending` entries that
+            // need a decision from this person. Unlike `queue_depth`, this
+            // excludes armed folders' `Pending` entries that will go out
+            // unattended once they settle or the gate clears -- "armed
+            // folders never move it" -- except the two kinds that still need
+            // a person: `held_for_review` and a grant's pre-grant hold-back.
+            // See `queue::decisions_owed`. `queue_depth` is kept unchanged
+            // for compatibility; do not derive it from this field.
+            "decisions_owed": decisions_owed,
             "next_digest_at": self.next_digest_at(),
             "health": {
                 "last_error_label": health.last_error_label,
@@ -1607,6 +1619,16 @@ impl DaemonShared {
             })
             .collect();
         serde_json::Value::Array(notices)
+    }
+
+    /// The `decisions_owed` count of [`Self::status_value`] (K6). See
+    /// [`super::queue::decisions_owed`] for the exact rule; this only takes
+    /// the locks in the order every other status helper above does: policy,
+    /// then queue.
+    fn decisions_owed_value(&self) -> usize {
+        let policy = self.policy.lock().expect("policy lock");
+        let queue = self.queue.lock().expect("queue lock");
+        super::queue::decisions_owed(&queue, &policy)
     }
 
     /// The `automatic_contribution_held` object of [`Self::status_value`].

@@ -527,6 +527,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "consent_scopes": [],
   "paused": false,
   "queue_depth": 0,
+  "decisions_owed": 0,
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
   "daily_budget": {
@@ -550,8 +551,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 ```
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
-`arming_rewordings` and `automatic_contribution_held` are additive; see their
-sections below.
+`arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
+additive; see their sections below.
 
 `legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
 {"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
@@ -684,6 +685,42 @@ health slot from the same pass, but a higher label can mask it, so render the
 condition from this object. It is never acknowledged: it releases on its own
 on the first full pass that finds the gate met. The words are
 `consent_copy::gate_held_notice_for_wire` (`tc_gate_held_notice`).
+
+#### `decisions_owed`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (K6). The menu-bar
+badge's exact count: `Pending` entries that need a decision from this person.
+It is **not** `queue_depth`, and the two are expected to diverge -- the design
+rule is "the menu-bar badge counts decisions owed, never queue depth or
+credit," and "armed folders never move it."
+
+`queue_depth` is `list_pending`'s length, unchanged for compatibility: every
+`Pending` entry, whatever folder it is in. `decisions_owed` excludes a
+`Pending` entry sitting in an armed (`auto_upload`) folder, because that
+entry is going to be sent unattended once it settles (see
+`eligibility::ARMED_SETTLE_SECS`) or once the automatic-contribution gate
+clears (`automatic_contribution_held` above) -- the design never asks about
+either, so armed folders must not move the badge whether they are merely
+unsettled or gate-held.
+
+Two kinds of entry count even inside an armed folder, because they do need a
+person:
+
+- an entry `held_for_review` -- revoked for a reason in
+  `REASONS_NEEDING_A_PERSON` that no unattended re-approval can satisfy;
+- a pre-grant session the automatic grant is holding back
+  (`holds_back_unattended`): it was already on disk when the grant armed the
+  folder, and the grant arms nothing already on disk, so it waits for a
+  person instead of going unattended.
+
+Computed fresh on every `status` (and therefore on `snapshot`, since
+`subscribe` sends `status` inside it) from the queue and the policy file, the
+same way `witness_capacity` is: never a second stored counter that could
+disagree with the rows it counts. The single function behind it,
+`queue::decisions_owed(queue, policy)`, is written as one small, explicit
+filter for exactly this reason -- a later state that also must not count
+(a non-permanent "keep on this Mac", K5) extends that filter rather than
+growing a second badge-counting path elsewhere.
 
 #### `routing`
 

@@ -147,6 +147,24 @@ fn a_call_returns_json_the_caller_owns() {
     stop(h);
 }
 
+/// K6: the menu-bar badge's exact count crosses the C ABI the same way
+/// `queue_depth` always has -- inside the plain JSON `tc_call(h, "status",
+/// "{}")` already returns. A macOS shell that decodes `status` off this call
+/// reads `decisions_owed` for free; there is no separate per-field ABI
+/// function to add for it, and this asserts that stays true.
+#[test]
+fn status_over_the_c_abi_carries_decisions_owed() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let out = call(h, "status", "{}");
+    assert!(out.contains("\"decisions_owed\""), "{out}");
+    assert!(
+        out.contains("\"queue_depth\""),
+        "queue_depth must stay for compatibility: {out}"
+    );
+    stop(h);
+}
+
 #[test]
 fn a_second_start_against_the_same_directory_fails_on_the_lock() {
     let dir = tempfile::tempdir().unwrap();
