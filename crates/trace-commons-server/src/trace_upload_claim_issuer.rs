@@ -42,8 +42,8 @@ use trace_commons_protocol::device_invite_subject::{
     DEVICE_INVITE_SUBJECT_STALE, DeviceInviteSubjectRequest, DeviceInviteSubjectResponse,
 };
 use trace_commons_protocol::invite_lookup::{
-    INVITE_LOOKUP_PATH, INVITE_LOOKUP_REASON_MALFORMED, INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
-    InviteLookupRequest, InviteLookupResponse,
+    INVITE_LOOKUP_PATH, INVITE_LOOKUP_REASON_MALFORMED, INVITE_LOOKUP_REASON_NOT_FOUND,
+    INVITE_LOOKUP_REQUEST_SCHEMA_VERSION, InviteLookupRequest, InviteLookupResponse,
 };
 use trace_commons_protocol::onboarding::{
     TRACE_INSTANCE_ENROLL_REQUEST_SCHEMA_VERSION, TRACE_ONBOARD_REQUEST_SCHEMA_VERSION,
@@ -1711,12 +1711,37 @@ impl TraceUploadClaimIssuerState {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 message: "invite_registry_not_configured",
             })?;
+        let registry = self.invite_admin_registry.as_ref().ok_or(IssuerError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "invite_registry_not_configured",
+        })?;
         let subject_hash = hash_invite_code(invite_code);
+        // Ask the in-process cache first, exactly as `/v1/onboard` does, so
+        // the two agree on whether a code is usable: a stale cache is a 503
+        // there and here, and a code the cache does not hold is refused there
+        // (an invite minted by a separate `--mint-invites` process is
+        // invisible to it until the next refresh) so it must not read valid
+        // here. Only a `valid` answer is overridden. The database is still
+        // consulted for the refusal label, since the cache drops revoked and
+        // expired rows and a holder is told which of those it was.
+        let cached = match registry.lookup(&subject_hash) {
+            Ok(cached) => cached,
+            Err(InviteRegistryError::Stale { .. }) => {
+                return Err(IssuerError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    message: "invite_registry_stale",
+                });
+            }
+            Err(InviteRegistryError::Backend(_)) => return Err(IssuerError::internal()),
+        };
         let peek = backend
             .peek_invite_grant(&subject_hash)
             .await
             .map_err(|_| IssuerError::internal())?;
-        let response = crate::invite_lookup::classify_invite(peek.as_ref(), Utc::now());
+        let mut response = crate::invite_lookup::classify_invite(peek.as_ref(), Utc::now());
+        if response.valid && cached.is_none() {
+            response = InviteLookupResponse::invalid(INVITE_LOOKUP_REASON_NOT_FOUND);
+        }
         Ok((Some(subject_hash), response))
     }
 }

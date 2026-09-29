@@ -170,11 +170,20 @@ impl IssuerClient {
 impl IssuerClient {
     /// Ask the issuer whether an invite is usable, who issued it and what it
     /// pays, WITHOUT joining: unlike [`Self::onboard`] this spends no use and
-    /// registers nothing, so it is safe to call as the user types. The code
-    /// goes in the body, never the URL. A refused invite is `Ok` with
-    /// `valid == false` and a `reason_label`; `Err` is a transport failure or
-    /// an issuer refusal such as its rate limit (`invite_lookup_rate_limited`)
-    /// or an issuer that predates the route.
+    /// registers nothing. The code goes in the body, never the URL. A refused
+    /// invite is `Ok` with `valid == false` and a `reason_label`; `Err` is a
+    /// transport failure or an issuer refusal such as its rate limit
+    /// (`invite_lookup_rate_limited`) or an issuer that predates the route.
+    ///
+    /// Do NOT call this per keystroke. Validate the code's format on the
+    /// client first and call once, on an explicit "Look up" action: the
+    /// issuer's lookup budget is small and shared, every call counts against
+    /// it, so partial codes burn it and the user is throttled just as the
+    /// code completes.
+    ///
+    /// Clients MUST present the returned `credit_range` as "estimated credit
+    /// per accepted trace, not yet settled", never as a payment promise. The
+    /// range is operator-set and not enforced by the ledger.
     pub async fn lookup_invite(
         &self,
         issuer_url: &str,

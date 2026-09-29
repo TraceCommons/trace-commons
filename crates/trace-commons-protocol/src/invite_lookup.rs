@@ -51,8 +51,17 @@ impl std::fmt::Debug for InviteLookupRequest {
 }
 
 /// Operator-set credit per accepted trace, inclusive on both ends.
+///
+/// This is an estimate, not a promise. It is set by the operator on the
+/// invite, the credit ledger does not enforce it, settlement is disabled and
+/// grading is in shadow mode. Clients MUST present it as "estimated credit per
+/// accepted trace, not yet settled", and never as a payment promise or a
+/// guaranteed rate.
+///
+/// Response types deliberately do not use `deny_unknown_fields`, so an issuer
+/// can add a field without breaking clients already shipped. Only the request
+/// does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CreditRange {
     pub min: i64,
     pub max: i64,
@@ -73,8 +82,13 @@ impl CreditRange {
 
 /// The answer. On `valid: true` the display name and range are present when
 /// the operator set them; on `valid: false` only `reason_label` is.
+///
+/// Clients MUST present `credit_range` as "estimated credit per accepted
+/// trace, not yet settled", never as a payment promise. See [`CreditRange`].
+///
+/// Unknown fields are ignored on purpose: a field added to the response later
+/// must not break clients already shipped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InviteLookupResponse {
     pub valid: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +143,28 @@ pub fn valid_credit_range(min: i64, max: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_response_with_an_extra_field_still_deserializes() {
+        let parsed: InviteLookupResponse = serde_json::from_value(serde_json::json!({
+            "valid": true,
+            "issuer_display_name": "Pilot",
+            "credit_range": {"min": 1, "max": 2, "unit": "points_per_accepted_trace", "tier": "x"},
+            "a_future_field": {"nested": [1, 2]},
+        }))
+        .unwrap();
+        assert!(parsed.valid);
+        assert_eq!(parsed.credit_range, Some(CreditRange::points(1, 2)));
+        // The request stays strict.
+        assert!(
+            serde_json::from_value::<InviteLookupRequest>(serde_json::json!({
+                "schema_version": INVITE_LOOKUP_REQUEST_SCHEMA_VERSION,
+                "invite_code": "x",
+                "extra": 1,
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn display_name_rules() {

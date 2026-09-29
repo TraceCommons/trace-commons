@@ -1201,8 +1201,6 @@ mod lookup_route {
     }
 
     async fn router_with(backend: Arc<PgBackend>, authoritative: bool) -> axum::Router {
-        let issuer_keys = generate_upload_claim_keypair().unwrap();
-        let workload_keys = generate_upload_claim_keypair().unwrap();
         let registry = Arc::new(
             DbInviteRegistry::new(
                 backend.clone(),
@@ -1212,6 +1210,16 @@ mod lookup_route {
             .await
             .expect("registry warms"),
         );
+        router_over(backend, registry, authoritative)
+    }
+
+    fn router_over(
+        backend: Arc<PgBackend>,
+        registry: Arc<DbInviteRegistry>,
+        authoritative: bool,
+    ) -> axum::Router {
+        let issuer_keys = generate_upload_claim_keypair().unwrap();
+        let workload_keys = generate_upload_claim_keypair().unwrap();
         trace_upload_claim_issuer_router(TraceUploadClaimIssuerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             signing_private_key_pem: issuer_keys.private_key_pem.clone(),
@@ -1399,6 +1407,52 @@ mod lookup_route {
                 "{text}"
             );
         }
+
+        cleanup_test_invites(&backend, &policy_label).await;
+    }
+
+    /// An invite written to the database by another process (the
+    /// `--mint-invites` CLI) is not in this process's cache. Onboarding
+    /// refuses a code the cache does not hold, so the lookup must not call it
+    /// valid; after the cache refreshes both accept it.
+    #[tokio::test]
+    async fn lookup_agrees_with_onboarding_about_a_code_the_cache_has_not_seen() {
+        let Some(config) = registry_test_config() else {
+            eprintln!("skipping: no test database configured");
+            return;
+        };
+        let backend = Arc::new(PgBackend::new(&config).await.expect("backend"));
+        backend.run_migrations().await.expect("migrations");
+        let policy_label = unique_label(SECRET_POLICY_SUFFIX);
+        let registry = Arc::new(
+            DbInviteRegistry::new(
+                backend.clone(),
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(600),
+            )
+            .await
+            .expect("registry warms"),
+        );
+        let router = router_over(backend.clone(), registry.clone(), true);
+
+        // Minted after the cache warmed, straight into the database.
+        let code = unique_code();
+        backend
+            .insert_invite_grant(write_for(&code, &policy_label))
+            .await
+            .unwrap();
+        let (status, body, text) = lookup(&router, &code).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            body,
+            serde_json::json!({"valid": false, "reason_label": "not_found"}),
+            "{text}"
+        );
+
+        registry.refresh_once().await.expect("refresh");
+        let (status, body, text) = lookup(&router, &code).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(body["valid"], true, "{text}");
 
         cleanup_test_invites(&backend, &policy_label).await;
     }

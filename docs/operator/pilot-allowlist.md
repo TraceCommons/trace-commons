@@ -464,9 +464,20 @@ that is not authoritative: in that mode `/v1/onboard` redeems from the file
 allowlist, so an answer read from the database could call an invite valid
 that onboarding then refuses, or report a revocation onboarding ignores.
 
+Lookup and onboarding agree on whether a code is usable. The lookup asks the
+same in-process invite cache `/v1/onboard` asks, and answers 503
+`invite_registry_stale` when onboarding would. A code the cache does not hold
+reads `not_found`, even if the database has it live, because onboarding would
+refuse it too. That is the case for an invite minted by a separate
+`--mint-invites` process, until the next cache refresh (60 seconds by
+default). The database is still read for the refusal label of a revoked,
+expired or exhausted invite.
+
 The answer is `valid` plus, when you set them on the invite
 (`issuer_display_name`, `credit_range_min`, `credit_range_max` on
-`POST /v1/admin/invites`), the public name and the credit range. A refusal
+`POST /v1/admin/invites`), the public name and the credit range. The
+credit range is an estimate: clients show it as "estimated credit per
+accepted trace, not yet settled", never as a payment promise. A refusal
 carries one label: `malformed`, `not_found`, `revoked`, `expired` or
 `exhausted`. `issued_by_label`, `note_label`, `policy_label`, `max_uses` and
 the use count are never returned. Unlike `/v1/onboard`, which says
@@ -481,10 +492,15 @@ code was revoked or expired. Only someone holding the code learns that.
 | `TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER` | unset | Header your reverse proxy writes the caller's address into. Unset means no header is trusted. A value that is not a header name refuses startup. |
 | `TRACE_COMMONS_INVITE_LOOKUP_PER_CLIENT_RATE_PER_MIN` | `10` | Lookups per minute per client. Applies only when the header above is set. |
 
+The pilot template enables per-client keying
+(`TRACE_COMMONS_INVITE_LOOKUP_CLIENT_IP_HEADER=X-Forwarded-For`) with a shared
+cap of 300, and it depends on the Caddy overwrite described below: it is a
+requirement, not an option.
+
 The issuer does not see client addresses itself. With the header unset,
 every caller shares the one bucket, so a single caller making lookups in a
 loop uses up the budget for everyone (429 `invite_lookup_rate_limited`)
-until it stops. Codes are 16 characters from a 36-symbol alphabet, so the
+until it stops. Codes are 16 characters from a 34-symbol alphabet (`A-Z2-9`), so the
 shared cap is not what keeps them from being guessed. It keeps one caller
 from locking out everyone else.
 
