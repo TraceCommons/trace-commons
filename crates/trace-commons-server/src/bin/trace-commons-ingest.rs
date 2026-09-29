@@ -265,7 +265,7 @@ use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
     PipelineContributorStatus, PipelineCreditStatus, PipelineExportConsentScopes,
     PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
-    PipelineProductStore,
+    PipelineProductStore, is_pipeline_export_manifest_purpose_code,
 };
 use uuid::Uuid;
 
@@ -72807,6 +72807,10 @@ fn is_ranker_training_storage_manifest(record: &StorageTraceExportManifestRecord
 fn is_replay_dataset_storage_manifest(record: &StorageTraceExportManifestRecord) -> bool {
     record.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
         && !is_ranker_training_storage_manifest(record)
+        && !record
+            .purpose_code
+            .as_deref()
+            .is_some_and(is_pipeline_export_manifest_purpose_code)
 }
 
 fn deterministic_vector_entry_uuid(
@@ -74065,10 +74069,10 @@ impl TraceExportManifestSummary {
 
     fn is_replay_dataset_manifest(&self) -> bool {
         self.artifact_kind == StorageTraceObjectArtifactKind::ExportArtifact
-            && !self
-                .purpose_code
-                .as_deref()
-                .is_some_and(is_ranker_training_purpose_code)
+            && !self.purpose_code.as_deref().is_some_and(|purpose_code| {
+                is_ranker_training_purpose_code(purpose_code)
+                    || is_pipeline_export_manifest_purpose_code(purpose_code)
+            })
     }
 }
 

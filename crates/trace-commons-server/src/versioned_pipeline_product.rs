@@ -43,6 +43,21 @@ pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
 pub const PIPELINE_EXPORT_ITEM_MAX: usize = 500;
 pub const PIPELINE_EXPORT_SELECTION_POLICY_ID: &str = "trace_commons.pipeline_export_selection.v1";
 pub const PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID: &str = "trace_commons.authorized_trace_view.v1";
+/// The purpose-code family of a delivered snapshot's export manifest:
+/// `pipeline_export:<allowed use>`. `main`'s replay-dataset manifest list and
+/// its replay manifest count leave this family out, as they leave out the
+/// ranker-training families, so a replay worker never takes a pipeline
+/// export for a replay dataset. The manifest's kind stays `export_artifact`.
+pub const PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX: &str = "pipeline_export";
+
+/// Whether a manifest's purpose code is in the
+/// `PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX` family.
+pub fn is_pipeline_export_manifest_purpose_code(purpose_code: &str) -> bool {
+    purpose_code
+        .strip_prefix(PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX)
+        .is_some_and(|suffix| suffix.starts_with(':'))
+}
+
 /// `create_export_snapshot`'s refusal of a request key that an earlier,
 /// different request used.
 pub const PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT: &str = "export idempotency content conflict";
@@ -981,8 +996,11 @@ impl PipelineProductStore {
         let item_count = i32::try_from(snapshot.items.len())
             .map_err(|_| DatabaseError::Constraint("export item count overflow".to_string()))?;
         // `main` reads every manifest's kind back as a
-        // `TraceObjectArtifactKind`, so the manifest carries one of those.
+        // `TraceObjectArtifactKind`, so the manifest carries one of those. Its
+        // purpose code marks it as a pipeline export, which `main`'s
+        // replay-dataset list and count leave out.
         let artifact_kind = storage_label(TraceObjectArtifactKind::ExportArtifact)?;
+        let purpose_code = format!("{PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX}:{allowed_use_label}");
         tx.execute(
             "INSERT INTO trace_export_manifests (
                 tenant_id, export_manifest_id, artifact_kind, purpose_code,
@@ -993,7 +1011,7 @@ impl PipelineProductStore {
                 &tenant_id,
                 &snapshot_id,
                 &artifact_kind,
-                &allowed_use_label,
+                &purpose_code,
                 &submission_ids,
                 &snapshot.source_list_hash,
                 &item_count,
@@ -1761,6 +1779,21 @@ mod tests {
             TraceAllowedUse::RankingModelTraining
         );
         assert!(from_storage_label::<TraceAllowedUse>("research".to_string(), "use").is_err());
+    }
+
+    #[test]
+    fn pipeline_export_manifest_purpose_codes_are_one_family() {
+        assert!(is_pipeline_export_manifest_purpose_code(
+            "pipeline_export:evaluation"
+        ));
+        for other in [
+            "evaluation",
+            "pipeline_export",
+            "pipeline_exporter:evaluation",
+            "trace_commons_replay_dataset",
+        ] {
+            assert!(!is_pipeline_export_manifest_purpose_code(other), "{other}");
+        }
     }
 
     #[test]

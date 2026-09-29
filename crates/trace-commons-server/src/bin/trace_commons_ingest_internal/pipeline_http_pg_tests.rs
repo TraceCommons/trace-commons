@@ -2454,12 +2454,6 @@ fn assert_pipeline_export_audit(
 /// again returns it unchanged. The response never carries the tenant id.
 /// Each call that succeeds appends one `export` audit event (`created` or
 /// `delivered`), hash- and label-only; a refused call appends none.
-///
-/// Also recorded here, for the owner's decision and without changing
-/// `main`: a delivered pipeline snapshot's manifest has kind
-/// `export_artifact` and the requested use as its purpose code, so `main`'s
-/// replay-dataset manifest list (`GET /v1/datasets/replay/manifests`)
-/// returns it as a replay dataset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential() {
     let Some(fixture) = product_fixture().await else {
@@ -2546,33 +2540,6 @@ async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential(
     assert_eq!(audit.len(), 4, "{audit:?}");
     assert_pipeline_export_audit(&audit, "delivered", &completed);
 
-    let (status, manifests) = pipeline_product_request(
-        state.clone(),
-        "GET",
-        "/v1/datasets/replay/manifests",
-        Some(fixture.export_token.as_str()),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{manifests}");
-    let manifests = manifests.as_array().expect("a manifest list");
-    assert_eq!(
-        manifests.len(),
-        1,
-        "main's replay list returns the pipeline manifest: {manifests:?}"
-    );
-    let manifest = &manifests[0];
-    assert_eq!(&manifest["export_manifest_id"], snapshot_id);
-    assert_eq!(manifest["artifact_kind"], "export_artifact");
-    assert_eq!(manifest["purpose_code"], "evaluation");
-    assert_eq!(
-        manifest["source_submission_ids"],
-        serde_json::json!([run.submission_id])
-    );
-    assert_eq!(manifest["item_count"], 1);
-    assert_eq!(manifest["audit_event_id"], serde_json::Value::Null);
-
     // `main`'s own check accepts the mirrored audit rows: each row's columns
     // match its canonical payload, whose kind is `dataset_export`, the kind
     // an `Export` row projects to.
@@ -2582,6 +2549,107 @@ async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential(
         .expect("main lists the tenant's audit events");
     let failures = collect_db_audit_canonical_projection_failures(&rows);
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// Owner ruling T14-7: a delivered pipeline snapshot's export manifest keeps
+/// kind `export_artifact`, but it stays out of `main`'s replay-dataset
+/// manifest list (`GET /v1/datasets/replay/manifests`) and out of the DB
+/// reconciliation's replay manifest count, so a replay worker never takes a
+/// pipeline export for a replay dataset. A `main` replay export in the same
+/// tenant, made through `main`'s worker route, is still listed and counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_exports_stay_out_of_mains_replay_dataset_list_and_count() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let (status, created) =
+        create_pipeline_export(state, &fixture.export_token, "replay-list", 10).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (status, completed) =
+        complete_pipeline_export(state, &fixture.export_token, &created["snapshot_id"]).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    let pipeline_manifest_id: Uuid =
+        serde_json::from_value(completed["export_manifest_id"].clone())
+            .expect("the delivered snapshot names its manifest");
+
+    let (status, replay) = pipeline_product_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/replay-export",
+        Some(fixture.export_token.as_str()),
+        None,
+        Some(serde_json::json!({"purpose": "trace_commons_worker_replay_dataset"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "main's replay export runs: {replay}"
+    );
+    let replay_manifest_id: Uuid =
+        serde_json::from_value(replay["export_id"].clone()).expect("main's replay export id");
+
+    let mut stored = fixture
+        .base
+        .owner
+        .list_trace_export_manifests(tenant)
+        .await
+        .expect("main reads the tenant's export manifests");
+    stored.sort_by_key(|manifest| manifest.export_manifest_id != pipeline_manifest_id);
+    assert_eq!(stored.len(), 2, "{stored:?}");
+    assert_eq!(stored[0].export_manifest_id, pipeline_manifest_id);
+    assert_eq!(
+        stored[0].artifact_kind,
+        StorageTraceObjectArtifactKind::ExportArtifact
+    );
+    assert_eq!(
+        stored[0].purpose_code.as_deref(),
+        Some("pipeline_export:evaluation"),
+        "the marker main's replay filters read"
+    );
+    assert_eq!(stored[0].source_submission_ids, vec![run.submission_id]);
+    assert_eq!(stored[1].export_manifest_id, replay_manifest_id);
+
+    let (status, listed) = pipeline_product_request(
+        state.clone(),
+        "GET",
+        "/v1/datasets/replay/manifests",
+        Some(fixture.export_token.as_str()),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let listed = listed
+        .as_array()
+        .expect("a manifest list")
+        .iter()
+        .map(|manifest| manifest["export_manifest_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        vec![serde_json::json!(replay_manifest_id)],
+        "main's replay list holds main's replay export and not the pipeline export"
+    );
+
+    let caller = state
+        .tokens
+        .get(&fixture.export_token)
+        .expect("the export credential")
+        .clone();
+    let report = reconcile_db_mirror(state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert_eq!(report.db_export_manifest_count, 2);
+    assert_eq!(
+        report.db_replay_export_manifest_count, 1,
+        "main's replay export is counted and the pipeline export is not"
+    );
 }
 
 /// The export route passes the caller's consent-scope allowlists to the
