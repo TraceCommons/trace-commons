@@ -3458,3 +3458,166 @@ async fn compatibility_credit_rows_stay_readable_by_mains_database_reads() {
         vec![("novelty_utility".to_string(), "vector_worker".to_string()); 2]
     );
 }
+
+/// The shadow credit quality a run's committed Score outcome recorded, as
+/// the gate-decision row `main` builds its credit figure and explanation
+/// from.
+async fn score_shadow_credit_decision(
+    runtime: &Arc<PgBackend>,
+    tenant_id: &str,
+    run: &trace_commons_server::versioned_pipeline::PipelineRunRecord,
+) -> StorageTraceGateCreditDecisionRow {
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let evidence: serde_json::Value = tx
+        .query_one(
+            "SELECT evidence FROM phase_outcomes
+              WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'",
+            &[&tenant_id, &run.run_id],
+        )
+        .await
+        .expect("the run's Score outcome")
+        .get(0);
+    tx.commit().await.unwrap();
+    let int = |field: &str| evidence[field].as_i64();
+    StorageTraceGateCreditDecisionRow {
+        submission_id: run.submission_id,
+        credit_quality_micros: int("credit_quality_micros"),
+        credit_quality_calibration_version: int("credit_quality_version").map(|v| v as i32),
+        credit_withheld_reason: None,
+        chunk_count: int("chunk_count").map(|v| v as i32),
+        total_chunk_count: int("total_chunk_count").map(|v| v as i32),
+        chunks_capped: evidence["chunks_capped"].as_bool(),
+    }
+}
+
+/// Ruling T15-7: a compatibility run's contributor status reads as `main`'s
+/// document for the same credit, with contributor reads from the database
+/// and from files alike: status `accepted`; its `NoveltyUtility` event
+/// counted as ledger credit (ledger and total 2.5, with `main`'s delayed
+/// credit line); and, where `main` shows its gate's credit-quality figure,
+/// the Score evidence's shadow credit quality with `main`'s explanation
+/// line, not "scoring in progress". The pipeline block comes with it. The
+/// minimal family keeps its own document under file reads (Ruling T14-9;
+/// `pipeline_status_route_reports_the_pipeline_block_to_the_owner`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_reads_as_mains_under_both_read_modes() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-status-{suffix}");
+    let token = format!("token-compat-status-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let principal = static_token_principal_ref(&token);
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let shadow = score_shadow_credit_decision(&runtime, &tenant, &run).await;
+    let shadow_quality = shadow
+        .credit_quality_micros
+        .expect("a compatibility Score records a shadow credit quality");
+    let expected_pending = f64::from(credit_points_from_quality_micros(shadow_quality));
+    let expected_basis = gate_credit_basis_line(&shadow);
+    assert!(
+        expected_basis.starts_with("Credit reflects the gate's scoring (calibration V"),
+        "{expected_basis}"
+    );
+
+    for database_reads in [true, false] {
+        let mut state = test_state_with_options(
+            dir.path().to_path_buf(),
+            Some(owner.clone() as Arc<dyn Database>),
+            Some(artifacts.clone()),
+            database_reads,
+            database_reads,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens.clone());
+        state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        let (status, documents) = route_request(
+            state,
+            "POST",
+            "/v1/contributors/me/submission-status",
+            auth_headers(&token),
+            Some(serde_json::json!({ "submission_ids": [run.submission_id] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{documents}");
+        let documents = documents.as_array().expect("a document list").clone();
+        assert_eq!(documents.len(), 1, "{documents:?}");
+        let document = &documents[0];
+        let mode = if database_reads { "database" } else { "file" };
+        assert_eq!(document["status"], "accepted", "{mode} reads: {document}");
+        let pending = document["credit_points_pending"]
+            .as_f64()
+            .expect("a pending figure");
+        assert!(
+            (pending - expected_pending).abs() < 1e-4,
+            "{mode} reads: the shadow credit quality is the pending figure: {document}"
+        );
+        assert!(
+            document.get("credit_points_final").is_none(),
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["credit_points_ledger"].as_f64(),
+            Some(2.5),
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["credit_points_total"].as_f64(),
+            Some(2.5),
+            "{mode} reads: {document}"
+        );
+        let explanation = document["explanation"]
+            .as_array()
+            .expect("explanation lines")
+            .iter()
+            .map(|line| line.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            explanation.contains(&expected_basis),
+            "{mode} reads: {explanation:?}"
+        );
+        assert!(
+            !explanation
+                .iter()
+                .any(|line| line == SCORING_IN_PROGRESS_LINE),
+            "{mode} reads: {explanation:?}"
+        );
+        assert_eq!(
+            document["delayed_credit_explanations"],
+            serde_json::json!([
+                "NoveltyUtility: +2.50 (novelty_utility:compatibility_quality_novelty_v1)"
+            ]),
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["consent_scopes"],
+            serde_json::json!(["model_training"]),
+            "{mode} reads: {document}"
+        );
+        assert_eq!(document["pipeline"]["run_id"], run.run_id.to_string());
+    }
+}

@@ -15864,17 +15864,37 @@ async fn submission_status_handler(
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         let pipeline = pipeline_by_submission.get(&submission_id);
+        // Ruling T15-7: a compatibility run's credit figure is the shadow
+        // credit quality its Score recorded, where `main` shows its gate's.
+        let compatibility_decision = pipeline.and_then(compatibility_credit_decision);
         if let Some(record) = visible_by_submission.get(&submission_id) {
             let mut status = submission_status_from_record(
                 record,
                 &status_credit_events,
                 state.near_settlement_mode,
-                gate_decisions.get(&submission_id),
+                gate_decisions
+                    .get(&submission_id)
+                    .or(compatibility_decision.as_ref()),
             );
             status.pipeline = pipeline.map(pipeline_status_for_protocol);
             statuses.push(status);
         } else if let Some(pipeline) = pipeline {
-            statuses.push(submission_status_from_pipeline(pipeline));
+            let compatibility_status = if pipeline.compatibility.is_some() {
+                compatibility_status_from_database(
+                    state.as_ref(),
+                    tenant.auth(),
+                    account_principals,
+                    pipeline,
+                    compatibility_decision.as_ref(),
+                )
+                .await
+                .map_err(internal_error)?
+            } else {
+                None
+            };
+            statuses.push(
+                compatibility_status.unwrap_or_else(|| submission_status_from_pipeline(pipeline)),
+            );
         }
     }
 
@@ -15925,12 +15945,75 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
     }
 }
 
+/// Ruling T15-7: the gate decision `main`'s status reads its credit figure
+/// and explanation from, for a compatibility run whose Score has committed:
+/// the shadow credit quality and coverage the Score evidence recorded.
+fn compatibility_credit_decision(
+    status: &PipelineContributorStatus,
+) -> Option<StorageTraceGateCreditDecisionRow> {
+    let quality = status.compatibility.as_ref()?.credit_quality.as_ref()?;
+    let count = |value: Option<u32>| value.and_then(|value| i32::try_from(value).ok());
+    Some(StorageTraceGateCreditDecisionRow {
+        submission_id: status.submission_id,
+        credit_quality_micros: i64::try_from(quality.credit_quality_micros).ok(),
+        credit_quality_calibration_version: Some(quality.credit_quality_version),
+        credit_withheld_reason: None,
+        chunk_count: count(quality.chunk_count),
+        total_chunk_count: count(quality.total_chunk_count),
+        chunks_capped: quality.chunks_capped,
+    })
+}
+
+/// Ruling T15-7: the status document of a compatibility run that `main`'s
+/// own view does not hold -- contributor reads come from files, and the
+/// pipeline writes no file record. It is `main`'s document, built by
+/// `main`'s functions from the submission row and the ledger events the
+/// pipeline wrote, with `decision` as the gate decision. `None` when no
+/// database is configured, or the submission is not one `main`'s document
+/// describes (a `received` one) or one the caller may see; the caller then
+/// reports the pipeline's own document.
+async fn compatibility_status_from_database(
+    state: &AppState,
+    auth: &TenantAuth,
+    account_principals: Option<&AccountPrincipalSet>,
+    pipeline: &PipelineContributorStatus,
+    decision: Option<&StorageTraceGateCreditDecisionRow>,
+) -> anyhow::Result<Option<TraceSubmissionStatusUpdate>> {
+    let Some(db) = state.db_mirror.as_ref() else {
+        return Ok(None);
+    };
+    let Some(stored) = db
+        .get_trace_submission(&auth.tenant_id, pipeline.submission_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(record) = trace_commons_record_from_storage_submission(stored).transpose()? else {
+        return Ok(None);
+    };
+    let records = visible_submission_records_scoped(auth, account_principals, vec![record]);
+    let Some(record) = records.first() else {
+        return Ok(None);
+    };
+    let credit_events = credit_events_for_records(
+        &records,
+        read_contributor_credit_events_from_db(state, auth, account_principals, &records).await?,
+    );
+    let mut status =
+        submission_status_from_record(record, &credit_events, state.near_settlement_mode, decision);
+    status.pipeline = Some(pipeline_status_for_protocol(pipeline));
+    Ok(Some(status))
+}
+
 /// The status document of a submission only the pipeline knows. Trace Credit
 /// becomes points as the legacy status computes them, microcredits over one
 /// million: pending from the award, and final only once the leg is
 /// finalized. The ledger and total points keep their legacy meaning, the
-/// delayed ledger deltas and final plus those deltas: a pipeline run has no
-/// delayed ledger event, so they are 0 and absent.
+/// delayed ledger deltas and final plus those deltas: a minimal-family run
+/// has no delayed ledger event, so they are 0 and absent (Ruling T14-9). A
+/// compatibility run's document is `main`'s instead
+/// (`compatibility_status_from_database`); this one covers it only before
+/// `main`'s document can describe it.
 fn submission_status_from_pipeline(
     status: &PipelineContributorStatus,
 ) -> TraceSubmissionStatusUpdate {

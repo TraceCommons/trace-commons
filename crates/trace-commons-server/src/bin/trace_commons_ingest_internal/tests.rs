@@ -101863,6 +101863,7 @@ fn pipeline_contributor_status_fixture() -> PipelineContributorStatus {
                 reason_label: None,
             },
         ],
+        compatibility: None,
     }
 }
 

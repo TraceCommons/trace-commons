@@ -36,6 +36,7 @@ use crate::trace_corpus_storage::TraceObjectArtifactKind;
 use crate::versioned_pipeline::{
     PIPELINE_SUBMISSION_INOPERABLE_LABEL, PipelineRunState, phase_from_db, sha256_prefixed,
 };
+use crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_IMPLEMENTATION;
 
 pub const PIPELINE_STATUS_BATCH_MAX: usize = 500;
 /// The most items one export snapshot holds. V97 bounds a snapshot's
@@ -191,6 +192,31 @@ pub struct PipelineContributorStatus {
     /// Compatibility projection for clients that only understand one payout.
     pub payout: Option<String>,
     pub instruments: Vec<PipelineInstrumentStatus>,
+    /// Ruling T15-7: `Some` when the run is bound to a compatibility-family
+    /// bundle, whose contributor status reads as `main`'s document for the
+    /// same credit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<PipelineCompatibilityStatus>,
+}
+
+/// What a compatibility run's contributor status needs beyond the run: the
+/// credit-quality figure `main` shows from its gate decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineCompatibilityStatus {
+    /// The shadow credit quality the committed Score outcome recorded;
+    /// `None` until Score commits.
+    pub credit_quality: Option<PipelineShadowCreditQuality>,
+}
+
+/// A compatibility Score's shadow credit quality and the coverage it was
+/// measured over: the fields of `main`'s gate decision its status reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineShadowCreditQuality {
+    pub credit_quality_micros: u64,
+    pub credit_quality_version: i32,
+    pub chunk_count: Option<u32>,
+    pub total_chunk_count: Option<u32>,
+    pub chunks_capped: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -515,6 +541,16 @@ impl PipelineProductStore {
                         score.decision AS score_decision,
                         score.outcome_schema_id AS score_schema_id,
                         score.outcome_schema_version AS score_schema_version,
+                        package.package->'manifest'->'score'->>'implementation_id'
+                            AS score_implementation_id,
+                        (score.evidence->>'credit_quality_micros')::BIGINT
+                            AS score_credit_quality_micros,
+                        (score.evidence->>'credit_quality_version')::INTEGER
+                            AS score_credit_quality_version,
+                        (score.evidence->>'chunk_count')::BIGINT AS score_chunk_count,
+                        (score.evidence->>'total_chunk_count')::BIGINT
+                            AS score_total_chunk_count,
+                        (score.evidence->>'chunks_capped')::BOOLEAN AS score_chunks_capped,
                         latest.phase AS latest_outcome_phase,
                         latest.decision AS latest_outcome_decision,
                         COALESCE(settlements.items, '[]'::jsonb) AS instrument_statuses
@@ -531,6 +567,9 @@ impl PipelineProductStore {
                          ORDER BY pr.created_at DESC
                          LIMIT 1
                    ) r ON TRUE
+                   LEFT JOIN pipeline_bundle_packages package
+                     ON package.tenant_id = r.tenant_id
+                    AND package.bundle_id = r.bundle_id
                    LEFT JOIN phase_outcomes score
                      ON score.tenant_id = r.tenant_id
                     AND score.run_id = r.run_id
@@ -1499,6 +1538,7 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
         Some(value) => Some(value.to_string()),
     };
     let settlement_batch_id = trace_credit.and_then(|instrument| instrument.settlement_batch_id);
+    let compatibility = compatibility_status_from_row(row)?;
     Ok(PipelineContributorStatus {
         submission_id: row.get("submission_id"),
         trace_id: row.get("trace_id"),
@@ -1533,7 +1573,44 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
         settlement_batch_id,
         payout,
         instruments,
+        compatibility,
     })
+}
+
+/// Ruling T15-7: `Some` for a run whose bound bundle's Score policy is the
+/// compatibility one, with the shadow credit quality its committed Score
+/// recorded, once it has one.
+fn compatibility_status_from_row(
+    row: &Row,
+) -> Result<Option<PipelineCompatibilityStatus>, DatabaseError> {
+    if row
+        .get::<_, Option<String>>("score_implementation_id")
+        .as_deref()
+        != Some(COMPATIBILITY_SCORE_IMPLEMENTATION)
+    {
+        return Ok(None);
+    }
+    let malformed =
+        || DatabaseError::Serialization("pipeline score evidence is malformed".to_string());
+    let count = |column: &str| {
+        row.get::<_, Option<i64>>(column)
+            .map(|value| u32::try_from(value).map_err(|_| malformed()))
+            .transpose()
+    };
+    let credit_quality = match (
+        row.get::<_, Option<i64>>("score_credit_quality_micros"),
+        row.get::<_, Option<i32>>("score_credit_quality_version"),
+    ) {
+        (Some(micros), Some(version)) => Some(PipelineShadowCreditQuality {
+            credit_quality_micros: u64::try_from(micros).map_err(|_| malformed())?,
+            credit_quality_version: version,
+            chunk_count: count("score_chunk_count")?,
+            total_chunk_count: count("score_total_chunk_count")?,
+            chunks_capped: row.get("score_chunks_capped"),
+        }),
+        _ => None,
+    };
+    Ok(Some(PipelineCompatibilityStatus { credit_quality }))
 }
 
 /// Reads one settlement row as an instrument status. The caller selects
@@ -1882,6 +1959,7 @@ mod tests {
             settlement_batch_id: None,
             payout: None,
             instruments: Vec::new(),
+            compatibility: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(
