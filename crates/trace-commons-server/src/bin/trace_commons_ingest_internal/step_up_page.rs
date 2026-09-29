@@ -16,7 +16,8 @@
 //! drives the EXISTING routes and nothing else:
 //!
 //! - `POST /account/passkey/login/{start,finish}` for the sign-in, which sets
-//!   the strong session cookie;
+//!   the strong session cookie. `start` carries `purpose=step_up`, so that
+//!   session lasts `STEP_UP_SESSION_TTL_MINUTES`, not seven days;
 //! - `/v1/account/passkeys/register/{start,finish}`, `GET /v1/account/passkeys`
 //!   and `DELETE /v1/account/passkeys/{credential_id}` to add or remove a
 //!   passkey;

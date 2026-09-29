@@ -12,7 +12,7 @@
 'use strict';
 (() => {
   const ROUTES = {
-    loginStart: '/account/passkey/login/start',
+    loginStart: '/account/passkey/login/start?purpose=step_up',
     loginFinish: '/account/passkey/login/finish',
     passkeys: '/v1/account/passkeys',
     passkey: '/v1/account/passkeys/{credential_id}',

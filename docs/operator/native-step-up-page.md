@@ -13,6 +13,26 @@ payout routes. It adds no API, and nothing comes back to the app: the native
 token is never upgraded. When the person is done, the app carries on with its
 own weak session and re-reads whatever changed.
 
+## A short-lived session
+
+The page starts its sign-in at `POST /account/passkey/login/start?purpose=step_up`.
+The purpose is bound into the ceremony, and the session that `finish` mints
+lasts **15 minutes** (`STEP_UP_SESSION_TTL_MINUTES`) instead of the ordinary
+seven days: both the session row's `expires_at` and the cookie's `Max-Age`.
+
+- The 15 minutes are absolute. Activity only records `last_seen_at` for the
+  idle cap (three days, which never binds here), and rotation-on-use swaps the
+  secret without moving `expires_at`. A rotated cookie's `Max-Age` is capped at
+  what is left of the session, so it cannot outlive the row either.
+- `purpose` is an allowlist of one. `purpose=step_up` exactly, once; any other
+  value, an empty value or a repeat gets the uniform passkey-login deny. A
+  sign-in without `purpose` is unchanged: seven days.
+- The sign-in audit row carries `"purpose": "step_up"` beside
+  `"client_kind": "passkey"`. The lifetime is a constant, as the other session
+  lifetimes are; it is not an operator setting.
+- Nothing else in this tree calls the browser passkey login; the page is its
+  only in-tree caller.
+
 ## URL contract (for the native client, C1)
 
 ```
@@ -112,8 +132,8 @@ It is **proposed** and awaits approval.
 
 - Change payout lists only NEAR identities already linked to the account; the
   page does not link one.
-- The browser session it mints lasts the ordinary seven days unless the person
-  signs out on the page.
+- The browser session it mints lasts 15 minutes (see above), or less if the
+  person signs out on the page.
 - Not exercised in a real browser by the tests: the in-process tests drive the
   same HTTP calls the script makes, with a software authenticator reporting the
   ingest origin.

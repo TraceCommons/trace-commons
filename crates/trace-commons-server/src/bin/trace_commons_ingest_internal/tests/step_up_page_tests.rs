@@ -348,10 +348,14 @@ async fn without_a_relying_party_or_database_the_page_is_unavailable() {
     }
 }
 
+/// The page's sign-in start: the browser passkey login, asked for a
+/// short-lived step-up session.
+const STEP_UP_LOGIN_START: &str = "/account/passkey/login/start?purpose=step_up";
+
 /// The routes the script calls, with the method it calls each with. This is
 /// the whole of the page's API surface; every one already exists.
 const SCRIPT_ROUTES: &[(&str, &str, &str)] = &[
-    ("POST", "loginStart", "/account/passkey/login/start"),
+    ("POST", "loginStart", STEP_UP_LOGIN_START),
     ("POST", "loginFinish", "/account/passkey/login/finish"),
     ("GET", "passkeys", "/v1/account/passkeys"),
     ("DELETE", "passkey", "/v1/account/passkeys/{credential_id}"),
@@ -598,11 +602,27 @@ async fn page_sign_in(
     account_id: Uuid,
     origin: &str,
 ) -> Reply {
-    let start = send(
+    sign_in_through(
         state,
-        page_fetch("POST", "/account/passkey/login/start", None, None),
+        STEP_UP_LOGIN_START,
+        authenticator,
+        credential_id,
+        account_id,
+        origin,
     )
-    .await;
+    .await
+}
+
+/// A browser passkey sign-in that starts at `start_uri`, from `origin`.
+async fn sign_in_through(
+    state: &Arc<AppState>,
+    start_uri: &str,
+    authenticator: &mut SoftAuthenticator,
+    credential_id: &str,
+    account_id: Uuid,
+    origin: &str,
+) -> Reply {
+    let start = send(state, page_fetch("POST", start_uri, None, None)).await;
     assert_eq!(start.status, StatusCode::OK, "login/start");
     let ceremony = start
         .cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE)
@@ -885,6 +905,388 @@ async fn pg_the_page_sign_in_is_strong_and_a_native_session_is_not() {
 
     admin
         .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .expect("cleanup");
+}
+
+// --- Step-up session lifetime ---------------------------------------------
+
+/// `purpose` on the browser login start is an allowlist of one. Anything else
+/// is the uniform passkey-login deny, byte for byte; no purpose is today's
+/// sign-in.
+#[tokio::test]
+async fn a_login_purpose_outside_the_allowlist_is_refused() {
+    reset_account_rate_limiter_for_test();
+    let (state, _root) = available_state();
+    let deny = passkey_login_generic_deny();
+    let deny_status = deny.status();
+    let deny_bytes = axum::body::to_bytes(deny.into_body(), 1024)
+        .await
+        .expect("body")
+        .to_vec();
+    for query in [
+        "purpose=other",
+        "purpose=STEP_UP",
+        "purpose=",
+        "purpose=step_up&purpose=step_up",
+        "purpose=step_up%00",
+    ] {
+        let reply = send(
+            &state,
+            page_fetch(
+                "POST",
+                &format!("/account/passkey/login/start?{query}"),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, deny_status, "{query}");
+        assert_eq!(reply.bytes, deny_bytes, "{query}");
+        assert!(reply.cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE).is_none());
+    }
+    for uri in ["/account/passkey/login/start", STEP_UP_LOGIN_START] {
+        let reply = send(&state, page_fetch("POST", uri, None, None)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{uri}");
+        assert!(reply.cookie_pair(ACCOUNT_PASSKEY_CEREMONY_COOKIE).is_some());
+    }
+    reset_account_rate_limiter_for_test();
+}
+
+/// A bound passkey-origin account, created natively, and what a browser
+/// sign-in with its passkey needs.
+struct StepUpAccount {
+    tenant: String,
+    account_id: Uuid,
+    credential_id: String,
+    authenticator: SoftAuthenticator,
+}
+
+async fn step_up_account(
+    state: &Arc<AppState>,
+    admin: &deadpool_postgres::Object,
+) -> StepUpAccount {
+    let start = send(
+        state,
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/account/native/passkey/create/start")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(start.status, StatusCode::OK, "{}", start.text());
+    let start = start.json();
+    let mut authenticator: SoftAuthenticator = new_software_authenticator();
+    let options: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(start["public_key"].clone()).expect("creation challenge");
+    let credential = authenticator
+        .do_registration(url(NATIVE_ORIGIN), options)
+        .expect("software authenticator registers");
+    let created = send(
+        state,
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/account/native/passkey/create/finish")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "ceremony_id": start["ceremony_id"],
+                    "credential": credential,
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.text());
+    let created = created.json();
+    let (tenant, _) =
+        native_token_parts(created["access_token"].as_str().expect("token")).expect("tcn1_");
+    let account_id = Uuid::parse_str(created["account_id"].as_str().unwrap()).unwrap();
+    admin
+        .execute(
+            "UPDATE trace_account_bindings SET state = 'bound', bound_at = now()
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .expect("bind");
+    StepUpAccount {
+        tenant,
+        account_id,
+        credential_id: credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(
+            credential.raw_id.as_ref(),
+        )),
+        authenticator,
+    }
+}
+
+/// Sign in from the ingest origin through `start_uri`; returns the whole
+/// `Set-Cookie` line of the session cookie and its `name=value` pair.
+async fn browser_session(
+    state: &Arc<AppState>,
+    account: &mut StepUpAccount,
+    start_uri: &str,
+) -> (String, String) {
+    let reply = sign_in_through(
+        state,
+        start_uri,
+        &mut account.authenticator,
+        &account.credential_id,
+        account.account_id,
+        INGEST_ORIGIN,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.text());
+    session_set_cookie(&reply).expect("session cookie")
+}
+
+/// The session cookie's full `Set-Cookie` line and its `name=value` pair.
+fn session_set_cookie(reply: &Reply) -> Option<(String, String)> {
+    let line = reply
+        .headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))?
+        .to_string();
+    let pair = line.split(';').next()?.to_string();
+    Some((line, pair))
+}
+
+fn max_age(set_cookie: &str) -> i64 {
+    set_cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("Max-Age="))
+        .and_then(|v| v.parse().ok())
+        .expect("Max-Age")
+}
+
+/// `(expires_at - created_at, expires_at)` of the account's one session row,
+/// the lifetime in whole seconds.
+async fn session_lifetime(
+    admin: &mut deadpool_postgres::Object,
+    tenant: &str,
+) -> (i64, chrono::DateTime<Utc>) {
+    let tx = admin.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("tenant ctx");
+    let row = tx
+        .query_one(
+            "SELECT extract(epoch FROM expires_at - created_at)::BIGINT, expires_at
+               FROM trace_sessions
+              WHERE tenant_id = $1 AND client_kind = 'passkey'",
+            &[&tenant],
+        )
+        .await
+        .expect("one browser session");
+    tx.commit().await.expect("commit");
+    (row.get(0), row.get(1))
+}
+
+/// Move the clock forward by `secs` for every session in `tenant`: each of the
+/// row's timestamps moves back by the same amount, which is what the server
+/// sees when that much time has passed. The same device the other session
+/// tests use (they backdate `last_seen_at` or `token_issued_at`).
+async fn advance_session_clock(admin: &mut deadpool_postgres::Object, tenant: &str, secs: i64) {
+    let tx = admin.transaction().await.expect("tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("tenant ctx");
+    tx.execute(
+        "UPDATE trace_sessions
+            SET created_at = created_at - make_interval(secs => $2),
+                expires_at = expires_at - make_interval(secs => $2),
+                last_seen_at = last_seen_at - make_interval(secs => $2),
+                token_issued_at = token_issued_at - make_interval(secs => $2),
+                prev_token_valid_until = prev_token_valid_until - make_interval(secs => $2)
+          WHERE tenant_id = $1",
+        &[&tenant, &(secs as f64)],
+    )
+    .await
+    .expect("advance");
+    tx.commit().await.expect("commit");
+}
+
+async fn passkeys_with(state: &Arc<AppState>, cookie: &str) -> Reply {
+    send(
+        state,
+        page_fetch("GET", "/v1/account/passkeys", Some(cookie), None),
+    )
+    .await
+}
+
+async fn pg_step_up_state() -> Option<(
+    Arc<PgBackend>,
+    Arc<AppState>,
+    tempfile::TempDir,
+    deadpool_postgres::Object,
+)> {
+    let backend = postgres_backend_for_ingest_test().await?;
+    reset_account_rate_limiter_for_test();
+    let current = backend
+        .count_unbound_passkey_accounts()
+        .await
+        .expect("unbound count");
+    let db: Arc<dyn Database> = backend.clone();
+    let (state, root) = pilot_shaped_state(db, current + 5);
+    let admin = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("admin");
+    Some((backend, state, root, admin))
+}
+
+const STEP_UP_TTL_SECS: i64 = STEP_UP_SESSION_TTL_MINUTES * 60;
+
+/// The page's sign-in mints a session that lasts the step-up TTL: the cookie
+/// says so, the row says so, and the session is refused once that much time
+/// has passed, not before.
+#[tokio::test]
+async fn pg_a_step_up_session_expires_after_its_ttl() {
+    let Some((_backend, state, _root, mut admin)) = pg_step_up_state().await else {
+        return;
+    };
+    assert_eq!(STEP_UP_TTL_SECS, 15 * 60);
+    let mut account = step_up_account(&state, &admin).await;
+    let (set_cookie, session) = browser_session(&state, &mut account, STEP_UP_LOGIN_START).await;
+    assert_eq!(max_age(&set_cookie), STEP_UP_TTL_SECS, "{set_cookie}");
+    let (lifetime, _) = session_lifetime(&mut admin, &account.tenant).await;
+    assert!(
+        (STEP_UP_TTL_SECS - 5..=STEP_UP_TTL_SECS).contains(&lifetime),
+        "row lifetime {lifetime}s"
+    );
+
+    assert_eq!(passkeys_with(&state, &session).await.status, StatusCode::OK);
+    advance_session_clock(&mut admin, &account.tenant, STEP_UP_TTL_SECS - 60).await;
+    assert_eq!(
+        passkeys_with(&state, &session).await.status,
+        StatusCode::OK,
+        "a minute before the TTL"
+    );
+    advance_session_clock(&mut admin, &account.tenant, 61).await;
+    assert_eq!(
+        passkeys_with(&state, &session).await.status,
+        StatusCode::UNAUTHORIZED,
+        "past the TTL"
+    );
+
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&account.tenant],
+        )
+        .await
+        .expect("cleanup");
+}
+
+/// A browser passkey sign-in that does not ask for step-up keeps today's
+/// seven days, in the cookie and the row, and outlives the step-up TTL.
+#[tokio::test]
+async fn pg_a_sign_in_without_the_step_up_purpose_is_unchanged() {
+    let Some((_backend, state, _root, mut admin)) = pg_step_up_state().await else {
+        return;
+    };
+    let mut account = step_up_account(&state, &admin).await;
+    let (set_cookie, session) =
+        browser_session(&state, &mut account, "/account/passkey/login/start").await;
+    let seven_days = ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60;
+    assert_eq!(max_age(&set_cookie), seven_days, "{set_cookie}");
+    let (lifetime, _) = session_lifetime(&mut admin, &account.tenant).await;
+    assert!(
+        (seven_days - 5..=seven_days).contains(&lifetime),
+        "row lifetime {lifetime}s"
+    );
+    advance_session_clock(&mut admin, &account.tenant, STEP_UP_TTL_SECS + 60).await;
+    assert_eq!(
+        passkeys_with(&state, &session).await.status,
+        StatusCode::OK,
+        "an ordinary session outlives the step-up TTL"
+    );
+
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&account.tenant],
+        )
+        .await
+        .expect("cleanup");
+}
+
+/// Rotation-on-use cannot extend a step-up session: the rotated cookie's
+/// Max-Age is capped at what is left of the session, the row's absolute
+/// expiry does not move, and the rotated secret is refused once the TTL has
+/// passed. Activity (the idle window) does not move it either.
+#[tokio::test]
+async fn pg_rotation_cannot_extend_a_step_up_session() {
+    let Some((_backend, state, _root, mut admin)) = pg_step_up_state().await else {
+        return;
+    };
+    let mut account = step_up_account(&state, &admin).await;
+    let (_, session) = browser_session(&state, &mut account, STEP_UP_LOGIN_START).await;
+    let (_, expires_before) = session_lifetime(&mut admin, &account.tenant).await;
+
+    // Five minutes in, the token has aged past the rotation interval (the way
+    // the rotation tests force it), so the next request rotates.
+    advance_session_clock(&mut admin, &account.tenant, 5 * 60).await;
+    admin
+        .execute(
+            "UPDATE trace_sessions SET token_issued_at = now() - interval '13 hours'
+              WHERE tenant_id = $1",
+            &[&account.tenant],
+        )
+        .await
+        .expect("age the token");
+    let rotated = passkeys_with(&state, &session).await;
+    assert_eq!(rotated.status, StatusCode::OK);
+    let (rotated_line, rotated_session) =
+        session_set_cookie(&rotated).expect("rotation set a new session cookie");
+    assert_ne!(rotated_session, session, "the secret rotated");
+    let left = STEP_UP_TTL_SECS - 5 * 60;
+    let rotated_max_age = max_age(&rotated_line);
+    assert!(
+        (left - 5..=left).contains(&rotated_max_age),
+        "rotated cookie Max-Age {rotated_max_age}s, {left}s left"
+    );
+    let (_, expires_after) = session_lifetime(&mut admin, &account.tenant).await;
+    assert_eq!(
+        expires_after,
+        expires_before - chrono::Duration::seconds(5 * 60),
+        "rotation leaves the absolute expiry where the clock put it"
+    );
+
+    // More activity, then past the TTL: refused, old secret and new.
+    assert_eq!(
+        passkeys_with(&state, &rotated_session).await.status,
+        StatusCode::OK
+    );
+    advance_session_clock(&mut admin, &account.tenant, left + 1).await;
+    assert_eq!(
+        passkeys_with(&state, &rotated_session).await.status,
+        StatusCode::UNAUTHORIZED,
+        "the rotated secret past the TTL"
+    );
+    assert_eq!(
+        passkeys_with(&state, &session).await.status,
+        StatusCode::UNAUTHORIZED,
+        "the original secret past the TTL"
+    );
+
+    admin
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&account.tenant],
+        )
         .await
         .expect("cleanup");
 }
