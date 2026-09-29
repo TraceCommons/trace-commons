@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
-    InstrumentId, InstrumentKind, InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult,
-    ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
+    InstrumentId, InstrumentKind, InstrumentSettlement, InstrumentSettlementOutcome, Microcredits,
+    Phase, PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
     ReviewRecommendation, ScoreEvidence, SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
     TenantStorageRef, UnverifiedScoreDecision,
 };
@@ -14613,13 +14613,45 @@ async fn checked_compatibility_service(
     .await
 }
 
+/// A settled compatibility award, as the credit-check tests read it: the
+/// Trace Credit leg's settlement row, its ledger row count, the owner's
+/// contributor status, and the `trace_credit` operation of the committed
+/// Settle outcome.
+type SettledCompatibilityAward = (
+    PipelineSettlementRecord,
+    i64,
+    PipelineContributorStatus,
+    InstrumentSettlement,
+);
+
+/// The `trace_credit` operation of the run's committed Settle outcome.
+async fn committed_trace_credit_operation(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> InstrumentSettlement {
+    let outcome = service
+        .store()
+        .outcome_for_phase(tenant_id, run_id, Phase::Settle)
+        .await
+        .unwrap()
+        .expect("Settle committed its outcome");
+    let decision: SettleDecision = serde_json::from_value(outcome.decision).unwrap();
+    decision
+        .settlement_operations()
+        .iter()
+        .find(|operation| operation.instrument_id() == &InstrumentId::trace_credit())
+        .cloned()
+        .expect("the committed outcome has a trace_credit operation")
+}
+
 /// Runs `env` to completion for a fresh tenant of `service`, and returns its
-/// Trace Credit leg, its ledger row count, and its contributor status.
+/// settled award.
 async fn settled_compatibility_award(
     service: &PipelineService,
     backend: &Arc<PgBackend>,
     env: &TraceContributionEnvelope,
-) -> (PipelineSettlementRecord, i64, PipelineContributorStatus) {
+) -> SettledCompatibilityAward {
     let tenant = format!("compat-checks-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-checks";
     let run = submit_envelope_and_complete(service, &tenant, principal, env).await;
@@ -14632,20 +14664,31 @@ async fn settled_compatibility_award(
         .unwrap()
         .pop()
         .expect("the owner reads the run's status");
-    (leg, rows, status)
+    let committed = committed_trace_credit_operation(service, &tenant, run.run_id).await;
+    (leg, rows, status, committed)
 }
 
 /// Ruling T15-12: a withheld leg completed with no ledger row under `label`,
 /// its product status reads `Withheld` with that label, and Score's decision
-/// still holds its award.
-fn assert_withheld(
-    (leg, rows, status): &(PipelineSettlementRecord, i64, PipelineContributorStatus),
-    label: &str,
-) {
+/// still holds its award. The committed Settle outcome records the leg as
+/// `Forfeited` under `label`, for the award's amount: no credit was issued.
+fn assert_withheld((leg, rows, status, committed): &SettledCompatibilityAward, label: &str) {
     assert_eq!(leg.operation_state, "complete", "{leg:?}");
     assert_eq!(leg.credit_event_id, None, "{leg:?}");
     assert_eq!(leg.last_error_label.as_deref(), Some(label), "{leg:?}");
     assert_eq!(*rows, 0, "a withheld leg writes no ledger row");
+    assert_eq!(
+        committed.atomic_units(),
+        AtomicUnits::from_raw(u128::from(CHECKED_DELTA_MICROCREDITS))
+    );
+    match committed.outcome() {
+        InstrumentSettlementOutcome::Forfeited { reason } => {
+            assert_eq!(reason.as_str(), label, "{committed:?}");
+        }
+        InstrumentSettlementOutcome::Completed { .. } => {
+            panic!("a withheld leg is not a completed settlement: {committed:?}")
+        }
+    }
     assert_eq!(status.credit, PipelineCreditStatus::Withheld);
     assert_eq!(
         status.score_microcredits,
@@ -14661,15 +14704,25 @@ fn assert_withheld(
     assert_eq!(trace_credit.reason_label.as_deref(), Some(label));
 }
 
-/// The leg wrote its one `NoveltyUtility` ledger row.
-fn assert_credited(
-    (leg, rows, status): &(PipelineSettlementRecord, i64, PipelineContributorStatus),
-) {
+/// The leg wrote its one `NoveltyUtility` ledger row, and the committed
+/// Settle outcome records it completed for the award's amount.
+fn assert_credited((leg, rows, status, committed): &SettledCompatibilityAward) {
     assert_eq!(leg.operation_state, "complete", "{leg:?}");
     assert!(leg.credit_event_id.is_some(), "{leg:?}");
     assert_eq!(leg.last_error_label, None, "{leg:?}");
     assert_eq!(*rows, 1);
     assert_eq!(status.credit, PipelineCreditStatus::NotSettlementEligible);
+    assert_eq!(
+        committed.atomic_units(),
+        AtomicUnits::from_raw(u128::from(CHECKED_DELTA_MICROCREDITS))
+    );
+    assert!(
+        matches!(
+            committed.outcome(),
+            InstrumentSettlementOutcome::Completed { .. }
+        ),
+        "{committed:?}"
+    );
 }
 
 /// Ruling T15-8: `main` credits `NoveltyUtility` only to a submission whose
@@ -14891,8 +14944,9 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
         .unwrap()
         .pop()
         .unwrap();
+    let committed = committed_trace_credit_operation(&service, &tenant, created.run_id).await;
     assert_withheld(
-        &(leg, rows, status),
+        &(leg, rows, status, committed),
         PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL,
     );
 }

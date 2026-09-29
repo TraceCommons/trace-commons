@@ -7526,6 +7526,14 @@ impl PipelineService {
         // label the row itself was written with. `list_settlements` orders
         // by `instrument_id`, so this is already instrument order;
         // `SettleDecision::from_parts` re-sorts regardless.
+        //
+        // Ruling F-I1: a `trace_credit` row `complete` with no credit event
+        // is a leg one of `main`'s NoveltyUtility checks withheld (the
+        // withheld branch of `settle_internal_credit`, the only writer of
+        // such a row). No credit was issued, so the outcome records it as
+        // `Forfeited` under the row's own withheld label, not as a completed
+        // settlement of the award. A row of that shape with no label cannot
+        // be told apart from a lost event, and fails closed.
         let settlements = self
             .store
             .list_settlements(&run.tenant_id, run.run_id)
@@ -7536,6 +7544,23 @@ impl PipelineService {
                 let instrument_id = InstrumentId::new(settlement.instrument_id.clone())
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
                 match settlement.operation_state.as_str() {
+                    "complete"
+                        if settlement.instrument_id == InstrumentId::trace_credit().as_str()
+                            && settlement.credit_event_id.is_none() =>
+                    {
+                        let withheld_label = settlement
+                            .last_error_label
+                            .clone()
+                            .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                        InstrumentSettlement::forfeited(
+                            instrument_id,
+                            settlement.atomic_units,
+                            settlement.operation_ref_hash.clone(),
+                            ReasonCode::new(withheld_label)
+                                .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?,
+                        )
+                        .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))
+                    }
                     "complete" => {
                         let result_ref_hash = settlement
                             .result_ref_hash
