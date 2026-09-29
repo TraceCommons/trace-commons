@@ -15799,7 +15799,7 @@ fn cookie_value_from_headers<'a>(headers: &'a HeaderMap, name: &str) -> Option<&
     })
 }
 
-/// Parse a `tc_account_session` cookie value (`{b64url(tenant_id)}.{secret}`)
+/// Parse an [`ACCOUNT_SESSION_COOKIE`] value (`{b64url(tenant_id)}.{secret}`)
 /// into `(tenant_id, token_hash)`. Returns `None` for any malformed value: no '.'
 /// separator, an empty secret, or a tenant prefix that is not valid base64url /
 /// UTF-8. The stored `token_hash` is `sha256(secret)` ONLY — the tenant is carried
@@ -15825,7 +15825,7 @@ fn account_session_cookie_parts(cookie: &str) -> Option<(String, String)> {
 /// Resolve the dual-auth `AccountCtx` guarding the `/v1/account/*` read surface.
 ///
 /// Exactly one credential is accepted:
-/// - Both a `Authorization: Bearer` AND the `tc_account_session` cookie present →
+/// - Both a `Authorization: Bearer` AND the [`ACCOUNT_SESSION_COOKIE`] present →
 ///   `400` ambiguous credentials. No silent precedence.
 /// - Bearer only → authenticate the device token, resolve its linked account, and
 ///   expand active memberships. `auth_method = DeviceBearer`; actor = device ref.
@@ -15921,6 +15921,7 @@ async fn account_auth_middleware(
             response
                 .headers_mut()
                 .append(axum::http::header::SET_COOKIE, value);
+            append_legacy_account_session_clear(response.headers_mut());
             // Cache-Control is single-valued: insert (overwrite) is correct here.
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
@@ -17732,7 +17733,48 @@ const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
 /// lets the (tenant-less) browser request bootstrap an RLS tenant tx without the
 /// narrow login-resolver pool; see `confirm_login_handler` / `resolve_account_ctx`.
-const ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+///
+/// The `__Host-` prefix binds the cookie to the exact host that set it: a
+/// browser accepts it only with `Secure`, `Path=/` and no `Domain`, so the
+/// cookie can be neither set nor shadowed from any other host. Every
+/// `Set-Cookie` for this name must therefore keep those three attributes.
+const ACCOUNT_SESSION_COOKIE: &str = "__Host-tc_account_session";
+
+/// The session cookie's name before it took the `__Host-` prefix. It is never
+/// read: a request that carries only this name is unauthenticated, and the
+/// person signs in again (a one-time sign-out, see
+/// `docs/operator/deployment.md`). Accepting it would keep the old,
+/// host-unbound name alive. The server only ever writes it to expire it; see
+/// [`append_legacy_account_session_clear`].
+const LEGACY_ACCOUNT_SESSION_COOKIE: &str = "tc_account_session";
+
+/// Append a `Set-Cookie` that expires the pre-`__Host-` session cookie, so a
+/// browser still holding it drops it. Same attributes it was set with
+/// (`Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Domain`), with
+/// `Max-Age=0`. Emitted on logout and on every response that sets
+/// [`ACCOUNT_SESSION_COOKIE`]. Append, never insert: it rides alongside the
+/// cookies the response already carries. Idempotent, because a logout that
+/// also rotates reaches this twice (handler, then middleware).
+fn append_legacy_account_session_clear(headers: &mut HeaderMap) {
+    let prefix = format!("{LEGACY_ACCOUNT_SESSION_COOKIE}=");
+    let already = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .any(|v| v.to_str().is_ok_and(|v| v.starts_with(&prefix)));
+    if already {
+        return;
+    }
+    let clear = cookie::Cookie::build((LEGACY_ACCOUNT_SESSION_COOKIE, ""))
+        .secure(true)
+        .http_only(true)
+        .same_site(cookie::SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(0))
+        .build();
+    if let Ok(value) = HeaderValue::from_str(&clear.to_string()) {
+        headers.append(axum::http::header::SET_COOKIE, value);
+    }
+}
 
 /// Code-free account view path the redeem flow redirects to. The view itself is
 /// a later concern (Tasks 9-10); redirecting here keeps the secret out of any
@@ -18143,7 +18185,7 @@ async fn sleep_to_redeem_floor(start: std::time::Instant) {
 ///
 /// `confirm_is_same_origin` is deliberately kept as well. This does not
 /// replace it; it covers what it cannot.
-const LOGIN_CEREMONY_COOKIE: &str = "tc_login_ceremony";
+const LOGIN_CEREMONY_COOKIE: &str = "__Host-tc_login_ceremony";
 
 /// How long a rendered interstitial stays confirmable. Long enough for a human
 /// to read the page and click, short enough that a leaked nonce is not a
@@ -18303,7 +18345,10 @@ Confirm only if you started this.</p>"
         .secure(true)
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
-        .path("/account/login")
+        // `/`, not `/account/login`: the `__Host-` prefix requires `Path=/`.
+        // The value is a single-use nonce that is useless without the form
+        // it is embedded in, so the wider path exposes nothing.
+        .path("/")
         .max_age(cookie::time::Duration::seconds(LOGIN_CEREMONY_TTL_SECONDS))
         .build()
         .to_string();
@@ -18505,6 +18550,7 @@ async fn confirm_login_inner(
     match HeaderValue::from_str(&cookie.to_string()) {
         Ok(value) => {
             resp_headers.insert(axum::http::header::SET_COOKIE, value);
+            append_legacy_account_session_clear(resp_headers);
         }
         Err(_) => return redeem_generic_deny(),
     }
@@ -18522,7 +18568,7 @@ async fn confirm_login_inner(
 /// `POST /v1/account/logout` — revoke the CURRENT session (Task 11, Part 1).
 ///
 /// Guarded by `resolve_account_ctx` (dual-auth). On the COOKIE path we re-parse
-/// the presented `tc_account_session` cookie to recover the secret, recompute its
+/// the presented session cookie to recover the secret, recompute its
 /// `token_hash`, and revoke exactly that session row (tenant- + token-scoped under
 /// forced RLS, so only the caller's own session is ever touched). On the BEARER
 /// path there is no browser session to revoke (the device token is the
@@ -18532,7 +18578,7 @@ async fn account_logout_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
     headers: HeaderMap,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<axum::response::Response> {
     let db = account_db(state.as_ref())?;
 
     let revoked = match ctx.auth_method {
@@ -18591,7 +18637,13 @@ async fn account_logout_handler(
     .await
     .map_err(internal_error)?;
 
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    // A browser signing out drops any pre-`__Host-` session cookie it still
+    // holds. Native and device callers have no cookie jar, so nothing is sent.
+    if matches!(ctx.auth_method, AccountAuthMethod::SessionCookie) {
+        append_legacy_account_session_clear(response.headers_mut());
+    }
+    Ok(response)
 }
 
 /// `POST /v1/account/sessions/revoke-all` — revoke EVERY session for the caller's
@@ -18629,7 +18681,7 @@ async fn account_revoke_all_handler(
 // Two dual-auth handlers guarded by `resolve_account_ctx`. `register/start`
 // issues a WebAuthn registration challenge, stashes the server-side
 // `PasskeyRegistration` state in the in-process ceremony store, and binds the
-// ceremony to the browser via a short-lived `tc_passkey_ceremony` cookie.
+// ceremony to the browser via a short-lived `__Host-tc_passkey_ceremony` cookie.
 // `register/finish` consumes that cookie (single-use), verifies the attestation,
 // and persists the resulting passkey. Discoverable login (Task 6) and credential
 // management (Task 7+) are intentionally out of scope here.
@@ -18639,7 +18691,7 @@ async fn account_revoke_all_handler(
 /// that started it. Carries only the opaque ceremony id (an unguessable CSPRNG
 /// token), never any key or challenge material; the server-side challenge state
 /// lives in the ceremony store keyed by this id.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "tc_passkey_ceremony";
+const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "__Host-tc_passkey_ceremony";
 
 /// Ceremony cookie lifetime. Matches the ceremony-store TTL window (a few
 /// minutes): long enough for an interactive authenticator tap, short enough to
@@ -18720,7 +18772,7 @@ struct AccountPasskeyRegisterFinishBody {
 /// `exclude_credentials` from the account's existing active credentials so the
 /// same authenticator cannot enroll twice, stashes the server-side
 /// `PasskeyRegistration` state in the ceremony store, and returns the
-/// `CreationChallengeResponse` plus a short-lived `tc_passkey_ceremony` cookie
+/// `CreationChallengeResponse` plus a short-lived `__Host-tc_passkey_ceremony` cookie
 /// binding the ceremony to this browser.
 async fn account_passkey_register_start_handler(
     State(state): State<Arc<AppState>>,
@@ -18817,7 +18869,7 @@ async fn account_passkey_register_start_handler(
 /// `POST /v1/account/passkeys/register/finish` — complete passkey enrollment
 /// (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`; fails closed with 503
 /// if the relying party is unconfigured. Recovers the pending
-/// `PasskeyRegistration` via the single-use `tc_passkey_ceremony` cookie
+/// `PasskeyRegistration` via the single-use `__Host-tc_passkey_ceremony` cookie
 /// (missing / expired / already-consumed / wrong-variant -> 400), verifies the
 /// browser's attestation, and persists the resulting passkey under the canonical
 /// credential-id encoding. A failed/invalid attestation is rejected with a 400
@@ -18929,7 +18981,7 @@ const NEAR_LOGIN_MESSAGE: &str = "Trace Commons sign-in";
 /// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
 /// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
 /// passkey ceremony cookie but a distinct name so the two ceremonies never alias.
-const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "tc_near_ceremony";
+const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "__Host-tc_near_ceremony";
 
 /// Encode the 32-byte challenge nonce for the wire as lowercase hex (64 chars).
 ///
@@ -18944,7 +18996,7 @@ fn near_nonce_to_wire(nonce: &[u8; 32]) -> String {
 /// `POST /v1/account/near/enroll/start` — begin linking a NEAR access key to the
 /// authenticated account. Fails closed (503) when NEAR sign-in is unconfigured.
 /// Generates a fresh 32-byte CSPRNG nonce, stashes a `NearChallenge` ceremony
-/// keyed by an opaque ceremony id, sets the short-lived `tc_near_ceremony`
+/// keyed by an opaque ceremony id, sets the short-lived `__Host-tc_near_ceremony`
 /// cookie, and returns the `{ message, nonce, recipient }` the wallet's
 /// `signMessage` consumes.
 async fn account_near_enroll_start_handler(
@@ -19037,7 +19089,7 @@ struct AccountNearEnrollFinishBody {
 
 /// `POST /v1/account/near/enroll/finish` — complete the NEAR access-key link.
 /// Fails closed (503) when NEAR sign-in is unconfigured. Recovers and CONSUMES
-/// the `NearChallenge` via the single-use `tc_near_ceremony` cookie (missing /
+/// the `NearChallenge` via the single-use `__Host-tc_near_ceremony` cookie (missing /
 /// expired / wrong-variant -> 400), verifies the NEP-413 wallet signature over
 /// the stashed challenge, then performs the BINDING CHECK: the signing key must
 /// be a FullAccess key of the named NEAR account (a non-FullAccess key or any RPC
@@ -19724,7 +19776,7 @@ async fn account_merge_confirm_handler(
 //   * `/account/passkey/login/start` issues a discoverable-credential WebAuthn
 //     challenge (no allow-list), stashes the server-side
 //     `DiscoverableAuthentication` state in the in-process ceremony store, and
-//     binds it to the browser via the same short-lived `tc_passkey_ceremony`
+//     binds it to the browser via the same short-lived `__Host-tc_passkey_ceremony`
 //     cookie used by enrollment.
 //   * `/account/passkey/login/finish` verifies the browser's assertion and, on
 //     success, mints the IDENTICAL Slice 1 session cookie. It bootstraps the
@@ -19791,7 +19843,7 @@ where
 /// discoverable-credential challenge (no allow-list — the authenticator
 /// "discovers" the credential and user handle), stashes the server-side
 /// `DiscoverableAuthentication` state under a fresh ceremony id, and binds it to
-/// this browser with the short-lived `tc_passkey_ceremony` cookie. Returns the
+/// this browser with the short-lived `__Host-tc_passkey_ceremony` cookie. Returns the
 /// `RequestChallengeResponse`. ANY failure collapses to the uniform deny.
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
@@ -20075,6 +20127,7 @@ async fn account_passkey_login_finish_inner(
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
     }
+    append_legacy_account_session_clear(resp_headers);
     resp_headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -20094,7 +20147,7 @@ async fn account_passkey_login_finish_inner(
 //
 //   * `/account/near/login/start` mints a fresh 32-byte challenge nonce, stashes
 //     a `NearChallenge` ceremony in the in-process store, binds it to the browser
-//     via the short-lived `tc_near_ceremony` cookie, and returns
+//     via the short-lived `__Host-tc_near_ceremony` cookie, and returns
 //     `{ message: NEAR_LOGIN_MESSAGE, nonce, recipient }`.
 //   * `/account/near/login/finish` verifies the wallet's NEP-413 assertion
 //     OFFLINE (NO RPC at login), bootstraps the tenant from the asserted public
@@ -20171,7 +20224,7 @@ where
 /// (Slice 3a Task 7). UNAUTHENTICATED. Fails closed (uniform deny) when NEAR
 /// sign-in is unconfigured. Rate-limited per-IP + global. Mints a fresh 32-byte
 /// challenge nonce, stashes a `NearChallenge` ceremony under a fresh ceremony id,
-/// binds it to this browser with the short-lived `tc_near_ceremony` cookie, and
+/// binds it to this browser with the short-lived `__Host-tc_near_ceremony` cookie, and
 /// returns `{ message: NEAR_LOGIN_MESSAGE, nonce: hex, recipient }`. ANY failure
 /// collapses to the uniform deny.
 async fn account_near_login_start_handler(
@@ -20446,6 +20499,7 @@ async fn account_near_login_finish_inner(
     if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
         resp_headers.append(axum::http::header::SET_COOKIE, value);
     }
+    append_legacy_account_session_clear(resp_headers);
     resp_headers.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),

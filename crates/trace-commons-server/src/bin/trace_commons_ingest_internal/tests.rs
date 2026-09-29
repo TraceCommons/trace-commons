@@ -1737,9 +1737,11 @@ async fn confirm_login_issues_single_use_session_cookie() {
         .to_str()
         .expect("ascii cookie");
     assert!(
-        set_cookie.starts_with("tc_account_session="),
-        "cookie name must be tc_account_session: {set_cookie}"
+        set_cookie.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")),
+        "cookie name must be {ACCOUNT_SESSION_COOKIE}: {set_cookie}"
     );
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
     assert!(set_cookie.contains("Secure"), "cookie must be Secure");
     assert!(
@@ -1835,7 +1837,7 @@ async fn confirm_login_issues_single_use_session_cookie() {
 // both-credentials test short-circuits before any DB access and runs without a
 // database.
 
-/// Mint + redeem via the public handlers and return the raw `tc_account_session`
+/// Mint + redeem via the public handlers and return the raw `ACCOUNT_SESSION_COOKIE`
 /// cookie value the browser would replay (the `{b64url(tenant)}.{secret}` form).
 async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) -> String {
     use axum::response::IntoResponse;
@@ -1871,7 +1873,7 @@ async fn mint_redeem_session_cookie_value(state: &Arc<AppState>, token: &str) ->
     // `name=value; Attr; Attr` -> take the value of the first pair.
     let first = set_cookie.split(';').next().expect("cookie pair");
     let (name, value) = first.split_once('=').expect("cookie name=value");
-    assert_eq!(name, "tc_account_session");
+    assert_eq!(name, ACCOUNT_SESSION_COOKIE);
     value.to_string()
 }
 
@@ -1895,7 +1897,7 @@ async fn account_ctx_ext(state: &Arc<AppState>, headers: &HeaderMap) -> Extensio
 /// which is what those tests previously relied on `mint_login_link_handler` for.
 async fn account_session_headers(state: &Arc<AppState>, token: &str) -> HeaderMap {
     let cookie = mint_redeem_session_cookie_value(state, token).await;
-    cookie_request_headers("tc_account_session", &cookie)
+    cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie)
 }
 
 fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
@@ -1905,6 +1907,74 @@ fn cookie_request_headers(name: &str, value: &str) -> HeaderMap {
         HeaderValue::from_str(&format!("{name}={value}")).expect("valid cookie header"),
     );
     headers
+}
+
+/// Every cookie ingest sets is bound to the exact host: the name carries the
+/// `__Host-` prefix, and the attributes are the ones a browser demands before
+/// it will accept that prefix (`Secure`, `Path=/`, no `Domain`), plus
+/// `HttpOnly` and `SameSite=Strict`. The one permitted exception is the
+/// `Max-Age=0` write that expires the pre-prefix session cookie, which
+/// [`assert_clears_legacy_session_cookie`] checks on its own. Panics on the
+/// first `Set-Cookie` that breaks the rule, and when there is none at all.
+fn assert_set_cookies_are_host_bound(headers: &HeaderMap) {
+    let values: Vec<&str> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().expect("ascii Set-Cookie"))
+        .collect();
+    assert!(!values.is_empty(), "expected at least one Set-Cookie");
+    for raw in values {
+        let parsed = cookie::Cookie::parse(raw.to_string()).expect("Set-Cookie parses");
+        if parsed.name() == LEGACY_ACCOUNT_SESSION_COOKIE {
+            continue;
+        }
+        assert!(
+            parsed.name().starts_with("__Host-"),
+            "cookie name must carry the __Host- prefix: {raw}"
+        );
+        assert_eq!(parsed.secure(), Some(true), "must be Secure: {raw}");
+        assert_eq!(parsed.path(), Some("/"), "must be Path=/: {raw}");
+        assert_eq!(parsed.domain(), None, "must not carry a Domain: {raw}");
+        assert!(
+            !raw.to_ascii_lowercase().contains("domain="),
+            "must not carry a Domain: {raw}"
+        );
+        assert_eq!(parsed.http_only(), Some(true), "must be HttpOnly: {raw}");
+        assert_eq!(
+            parsed.same_site(),
+            Some(cookie::SameSite::Strict),
+            "must be SameSite=Strict: {raw}"
+        );
+    }
+}
+
+/// The response expires the pre-`__Host-` session cookie exactly once, with the
+/// attributes it was set with, so a browser still holding it drops it.
+fn assert_clears_legacy_session_cookie(headers: &HeaderMap) {
+    let clears: Vec<cookie::Cookie<'static>> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| cookie::Cookie::parse(v.to_string()).ok())
+        .filter(|c| c.name() == LEGACY_ACCOUNT_SESSION_COOKIE)
+        .collect();
+    assert_eq!(
+        clears.len(),
+        1,
+        "exactly one Set-Cookie must expire the legacy session cookie"
+    );
+    let clear = &clears[0];
+    assert_eq!(clear.value(), "", "the legacy clear carries no value");
+    assert_eq!(
+        clear.max_age(),
+        Some(cookie::time::Duration::ZERO),
+        "the legacy clear must be Max-Age=0"
+    );
+    assert_eq!(clear.path(), Some("/"));
+    assert_eq!(clear.domain(), None);
+    assert_eq!(clear.secure(), Some(true));
+    assert_eq!(clear.http_only(), Some(true));
+    assert_eq!(clear.same_site(), Some(cookie::SameSite::Strict));
 }
 
 /// `export_job_request_metadata` records the request filters only. The
@@ -2063,7 +2133,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
     let cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
     let mut ctx = resolve_account_ctx(
         state.as_ref(),
-        &cookie_request_headers("tc_account_session", &cookie),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie),
     )
     .await
     .unwrap();
@@ -2101,7 +2171,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "cross-site")
                 .header(CONTENT_TYPE, "application/json")
@@ -2124,7 +2194,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2149,7 +2219,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2174,7 +2244,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
     ] {
         let rejected = app(state.clone()).oneshot(
             axum::http::Request::builder().method("POST").uri("/v1/account/invites/redeem")
-                .header(axum::http::header::COOKIE, format!("tc_account_session={cookie}"))
+                .header(axum::http::header::COOKIE, format!("{ACCOUNT_SESSION_COOKIE}={cookie}"))
                 .header("sec-fetch-site", "same-origin").header(CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::json!({"invite_code": malformed_code, "idempotency_key": Uuid::new_v4()}).to_string())).unwrap()
         ).await.unwrap();
@@ -2196,7 +2266,7 @@ async fn account_invite_route_requires_session_and_rejects_cross_site_cookie() {
                 .uri("/v1/account/invites/redeem")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2408,7 +2478,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
     let cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
     let ctx = resolve_account_ctx(
         state.as_ref(),
-        &cookie_request_headers("tc_account_session", &cookie),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie),
     )
     .await
     .unwrap();
@@ -2425,7 +2495,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection/offers")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2450,7 +2520,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2483,7 +2553,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2534,7 +2604,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "cross-site")
                 .header(CONTENT_TYPE, "application/json")
@@ -2560,7 +2630,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2577,7 +2647,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2619,7 +2689,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2640,7 +2710,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2666,7 +2736,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "same-origin")
                 .header(CONTENT_TYPE, "application/json")
@@ -2689,7 +2759,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2714,7 +2784,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri(&path)
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .header("sec-fetch-site", "cross-site")
                 .body(Body::empty())
@@ -2731,7 +2801,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                     .uri(&path)
                     .header(
                         axum::http::header::COOKIE,
-                        format!("tc_account_session={cookie}"),
+                        format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                     )
                     .header("sec-fetch-site", "same-origin")
                     .body(Body::empty())
@@ -2755,7 +2825,7 @@ async fn inference_connection_requires_explicit_account_session_selection() {
                 .uri("/v1/account/inference-connection")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie}"),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -2808,7 +2878,7 @@ async fn account_ctx_cookie_resolves_account_with_actor_prefix() {
     // The cookie carries `{b64url(tenant)}.{secret}`.
     assert!(cookie_value.contains('.'), "cookie must be tenant.secret");
 
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("cookie resolves to an account ctx");
@@ -2854,7 +2924,7 @@ async fn account_ctx_cookie_with_forged_tenant_fails_closed() {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("tenant-evil".as_bytes()),
         secret,
     );
-    let headers = cookie_request_headers("tc_account_session", &forged);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &forged);
     let result = resolve_account_ctx(state.as_ref(), &headers).await;
     let err = result.expect_err("forged tenant must fail closed");
     assert_eq!(err.0, StatusCode::UNAUTHORIZED, "forged tenant -> 401");
@@ -2918,7 +2988,7 @@ async fn account_ctx_session_past_idle_cap_is_denied() {
     assert!(validated.is_none(), "idle-capped session must not validate");
 
     // And the resolver surfaces it as 401.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect_err("idle-capped cookie must be denied");
@@ -3007,7 +3077,7 @@ async fn validate_session_rejects_closed_account() {
     );
 
     // And the resolver surfaces it as 401.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect_err("closed-account cookie must be denied");
@@ -3092,7 +3162,8 @@ async fn account_ctx_both_credentials_is_ambiguous_400() {
     let mut headers = auth_headers("token-a");
     headers.insert(
         axum::http::header::COOKIE,
-        HeaderValue::from_static("tc_account_session=dGVuYW50LWE.somesecret"),
+        HeaderValue::from_str(&format!("{ACCOUNT_SESSION_COOKIE}=dGVuYW50LWE.somesecret"))
+            .expect("cookie header"),
     );
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
@@ -3207,21 +3278,20 @@ async fn rotation_test_read_session(
     )
 }
 
-/// Extract the `tc_account_session` cookie VALUE from a response's `Set-Cookie`
-/// header, if present.
+/// Extract the `ACCOUNT_SESSION_COOKIE` cookie VALUE from a response's `Set-Cookie`
+/// header, if present. Searches every `Set-Cookie`, not just the first: a
+/// response can also carry a ceremony cookie or the legacy-name clear, in any
+/// order.
 fn rotation_test_set_cookie_value(response: &axum::response::Response) -> Option<String> {
-    let raw = response
+    response
         .headers()
-        .get(axum::http::header::SET_COOKIE)?
-        .to_str()
-        .ok()?;
-    let first = raw.split(';').next()?;
-    let (name, value) = first.split_once('=')?;
-    if name.trim() == "tc_account_session" {
-        Some(value.to_string())
-    } else {
-        None
-    }
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|raw| raw.split(';').next())
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| name.trim() == ACCOUNT_SESSION_COOKIE)
+        .map(|(_, value)| value.to_string())
 }
 
 /// Drive `GET /v1/account/passkeys` through the FULL app (and thus the auth
@@ -3239,7 +3309,7 @@ async fn rotation_test_get_passkeys(
                 .uri("/v1/account/passkeys")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie_value}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                 )
                 .body(Body::empty())
                 .expect("request builds"),
@@ -3291,6 +3361,8 @@ async fn session_rotation_fires_and_attaches_set_cookie() {
     // A NEW session cookie is attached.
     let new_cookie =
         rotation_test_set_cookie_value(&response).expect("rotation attaches a Set-Cookie");
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     assert_ne!(
         new_cookie, cookie_value,
         "rotated cookie carries a NEW value"
@@ -3512,7 +3584,7 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
                 .header(AUTHORIZATION, "Bearer token-a")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie_value}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                 )
                 .body(Body::empty())
                 .expect("request builds"),
@@ -3612,7 +3684,7 @@ async fn rotation_test_post_logout(
                 .uri("/v1/account/logout")
                 .header(
                     axum::http::header::COOKIE,
-                    format!("tc_account_session={cookie_value}"),
+                    format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                 )
                 .body(Body::empty())
                 .expect("request builds"),
@@ -3670,6 +3742,10 @@ async fn logout_while_rotation_revokes_the_rotated_session() {
     let rotated_cookie =
         rotation_test_set_cookie_value(&response).expect("logout request rotated -> new cookie");
     assert_ne!(rotated_cookie, old_cookie, "rotated to a new secret");
+    // Handler and middleware both expire the legacy cookie; the header is
+    // emitted once, and every other cookie is host-bound.
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     let new_hash = trace_commons_server::account_session::hash_secret(
         rotated_cookie.split_once('.').expect("tenant.secret").1,
     );
@@ -3703,7 +3779,7 @@ async fn logout_while_rotation_revokes_the_rotated_session() {
 /// Regression (Set-Cookie clobber): if rotation fires during register/start, the
 /// middleware must APPEND the rotated session cookie alongside the handler's
 /// ceremony cookie, not replace it. Assert the response carries BOTH a
-/// `tc_passkey_ceremony` and a `tc_account_session` Set-Cookie.
+/// `ACCOUNT_PASSKEY_CEREMONY_COOKIE` and a `ACCOUNT_SESSION_COOKIE` Set-Cookie.
 #[tokio::test]
 async fn register_start_while_rotation_keeps_both_set_cookies() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -3738,7 +3814,7 @@ async fn register_start_while_rotation_keeps_both_set_cookies() {
                     .uri("/v1/account/passkeys/register/start")
                     .header(
                         axum::http::header::COOKIE,
-                        format!("tc_account_session={cookie_value}"),
+                        format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
                     )
                     .body(Body::empty())
                     .expect("request builds"),
@@ -3753,11 +3829,11 @@ async fn register_start_while_rotation_keeps_both_set_cookies() {
     // cookie and register/finish would then fail with no ceremony in progress.
     let names = rotation_test_all_set_cookie_names(&response);
     assert!(
-        names.contains("tc_passkey_ceremony"),
+        names.contains(ACCOUNT_PASSKEY_CEREMONY_COOKIE),
         "ceremony cookie must survive rotation; got {names:?}"
     );
     assert!(
-        names.contains("tc_account_session"),
+        names.contains(ACCOUNT_SESSION_COOKIE),
         "rotated session cookie must be present; got {names:?}"
     );
 
@@ -3932,7 +4008,7 @@ async fn credit_summary_scopes_to_the_calling_accounts_principal_set() {
 
     let ext = account_ctx_ext(
         &state,
-        &cookie_request_headers("tc_account_session", &cookie_value),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
     )
     .await;
     let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
@@ -3987,7 +4063,7 @@ async fn credit_summary_omits_currency_when_no_rate_is_configured() {
 
     let ext = account_ctx_ext(
         &state,
-        &cookie_request_headers("tc_account_session", &cookie_value),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
     )
     .await;
     let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
@@ -4042,7 +4118,7 @@ async fn credit_summary_never_reports_a_spend_figure() {
 
     let ext = account_ctx_ext(
         &state,
-        &cookie_request_headers("tc_account_session", &cookie_value),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
     )
     .await;
     let Json(summary) = account_credit_summary_handler(State(state.clone()), ext)
@@ -5648,13 +5724,14 @@ async fn the_interstitial_sets_a_ceremony_cookie_and_embeds_it() {
         }),
     )
     .await;
+    assert_set_cookies_are_host_bound(response.headers());
 
     let set_cookie = response
         .headers()
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|v| v.starts_with("tc_login_ceremony="))
+        .find(|v| v.starts_with(&format!("{LOGIN_CEREMONY_COOKIE}=")))
         .expect("interstitial sets the ceremony cookie")
         .to_string();
 
@@ -5666,7 +5743,7 @@ async fn the_interstitial_sets_a_ceremony_cookie_and_embeds_it() {
     );
 
     let nonce = set_cookie
-        .trim_start_matches("tc_login_ceremony=")
+        .trim_start_matches(&format!("{LOGIN_CEREMONY_COOKIE}="))
         .split(';')
         .next()
         .expect("cookie value")
@@ -5690,7 +5767,7 @@ fn with_login_ceremony(base: HeaderMap) -> HeaderMap {
     let mut headers = base;
     headers.insert(
         axum::http::header::COOKIE,
-        HeaderValue::from_str(&format!("tc_login_ceremony={TEST_LOGIN_CEREMONY}"))
+        HeaderValue::from_str(&format!("{LOGIN_CEREMONY_COOKIE}={TEST_LOGIN_CEREMONY}"))
             .expect("cookie header"),
     );
     headers
@@ -79574,7 +79651,7 @@ async fn logout_revokes_current_session() {
     );
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
 
     // The cookie resolves before logout.
     resolve_account_ctx(state.as_ref(), &headers)
@@ -79583,16 +79660,85 @@ async fn logout_revokes_current_session() {
 
     // Logout the current session.
     let logout_ext = account_ctx_ext(&state, &headers).await;
-    let status = account_logout_handler(State(state.clone()), logout_ext, headers.clone())
+    let response = account_logout_handler(State(state.clone()), logout_ext, headers.clone())
         .await
         .expect("logout succeeds");
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    // A browser signing out also drops any pre-`__Host-` session cookie.
+    assert_clears_legacy_session_cookie(response.headers());
 
     // The same cookie now fails closed (revoked).
     let err = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect_err("revoked session must 401");
     assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The session cookie took the `__Host-` prefix, and the old name is ignored
+/// rather than accepted alongside it. A live session presented under the old
+/// name is unauthenticated, both at the resolver and through the full router,
+/// and the same value under the current name still works, so the refusal is
+/// about the name alone. PostgreSQL-backed; self-skips without a database.
+#[tokio::test]
+async fn legacy_session_cookie_name_is_not_authenticated() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
+    assert_ne!(LEGACY_ACCOUNT_SESSION_COOKIE, ACCOUNT_SESSION_COOKIE);
+    let legacy_headers = cookie_request_headers(LEGACY_ACCOUNT_SESSION_COOKIE, &cookie_value);
+
+    let err = resolve_account_ctx(state.as_ref(), &legacy_headers)
+        .await
+        .expect_err("the legacy cookie name must not authenticate");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    let legacy_response = {
+        use axum::body::Body;
+        use tower::ServiceExt;
+        app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/account/passkeys")
+                    .header(
+                        axum::http::header::COOKIE,
+                        format!("{LEGACY_ACCOUNT_SESSION_COOKIE}={cookie_value}"),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    };
+    assert_eq!(
+        legacy_response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the full router must refuse the legacy cookie name"
+    );
+
+    // The same value under the current name resolves: only the name differs.
+    resolve_account_ctx(
+        state.as_ref(),
+        &cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value),
+    )
+    .await
+    .expect("the current cookie name resolves");
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -79620,8 +79766,8 @@ async fn revoke_all_invalidates_every_session() {
     // Two redeems for the SAME device principal -> same account, two sessions.
     let cookie_one = mint_redeem_session_cookie_value(&state, "token-a").await;
     let cookie_two = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers_one = cookie_request_headers("tc_account_session", &cookie_one);
-    let headers_two = cookie_request_headers("tc_account_session", &cookie_two);
+    let headers_one = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_one);
+    let headers_two = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_two);
 
     // Both resolve before revoke-all.
     resolve_account_ctx(state.as_ref(), &headers_one)
@@ -80050,7 +80196,7 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
     // Cookie session for token-a's account; the resolved actor ref will be
     // `account-actor:{account_id}`.
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("cookie resolves");
@@ -81136,7 +81282,7 @@ async fn near_payout_resolution_is_fail_closed() {
 //     exists for the account with the expected credential_id + passkey JSON, and
 //     the `account_passkey_enrolled` audit row is written.
 //   * `register/start` also asserted in isolation: returns WebAuthn options, sets
-//     the `tc_passkey_ceremony` cookie, stashes `CeremonyState::Registration`,
+//     the `ACCOUNT_PASSKEY_CEREMONY_COOKIE` cookie, stashes `CeremonyState::Registration`,
 //     and (after one credential is enrolled) carries that credential in the
 //     options' `exclude_credentials`.
 //   * `register/finish` ceremony-binding gate: a missing ceremony cookie and an
@@ -81252,7 +81398,7 @@ async fn passkey_register_start(
     session_cookie: &str,
 ) -> (serde_json::Value, String) {
     use axum::response::IntoResponse;
-    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, session_cookie);
     let ext = account_ctx_ext(state, &headers).await;
     let response = account_passkey_register_start_handler(State(state.clone()), ext)
         .await
@@ -81294,7 +81440,7 @@ async fn passkey_register_start_returns_options_and_stashes_ceremony() {
     let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
 
     let start_ext = account_ctx_ext(&state, &headers).await;
     let response = account_passkey_register_start_handler(State(state.clone()), start_ext)
@@ -81311,7 +81457,8 @@ async fn passkey_register_start_returns_options_and_stashes_ceremony() {
         .expect("ceremony cookie set")
         .to_str()
         .expect("ascii cookie");
-    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    assert!(set_cookie.starts_with(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}=")));
+    assert_set_cookies_are_host_bound(response.headers());
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("Secure"));
     assert!(set_cookie.contains("SameSite=Strict"));
@@ -81358,8 +81505,8 @@ async fn passkey_register_finish_without_ceremony_cookie_is_400() {
     let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Only the session cookie; no `tc_passkey_ceremony`.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    // Only the session cookie; no `ACCOUNT_PASSKEY_CEREMONY_COOKIE`.
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
 
     let finish_ext = account_ctx_ext(&state, &headers).await;
     let err = account_passkey_register_finish_handler(
@@ -81395,7 +81542,7 @@ async fn passkey_register_finish_with_unknown_ceremony_is_400() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; tc_passkey_ceremony=never-issued-ceremony-id"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ACCOUNT_PASSKEY_CEREMONY_COOKIE}=never-issued-ceremony-id"
         ))
         .expect("valid cookie header"),
     );
@@ -81518,7 +81665,7 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
     finish_headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
         ))
         .expect("valid cookie header"),
     );
@@ -81616,7 +81763,7 @@ async fn passkey_enroll_round_trip_persists_credential_and_audit() {
 // ceremony end-to-end with the dev-only SoftPasskey software authenticator.
 // Coverage:
 //   * Round-trip: enroll -> login/start -> SoftPasskey assertion -> login/finish
-//     mints a `tc_account_session` cookie (client_kind='passkey',
+//     mints a `ACCOUNT_SESSION_COOKIE` cookie (client_kind='passkey',
 //     auth_credential_id set) and 303s.
 //   * Sign-counter / clone defense: a stale (replayed) assertion is rejected
 //     with the uniform deny and mints no session.
@@ -81694,7 +81841,7 @@ async fn enroll_passkey_for_token(
     finish_headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
         ))
         .expect("valid cookie header"),
     );
@@ -81800,7 +81947,8 @@ async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, Strin
         .to_str()
         .expect("ascii cookie")
         .to_string();
-    assert!(set_cookie.starts_with("tc_passkey_ceremony="));
+    assert!(set_cookie.starts_with(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}=")));
+    assert_set_cookies_are_host_bound(response.headers());
     let ceremony_pair = set_cookie
         .split(';')
         .next()
@@ -81849,19 +81997,21 @@ async fn passkey_login_cookie_value(
         StatusCode::SEE_OTHER,
         "passkey login 303s"
     );
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     response
         .headers()
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
         .expect("passkey session cookie value")
 }
 
-/// Full enroll -> discoverable login round trip: a `tc_account_session` cookie is
+/// Full enroll -> discoverable login round trip: a `ACCOUNT_SESSION_COOKIE` cookie is
 /// minted with `client_kind='passkey'` and `auth_credential_id` set, and the
 /// response is a 303 to the account view.
 #[tokio::test]
@@ -81917,7 +82067,7 @@ async fn passkey_login_round_trip_mints_passkey_session() {
         .collect::<Vec<_>>();
     let session_set = set_cookie
         .iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .expect("session cookie set on login");
     assert!(session_set.contains("HttpOnly"));
     assert!(session_set.contains("Secure"));
@@ -81937,7 +82087,7 @@ async fn passkey_login_round_trip_mints_passkey_session() {
         "auth_credential_id records the asserting credential"
     );
 
-    let headers = cookie_request_headers("tc_account_session", value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("passkey session cookie resolves");
@@ -82075,12 +82225,12 @@ async fn passkey_login_binds_only_to_owning_account() {
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
         .expect("session cookie value");
-    let headers = cookie_request_headers("tc_account_session", &value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("session resolves");
@@ -82408,7 +82558,7 @@ async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
         .get_all(axum::http::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
@@ -82417,7 +82567,7 @@ async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
     // (3) Cookie-session list flags cred1 as this_device, cred2 false.
     let cookie_list = list_passkeys(
         &state,
-        cookie_request_headers("tc_account_session", &passkey_cookie),
+        cookie_request_headers(ACCOUNT_SESSION_COOKIE, &passkey_cookie),
     )
     .await;
     assert_eq!(cookie_list.len(), 2);
@@ -82517,7 +82667,7 @@ async fn passkey_remove_soft_deletes_and_404s_unknown() {
     // must run from a strong (passkey-login) session. Log in with cred1.
     let strong_cookie = passkey_login_cookie_value(&state, &mut a1, &cred1, account_id).await;
     let (_a2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // Remove cred1 from the STRONG session: removed=true, one remaining.
     let remove_ext = account_ctx_ext(&state, &strong_headers).await;
@@ -82732,13 +82882,14 @@ async fn near_enroll_start(
     session_cookie: &str,
 ) -> (String, [u8; 32], String, String) {
     use axum::response::IntoResponse;
-    let headers = cookie_request_headers("tc_account_session", session_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, session_cookie);
     let ext = account_ctx_ext(state, &headers).await;
     let response = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
         .expect("enroll/start succeeds")
         .into_response();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_set_cookies_are_host_bound(response.headers());
 
     let set_cookie = response
         .headers()
@@ -82838,7 +82989,7 @@ async fn near_enroll_start_returns_challenge_and_stashes_ceremony() {
     assert_eq!(message, "Trace Commons account link");
     assert_eq!(recipient, NEAR_TEST_RECIPIENT);
     assert_ne!(nonce, [0u8; 32], "nonce is a real CSPRNG value");
-    assert!(ceremony_pair.starts_with("tc_near_ceremony="));
+    assert!(ceremony_pair.starts_with(&format!("{ACCOUNT_NEAR_CEREMONY_COOKIE}=")));
 
     // The ceremony state was stashed under the cookie's id as a NearChallenge.
     let (_name, ceremony_id) = ceremony_pair.split_once('=').expect("name=value");
@@ -82879,7 +83030,7 @@ async fn near_enroll_start_fails_closed_without_config() {
     );
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ext = account_ctx_ext(&state, &headers).await;
     let err = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
@@ -82919,7 +83070,7 @@ async fn near_enroll_finish_persists_identity_when_binding_holds() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -82975,7 +83126,7 @@ async fn near_enroll_finish_rejects_when_key_not_full_access() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83030,7 +83181,7 @@ async fn near_enroll_finish_fails_closed_on_rpc_error() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83085,7 +83236,7 @@ async fn near_enroll_finish_rejects_bad_signature() {
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={cookie_value}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={cookie_value}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83124,8 +83275,8 @@ async fn near_enroll_finish_without_ceremony_is_400() {
     let state = test_state_with_near(temp.path().to_path_buf(), Some(db_mirror), Some(checker));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Only the session cookie; no tc_near_ceremony.
-    let headers = cookie_request_headers("tc_account_session", &cookie_value);
+    // Only the session cookie; no `ACCOUNT_NEAR_CEREMONY_COOKIE`.
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
     let ext = account_ctx_ext(&state, &headers).await;
 
     let kp = near_test_keypair();
@@ -83188,7 +83339,8 @@ async fn near_login_start(state: &Arc<AppState>) -> (String, [u8; 32], String, S
         .to_str()
         .expect("ascii cookie")
         .to_string();
-    assert!(set_cookie.starts_with("tc_near_ceremony="));
+    assert!(set_cookie.starts_with(&format!("{ACCOUNT_NEAR_CEREMONY_COOKIE}=")));
+    assert_set_cookies_are_host_bound(response.headers());
     let ceremony_pair = set_cookie
         .split(';')
         .next()
@@ -83232,7 +83384,7 @@ async fn seed_near_login_identity(
     headers.insert(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!(
-            "tc_account_session={session_cookie}; {ceremony_pair}"
+            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
         ))
         .expect("combined cookie header"),
     );
@@ -83274,7 +83426,7 @@ async fn deny_status_and_body(response: axum::response::Response) -> (StatusCode
 }
 
 /// Round-trip: enroll a NEAR identity, then `login/start` -> sign -> `login/finish`
-/// mints a `tc_account_session` cookie with `client_kind='near'` and
+/// mints a `ACCOUNT_SESSION_COOKIE` cookie with `client_kind='near'` and
 /// `auth_credential_id` = the public key, and 303s to the account view.
 #[tokio::test]
 async fn near_login_round_trip_mints_near_session() {
@@ -83322,10 +83474,12 @@ async fn near_login_round_trip_mints_near_session() {
         StatusCode::SEE_OTHER,
         "login/finish 303s on success"
     );
+    assert_set_cookies_are_host_bound(response.headers());
+    assert_clears_legacy_session_cookie(response.headers());
     let set_cookies = all_set_cookies(&response);
     let session_set = set_cookies
         .iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .expect("session cookie set on login");
     assert!(session_set.contains("HttpOnly"));
     assert!(session_set.contains("Secure"));
@@ -83346,7 +83500,7 @@ async fn near_login_round_trip_mints_near_session() {
     );
 
     // The minted cookie resolves to the SAME tenant + account.
-    let headers = cookie_request_headers("tc_account_session", value);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, value);
     let ctx = resolve_account_ctx(state.as_ref(), &headers)
         .await
         .expect("near session cookie resolves");
@@ -83520,7 +83674,7 @@ async fn near_login_rejects_replayed_ceremony() {
     assert!(
         !replay_set
             .iter()
-            .any(|c| c.starts_with("tc_account_session=")),
+            .any(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}="))),
         "a refused replay mints no session cookie"
     );
 
@@ -83579,7 +83733,7 @@ async fn near_login_rejects_enroll_message_signature() {
     assert!(
         !all_set_cookies(&response)
             .iter()
-            .any(|c| c.starts_with("tc_account_session=")),
+            .any(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}="))),
         "the refused enroll-replay mints no session cookie"
     );
 
@@ -83642,7 +83796,7 @@ async fn near_login_binds_session_to_owning_tenant() {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let cookie = all_set_cookies(&response)
         .into_iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .expect("session cookie");
     let value = cookie
         .split(';')
@@ -83651,7 +83805,7 @@ async fn near_login_binds_session_to_owning_tenant() {
         .expect("name=value")
         .1
         .to_string();
-    let resolve_headers = cookie_request_headers("tc_account_session", &value);
+    let resolve_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &value);
     let ctx = resolve_account_ctx(state.as_ref(), &resolve_headers)
         .await
         .expect("session resolves");
@@ -83724,7 +83878,7 @@ async fn near_login_rejects_malformed_public_key_shape() {
         assert!(
             !all_set_cookies(&response)
                 .iter()
-                .any(|c| c.starts_with("tc_account_session=")),
+                .any(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}="))),
             "the refused malformed-key attempt mints no session cookie"
         );
     }
@@ -83809,7 +83963,7 @@ async fn gate_allows_first_authenticator_from_weak_session() {
     let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
 
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // passkey register/start from the weak session -> 200 (carve-out).
     let ext = account_ctx_ext(&state, &headers).await;
@@ -83854,7 +84008,7 @@ async fn gate_blocks_second_authenticator_from_weak_session() {
     // Enroll the first passkey (carve-out) -> account now holds 1 strong.
     let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
 
-    let headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // passkey register/start from the weak session -> 403.
     let ext = account_ctx_ext(&state, &headers).await;
@@ -83903,7 +84057,7 @@ async fn gate_allows_any_authenticator_from_strong_session() {
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     // Log in with the passkey -> STRONG (`client_kind='passkey'`) session cookie.
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     use axum::response::IntoResponse;
     // passkey register/start from the strong session -> 200.
@@ -83956,7 +84110,7 @@ async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
     .await;
     // Enroll the only passkey (carve-out) -> 1 strong.
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let weak_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // Removing it from the WEAK session is blocked: 1 strong still present.
     let remove_ext = account_ctx_ext(&state, &weak_headers).await;
@@ -83974,7 +84128,7 @@ async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
     // From a STRONG (passkey-login) session the remove is allowed; this returns the
     // account to zero strong authenticators.
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
     let remove_ext = account_ctx_ext(&state, &strong_headers).await;
     let Json(out) =
         account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
@@ -84111,7 +84265,7 @@ async fn list_near_identities(
 
 /// Drive `near/login/start` -> sign -> `near/login/finish` for an already-enrolled
 /// `(kp, public_key)` under `near_account_id`, returning the minted
-/// `tc_account_session` cookie VALUE (a `client_kind='near'` strong session whose
+/// `ACCOUNT_SESSION_COOKIE` cookie VALUE (a `client_kind='near'` strong session whose
 /// `auth_credential_id` is `public_key`).
 async fn near_login_cookie_value(
     state: &Arc<AppState>,
@@ -84139,7 +84293,7 @@ async fn near_login_cookie_value(
     assert_eq!(response.status(), StatusCode::SEE_OTHER, "near login 303s");
     all_set_cookies(&response)
         .iter()
-        .find(|c| c.starts_with("tc_account_session="))
+        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
         .and_then(|c| c.split(';').next())
         .and_then(|p| p.split_once('='))
         .map(|(_, v)| v.to_string())
@@ -84265,7 +84419,7 @@ async fn merge_start_then_confirm_folds_device_b_into_a() {
     .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // Device B: its own account + a webauthn credential + an UNREDEEMED login-link.
     let (merge_code, account_b) =
@@ -84374,7 +84528,7 @@ async fn merge_confirm_is_blocked_from_weak_session() {
     // Enroll a passkey so a strong authenticator EXISTS (arming the gate); the
     // account id is not needed since enrollment binds to the session cookie.
     let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let weak_headers = cookie_request_headers("tc_account_session", &weak_cookie);
+    let weak_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // Device B with an unredeemed login-link.
     let (merge_code, account_b) =
@@ -84453,7 +84607,7 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
     .await;
     let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
-    let strong_headers = cookie_request_headers("tc_account_session", &strong_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // (1) start with a bogus code -> 400 (no matching login-link).
     let ext = account_ctx_ext(&state, &strong_headers).await;
@@ -84492,7 +84646,7 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
     .await;
     let (mut c_auth, c_cred) = enroll_passkey_for_token(&state, &c_weak).await;
     let c_strong = passkey_login_cookie_value(&state, &mut c_auth, &c_cred, account_c).await;
-    let c_headers = cookie_request_headers("tc_account_session", &c_strong);
+    let c_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &c_strong);
 
     let (merge_code, _account_b) =
         mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
@@ -84566,7 +84720,7 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
 
     // (2) NEAR-login with identity #1 -> that exact key flags this_session=true.
     let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
-    let near_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let near_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
     let near_listed = list_near_identities(&state, near_headers).await;
     assert_eq!(near_listed.len(), 2);
     let flagged: Vec<&str> = near_listed
@@ -84585,7 +84739,7 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     // then log in via passkey.
     let (mut auth, cred) = enroll_passkey_for_token(&state, &near_cookie).await;
     let passkey_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let passkey_headers = cookie_request_headers("tc_account_session", &passkey_cookie);
+    let passkey_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &passkey_cookie);
     let passkey_listed = list_near_identities(&state, passkey_headers).await;
     assert!(
         passkey_listed.iter().all(|(_, _, _, this, _)| !*this),
@@ -84694,7 +84848,7 @@ async fn near_identity_remove_endpoint_gated_and_soft_deletes() {
     // From a STRONG (NEAR-login) session: remove identity #2 -> removed, one strong
     // (identity #1) remains.
     let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
-    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
     let strong_ext = account_ctx_ext(&state, &strong_headers).await;
     let Json(body) = account_near_identity_remove_handler(
         State(state.clone()),
@@ -84905,7 +85059,7 @@ async fn near_payout_endpoint_designates_clears_and_flips_prior() {
         .expect("insert second identity");
 
     let near_cookie = near_login_cookie_value(&state, &kp1, &pk1, "alice.testnet").await;
-    let strong_headers = || cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_headers = || cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
 
     // Nothing designated initially.
     let listed =
@@ -85037,7 +85191,7 @@ async fn near_payout_endpoint_unknown_and_cross_account_404() {
         seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
             .await;
     let near_cookie = near_login_cookie_value(&state, &kp_a, &pk_a, "alice.testnet").await;
-    let strong_headers = cookie_request_headers("tc_account_session", &near_cookie);
+    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &near_cookie);
 
     // Unknown key from A's strong session -> uniform 404.
     let err = payout_patch(&state, strong_headers, "ed25519:does-not-exist", true)
