@@ -68,7 +68,9 @@ use ironwire_proxy::proof::{Attestation, SignerAttestor};
 use trace_commons_attestation::measurements::{
     ExpectedMeasurements, MeasurementVerdict, check_measurements_opt,
 };
-use trace_commons_attestation::quote::{Collateral, VerifiedQuote, verify_quote};
+use trace_commons_attestation::quote::{
+    Collateral, REQUIRED_TCB_STATUS, VerifiedQuote, verify_quote,
+};
 use trace_commons_attestation::receipt::{AttestedKeyError, model_entry_quotes, quote_bound_keys};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins;
@@ -504,6 +506,11 @@ impl NearAiQuoteAttestor {
             let Some(checked) = (inner.verify)(quote, &collateral, now) else {
                 return Attestation::NotAttested;
             };
+            // A genuine quote from a platform behind on Intel's fixes earns
+            // nothing, exactly as the server's drill refuses it.
+            if checked.tcb_status != REQUIRED_TCB_STATUS {
+                return Attestation::NotAttested;
+            }
             if !image_is_pinned(&pins.sets, &checked) {
                 return Attestation::NotAttested;
             }
@@ -752,6 +759,47 @@ mod tests {
             attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
             Attestation::NotAttested
         );
+    }
+
+    /// Intel's TCB verdict must be `UpToDate`, as the server's drill requires.
+    /// The fixture is `UpToDate`, so every other verdict is injected on top
+    /// of a real verification: the quote, pins, nonce and binding all still
+    /// pass, and only the platform's patch level is wrong.
+    #[tokio::test]
+    async fn a_platform_that_is_not_up_to_date_earns_no_key() {
+        for status in [
+            "OutOfDate",
+            "OutOfDateConfigurationNeeded",
+            "ConfigurationNeeded",
+            "SWHardeningNeeded",
+            "ConfigurationAndSWHardeningNeeded",
+            "Revoked",
+            "",
+            "uptodate",
+        ] {
+            let (report, nonce, _) = synthetic_report();
+            let reports = Arc::new(AtomicUsize::new(0));
+            let attestor = NearAiQuoteAttestor::with_parts(
+                Box::new(Fixture {
+                    report,
+                    reports,
+                    collateral_ok: true,
+                }),
+                Arc::new(PinProvider::new(Some(real_pins()), None)),
+                Box::new(|| FIXTURE_CAPTURED_AT),
+                Box::new(move || Some(nonce.clone())),
+                Box::new(move |quote, collateral, now| {
+                    let mut verified = verify_quote(quote, collateral, now).ok()?;
+                    verified.tcb_status = status.to_string();
+                    Some(verified)
+                }),
+            );
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::NotAttested,
+                "tcb_status {status:?}"
+            );
+        }
     }
 
     #[tokio::test]
