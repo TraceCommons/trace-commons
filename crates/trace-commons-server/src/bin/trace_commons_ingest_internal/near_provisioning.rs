@@ -1523,13 +1523,16 @@ async fn near_ai_bind_finish(
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(Some("ceremony"))?;
+    // The account in the preimage is the SESSION's, not the stored one. The
+    // check above already makes them equal; taking the session's here means a
+    // signature is also useless to any other account if that check ever went.
     let signing_bytes = trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
         &nonce,
         &body.ceremony_id,
         &device,
         &pending.code_challenge,
         pending.expires_at,
-        &pending.account_id,
+        &account_id,
     );
     near_ai_verify_device_proof(
         &body,
