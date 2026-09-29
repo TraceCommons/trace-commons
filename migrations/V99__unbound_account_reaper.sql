@@ -35,33 +35,44 @@
 -- and nothing else. The deployer grants the worker to the login that runs
 -- the reaper.
 --
--- WHAT GOES, AND THE TENANT REFUSAL. A candidate is deleted by deleting its
--- account and then its tenant, and both cascade. The tenant cascade alone
--- reaches about fifty tenant-keyed tables, so the function first proves the
--- tenant holds only what a passkey tenant may hold (the spec's "unbound"
--- state): its tenant row, the one account, that account's binding,
--- credential and sessions, and trace_account_audit rows. If the tenant holds
--- another account or ANY row in any other table keyed to trace_tenants or
--- trace_accounts, the whole candidate is refused -- nothing is deleted -- and
--- counted skipped.
+-- WHAT GOES (decided 2026-09-29): THE ACCOUNT, NEVER THE TENANT. A
+-- candidate is deleted by deleting its trace_accounts row, and nothing else is
+-- deleted directly. The tenant row is left in place, possibly empty, and so is
+-- every tenant-keyed row (trace_account_audit among them). An earlier draft
+-- also deleted the tenant, which cascades into about fifty tables; to make
+-- that safe it ran a catalog-driven scope check that needed a grant and a
+-- policy for the guard on every tenant-keyed table, and so put an obligation
+-- on every later migration. Not deleting the tenant removes the check, its
+-- grants and policies, and the obligation. A LATER MIGRATION OWES THE REAPER
+-- NOTHING.
 --
--- That check is driven by the catalog, not a hand-kept list: every foreign
--- key into trace_tenants or trace_accounts (or the allowed tables) through a
--- tenant_id column puts its table IN SCOPE. The guard is NOBYPASSRLS, so a
--- scope table it cannot see into would read as empty and be cascaded away
--- unseen. The function therefore refuses the whole call, raising
--- 'unbound_reaper_scope_incomplete: <tables>', when any scope table lacks the
--- guard's SELECT on its tenant column or a permissive SELECT policy for the
--- guard. This migration grants both on every scope table that exists when it
--- runs. A LATER MIGRATION THAT ADDS A TENANT-KEYED TABLE MUST GRANT THE GUARD
--- THE SAME, or the reaper stops; unbound_account_reaper_pg fails in CI until
--- it does. Table names are schema, not data, so the message may carry them.
+-- The account delete takes whatever cascades from trace_accounts. For a
+-- passkey account that is its binding, credentials, sessions and login links.
+-- The same ON DELETE CASCADE also reaches trace_account_principals,
+-- trace_near_identities, trace_account_merge_proposals, trace_public_runs,
+-- trace_source_sessions and trace_account_inference_connections. The unbound
+-- gate keeps an unbound or closed account's session away from every route
+-- that writes those, so a candidate is not expected to hold any, but if one
+-- does, the cascade deletes it. unbound_account_reaper_pg pins that exact set
+-- of cascading tables, so a change to it is a visible test edit, not a
+-- silent widening of what a reap deletes.
 --
--- AUDIT. trace_audit_events has no foreign key to trace_tenants, so those
--- rows are not deleted: they are hash-chained and hash-only, and every other
--- deletion in the repo (withdrawal, purge) retains them. trace_account_audit
--- cascades with the tenant. The reaper cannot audit into the tenant it
--- deletes, so it reports counts only, through its return value.
+-- Any account-keyed row whose foreign key does NOT cascade (ON DELETE
+-- RESTRICT or NO ACTION -- trace_reward_principal_accounts, the account trust
+-- and admission tables, the legacy invite link tables, trace_near_account_
+-- anchors, and any added later) refuses the delete with 23503. The candidate
+-- is rolled back and counted skipped, nothing of it is deleted, and the
+-- batch moves on.
+--
+-- A second account in the same tenant does not matter. The delete is keyed
+-- to (tenant_id, account_id) and cascades only from that account row, so it
+-- cannot touch another account; refusing on one existed only to protect the
+-- tenant delete, which is gone.
+--
+-- AUDIT. trace_audit_events and trace_account_audit are keyed to the tenant,
+-- not the account, so both are retained with the tenant row. The reaper
+-- writes no audit row of its own; it reports counts only, through its return
+-- value.
 --
 -- CONCURRENCY. Each candidate is handled in its own sub-transaction:
 --   1. the binding row is locked FOR UPDATE SKIP LOCKED with its state
@@ -69,17 +80,14 @@
 --      updated or is updating the row either commits first (the state no
 --      longer matches, so the row is not returned) or holds the lock (the row
 --      is skipped).
---   2. the account row, then the tenant row, are locked FOR UPDATE SKIP
---      LOCKED. Inserting any row keyed to either takes a key-share lock on it
---      through the foreign key, so a concurrent sign-in or other tenant write
---      makes the candidate skipped; one that commits earlier is seen by 3.
---      Holding the tenant lock is what stops a row from slipping in between
---      the scope check and the delete.
---   3. live sessions, other accounts and the scope are re-checked in fresh
---      statements, under all three locks.
+--   2. the account row is locked FOR UPDATE SKIP LOCKED. Inserting any row
+--      keyed to the account takes a key-share lock on it through the foreign
+--      key, so a concurrent sign-in makes the candidate skipped; one that
+--      commits earlier is seen by 3.
+--   3. live sessions are re-checked in a fresh statement, under both locks.
 -- Nothing waits on a lock the reaper cannot take, but the cascade itself can
 -- wait on a child row (a session being updated) held by a transaction that
--- then waits on the reaper's account or tenant lock. That is a deadlock; the
+-- then waits on the reaper's account lock. That is a deadlock; the
 -- detector aborts one side, and when it is the reaper the candidate is
 -- rolled back and counted skipped, like a foreign-key refusal (23503) or a
 -- lock timeout (lock_timeout is 3s).
@@ -125,8 +133,6 @@ GRANT SELECT (tenant_id, account_id, created_at, closed_at), DELETE
 GRANT UPDATE (created_at) ON trace_accounts TO trace_unbound_account_reaper_guard;
 GRANT SELECT (tenant_id, account_id, last_seen_at, expires_at, revoked_at)
     ON trace_sessions TO trace_unbound_account_reaper_guard;
-GRANT SELECT (tenant_id), DELETE ON trace_tenants TO trace_unbound_account_reaper_guard;
-GRANT UPDATE (created_at) ON trace_tenants TO trace_unbound_account_reaper_guard;
 
 -- Role-scoped permissive policies; the shared tenant-isolation policies stay
 -- for everyone else.
@@ -153,52 +159,45 @@ CREATE POLICY trace_unbound_reaper_delete ON trace_accounts
 DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_sessions;
 CREATE POLICY trace_unbound_reaper_read ON trace_sessions
     FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
-DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_tenants;
-CREATE POLICY trace_unbound_reaper_read ON trace_tenants
-    FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
-DROP POLICY IF EXISTS trace_unbound_reaper_lock ON trace_tenants;
-CREATE POLICY trace_unbound_reaper_lock ON trace_tenants
-    FOR UPDATE TO trace_unbound_account_reaper_guard USING (TRUE) WITH CHECK (TRUE);
-DROP POLICY IF EXISTS trace_unbound_reaper_delete ON trace_tenants;
-CREATE POLICY trace_unbound_reaper_delete ON trace_tenants
-    FOR DELETE TO trace_unbound_account_reaper_guard USING (TRUE);
--- An earlier draft read trace_submissions under this name; the scope loop
--- below covers it now.
+-- An earlier draft read trace_submissions under this name.
 DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_submissions;
 
--- The tenant-refusal scope: SELECT on the tenant column and a permissive
--- SELECT policy for the guard on every table keyed to a tenant or account.
--- The query is the one the function's preflight runs; keep them identical.
+-- Converge a database that ran an earlier draft of this migration (CI and
+-- scratch databases only; V99 was never released). That draft deleted the
+-- tenant, so it gave the guard SELECT/DELETE/UPDATE on trace_tenants with
+-- three policies there, and a SELECT grant plus a trace_unbound_reaper_scope
+-- policy on every tenant-keyed table. None of it is used now. Each step is a
+-- no-op on a fresh database.
+DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_tenants;
+DROP POLICY IF EXISTS trace_unbound_reaper_lock ON trace_tenants;
+DROP POLICY IF EXISTS trace_unbound_reaper_delete ON trace_tenants;
 DO $$
 DECLARE
     r RECORD;
 BEGIN
     FOR r IN
-        SELECT DISTINCT con.conrelid::regclass AS rel, a.attname AS col
-          FROM pg_constraint con
-          CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(ck, fk)
-          JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.fk
-          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.ck
-         WHERE con.contype = 'f'
-           AND ra.attname = 'tenant_id'
-           AND con.confrelid IN ('public.trace_tenants'::regclass,
-                               'public.trace_accounts'::regclass,
-                               'public.trace_account_bindings'::regclass,
-                               'public.trace_webauthn_credentials'::regclass,
-                               'public.trace_sessions'::regclass,
-                               'public.trace_account_audit'::regclass)
-           AND con.conrelid NOT IN ('public.trace_accounts'::regclass,
-                                  'public.trace_account_bindings'::regclass,
-                                  'public.trace_webauthn_credentials'::regclass,
-                                  'public.trace_sessions'::regclass,
-                                  'public.trace_account_audit'::regclass)
+        SELECT p.polrelid::regclass AS rel
+          FROM pg_policy p
+         WHERE p.polname = 'trace_unbound_reaper_scope'
     LOOP
-        EXECUTE format('GRANT SELECT (%I) ON %s TO trace_unbound_account_reaper_guard',
-                       r.col, r.rel);
         EXECUTE format('DROP POLICY IF EXISTS trace_unbound_reaper_scope ON %s', r.rel);
-        EXECUTE format('CREATE POLICY trace_unbound_reaper_scope ON %s
-                            FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE)',
-                       r.rel);
+    END LOOP;
+    -- Every table the guard holds any privilege on, other than the three it
+    -- needs. A table-level REVOKE ALL also revokes its column privileges.
+    FOR r IN
+        SELECT DISTINCT format('%I.%I', cp.table_schema, cp.table_name) AS rel
+          FROM information_schema.column_privileges cp
+         WHERE cp.grantee = 'trace_unbound_account_reaper_guard'
+           AND cp.table_schema = 'public'
+           AND cp.table_name NOT IN ('trace_account_bindings', 'trace_accounts', 'trace_sessions')
+        UNION
+        SELECT DISTINCT format('%I.%I', tp.table_schema, tp.table_name)
+          FROM information_schema.table_privileges tp
+         WHERE tp.grantee = 'trace_unbound_account_reaper_guard'
+           AND tp.table_schema = 'public'
+           AND tp.table_name NOT IN ('trace_account_bindings', 'trace_accounts', 'trace_sessions')
+    LOOP
+        EXECUTE format('REVOKE ALL ON %s FROM trace_unbound_account_reaper_guard', r.rel);
     END LOOP;
 END $$;
 
@@ -216,10 +215,6 @@ DECLARE
     v_reaped_unbound BIGINT := 0;
     v_reaped_closed  BIGINT := 0;
     v_skipped        BIGINT := 0;
-    v_me             OID;
-    v_missing        TEXT;
-    v_scope_sql      TEXT;
-    v_held           BOOLEAN;
     c                RECORD;
 BEGIN
     -- A one-day floor is defense in depth against a misconfigured TTL of a
@@ -232,48 +227,6 @@ BEGIN
     PERFORM set_config('lock_timeout', '3s', true);
     v_unbound_cutoff := v_now - (p_unbound_ttl_seconds * interval '1 second');
     v_closed_cutoff := v_now - (p_closed_ttl_seconds * interval '1 second');
-
-    -- Preflight: every table in scope must be visible to this role, or a
-    -- tenant's rows in it would read as absent and be cascaded away.
-    SELECT r.oid INTO v_me FROM pg_roles r WHERE r.rolname = current_user;
-    WITH fk AS (
-        SELECT DISTINCT con.conrelid AS rel, a.attname AS col
-          FROM pg_constraint con
-          CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(ck, fk)
-          JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.fk
-          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.ck
-         WHERE con.contype = 'f'
-           AND ra.attname = 'tenant_id'
-           AND con.confrelid IN ('public.trace_tenants'::regclass,
-                               'public.trace_accounts'::regclass,
-                               'public.trace_account_bindings'::regclass,
-                               'public.trace_webauthn_credentials'::regclass,
-                               'public.trace_sessions'::regclass,
-                               'public.trace_account_audit'::regclass)
-           AND con.conrelid NOT IN ('public.trace_accounts'::regclass,
-                                  'public.trace_account_bindings'::regclass,
-                                  'public.trace_webauthn_credentials'::regclass,
-                                  'public.trace_sessions'::regclass,
-                                  'public.trace_account_audit'::regclass)
-    ), checked AS (
-        SELECT fk.rel, fk.col,
-               has_column_privilege(fk.rel, fk.col, 'SELECT')
-               AND (NOT cl.relrowsecurity OR EXISTS (
-                    SELECT 1 FROM pg_policy p
-                     WHERE p.polrelid = fk.rel AND p.polpermissive
-                       AND p.polcmd IN ('r', '*') AND v_me = ANY (p.polroles))) AS visible
-          FROM fk JOIN pg_class cl ON cl.oid = fk.rel
-    )
-    SELECT string_agg(DISTINCT rel::regclass::text, ', ') FILTER (WHERE NOT visible),
-           'SELECT ' || coalesce(
-               string_agg(format('EXISTS (SELECT 1 FROM %s WHERE %I = $1)', rel::regclass, col),
-                          ' OR ') FILTER (WHERE visible),
-               'FALSE')
-      INTO v_missing, v_scope_sql
-      FROM checked;
-    IF v_missing IS NOT NULL THEN
-        RAISE EXCEPTION 'unbound_reaper_scope_incomplete: %', v_missing;
-    END IF;
 
     FOR c IN
         SELECT k.tenant_id, k.account_id, k.state
@@ -313,14 +266,7 @@ BEGIN
                 v_skipped := v_skipped + 1;
                 CONTINUE;
             END IF;
-            PERFORM 1 FROM public.trace_tenants t
-             WHERE t.tenant_id = c.tenant_id
-             FOR UPDATE SKIP LOCKED;
-            IF NOT FOUND THEN
-                v_skipped := v_skipped + 1;
-                CONTINUE;
-            END IF;
-            -- Re-check under the locks.
+            -- Re-check under both locks.
             IF EXISTS (
                 SELECT 1 FROM public.trace_sessions s
                  WHERE s.tenant_id = c.tenant_id AND s.account_id = c.account_id
@@ -328,22 +274,10 @@ BEGIN
                 v_skipped := v_skipped + 1;
                 CONTINUE;
             END IF;
-            -- The tenant refusal: another account, or any row in scope.
-            IF EXISTS (
-                SELECT 1 FROM public.trace_accounts a
-                 WHERE a.tenant_id = c.tenant_id AND a.account_id <> c.account_id) THEN
-                v_skipped := v_skipped + 1;
-                CONTINUE;
-            END IF;
-            EXECUTE v_scope_sql INTO v_held USING c.tenant_id;
-            IF v_held THEN
-                v_skipped := v_skipped + 1;
-                CONTINUE;
-            END IF;
-
+            -- The account alone. Its tenant row is never deleted. A
+            -- non-cascading account-keyed row raises 23503 below.
             DELETE FROM public.trace_accounts a
              WHERE a.tenant_id = c.tenant_id AND a.account_id = c.account_id;
-            DELETE FROM public.trace_tenants t WHERE t.tenant_id = c.tenant_id;
             IF c.state = 'unbound' THEN
                 v_reaped_unbound := v_reaped_unbound + 1;
             ELSE

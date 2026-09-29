@@ -61,7 +61,6 @@ async fn fixture() -> Option<Fixture> {
              THEN CREATE ROLE {LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; \
              GRANT trace_unbound_account_reaper TO {LOGIN}; \
              DROP TABLE IF EXISTS reaper_refusal_probe; \
-             DROP TABLE IF EXISTS reaper_scope_probe; \
              DELETE FROM trace_tenants; \
              DELETE FROM trace_audit_events;"
         ))
@@ -305,8 +304,10 @@ async fn rows(fx: &Fixture, tenant: &str) -> [i64; 7] {
 }
 
 const WHOLE: [i64; 7] = [1, 1, 1, 1, 0, 1, 1];
-/// Everything the tenant held is gone except the retained hash-chained audit.
-const GONE: [i64; 7] = [0, 0, 0, 0, 0, 0, 1];
+/// After a reap: the account and the passkey-origin rows that cascade from it
+/// (binding, credential, sessions) are gone. The tenant row is never deleted
+/// (decided 2026-09-29), and the tenant-keyed audit rows stay with it.
+const REAPED: [i64; 7] = [1, 0, 0, 0, 0, 1, 1];
 
 impl Fixture {
     async fn reap(&self, limit: i32) -> ReapSummary {
@@ -334,10 +335,10 @@ async fn an_unbound_account_past_the_ttl_is_deleted_with_all_its_rows() {
     );
 
     assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
-    // Tenant, account, binding, credential, sessions and account audit go.
-    // The hash-chained trace_audit_events row is retained, as it is for every
-    // other deletion in the repo.
-    assert_eq!(rows(&fx, &target.tenant).await, GONE);
+    // Account, binding, credential and sessions go. The tenant row stays,
+    // and with it the tenant-keyed trace_account_audit and hash-chained
+    // trace_audit_events rows.
+    assert_eq!(rows(&fx, &target.tenant).await, REAPED);
     assert_eq!(counts(fx.reap(100).await), (0, 0, 0), "idempotent");
 }
 
@@ -356,7 +357,7 @@ async fn an_unbound_account_that_signed_in_again_is_reaped_at_eight_days() {
 
     assert_eq!(counts(fx.reap(100).await), (2, 0, 0));
     for s in [&second_session, &same_session] {
-        assert_eq!(rows(&fx, &s.tenant).await, GONE);
+        assert_eq!(rows(&fx, &s.tenant).await, REAPED);
     }
 }
 
@@ -374,8 +375,8 @@ async fn an_unbound_account_with_a_live_session_survives() {
 
     assert_eq!(counts(fx.reap(100).await), (2, 0, 0));
     assert_eq!(rows(&fx, &live.tenant).await[..5], [1, 1, 1, 1, 2]);
-    assert_eq!(rows(&fx, &revoked.tenant).await, GONE);
-    assert_eq!(rows(&fx, &expired.tenant).await, GONE);
+    assert_eq!(rows(&fx, &revoked.tenant).await, REAPED);
+    assert_eq!(rows(&fx, &expired.tenant).await, REAPED);
 }
 
 #[tokio::test]
@@ -385,7 +386,7 @@ async fn an_unbound_account_is_reaped_at_eight_days_and_survives_at_six() {
     let six = seed_created(&fx, 6).await;
     let six_no_session = seed(&fx, Binding::Unbound, 6, None).await;
     assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
-    assert_eq!(rows(&fx, &eight.tenant).await, GONE);
+    assert_eq!(rows(&fx, &eight.tenant).await, REAPED);
     assert_eq!(rows(&fx, &six.tenant).await[..6], [1, 1, 1, 1, 1, 1]);
     assert_eq!(rows(&fx, &six_no_session.tenant).await, WHOLE);
 }
@@ -426,7 +427,7 @@ async fn a_closed_account_is_reaped_at_thirty_one_days_and_survives_at_twenty_ni
     );
 
     assert_eq!(counts(fx.reap(100).await), (0, 1, 0));
-    assert_eq!(rows(&fx, &thirty_one.tenant).await, GONE);
+    assert_eq!(rows(&fx, &thirty_one.tenant).await, [1, 0, 0, 0, 0, 2, 1]);
     assert_eq!(rows(&fx, &twenty_nine.tenant).await, [1, 1, 1, 1, 1, 2, 1]);
     assert_eq!(counts(fx.reap(100).await), (0, 0, 0), "idempotent");
 }
@@ -441,33 +442,16 @@ async fn a_recently_closed_account_is_not_reaped_on_the_unbound_window() {
     assert_eq!(rows(&fx, &s.tenant).await[..3], [1, 1, 1]);
 }
 
-/// The spec (S5): "the function refuses a tenant holding any other row". The
-/// candidate is refused whole -- nothing is deleted, not even the account --
-/// and counted as skipped.
+/// Decided 2026-09-29: the reaper deletes the account, never the tenant. What
+/// the tenant holds outside the account is left alone and does not refuse the
+/// candidate; what cascades from the account (a login link here) goes with it.
 #[tokio::test]
-async fn a_tenant_holding_any_other_row_is_refused() {
+async fn the_tenant_row_and_its_other_rows_survive_a_reap() {
     let Some(fx) = fixture().await else { return };
-    // Another account in the tenant.
-    let other_account = seed(&fx, Binding::Unbound, 90, None).await;
-    fx.admin
-        .execute(
-            "INSERT INTO trace_accounts(tenant_id, account_id) VALUES ($1, $2)",
-            &[&other_account.tenant, &Uuid::new_v4()],
-        )
-        .await
-        .unwrap();
-    // A tenant-keyed row the cascade from trace_tenants would destroy.
+    // A tenant-keyed row that is not the account's.
     let policy = seed(&fx, Binding::Unbound, 90, None).await;
-    fx.admin
-        .execute(
-            "INSERT INTO trace_tenant_policies(tenant_id, policy_version, allowed_consent_scopes,
-                allowed_uses, updated_by_principal_ref)
-             VALUES ($1, 'v1', '[]'::jsonb, '[]'::jsonb, 'label')",
-            &[&policy.tenant],
-        )
-        .await
-        .unwrap();
-    // An account-keyed row the cascade from trace_accounts would destroy.
+    insert_tenant_policy(&fx, &policy.tenant).await;
+    // An account-keyed row that cascades from the account.
     let login_link = seed(&fx, Binding::Unbound, 90, None).await;
     fx.admin
         .execute(
@@ -483,76 +467,144 @@ async fn a_tenant_holding_any_other_row_is_refused() {
         )
         .await
         .unwrap();
-    // The same, for a closed account.
+    // The same tenant-keyed row, for a closed account.
     let closed = seed_closed(&fx, 400, 31).await;
+    insert_tenant_policy(&fx, &closed.tenant).await;
+
+    assert_eq!(counts(fx.reap(100).await), (2, 1, 0));
+    assert_eq!(rows(&fx, &policy.tenant).await, REAPED);
+    assert_eq!(tenant_policies(&fx, &policy.tenant).await, 1, "kept");
+    assert_eq!(rows(&fx, &login_link.tenant).await, REAPED);
+    let links: i64 = fx
+        .admin
+        .query_one(
+            "SELECT count(*) FROM trace_login_links WHERE tenant_id = $1",
+            &[&login_link.tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(links, 0, "the login link cascades from the account");
+    assert_eq!(rows(&fx, &closed.tenant).await, [1, 0, 0, 0, 0, 2, 1]);
+    assert_eq!(tenant_policies(&fx, &closed.tenant).await, 1, "kept");
+    assert_eq!(counts(fx.reap(100).await), (0, 0, 0), "idempotent");
+}
+
+/// Decided 2026-09-29: a second account in the candidate's tenant does not
+/// refuse it. The delete is keyed to the candidate's (tenant_id, account_id)
+/// and cascades only from that row, so the other account, its binding,
+/// credential and session, and the tenant row all survive.
+#[tokio::test]
+async fn another_account_in_the_tenant_neither_refuses_nor_is_touched() {
+    let Some(fx) = fixture().await else { return };
+    let target = seed(&fx, Binding::Unbound, 90, None).await;
+    let other = Uuid::new_v4();
+    fx.admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id, account_id) VALUES ($1, $2)",
+            &[&target.tenant, &other],
+        )
+        .await
+        .unwrap();
+    fx.admin
+        .execute(
+            "INSERT INTO trace_account_bindings(tenant_id, account_id, origin, state, bound_at)
+             VALUES ($1, $2, 'passkey', 'bound', now())",
+            &[&target.tenant, &other],
+        )
+        .await
+        .unwrap();
+    fx.admin
+        .execute(
+            "INSERT INTO trace_webauthn_credentials(tenant_id, credential_id, account_id, passkey)
+             VALUES ($1, $2, $3, '{}'::jsonb)",
+            &[
+                &target.tenant,
+                &format!("cred-{}", Uuid::new_v4().simple()),
+                &other,
+            ],
+        )
+        .await
+        .unwrap();
+    insert_session(&fx.admin, &target.tenant, other, 0, 5, false).await;
+
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
+    // Only the other account's rows are left in the tenant.
+    assert_eq!(rows(&fx, &target.tenant).await, [1, 1, 1, 1, 1, 1, 1]);
+    let survivor: Uuid = fx
+        .admin
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id = $1",
+            &[&target.tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(survivor, other);
+}
+
+/// What a reap deletes is whatever cascades from trace_accounts. That set is
+/// pinned here so a migration that adds or removes an ON DELETE CASCADE into
+/// trace_accounts changes this list on purpose, in review, instead of silently
+/// changing what the reaper deletes. It is not an obligation on the migration
+/// (no grant, no policy), just one visible line.
+#[tokio::test]
+async fn the_account_cascade_set_is_pinned() {
+    let Some(fx) = fixture().await else { return };
+    let tables: Vec<String> = fx
+        .admin
+        .query(
+            "SELECT DISTINCT conrelid::regclass::text FROM pg_constraint
+              WHERE contype = 'f' AND confrelid = 'trace_accounts'::regclass
+                AND confdeltype = 'c'
+              ORDER BY 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let mut expected = vec![
+        // The passkey-origin rows a reap is meant to take.
+        "trace_account_bindings",
+        "trace_login_links",
+        "trace_sessions",
+        "trace_webauthn_credentials",
+        // Behind the unbound gate an unbound or closed account has no route
+        // that writes these, but if one holds any, the reap deletes them too.
+        "trace_account_inference_connections",
+        "trace_account_merge_proposals",
+        "trace_account_principals",
+        "trace_near_identities",
+        "trace_public_runs",
+        "trace_source_sessions",
+    ];
+    expected.sort_unstable();
+    assert_eq!(tables, expected);
+}
+
+async fn insert_tenant_policy(fx: &Fixture, tenant: &str) {
     fx.admin
         .execute(
             "INSERT INTO trace_tenant_policies(tenant_id, policy_version, allowed_consent_scopes,
                 allowed_uses, updated_by_principal_ref)
              VALUES ($1, 'v1', '[]'::jsonb, '[]'::jsonb, 'label')",
-            &[&closed.tenant],
+            &[&tenant],
         )
         .await
         .unwrap();
-    // A clean one behind them all is still reaped.
-    let clean = seed(&fx, Binding::Unbound, 10, None).await;
-
-    assert_eq!(counts(fx.reap(100).await), (1, 0, 4));
-    assert_eq!(rows(&fx, &clean.tenant).await, GONE);
-    for s in [&policy, &login_link] {
-        assert_eq!(rows(&fx, &s.tenant).await, WHOLE, "refused whole");
-    }
-    // Both accounts kept, and the candidate's own rows with them.
-    assert_eq!(
-        rows(&fx, &other_account.tenant).await,
-        [1, 2, 1, 1, 0, 1, 1]
-    );
-    assert_eq!(rows(&fx, &closed.tenant).await[..3], [1, 1, 1]);
 }
 
-/// A tenant-keyed table the guard cannot see into would read as empty and be
-/// cascaded away unseen. The function must refuse the whole call instead,
-/// naming the table, so a migration that adds one fails this suite in CI.
-#[tokio::test]
-async fn a_tenant_keyed_table_outside_the_reaper_scope_refuses_the_call() {
-    let Some(fx) = fixture().await else { return };
-    let target = seed(&fx, Binding::Unbound, 90, None).await;
+async fn tenant_policies(fx: &Fixture, tenant: &str) -> i64 {
     fx.admin
-        .batch_execute(
-            "CREATE TABLE reaper_scope_probe (
-                 tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE
-             );
-             ALTER TABLE reaper_scope_probe ENABLE ROW LEVEL SECURITY;
-             ALTER TABLE reaper_scope_probe FORCE ROW LEVEL SECURITY;",
+        .query_one(
+            "SELECT count(*) FROM trace_tenant_policies WHERE tenant_id = $1",
+            &[&tenant],
         )
         .await
-        .unwrap();
-    let no_grant = fx.reaper.reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, 100).await;
-    // Granted but with no guard-visible policy: still refused.
-    fx.admin
-        .batch_execute(
-            "GRANT SELECT (tenant_id) ON reaper_scope_probe TO trace_unbound_account_reaper_guard",
-        )
-        .await
-        .unwrap();
-    let no_policy = fx.reaper.reap(UNBOUND_TTL_DAYS, CLOSED_TTL_DAYS, 100).await;
-    let kept = rows(&fx, &target.tenant).await;
-    fx.admin
-        .batch_execute("DROP TABLE reaper_scope_probe")
-        .await
-        .unwrap();
-
-    for result in [no_grant, no_policy] {
-        let message = format!("{:?}", result.expect_err("refused"));
-        assert!(
-            message.contains("unbound_reaper_scope_incomplete")
-                && message.contains("reaper_scope_probe"),
-            "{message}"
-        );
-    }
-    assert_eq!(kept, WHOLE);
-    // With the probe gone the scope is complete again.
-    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
+        .unwrap()
+        .get(0)
 }
 
 #[tokio::test]
@@ -611,11 +663,11 @@ async fn an_account_that_signs_in_during_the_sweep_survives() {
     assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 2]);
 }
 
-/// A tenant-keyed insert that begins between the reaper's scope check and its
-/// delete waits on the tenant row lock the reaper holds, so it cannot slip a
-/// row in to be cascaded away. Holding that lock is what can deadlock: here a
-/// peer locks the candidate's session row first, the reaper's cascade waits
-/// on it, and the peer then waits on the reaper's account lock. The reaper
+/// An account-keyed insert that begins between the reaper's session re-check
+/// and its delete waits on the account row lock the reaper holds, so it cannot
+/// slip a row in to be cascaded away. Holding that lock is what can deadlock:
+/// here a peer locks the candidate's session row first, the reaper's cascade
+/// waits on it, and the peer then waits on the reaper's account lock. The reaper
 /// must count that candidate skipped (40P01), not fail the batch.
 #[tokio::test]
 async fn a_deadlock_is_skipped() {
@@ -698,7 +750,7 @@ async fn a_deadlock_is_skipped() {
 
     let summary = summary.expect("a deadlock is a skip, not a failed batch");
     assert_eq!(counts(summary), (1, 0, 1));
-    assert_eq!(rows(&fx, &clean.tenant).await, GONE);
+    assert_eq!(rows(&fx, &clean.tenant).await, REAPED);
     assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 1]);
 }
 
@@ -728,10 +780,10 @@ async fn batches_are_bounded() {
 #[tokio::test]
 async fn permanently_refused_candidates_do_not_stall_the_batch() {
     let Some(fx) = fixture().await else { return };
-    // Stand-in for an account-keyed table holding something of value. It is
-    // in the reaper's scope (granted and visible), so the tenant check
-    // refuses its holders. Dropped before the assertions so a failure cannot
-    // poison the shared fixture.
+    // Stand-in for an account-keyed table holding something of value, with a
+    // foreign key that does not cascade: deleting a holder's account raises
+    // 23503, which refuses that candidate. Dropped before the assertions so a
+    // failure cannot poison the shared fixture.
     fx.admin
         .batch_execute(
             "CREATE TABLE reaper_refusal_probe (
@@ -739,8 +791,7 @@ async fn permanently_refused_candidates_do_not_stall_the_batch() {
                  account_id UUID NOT NULL,
                  FOREIGN KEY (tenant_id, account_id)
                      REFERENCES trace_accounts (tenant_id, account_id)
-             );
-             GRANT SELECT (tenant_id) ON reaper_refusal_probe TO trace_unbound_account_reaper_guard;",
+             );",
         )
         .await
         .unwrap();
@@ -780,7 +831,7 @@ async fn permanently_refused_candidates_do_not_stall_the_batch() {
 
     let first = first.unwrap();
     let second = second.unwrap();
-    assert_eq!(deletable_rows, GONE, "the deletable candidate was reaped");
+    assert_eq!(deletable_rows, REAPED, "the deletable candidate was reaped");
     assert_eq!(counts(first), (1, 0, refused.len() as u64));
     assert_eq!(second.reaped(), 0);
     assert_eq!(
@@ -879,7 +930,7 @@ async fn it_works_as_the_non_superuser_role_and_not_by_bypassing_row_security() 
     assert_eq!(rows(&fx, &target.tenant).await[1], 1);
 
     assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
-    assert_eq!(rows(&fx, &target.tenant).await, GONE);
+    assert_eq!(rows(&fx, &target.tenant).await, REAPED);
 }
 
 /// Boot does one `pool.get()` on the reaper pool, so a login that cannot
@@ -911,8 +962,99 @@ async fn reapplying_the_migration_changes_nothing() {
         .await
         .unwrap();
     assert_eq!(counts(fx.reap(100).await), (1, 1, 0));
-    assert_eq!(rows(&fx, &target.tenant).await, GONE);
-    assert_eq!(rows(&fx, &closed.tenant).await, GONE);
+    assert_eq!(rows(&fx, &target.tenant).await, REAPED);
+    assert_eq!(rows(&fx, &closed.tenant).await, [1, 0, 0, 0, 0, 2, 1]);
+}
+
+/// A database that ran the earlier draft of V99 (CI and scratch only) held a
+/// guard grant and a `trace_unbound_reaper_scope` policy on every tenant-keyed
+/// table, and grants and policies on trace_tenants. Re-applying V99 must
+/// remove all of it, leaving the guard with privileges and policies on exactly
+/// the three tables it reads.
+#[tokio::test]
+async fn reapplying_the_migration_removes_the_earlier_drafts_scope_grants() {
+    let Some(fx) = fixture().await else { return };
+    // Recreate what the earlier draft left, on a sample of tables.
+    fx.admin
+        .batch_execute(
+            "GRANT SELECT (tenant_id), DELETE ON trace_tenants TO trace_unbound_account_reaper_guard;
+             GRANT UPDATE (created_at) ON trace_tenants TO trace_unbound_account_reaper_guard;
+             DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_tenants;
+             CREATE POLICY trace_unbound_reaper_read ON trace_tenants
+                 FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
+             DROP POLICY IF EXISTS trace_unbound_reaper_lock ON trace_tenants;
+             CREATE POLICY trace_unbound_reaper_lock ON trace_tenants
+                 FOR UPDATE TO trace_unbound_account_reaper_guard USING (TRUE) WITH CHECK (TRUE);
+             DROP POLICY IF EXISTS trace_unbound_reaper_delete ON trace_tenants;
+             CREATE POLICY trace_unbound_reaper_delete ON trace_tenants
+                 FOR DELETE TO trace_unbound_account_reaper_guard USING (TRUE);
+             GRANT SELECT (tenant_id) ON trace_tenant_policies TO trace_unbound_account_reaper_guard;
+             DROP POLICY IF EXISTS trace_unbound_reaper_scope ON trace_tenant_policies;
+             CREATE POLICY trace_unbound_reaper_scope ON trace_tenant_policies
+                 FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
+             GRANT SELECT (tenant_id) ON trace_login_links TO trace_unbound_account_reaper_guard;
+             DROP POLICY IF EXISTS trace_unbound_reaper_scope ON trace_login_links;
+             CREATE POLICY trace_unbound_reaper_scope ON trace_login_links
+                 FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        guard_tables(&fx).await.0.len(),
+        6,
+        "the earlier draft's policies are in place"
+    );
+    fx.admin
+        .batch_execute(include_str!(
+            "../../../migrations/V99__unbound_account_reaper.sql"
+        ))
+        .await
+        .unwrap();
+
+    let three = ["trace_account_bindings", "trace_accounts", "trace_sessions"];
+    let (policy_tables, granted) = guard_tables(&fx).await;
+    assert_eq!(policy_tables, three, "policies left on other tables");
+    assert_eq!(granted, three, "grants left on other tables");
+
+    let target = seed(&fx, Binding::Unbound, 90, None).await;
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
+    assert_eq!(rows(&fx, &target.tenant).await, REAPED);
+}
+
+/// (tables with a policy naming the guard, tables the guard holds any grant
+/// on), each sorted and distinct.
+async fn guard_tables(fx: &Fixture) -> (Vec<String>, Vec<String>) {
+    let policy_tables = fx
+        .admin
+        .query(
+            "SELECT DISTINCT p.polrelid::regclass::text FROM pg_policy p
+               JOIN pg_roles r ON r.oid = ANY (p.polroles)
+              WHERE r.rolname = 'trace_unbound_account_reaper_guard'
+              ORDER BY 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect::<Vec<String>>();
+    let granted = fx
+        .admin
+        .query(
+            "SELECT table_name::text FROM information_schema.column_privileges
+              WHERE grantee = 'trace_unbound_account_reaper_guard'
+             UNION
+             SELECT table_name::text FROM information_schema.table_privileges
+              WHERE grantee = 'trace_unbound_account_reaper_guard'
+             ORDER BY 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect::<Vec<String>>();
+    (policy_tables, granted)
 }
 
 impl Fixture {
