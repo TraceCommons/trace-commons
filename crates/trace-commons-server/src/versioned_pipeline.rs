@@ -8236,8 +8236,8 @@ impl PipelineService {
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
-        lock.release().await?;
-        processed += result?;
+        let released = lock.release().await;
+        processed += payout_result_after_release(result, released)?;
         Ok(processed)
     }
 
@@ -8267,8 +8267,8 @@ impl PipelineService {
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
-        lock.release().await?;
-        result
+        let released = lock.release().await;
+        payout_result_after_release(result, released)
     }
 
     /// The tenant's NEAR submit lock (`main`'s key), or `None` when another
@@ -8618,6 +8618,33 @@ impl PipelineService {
             }
         }
         Ok(())
+    }
+}
+
+/// The payout's result once the tenant's NEAR submit lock is released
+/// (Ruling F-M5): the locked work's own error comes first, so a failed
+/// release cannot hide it (an injected crash included), and that release
+/// error is logged hash-only. After locked work that succeeded, a failed
+/// release is the error.
+fn payout_result_after_release<T>(
+    result: anyhow::Result<T>,
+    released: Result<(), DatabaseError>,
+) -> anyhow::Result<T> {
+    match result {
+        Ok(value) => {
+            released?;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Err(release_error) = released {
+                tracing::warn!(
+                    label = "pipeline_payout_lock_release_failed",
+                    error_hash = %sha256_prefixed(release_error.to_string().as_bytes()),
+                    "the tenant's NEAR submit lock was not released after a failed payout pass"
+                );
+            }
+            Err(error)
+        }
     }
 }
 
@@ -8994,6 +9021,31 @@ fn approved_object_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ruling F-M5: the payout's own result comes first. A lock release that
+    /// fails after a failed pass does not hide the pass's error (an injected
+    /// crash included); after a pass that succeeded, the release error is
+    /// the result.
+    #[test]
+    fn the_payout_error_comes_before_the_lock_release_error() {
+        let release_error = || Err(DatabaseError::Pool("release failed".to_string()));
+        let error = payout_result_after_release::<usize>(
+            Err(anyhow::anyhow!(INJECTED_PIPELINE_CRASH)),
+            release_error(),
+        )
+        .expect_err("the failed pass is an error");
+        assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+        let error = payout_result_after_release(Ok(2_usize), release_error())
+            .expect_err("a failed release after a good pass is an error");
+        assert!(error.to_string().contains("release failed"), "{error}");
+        assert_eq!(payout_result_after_release(Ok(2_usize), Ok(())).unwrap(), 2);
+        let error = payout_result_after_release::<usize>(
+            Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
+            Ok(()),
+        )
+        .expect_err("the failed pass is an error");
+        assert_eq!(error.to_string(), PIPELINE_PAYOUT_LOCK_HELD_LABEL);
+    }
 
     /// M3: a stored package that fails its own validation is permanent
     /// (`bundle_package_invalid`, the run fails); any other database error

@@ -148,7 +148,7 @@ impl NearCreditSubmitAdvisoryLock {
     /// own database work on it rather than take a second pooled connection
     /// while it holds this one (the versioned pipeline's NEAR payout, which
     /// shares this lock with the submit worker). `None` only after release.
-    pub fn client_mut(&mut self) -> Option<&mut deadpool_postgres::Client> {
+    pub(crate) fn client_mut(&mut self) -> Option<&mut deadpool_postgres::Client> {
         self.inner.as_mut().map(|inner| inner.client_mut())
     }
 }
