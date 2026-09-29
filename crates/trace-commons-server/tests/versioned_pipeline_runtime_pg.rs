@@ -15540,6 +15540,7 @@ async fn create_snapshot(
             &export_hash(key_seed),
             allowed_use,
             &PipelineExportConsentScopes::default(),
+            None,
             &export_hash("purpose"),
             PIPELINE_EXPORT_ITEM_MAX,
         )
@@ -15901,6 +15902,7 @@ async fn export_request_key_is_idempotent() {
             &export_hash("idempotent"),
             TraceAllowedUse::Evaluation,
             &PipelineExportConsentScopes::default(),
+            None,
             &export_hash("another purpose"),
             PIPELINE_EXPORT_ITEM_MAX,
         )
@@ -16021,6 +16023,7 @@ async fn exports_honor_consent_scope_allowlists() {
         let consent_scopes = PipelineExportConsentScopes {
             token: token.iter().copied().collect(),
             policy: policy.iter().copied().collect(),
+            requested: None,
         };
         async move {
             let snapshot = product
@@ -16030,6 +16033,7 @@ async fn exports_honor_consent_scope_allowlists() {
                     &export_hash(key_seed),
                     TraceAllowedUse::Evaluation,
                     &consent_scopes,
+                    None,
                     &export_hash("purpose"),
                     PIPELINE_EXPORT_ITEM_MAX,
                 )
@@ -16077,6 +16081,34 @@ async fn exports_honor_consent_scope_allowlists() {
             .await
             .is_empty(),
         "no submission consents to benchmarks"
+    );
+
+    // A scope the request names narrows the allowlists: the submission must
+    // hold it.
+    let requested = product
+        .create_export_snapshot(
+            &tenant,
+            EXPORTER,
+            &export_hash("requested"),
+            TraceAllowedUse::Evaluation,
+            &PipelineExportConsentScopes {
+                token: BTreeSet::from([
+                    ConsentScope::DebuggingEvaluation,
+                    ConsentScope::ModelTraining,
+                ]),
+                policy: BTreeSet::new(),
+                requested: Some(ConsentScope::ModelTraining),
+            },
+            None,
+            &export_hash("purpose"),
+            PIPELINE_EXPORT_ITEM_MAX,
+        )
+        .await
+        .expect("create the export snapshot");
+    assert_eq!(
+        item_runs(&requested),
+        sorted(vec![training_run.run_id, both_run.run_id]),
+        "the requested scope leaves out the debugging-only submission"
     );
 }
 
@@ -16138,6 +16170,7 @@ async fn export_selection_rechecks_a_submission_revoked_while_it_waits() {
                     &export_hash("race"),
                     TraceAllowedUse::Evaluation,
                     &PipelineExportConsentScopes::default(),
+                    None,
                     &export_hash("purpose"),
                     PIPELINE_EXPORT_ITEM_MAX,
                 )
@@ -16272,6 +16305,7 @@ async fn export_item_count_is_bounded() {
                     &export_hash(key_seed),
                     TraceAllowedUse::Evaluation,
                     &PipelineExportConsentScopes::default(),
+                    None,
                     &export_hash("purpose"),
                     max_items,
                 )

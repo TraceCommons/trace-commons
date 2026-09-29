@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
-use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
+use trace_commons_protocol::trace_contribution::{ConsentScope, ResidualPiiRisk, TraceAllowedUse};
 use uuid::Uuid;
 
 use crate::db::postgres::PgBackend;
@@ -49,6 +49,17 @@ pub const PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID: &str = "trace_commons.authorized_t
 /// ranker-training families, so a replay worker never takes a pipeline
 /// export for a replay dataset. The manifest's kind stays `export_artifact`.
 pub const PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX: &str = "pipeline_export";
+
+/// The purpose code of the export manifest a snapshot for `allowed_use` is
+/// delivered as: `pipeline_export:<allowed use>`.
+pub fn pipeline_export_manifest_purpose_code(
+    allowed_use: TraceAllowedUse,
+) -> Result<String, DatabaseError> {
+    Ok(format!(
+        "{PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX}:{}",
+        storage_label(allowed_use)?
+    ))
+}
 
 /// Whether a manifest's purpose code is in the
 /// `PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX` family.
@@ -226,10 +237,15 @@ pub struct PipelineExportSnapshotItem {
 /// scope. The two are checked one by one, not intersected: a submission
 /// that consents to scopes A and B meets a token allowlist of A and a
 /// policy allowlist of B.
+///
+/// `requested` is the consent scope the export request names, as `main`'s
+/// replay export filter `consent_scope`: when set, a submission must also
+/// hold that scope. It only narrows the two allowlists.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineExportConsentScopes {
     pub token: BTreeSet<ConsentScope>,
     pub policy: BTreeSet<ConsentScope>,
+    pub requested: Option<ConsentScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -398,7 +414,9 @@ const EXPORTABLE_SUBMISSION_PREDICATE: &str = "
 /// oldest run first, at most `$4`. `$3`, when not NULL, keeps only those
 /// run ids. `$5` and `$6` are the token's and the policy's consent-scope
 /// allowlists (`PipelineExportConsentScopes`), NULL when empty: a
-/// submission must hold at least one scope of each that is not NULL.
+/// submission must hold at least one scope of each that is not NULL. `$7`,
+/// when not NULL, is a scope the submission must hold, and `$8`, when not
+/// NULL, the privacy risk it must have.
 fn export_selection_sql() -> String {
     format!(
         "SELECT r.run_id, r.submission_id, r.trace_id, r.approved_revision_id,
@@ -427,6 +445,8 @@ fn export_selection_sql() -> String {
             AND ($3::uuid[] IS NULL OR r.run_id = ANY($3))
             AND ($5::text[] IS NULL OR s.consent_scopes ?| $5)
             AND ($6::text[] IS NULL OR s.consent_scopes ?| $6)
+            AND ($7::text IS NULL OR s.consent_scopes ? $7)
+            AND ($8::text IS NULL OR s.privacy_risk = $8)
             AND {EXPORTABLE_SUBMISSION_PREDICATE}
           ORDER BY r.created_at ASC, r.run_id ASC
           LIMIT $4"
@@ -747,9 +767,10 @@ impl PipelineProductStore {
     /// snapshot back unchanged, or a conflict when the request differs.
     ///
     /// An item is a complete run with a committed Review approved revision
-    /// whose submission is exportable (`EXPORTABLE_SUBMISSION_PREDICATE`)
-    /// and meets `consent_scopes`. The item names the approved object and
-    /// its `approved_content_hash`, never the raw request.
+    /// whose submission is exportable (`EXPORTABLE_SUBMISSION_PREDICATE`),
+    /// meets `consent_scopes`, and, when `privacy_risk` is set, has that
+    /// privacy risk. The item names the approved object and its
+    /// `approved_content_hash`, never the raw request.
     ///
     /// The selection runs twice. The first run picks the candidates without
     /// a lock. Their run rows are then locked `FOR KEY SHARE` in `run_id`
@@ -771,6 +792,7 @@ impl PipelineProductStore {
         request_idempotency_key: &str,
         allowed_use: TraceAllowedUse,
         consent_scopes: &PipelineExportConsentScopes,
+        privacy_risk: Option<ResidualPiiRisk>,
         purpose_hash: &str,
         max_items: usize,
     ) -> Result<PipelineExportSnapshot, DatabaseError> {
@@ -787,6 +809,8 @@ impl PipelineProductStore {
         let allowed_use_label = storage_label(allowed_use)?;
         let token_scopes = consent_allowlist_labels(&consent_scopes.token)?;
         let policy_scopes = consent_allowlist_labels(&consent_scopes.policy)?;
+        let requested_scope = consent_scopes.requested.map(storage_label).transpose()?;
+        let privacy_risk = privacy_risk.map(storage_label).transpose()?;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         tx.execute(
@@ -821,6 +845,8 @@ impl PipelineProductStore {
                     &limit,
                     &token_scopes,
                     &policy_scopes,
+                    &requested_scope,
+                    &privacy_risk,
                 ],
             )
             .await?;
@@ -855,6 +881,8 @@ impl PipelineProductStore {
                     &limit,
                     &token_scopes,
                     &policy_scopes,
+                    &requested_scope,
+                    &privacy_risk,
                 ],
             )
             .await?;
@@ -1000,7 +1028,7 @@ impl PipelineProductStore {
         // purpose code marks it as a pipeline export, which `main`'s
         // replay-dataset list and count leave out.
         let artifact_kind = storage_label(TraceObjectArtifactKind::ExportArtifact)?;
-        let purpose_code = format!("{PIPELINE_EXPORT_MANIFEST_PURPOSE_PREFIX}:{allowed_use_label}");
+        let purpose_code = pipeline_export_manifest_purpose_code(snapshot.allowed_use)?;
         tx.execute(
             "INSERT INTO trace_export_manifests (
                 tenant_id, export_manifest_id, artifact_kind, purpose_code,

@@ -101394,6 +101394,14 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     assert_eq!(projected.status, "complete");
     assert_eq!(projected.credit_points_pending, 2.5);
     assert_eq!(projected.credit_points_final, Some(2.5));
+    assert_eq!(
+        projected.credit_points_ledger, 0.0,
+        "legacy's ledger points are delayed ledger deltas; the award is none"
+    );
+    assert_eq!(
+        projected.credit_points_total, None,
+        "legacy has a total only with delayed ledger events"
+    );
     let pipeline = projected
         .pipeline
         .expect("the document carries a pipeline block");
@@ -101445,6 +101453,11 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     assert_eq!(
         projected.credit_points_final, None,
         "points are final only once the leg is finalized"
+    );
+    assert_eq!(projected.credit_points_ledger, 0.0);
+    assert_eq!(
+        projected.credit_points_total, None,
+        "a pending award is never reported as a total"
     );
 }
 
@@ -101684,11 +101697,13 @@ async fn pipeline_product_routes_refuse_a_caller_without_their_credential() {
 
 /// An export request is checked before the store is read: the store here
 /// cannot reach its database, so a request that reached it would be a 500.
-/// Refused: no idempotency key; an item limit outside
-/// `1..=PIPELINE_EXPORT_ITEM_MAX`; an unknown body field; a scoped export
-/// credential that does not allow the requested use; a tenant policy that
-/// does not allow it; and, when a tenant policy is required, a tenant with
-/// none. The last three are `main`'s export rules, with its messages.
+/// Refused: no idempotency key; an unknown body field; a consent scope
+/// `main` does not export; with `main`'s export guardrails on, an empty
+/// purpose and a missing consent scope; a scoped export credential that does
+/// not allow the requested use, or the requested consent scope; a tenant
+/// policy that does not allow the use; and, when a tenant policy is
+/// required, a tenant with none. All but the first two are `main`'s export
+/// rules, with its messages.
 #[tokio::test]
 async fn pipeline_product_export_request_is_refused_before_the_store() {
     let temp = tempfile::tempdir().unwrap();
@@ -101735,14 +101750,50 @@ async fn pipeline_product_export_request_is_refused_before_the_store() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "idempotency_key_required");
-    for limit in [0, PIPELINE_EXPORT_ITEM_MAX + 1] {
-        let mut request = pipeline_export_body();
-        request["limit"] = serde_json::json!(limit);
-        let (status, body) =
-            create(state.clone(), "export-worker-token-a", Some("key"), request).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "limit {limit}");
-        assert_eq!(body["error"], "export_item_limit_invalid", "limit {limit}");
-    }
+    let mut unsupported_scope = pipeline_export_body();
+    unsupported_scope["consent_scope"] = serde_json::json!("public_attribution");
+    let (status, body) = create(
+        state.clone(),
+        "export-worker-token-a",
+        Some("key"),
+        unsupported_scope,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"],
+        "unsupported consent_scope filter: public_attribution"
+    );
+
+    let mut guarded = state.clone();
+    Arc::make_mut(&mut guarded).require_export_guardrails = true;
+    let mut empty_purpose = pipeline_export_body();
+    empty_purpose["purpose"] = serde_json::json!("  ");
+    empty_purpose["consent_scope"] = serde_json::json!("debugging_evaluation");
+    let (status, body) = create(
+        guarded.clone(),
+        "export-worker-token-a",
+        Some("key"),
+        empty_purpose,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"],
+        "pipeline export requires an explicit purpose"
+    );
+    let (status, body) = create(
+        guarded,
+        "export-worker-token-a",
+        Some("key"),
+        pipeline_export_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error"],
+        "pipeline export requires an explicit consent_scope"
+    );
     let mut unknown_field = pipeline_export_body();
     unknown_field["requester_principal_ref"] = serde_json::json!("principal_sha256:other");
     let (status, _) = create(
@@ -101768,6 +101819,28 @@ async fn pipeline_product_export_request_is_refused_before_the_store() {
     assert_eq!(
         body["error"],
         "scoped tenant token does not allow this trace use"
+    );
+    let mut scoped_state = state.clone();
+    let mut scoped_tokens = (*scoped_state.tokens).clone();
+    let scoped = scoped_tokens
+        .get_mut("scoped-export-worker-token-a")
+        .unwrap();
+    scoped.allowed_uses = BTreeSet::new();
+    scoped.allowed_consent_scopes = BTreeSet::from([ConsentScope::DebuggingEvaluation]);
+    Arc::make_mut(&mut scoped_state).tokens = Arc::new(scoped_tokens);
+    let mut other_scope = pipeline_export_body();
+    other_scope["consent_scope"] = serde_json::json!("model_training");
+    let (status, body) = create(
+        scoped_state,
+        "scoped-export-worker-token-a",
+        Some("key"),
+        other_scope,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"],
+        "scoped tenant token does not allow this trace consent scope"
     );
 
     let mut restricted = state.clone();
@@ -101805,4 +101878,46 @@ async fn pipeline_product_export_request_is_refused_before_the_store() {
         body["error"],
         "trace export tenant does not have a contribution policy"
     );
+}
+
+/// Ruling T14-10: `pipeline_export:` purpose codes are reserved for pipeline
+/// export manifests, which `main`'s replay-dataset list and count leave out.
+/// So `main`'s replay export refuses a purpose in that family, with a label,
+/// before it records anything: it cannot hide itself from the list. An
+/// ordinary purpose still exports.
+#[tokio::test]
+async fn replay_export_refuses_the_reserved_pipeline_export_purpose() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = test_state(temp.path().to_path_buf());
+    let (status, body) = pipeline_product_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/replay-export",
+        Some("export-worker-token-a"),
+        None,
+        Some(serde_json::json!({"purpose": " pipeline_export:evaluation "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "export_purpose_reserved");
+    assert!(
+        read_all_export_manifests(temp.path(), "tenant-a")
+            .unwrap()
+            .is_empty(),
+        "the refused export recorded no manifest"
+    );
+
+    let (status, body) = pipeline_product_request(
+        state,
+        "POST",
+        "/v1/workers/replay-export",
+        Some("export-worker-token-a"),
+        None,
+        Some(serde_json::json!({"purpose": "trace_commons_worker_replay_dataset"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let manifests = read_all_export_manifests(temp.path(), "tenant-a").unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].purpose, "trace_commons_worker_replay_dataset");
 }

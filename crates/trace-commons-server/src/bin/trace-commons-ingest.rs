@@ -266,6 +266,7 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineContributorStatus, PipelineCreditStatus, PipelineExportConsentScopes,
     PipelineExportSnapshot, PipelineForensicTrace, PipelineOperationalSummary,
     PipelineProductStore, is_pipeline_export_manifest_purpose_code,
+    pipeline_export_manifest_purpose_code,
 };
 use uuid::Uuid;
 
@@ -15917,7 +15918,9 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
 /// The status document of a submission only the pipeline knows. Trace Credit
 /// becomes points as the legacy status computes them, microcredits over one
 /// million: pending from the award, and final only once the leg is
-/// finalized.
+/// finalized. The ledger and total points keep their legacy meaning, the
+/// delayed ledger deltas and final plus those deltas: a pipeline run has no
+/// delayed ledger event, so they are 0 and absent.
 fn submission_status_from_pipeline(
     status: &PipelineContributorStatus,
 ) -> TraceSubmissionStatusUpdate {
@@ -15934,8 +15937,8 @@ fn submission_status_from_pipeline(
         credit_points_pending: trace_credit_points,
         credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
             .then_some(trace_credit_points),
-        credit_points_ledger: trace_credit_points,
-        credit_points_total: Some(trace_credit_points),
+        credit_points_ledger: 0.0,
+        credit_points_total: None,
         explanation: Vec::new(),
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
@@ -16264,37 +16267,46 @@ async fn pipeline_score_attestation_handler(
 }
 
 /// Body of `POST /v1/pipeline/exports`. The tenant, the requester, and the
-/// consent scopes come from the credential and the tenant policy, never from
-/// the body: any other field is refused.
+/// consent-scope allowlists come from the credential and the tenant policy,
+/// never from the body: any other field is refused. `consent_scope` and
+/// `limit` are `main`'s replay export request fields, read as `main` reads
+/// them (`parse_consent_scope_filter`, `resolve_export_limit`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PipelineExportRequest {
     allowed_use: TraceAllowedUse,
     purpose: String,
-    #[serde(default = "default_pipeline_export_limit")]
+    #[serde(default)]
+    consent_scope: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// The hash an export snapshot stores as its purpose: of the purpose, the
+/// item limit, and the requested consent scope, so that the request key's
+/// idempotency check, which compares the requester, the use, and this hash,
+/// also refuses the same key with another limit or scope. The limit is
+/// digits and a scope label has no `:`, so the first two `:` end them.
+fn pipeline_export_purpose_hash(
+    purpose: &str,
     limit: usize,
-}
-
-const fn default_pipeline_export_limit() -> usize {
-    PIPELINE_EXPORT_ITEM_MAX
-}
-
-/// The hash an export snapshot stores as its purpose: of the purpose and the
-/// item limit, so that the request key's idempotency check, which compares
-/// the requester, the use, and this hash, also refuses the same key with
-/// another limit. The limit is digits only, so the first `:` ends it.
-fn pipeline_export_purpose_hash(purpose: &str, limit: usize) -> String {
-    sha256_prefixed(&format!("{limit}:{purpose}"))
+    consent_scope: Option<ConsentScope>,
+) -> String {
+    let consent_scope = consent_scope.map(snake_case_label).unwrap_or_default();
+    sha256_prefixed(&format!("{limit}:{consent_scope}:{purpose}"))
 }
 
 /// Records a pipeline export snapshot's `stage` (`created` or `delivered`)
 /// as `main`'s replay export records a delivered dataset: one `Export`
-/// audit event with `Export` metadata (export artifact, the use as the
-/// purpose code, the item count), appended through `main`'s mirrored helper.
+/// audit event with `Export` metadata (export artifact, `purpose_code`, the
+/// item count), appended through `main`'s mirrored helper. A delivery's
+/// purpose code is its manifest's, as `main` writes one purpose to both; a
+/// creation, which has no manifest, carries the use label.
 async fn append_pipeline_export_audit(
     state: &AppState,
     tenant: &TenantAuth,
     stage: &str,
+    purpose_code: String,
     snapshot: &PipelineExportSnapshot,
 ) -> anyhow::Result<()> {
     append_audit_event_with_db_mirror(
@@ -16304,7 +16316,7 @@ async fn append_pipeline_export_audit(
         StorageTraceAuditAction::Export,
         StorageTraceAuditSafeMetadata::Export {
             artifact_kind: StorageTraceObjectArtifactKind::ExportArtifact,
-            purpose_code: Some(snake_case_label(snapshot.allowed_use)),
+            purpose_code: Some(purpose_code),
             item_count: snapshot.items.len().min(u32::MAX as usize) as u32,
         },
     )
@@ -16312,12 +16324,19 @@ async fn append_pipeline_export_audit(
 }
 
 /// `POST /v1/pipeline/exports`: snapshots the tenant's approved pipeline
-/// revisions for `allowed_use`, at most `limit` of them (1 to
-/// `PIPELINE_EXPORT_ITEM_MAX`, by default the most). It authenticates as
+/// revisions for `allowed_use`, at most `limit` of them, resolved as
+/// `main`'s replay export resolves it (`resolve_export_limit`: by default
+/// 100, clamped to `max_export_items_per_request`) and at most
+/// `PIPELINE_EXPORT_ITEM_MAX`. It authenticates as
 /// `/v1/workers/replay-export` does -- an admin or export-worker credential
-/// -- and applies `main`'s export rules for the caller: the scoped credential
-/// and the tenant policy must allow the use, and a submission must meet
-/// their consent-scope allowlists. The `idempotency-key` header names the
+/// -- and applies `main`'s export rules for the caller: the export
+/// guardrails (`enforce_dataset_export_guardrails`: with
+/// `require_export_guardrails` on, an explicit purpose and consent scope);
+/// the scoped credential and the tenant policy must allow the use and the
+/// requested consent scope; and a submission must meet their consent-scope
+/// allowlists and hold the requested scope. The selection holds accepted
+/// submissions only, and under the guardrails low-risk ones only, as a
+/// guardrailed replay export does. The `idempotency-key` header names the
 /// request: the same key with the same use, purpose, and limit returns the
 /// first snapshot, and with any of them different is refused. Each snapshot
 /// returned is recorded as one `created` export audit event.
@@ -16335,25 +16354,36 @@ async fn create_pipeline_export_handler(
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "idempotency_key_required"))?;
-    if !(1..=PIPELINE_EXPORT_ITEM_MAX).contains(&body.limit) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "export_item_limit_invalid",
-        ));
-    }
+    let consent_scope = parse_consent_scope_filter(body.consent_scope.as_deref())?;
+    // The status and privacy risk `main`'s guardrails require hold for every
+    // pipeline export they reach: the selection takes accepted submissions
+    // only, and under the guardrails low-risk ones only.
+    let privacy_risk = state
+        .require_export_guardrails
+        .then_some(ResidualPiiRisk::Low);
+    enforce_dataset_export_guardrails(
+        state.as_ref(),
+        "pipeline",
+        Some(&body.purpose),
+        Some(TraceCorpusStatus::Accepted),
+        privacy_risk,
+        consent_scope,
+    )?;
     let policy = tenant_export_policy_for_request(
         state.as_ref(),
         &tenant,
         "pipeline export",
-        None,
+        consent_scope,
         body.allowed_use,
     )
     .await?;
+    let limit = resolve_export_limit(state.as_ref(), body.limit).min(PIPELINE_EXPORT_ITEM_MAX);
     let consent_scopes = PipelineExportConsentScopes {
         token: tenant.allowed_consent_scopes.clone(),
         policy: policy
             .map(|policy| policy.allowed_consent_scopes)
             .unwrap_or_default(),
+        requested: consent_scope,
     };
     let snapshot = product
         .create_export_snapshot(
@@ -16362,8 +16392,9 @@ async fn create_pipeline_export_handler(
             &sha256_prefixed(idempotency_key),
             body.allowed_use,
             &consent_scopes,
-            &pipeline_export_purpose_hash(&body.purpose, body.limit),
-            body.limit,
+            privacy_risk,
+            &pipeline_export_purpose_hash(&body.purpose, limit, consent_scope),
+            limit,
         )
         .await
         .map_err(|error| match error {
@@ -16372,9 +16403,15 @@ async fn create_pipeline_export_handler(
             }
             other => internal_error(other),
         })?;
-    append_pipeline_export_audit(state.as_ref(), &tenant, "created", &snapshot)
-        .await
-        .map_err(internal_error)?;
+    append_pipeline_export_audit(
+        state.as_ref(),
+        &tenant,
+        "created",
+        snake_case_label(snapshot.allowed_use),
+        &snapshot,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(snapshot))
 }
 
@@ -16419,9 +16456,17 @@ async fn complete_pipeline_export_handler(
             }
             other => internal_error(other),
         })?;
-    append_pipeline_export_audit(state.as_ref(), &tenant, "delivered", &snapshot)
-        .await
-        .map_err(internal_error)?;
+    let purpose_code =
+        pipeline_export_manifest_purpose_code(snapshot.allowed_use).map_err(internal_error)?;
+    append_pipeline_export_audit(
+        state.as_ref(),
+        &tenant,
+        "delivered",
+        purpose_code,
+        &snapshot,
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(snapshot))
 }
 
@@ -41471,6 +41516,15 @@ async fn prepare_replay_export_execution(
     .await?;
     let purpose =
         normalized_export_purpose(query.purpose.as_deref(), "trace_commons_replay_dataset");
+    // `pipeline_export:` purpose codes mark pipeline export manifests, which
+    // the replay-dataset list and count leave out; a replay export in that
+    // family would leave itself out of both.
+    if is_pipeline_export_manifest_purpose_code(&purpose) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "export_purpose_reserved",
+        ));
+    }
     Ok((consent_scope, tenant_policy, purpose))
 }
 

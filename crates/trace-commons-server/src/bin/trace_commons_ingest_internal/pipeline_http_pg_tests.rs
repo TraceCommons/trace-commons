@@ -2420,7 +2420,8 @@ async fn export_audit_events(owner: &Arc<PgBackend>, tenant_id: &str) -> Vec<ser
 
 /// Checks the newest of `events`: an export event of `stage` for
 /// `snapshot`, with the use label, the purpose hash, the source-list hash,
-/// and the item count, and nothing else.
+/// and the item count, and nothing else. A `delivered` event's purpose code
+/// is the manifest's (Ruling T14-11); a `created` event's is the use label.
 fn assert_pipeline_export_audit(
     events: &[serde_json::Value],
     stage: &str,
@@ -2438,7 +2439,12 @@ fn assert_pipeline_export_audit(
     );
     assert_eq!(event["export_manifest_id"], snapshot["snapshot_id"]);
     assert_eq!(event["decision_inputs_hash"], snapshot["source_list_hash"]);
-    assert_eq!(event["metadata"]["purpose_code"], "evaluation", "{event}");
+    let purpose_code = if stage == "delivered" {
+        "pipeline_export:evaluation"
+    } else {
+        "evaluation"
+    };
+    assert_eq!(event["metadata"]["purpose_code"], purpose_code, "{event}");
     assert_eq!(
         event["metadata"]["item_count"],
         snapshot["items"].as_array().unwrap().len(),
@@ -2549,6 +2555,142 @@ async fn pipeline_export_routes_snapshot_and_deliver_with_the_export_credential(
         .expect("main lists the tenant's audit events");
     let failures = collect_db_audit_canonical_projection_failures(&rows);
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// `POST /v1/pipeline/exports` with `body`, keyed by `key`.
+async fn create_pipeline_export_with(
+    state: &Arc<AppState>,
+    token: &str,
+    key: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    pipeline_product_request(
+        state.clone(),
+        "POST",
+        "/v1/pipeline/exports",
+        Some(token),
+        Some(key),
+        Some(body),
+    )
+    .await
+}
+
+/// Ruling T14-8: the export route applies `main`'s export rules for a
+/// request. Two low-risk submissions that consent to debugging and
+/// evaluation complete.
+/// - Guardrails off: an empty purpose and no consent scope are accepted.
+/// - The item limit is clamped to `max_export_items_per_request`.
+/// - A named consent scope narrows the export: model training holds
+///   nothing, debugging and evaluation holds both. The scope is part of the
+///   request the key names, so the same key with another scope is refused.
+/// - Guardrails on (purpose and consent scope given): the export holds only
+///   low-risk submissions, as `main`'s guardrailed replay export does; the
+///   second submission, stored as medium risk, is left out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_export_route_applies_mains_guardrails_limit_and_consent_scope() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let token = fixture.export_token.as_str();
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let low = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let medium = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    let mut both = vec![low.run_id.to_string(), medium.run_id.to_string()];
+    both.sort();
+    let item_runs = |snapshot: &serde_json::Value| {
+        let mut runs = snapshot["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["run_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        runs.sort();
+        runs
+    };
+
+    let (status, unguarded) = create_pipeline_export_with(
+        state,
+        token,
+        "unguarded",
+        serde_json::json!({"allowed_use": "evaluation", "purpose": "", "limit": 10}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unguarded}");
+    assert_eq!(item_runs(&unguarded), both);
+
+    let mut capped = state.clone();
+    Arc::make_mut(&mut capped).max_export_items_per_request = 1;
+    let (status, clamped) = create_pipeline_export_with(
+        &capped,
+        token,
+        "clamped",
+        serde_json::json!({"allowed_use": "evaluation", "purpose": "p", "limit": 10}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{clamped}");
+    assert_eq!(
+        clamped["items"].as_array().unwrap().len(),
+        1,
+        "the limit is clamped to the configured maximum: {clamped}"
+    );
+
+    let scoped = |scope: &str| {
+        serde_json::json!({
+            "allowed_use": "evaluation",
+            "purpose": "p",
+            "limit": 10,
+            "consent_scope": scope,
+        })
+    };
+    let (status, training) =
+        create_pipeline_export_with(state, token, "training", scoped("model_training")).await;
+    assert_eq!(status, StatusCode::OK, "{training}");
+    assert!(item_runs(&training).is_empty(), "{training}");
+    let (status, debugging) =
+        create_pipeline_export_with(state, token, "debugging", scoped("debugging_evaluation"))
+            .await;
+    assert_eq!(status, StatusCode::OK, "{debugging}");
+    assert_eq!(item_runs(&debugging), both);
+    let (status, conflict) =
+        create_pipeline_export_with(state, token, "debugging", scoped("model_training")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"], "export_idempotency_conflict");
+
+    let mut owner = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET privacy_risk = 'medium'
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &medium.submission_id],
+    )
+    .await
+    .expect("store the second submission as medium risk");
+    tx.commit().await.unwrap();
+    drop(owner);
+    let mut guarded = state.clone();
+    Arc::make_mut(&mut guarded).require_export_guardrails = true;
+    let (status, low_only) =
+        create_pipeline_export_with(&guarded, token, "guarded", scoped("debugging_evaluation"))
+            .await;
+    assert_eq!(status, StatusCode::OK, "{low_only}");
+    assert_eq!(item_runs(&low_only), vec![low.run_id.to_string()]);
+    let (status, unguarded_again) = create_pipeline_export_with(
+        state,
+        token,
+        "unguarded-again",
+        scoped("debugging_evaluation"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unguarded_again}");
+    assert_eq!(item_runs(&unguarded_again), both);
 }
 
 /// Owner ruling T14-7: a delivered pipeline snapshot's export manifest keeps
