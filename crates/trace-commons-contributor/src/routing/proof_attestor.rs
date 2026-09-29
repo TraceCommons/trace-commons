@@ -12,9 +12,8 @@
 //!    (`GET {gateway}/attestation/report?model=..&signing_algo=ed25519&nonce=..`),
 //! 2. passes Intel DCAP verification against collateral ingest fetched for it
 //!    (`crate::witness::transport::fetch_collateral`), at the current time,
-//! 3. runs an image whose measurements match a pinned set
-//!    (`TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS`, the server's own
-//!    variable and syntax: `mrconfigid=<96 hex>,...`, sets split by `;`), and
+//! 3. runs an image whose measurements match a pinned set (see "Where the
+//!    pins come from" below), and
 //! 4. commits, in its verified `report_data`, to exactly the keys the report's
 //!    JSON claims for the model, under our nonce
 //!    (`trace_commons_attestation::receipt::quote_bound_keys`, the same rule
@@ -39,6 +38,26 @@
 //! proof. A key set is cached for [`FRESH_TTL`] and then must be earned again;
 //! a failed refresh does not extend an old one.
 //!
+//! # Where the pins come from
+//!
+//! **Ingest publishes them.** `GET /v1/contributors/me/near-ai-measurements`
+//! (device credential) returns the set ingest itself enforces, so the device
+//! and ingest agree on which NEAR AI image counts. [`PinProvider`] caches the
+//! answer: it refreshes after [`PIN_REFRESH_AFTER`], a failed refresh keeps
+//! the last good set only until [`PIN_TTL`] after it was fetched, and past
+//! that the device pins nothing. A published `unconfigured` or `invalid`
+//! state, or a document whose digest does not match its sets, also pins
+//! nothing.
+//!
+//! **`TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` overrides it**, for an
+//! operator or a developer: when the variable is set at daemon start it wins
+//! outright and ingest is not asked. Set but empty or malformed, it pins
+//! nothing -- it never falls back to the published set, because an operator
+//! who set it meant it. The syntax is the server's own (`mrconfigid=<96
+//! hex>,...`, sets split by `;`).
+//!
+//! No pins, whichever way, means no key can be earned: nothing verifies.
+//!
 //! Nothing here logs a key, a nonce, a model, a report or a URL.
 
 use std::collections::HashMap;
@@ -52,6 +71,7 @@ use trace_commons_attestation::measurements::{
 use trace_commons_attestation::quote::{Collateral, VerifiedQuote, verify_quote};
 use trace_commons_attestation::receipt::{AttestedKeyError, model_entry_quotes, quote_bound_keys};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
+use trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins;
 
 /// The IronWire backend id whose receipts this attestor can speak for.
 pub const NEAR_AI_BACKEND: &str = "nearai";
@@ -70,6 +90,18 @@ const CONTROL: &str = "near_ai_expected_measurements";
 
 /// How long an earned key set is served before it must be earned again.
 pub const FRESH_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// How old a published pin set may get before it is fetched again.
+pub const PIN_REFRESH_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// How long a published pin set is trusted after it was fetched, however
+/// refreshes go. Past this with no successful refresh, the device pins
+/// nothing.
+pub const PIN_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// The least time between two failed pin fetches, so a daemon whose ingest is
+/// down does not ask on every pass.
+pub const PIN_RETRY_FLOOR: Duration = Duration::from_secs(60);
 
 /// Why the network half could not answer. Carries nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,20 +201,190 @@ impl AttestationSource for HttpAttestationSource {
     }
 }
 
-/// Read the pins from the environment. Absent, empty or malformed all read as
-/// no pins -- which answers `Unsupported`, never a pass.
+/// Where published pins come from: ingest's
+/// `GET /v1/contributors/me/near-ai-measurements`.
+#[async_trait::async_trait]
+pub trait PinSource: Send + Sync {
+    /// The published document.
+    async fn fetch(&self) -> Result<NearAiMeasurementPins, SourceUnavailable>;
+}
+
+/// The production source: ingest, with this device's own credential.
+pub struct IngestPinSource {
+    store: crate::config::ConfigStore,
+}
+
+impl IngestPinSource {
+    /// Read through `store`'s enrollment and device identity.
+    #[must_use]
+    pub fn new(store: crate::config::ConfigStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl PinSource for IngestPinSource {
+    async fn fetch(&self) -> Result<NearAiMeasurementPins, SourceUnavailable> {
+        let cfg = self
+            .store
+            .load_config()
+            .ok()
+            .flatten()
+            .ok_or(SourceUnavailable)?;
+        crate::submit::near_ai_measurement_pins(&self.store, &cfg)
+            .await
+            .map_err(|_| SourceUnavailable)
+    }
+}
+
+/// The pins in force right now, and a digest to tell when they changed.
+#[derive(Debug, Clone, Default)]
+pub struct CurrentPins {
+    /// Any one matching admits an image. Empty admits none.
+    pub sets: Vec<ExpectedMeasurements>,
+    /// Changes whenever `sets` does.
+    pub digest: String,
+}
+
+struct PublishedCache {
+    pins: CurrentPins,
+    fetched_at: u64,
+}
+
+/// The attestor's pins: the operator override when one is set, else what
+/// ingest publishes, cached with a bounded TTL. See the module docs for the
+/// precedence and the failure rule.
+pub struct PinProvider {
+    override_pins: Option<Vec<ExpectedMeasurements>>,
+    source: Option<Box<dyn PinSource>>,
+    cache: tokio::sync::Mutex<(Option<PublishedCache>, Option<u64>)>,
+}
+
+impl std::fmt::Debug for PinProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinProvider")
+            .field("overridden", &self.override_pins.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PinProvider {
+    /// `override_pins` wins when `Some`, even if empty. `source` is asked
+    /// only without one.
+    #[must_use]
+    pub fn new(
+        override_pins: Option<Vec<ExpectedMeasurements>>,
+        source: Option<Box<dyn PinSource>>,
+    ) -> Self {
+        Self {
+            override_pins,
+            source,
+            cache: tokio::sync::Mutex::new((None, None)),
+        }
+    }
+
+    /// The pins in force at `now_unix`.
+    pub async fn current(&self, now_unix: u64) -> CurrentPins {
+        if let Some(pins) = &self.override_pins {
+            return CurrentPins {
+                sets: pins.clone(),
+                digest: format!("override:{}", digest_sets(pins)),
+            };
+        }
+        let Some(source) = &self.source else {
+            return CurrentPins::default();
+        };
+        let mut guard = self.cache.lock().await;
+        let (cache, last_failure) = &mut *guard;
+        let age = cache
+            .as_ref()
+            .map(|c| now_unix.saturating_sub(c.fetched_at));
+        if age.is_some_and(|age| age < PIN_REFRESH_AFTER.as_secs()) {
+            return cache.as_ref().map(|c| c.pins.clone()).unwrap_or_default();
+        }
+        let backing_off =
+            last_failure.is_some_and(|at| now_unix.saturating_sub(at) < PIN_RETRY_FLOOR.as_secs());
+        if !backing_off {
+            match source.fetch().await {
+                Ok(document) => {
+                    *last_failure = None;
+                    let pins = published_to_current(&document);
+                    *cache = Some(PublishedCache {
+                        pins: pins.clone(),
+                        fetched_at: now_unix,
+                    });
+                    return pins;
+                }
+                Err(SourceUnavailable) => *last_failure = Some(now_unix),
+            }
+        }
+        // No fresh answer: the last good set stands only inside its TTL.
+        match cache {
+            Some(c) if now_unix.saturating_sub(c.fetched_at) < PIN_TTL.as_secs() => c.pins.clone(),
+            _ => {
+                *cache = None;
+                CurrentPins::default()
+            }
+        }
+    }
+}
+
+/// A published document as the pins it grants. Anything but a configured,
+/// self-consistent document whose every set parses grants none.
+fn published_to_current(document: &NearAiMeasurementPins) -> CurrentPins {
+    let parsed: Option<Vec<ExpectedMeasurements>> = document
+        .usable_sets()
+        .iter()
+        .map(|set| {
+            ExpectedMeasurements::from_env_value(Some(set))
+                .ok()
+                .flatten()
+        })
+        .collect();
+    match parsed {
+        Some(sets) => CurrentPins {
+            sets,
+            digest: document.digest.clone(),
+        },
+        None => CurrentPins {
+            sets: Vec::new(),
+            digest: document.digest.clone(),
+        },
+    }
+}
+
+fn digest_sets(sets: &[ExpectedMeasurements]) -> String {
+    sets.iter()
+        .map(ExpectedMeasurements::to_pin_string)
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Whether a verified quote's image matches any pinned set. An empty list
+/// matches nothing.
 #[must_use]
-pub fn pins_from_env() -> Vec<ExpectedMeasurements> {
-    let Ok(raw) = std::env::var(NEAR_AI_EXPECTED_MEASUREMENTS_ENV) else {
-        return Vec::new();
-    };
-    parse_pins(&raw).unwrap_or_else(|| {
+pub fn image_is_pinned(pins: &[ExpectedMeasurements], quote: &VerifiedQuote) -> bool {
+    pins.iter().any(|set| {
+        matches!(
+            check_measurements_opt(Some(set), quote, CONTROL),
+            MeasurementVerdict::Pinned { .. }
+        )
+    })
+}
+
+/// The operator override, read from the environment. `None` when the
+/// variable is unset, which lets the published pins apply. Set but empty or
+/// malformed is `Some(vec![])`: it wins and pins nothing.
+#[must_use]
+pub fn pins_from_env() -> Option<Vec<ExpectedMeasurements>> {
+    let raw = std::env::var(NEAR_AI_EXPECTED_MEASUREMENTS_ENV).ok()?;
+    Some(parse_pins(&raw).unwrap_or_else(|| {
         tracing::warn!(
             control = CONTROL,
-            "NEAR AI measurement pins did not parse; no answer will be proof"
+            "NEAR AI measurement override did not parse; no answer will be proof"
         );
         Vec::new()
-    })
+    }))
 }
 
 /// `;`-separated sets, each in `ExpectedMeasurements`' own `key=value,`
@@ -209,12 +411,12 @@ pub struct NearAiQuoteAttestor {
 
 struct Inner {
     source: Box<dyn AttestationSource>,
-    pins: Vec<ExpectedMeasurements>,
+    pins: Arc<PinProvider>,
     now_unix: Clock,
     nonce: Nonces,
     verify: QuoteVerifier,
-    /// model -> (keys, earned at).
-    cache: Mutex<HashMap<String, (Vec<String>, u64)>>,
+    /// model -> (keys, earned at, digest of the pins they were earned under).
+    cache: Mutex<HashMap<String, (Vec<String>, u64, String)>>,
     /// One refresh at a time, so a burst of rows for one model costs one
     /// report fetch rather than one each.
     refresh: tokio::sync::Mutex<()>,
@@ -223,15 +425,15 @@ struct Inner {
 impl std::fmt::Debug for NearAiQuoteAttestor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NearAiQuoteAttestor")
-            .field("pinned_sets", &self.inner.pins.len())
             .finish_non_exhaustive()
     }
 }
 
 impl NearAiQuoteAttestor {
-    /// An attestor over `source`, admitting quotes that match any of `pins`.
+    /// An attestor over `source`, admitting quotes whose image matches the
+    /// pins `pins` has in force when it asks.
     #[must_use]
-    pub fn new(source: Box<dyn AttestationSource>, pins: Vec<ExpectedMeasurements>) -> Self {
+    pub fn new(source: Box<dyn AttestationSource>, pins: Arc<PinProvider>) -> Self {
         Self::with_parts(
             source,
             pins,
@@ -247,7 +449,7 @@ impl NearAiQuoteAttestor {
 
     fn with_parts(
         source: Box<dyn AttestationSource>,
-        pins: Vec<ExpectedMeasurements>,
+        pins: Arc<PinProvider>,
         now_unix: Clock,
         nonce: Nonces,
         verify: QuoteVerifier,
@@ -265,20 +467,17 @@ impl NearAiQuoteAttestor {
         }
     }
 
-    /// Whether any measurement set is pinned. With none, no key can be earned.
-    #[must_use]
-    pub fn is_pinned(&self) -> bool {
-        !self.inner.pins.is_empty()
-    }
-
-    fn cached(&self, model: &str, now: u64) -> Option<Vec<String>> {
+    /// Keys earned under exactly these pins, still inside their TTL. A set
+    /// earned under pins that have since changed is not served.
+    fn cached(&self, model: &str, now: u64, pins_digest: &str) -> Option<Vec<String>> {
         let cache = self.inner.cache.lock().ok()?;
-        let (keys, at) = cache.get(model)?;
-        (now.saturating_sub(*at) < FRESH_TTL.as_secs()).then(|| keys.clone())
+        let (keys, at, digest) = cache.get(model)?;
+        (now.saturating_sub(*at) < FRESH_TTL.as_secs() && digest == pins_digest)
+            .then(|| keys.clone())
     }
 
-    /// Earn the key set for `model` from scratch.
-    async fn earn(&self, model: &str, now: u64) -> Attestation {
+    /// Earn the key set for `model` from scratch, under `pins`.
+    async fn earn(&self, model: &str, now: u64, pins: &CurrentPins) -> Attestation {
         let inner = &self.inner;
         let Some(nonce) = (inner.nonce)() else {
             return Attestation::Unavailable;
@@ -305,13 +504,7 @@ impl NearAiQuoteAttestor {
             let Some(checked) = (inner.verify)(quote, &collateral, now) else {
                 return Attestation::NotAttested;
             };
-            let pinned = inner.pins.iter().any(|pins| {
-                matches!(
-                    check_measurements_opt(Some(pins), &checked, CONTROL),
-                    MeasurementVerdict::Pinned { .. }
-                )
-            });
-            if !pinned {
+            if !image_is_pinned(&pins.sets, &checked) {
                 return Attestation::NotAttested;
             }
             verified.push(checked);
@@ -321,7 +514,7 @@ impl NearAiQuoteAttestor {
             Ok(keys) => {
                 if let Ok(mut cache) = inner.cache.lock() {
                     // Replace, never merge: a rotation must drop the old key.
-                    cache.insert(model.to_string(), (keys.clone(), now));
+                    cache.insert(model.to_string(), (keys.clone(), now, pins.digest.clone()));
                 }
                 Attestation::Keys(keys)
             }
@@ -333,19 +526,26 @@ impl NearAiQuoteAttestor {
 #[async_trait::async_trait]
 impl SignerAttestor for NearAiQuoteAttestor {
     async fn model_keys(&self, backend: &str, model: &str) -> Attestation {
-        if backend != NEAR_AI_BACKEND || !self.is_pinned() {
+        if backend != NEAR_AI_BACKEND {
             return Attestation::Unsupported;
         }
         let now = (self.inner.now_unix)();
-        if let Some(keys) = self.cached(model, now) {
+        let pins = self.inner.pins.current(now).await;
+        if pins.sets.is_empty() {
+            // The pins lapsed or were withdrawn. `Unavailable`, not a
+            // verdict: IronWire keeps the row `pending` and retries within
+            // its budget, and it can never become `verified` from here.
+            return Attestation::Unavailable;
+        }
+        if let Some(keys) = self.cached(model, now, &pins.digest) {
             return Attestation::Keys(keys);
         }
         let _one_at_a_time = self.inner.refresh.lock().await;
         // Somebody else may have earned it while we waited.
-        if let Some(keys) = self.cached(model, now) {
+        if let Some(keys) = self.cached(model, now, &pins.digest) {
             return Attestation::Keys(keys);
         }
-        self.earn(model, now).await
+        self.earn(model, now, &pins).await
     }
 }
 
@@ -463,7 +663,7 @@ mod tests {
         };
         let attestor = NearAiQuoteAttestor::with_parts(
             Box::new(source),
-            pins,
+            Arc::new(PinProvider::new(Some(pins), None)),
             Box::new(move || clock.load(Ordering::SeqCst)),
             Box::new(move || Some(nonce.clone())),
             Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
@@ -504,7 +704,8 @@ mod tests {
             attestor(report, nonce, Vec::new(), clock_at(FIXTURE_CAPTURED_AT));
         assert_eq!(
             attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
-            Attestation::Unsupported
+            Attestation::Unavailable,
+            "no pins is never a verdict, and never keys"
         );
         assert_eq!(reports.load(Ordering::SeqCst), 0, "nothing fetched");
     }
@@ -579,7 +780,7 @@ mod tests {
         };
         let attestor = NearAiQuoteAttestor::with_parts(
             Box::new(source),
-            real_pins(),
+            Arc::new(PinProvider::new(Some(real_pins()), None)),
             Box::new(|| FIXTURE_CAPTURED_AT),
             Box::new(move || Some(nonce.clone())),
             Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
@@ -618,5 +819,159 @@ mod tests {
             "one malformed set voids the list"
         );
         assert_eq!(parse_pins("").map(|p| p.len()), Some(0));
+    }
+
+    // ---- where the pins come from ----
+
+    use trace_commons_protocol::near_ai_measurements::{NearAiMeasurementPins, PinState};
+
+    fn pin_string(byte: &str) -> String {
+        format!("mrconfigid={}", byte.repeat(48))
+    }
+
+    /// A published-pins source whose answer the test changes, counting calls.
+    struct Published {
+        answer: Mutex<Result<NearAiMeasurementPins, SourceUnavailable>>,
+        calls: AtomicUsize,
+    }
+
+    impl Published {
+        fn serving(document: NearAiMeasurementPins) -> Arc<Self> {
+            Arc::new(Self {
+                answer: Mutex::new(Ok(document)),
+                calls: AtomicUsize::new(0),
+            })
+        }
+        fn set(&self, answer: Result<NearAiMeasurementPins, SourceUnavailable>) {
+            *self.answer.lock().unwrap() = answer;
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PinSource for Arc<Published> {
+        async fn fetch(&self) -> Result<NearAiMeasurementPins, SourceUnavailable> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.answer.lock().unwrap().clone()
+        }
+    }
+
+    fn configured(bytes: &[&str]) -> NearAiMeasurementPins {
+        NearAiMeasurementPins::new(
+            PinState::Configured,
+            bytes.iter().map(|b| pin_string(b)).collect(),
+        )
+    }
+
+    const T0: u64 = 1_800_000_000;
+
+    #[tokio::test]
+    async fn published_pins_are_fetched_and_used() {
+        let source = Published::serving(configured(&["aa"]));
+        let provider = PinProvider::new(None, Some(Box::new(Arc::clone(&source))));
+        let current = provider.current(T0).await;
+        assert_eq!(current.sets.len(), 1);
+        assert_eq!(current.sets[0].to_pin_string(), pin_string("aa"));
+        // Within the refresh interval, no second fetch.
+        provider.current(T0 + 1).await;
+        assert_eq!(source.calls(), 1);
+    }
+
+    /// A failed refresh keeps the last good set, but only until its TTL runs
+    /// out; after that the device pins nothing, so nothing can verify.
+    #[tokio::test]
+    async fn a_failing_fetch_keeps_the_last_good_set_only_until_its_ttl() {
+        let source = Published::serving(configured(&["aa"]));
+        let provider = PinProvider::new(None, Some(Box::new(Arc::clone(&source))));
+        assert_eq!(provider.current(T0).await.sets.len(), 1);
+
+        source.set(Err(SourceUnavailable));
+        let refresh = PIN_REFRESH_AFTER.as_secs();
+        let within = provider.current(T0 + refresh + 1).await;
+        assert_eq!(within.sets.len(), 1, "still inside the TTL");
+        assert!(source.calls() >= 2, "a refresh was attempted");
+
+        let past = provider.current(T0 + PIN_TTL.as_secs() + 1).await;
+        assert!(past.sets.is_empty(), "past the TTL the pins are gone");
+        // And they stay gone while the fetch keeps failing.
+        let later = provider
+            .current(T0 + PIN_TTL.as_secs() + PIN_RETRY_FLOOR.as_secs() + 2)
+            .await;
+        assert!(later.sets.is_empty());
+    }
+
+    /// Ingest publishing "nothing configured" means the device pins nothing
+    /// -- and an attestor over it attests nothing.
+    #[tokio::test]
+    async fn a_published_empty_set_means_no_verification() {
+        let source = Published::serving(NearAiMeasurementPins::new(
+            PinState::Unconfigured,
+            Vec::new(),
+        ));
+        let provider = Arc::new(PinProvider::new(None, Some(Box::new(Arc::clone(&source)))));
+        assert!(provider.current(T0).await.sets.is_empty());
+
+        let (report, nonce, _) = synthetic_report();
+        let attestor = NearAiQuoteAttestor::with_parts(
+            Box::new(Fixture {
+                report,
+                reports: Arc::new(AtomicUsize::new(0)),
+                collateral_ok: true,
+            }),
+            Arc::clone(&provider),
+            Box::new(|| FIXTURE_CAPTURED_AT),
+            Box::new(move || Some(nonce.clone())),
+            Box::new(|quote, collateral, now| verify_quote(quote, collateral, now).ok()),
+        );
+        assert!(!matches!(
+            attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+            Attestation::Keys(_)
+        ));
+    }
+
+    /// A document whose digest does not match its sets is not trusted.
+    #[tokio::test]
+    async fn a_published_document_with_a_wrong_digest_pins_nothing() {
+        let mut document = configured(&["aa"]);
+        document.digest = "00".repeat(32);
+        let source = Published::serving(document);
+        let provider = PinProvider::new(None, Some(Box::new(Arc::clone(&source))));
+        assert!(provider.current(T0).await.sets.is_empty());
+    }
+
+    /// The operator override wins over what ingest publishes, and when it is
+    /// set ingest is not asked at all.
+    #[tokio::test]
+    async fn the_environment_override_wins() {
+        let source = Published::serving(configured(&["aa"]));
+        let overridden = parse_pins(&pin_string("bb")).unwrap();
+        let provider = PinProvider::new(Some(overridden), Some(Box::new(Arc::clone(&source))));
+        let current = provider.current(T0).await;
+        assert_eq!(current.sets.len(), 1);
+        assert_eq!(current.sets[0].to_pin_string(), pin_string("bb"));
+        assert_eq!(source.calls(), 0);
+        // An override that pins nothing (set but empty or malformed) still
+        // wins, and means nothing verifies -- it does not fall back.
+        let empty = PinProvider::new(Some(Vec::new()), Some(Box::new(Arc::clone(&source))));
+        assert!(empty.current(T0).await.sets.is_empty());
+        assert_eq!(source.calls(), 0);
+    }
+
+    /// The image check itself: an empty pin list admits no image. The
+    /// mutation "an empty set allows everything" must turn this red.
+    #[test]
+    fn an_empty_pin_list_pins_no_image() {
+        let quote = hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap();
+        let verified = verify_quote(
+            &quote,
+            &parse_collateral(COLLATERAL).unwrap(),
+            FIXTURE_CAPTURED_AT,
+        )
+        .expect("the capture verifies");
+        assert!(!image_is_pinned(&[], &verified));
+        assert!(image_is_pinned(&real_pins(), &verified));
+        assert!(!image_is_pinned(&other_pins(), &verified));
     }
 }
