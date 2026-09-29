@@ -66,7 +66,7 @@ use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelin
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineCreditStatus,
     PipelineExportConsentScopes, PipelineExportSnapshot, PipelineProcessingStatus,
-    PipelineProductStore,
+    PipelineProductStore, pipeline_control_health,
 };
 
 use pilot_runtime_login::{
@@ -19246,4 +19246,83 @@ async fn a_submitted_payout_is_polled_once_per_confirmation_interval() {
         "submitted"
     );
     assert_eq!(near.submits(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The operational summary's control checks (Ruling F-I4, P4-D21)
+// ---------------------------------------------------------------------------
+
+/// With the migrations as they are, the operational summary reports both
+/// controls passed: every versioned-pipeline table forces row-level
+/// security, and both of `phase_outcomes`' immutability triggers are
+/// enabled.
+#[tokio::test]
+async fn the_operational_summary_reports_both_controls_passed() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tenant = format!("controls-{}", uuid::Uuid::new_v4());
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .unwrap();
+    assert!(summary.tenant_isolation_control_passed);
+    assert!(summary.audit_immutability_control_passed);
+}
+
+/// A table the isolation control names but the catalog does not hold (a
+/// misspelled or missing name) fails the control: it checked nothing for
+/// that name. An empty list fails it too.
+#[tokio::test]
+async fn a_missing_table_fails_the_isolation_control() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    let present = pipeline_control_health(&tx, &["pipeline_runs", "phase_outcomes"])
+        .await
+        .unwrap();
+    assert!(present.tenant_isolation_passed);
+    let misspelled = pipeline_control_health(&tx, &["pipeline_runs", "pipeline_runz"])
+        .await
+        .unwrap();
+    assert!(
+        !misspelled.tenant_isolation_passed,
+        "a name the catalog does not hold fails the control"
+    );
+    let empty = pipeline_control_health(&tx, &[]).await.unwrap();
+    assert!(
+        !empty.tenant_isolation_passed,
+        "an empty list checks nothing"
+    );
+    tx.rollback().await.unwrap();
+}
+
+/// A disabled immutability trigger fails the audit control. The trigger is
+/// disabled inside a transaction this test rolls back, so no other test
+/// ever sees it disabled.
+#[tokio::test]
+async fn a_disabled_immutability_trigger_fails_the_audit_control() {
+    let Some(_backend) = runtime_backend(2).await else {
+        return;
+    };
+    let mut owner = owner_client().await;
+    let tx = owner.transaction().await.unwrap();
+    let enabled = pipeline_control_health(&tx, &["phase_outcomes"])
+        .await
+        .unwrap();
+    assert!(enabled.audit_immutability_passed);
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update")
+        .await
+        .unwrap();
+    let disabled = pipeline_control_health(&tx, &["phase_outcomes"])
+        .await
+        .unwrap();
+    assert!(
+        !disabled.audit_immutability_passed,
+        "a disabled immutability trigger fails the control"
+    );
+    assert!(disabled.tenant_isolation_passed);
+    tx.rollback().await.unwrap();
 }

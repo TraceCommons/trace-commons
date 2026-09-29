@@ -30,7 +30,7 @@ use trace_commons_gate_api::pipeline::{AtomicUnits, Phase};
 use trace_commons_protocol::trace_contribution::{ConsentScope, ResidualPiiRisk, TraceAllowedUse};
 use uuid::Uuid;
 
-use crate::db::postgres::PgBackend;
+use crate::db::postgres::{PgBackend, TRACE_COMMONS_RLS_TABLES};
 use crate::error::DatabaseError;
 use crate::trace_corpus_storage::TraceObjectArtifactKind;
 use crate::versioned_pipeline::{
@@ -1161,13 +1161,8 @@ impl PipelineProductStore {
         })
     }
 
-    /// The tenant-isolation and audit-immutability booleans below are a live
-    /// health signal, not a cache: every versioned-pipeline table this
-    /// codebase defines must carry `FORCE ROW LEVEL SECURITY`, and
-    /// `phase_outcomes` must still carry both of its immutability triggers.
-    /// The relation list below names each such table by hand -- it does not
-    /// discover them from the catalog -- so a future migration that adds one
-    /// must extend this list too, or the check silently stops covering it.
+    /// The tenant-isolation and audit-immutability booleans are a live health
+    /// signal, not a cache (`pipeline_control_health`).
     pub async fn operational_summary(
         &self,
         tenant_id: &str,
@@ -1217,47 +1212,11 @@ impl PipelineProductStore {
                         AS failed_invalidation,
                     (SELECT COUNT(*) FROM pipeline_export_snapshots
                       WHERE tenant_id = $1 AND state = 'ready')
-                        AS incomplete_exports,
-                    (
-                        SELECT COUNT(*) = 0
-                          FROM pg_class c
-                          JOIN pg_namespace n ON n.oid = c.relnamespace
-                         WHERE n.nspname = current_schema()
-                           AND c.relname = ANY($2)
-                           AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
-                    ) AS tenant_isolation_passed,
-                    (
-                        SELECT COUNT(*) = 2
-                          FROM pg_trigger t
-                          JOIN pg_class c ON c.oid = t.tgrelid
-                         WHERE c.relname = 'phase_outcomes'
-                           AND NOT t.tgisinternal
-                           AND t.tgname = ANY($3)
-                    ) AS audit_immutability_passed",
-                &[
-                    &tenant_id,
-                    &vec![
-                        "pipeline_runs",
-                        "phase_outcomes",
-                        "pipeline_bundle_packages",
-                        "pipeline_active_bundles",
-                        "pipeline_bundle_policy_status",
-                        "pipeline_receipt_artifacts",
-                        "pipeline_run_settlements",
-                        "pipeline_admission_usage",
-                        "pipeline_review_claims",
-                        "pipeline_review_assessments",
-                        "pipeline_index_invalidations",
-                        "pipeline_export_snapshots",
-                        "pipeline_export_snapshot_items",
-                    ],
-                    &vec![
-                        "phase_outcomes_reject_update",
-                        "phase_outcomes_reject_delete",
-                    ],
-                ],
+                        AS incomplete_exports",
+                &[&tenant_id],
             )
             .await?;
+        let controls = pipeline_control_health(&tx, &pipeline_rls_tables()).await?;
         let near_rows = tx
             .query(
                 "SELECT status, COUNT(*) AS item_count
@@ -1308,8 +1267,8 @@ impl PipelineProductStore {
             pending_invalidation_count: count_from_row(&summary, "pending_invalidation")?,
             failed_invalidation_count: count_from_row(&summary, "failed_invalidation")?,
             incomplete_export_count: count_from_row(&summary, "incomplete_exports")?,
-            tenant_isolation_control_passed: summary.get("tenant_isolation_passed"),
-            audit_immutability_control_passed: summary.get("audit_immutability_passed"),
+            tenant_isolation_control_passed: controls.tenant_isolation_passed,
+            audit_immutability_control_passed: controls.audit_immutability_passed,
         })
     }
 
@@ -1442,6 +1401,87 @@ fn sum_trace_credit_atomic_units(
                 )
             })
         })
+}
+
+/// The versioned-pipeline tables the operational summary's tenant-isolation
+/// control covers: every `pipeline_*` table in `TRACE_COMMONS_RLS_TABLES`,
+/// and `phase_outcomes`. Read from that list rather than named again here,
+/// so a migration that adds a pipeline table to it is covered too.
+fn pipeline_rls_tables() -> Vec<&'static str> {
+    TRACE_COMMONS_RLS_TABLES
+        .iter()
+        .copied()
+        .filter(|table| table.starts_with("pipeline_") || *table == "phase_outcomes")
+        .collect()
+}
+
+/// `phase_outcomes`' two immutability triggers.
+const PHASE_OUTCOME_IMMUTABILITY_TRIGGERS: [&str; 2] = [
+    "phase_outcomes_reject_update",
+    "phase_outcomes_reject_delete",
+];
+
+/// The operational summary's two control booleans.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineControlHealth {
+    pub tenant_isolation_passed: bool,
+    pub audit_immutability_passed: bool,
+}
+
+/// Reads the operational summary's two controls from the catalog, in `tx`,
+/// failing closed (Ruling F-I4):
+///
+/// - Tenant isolation passes only when every table in `rls_tables` is a
+///   table in the current schema, the schema the unqualified pipeline
+///   queries resolve to, and has row-level security enabled and forced. A
+///   name the catalog does not hold there (misspelled, dropped, or in
+///   another schema) fails it, and so does an empty list.
+/// - Audit immutability passes only when both of `phase_outcomes`'
+///   immutability triggers exist on that table in the current schema and
+///   neither is disabled (`tgenabled = 'D'`).
+///
+/// Public only so the runtime suite can check it against a catalog it
+/// changed in a transaction it rolls back; `operational_summary` is its one
+/// production caller.
+#[doc(hidden)]
+pub async fn pipeline_control_health(
+    tx: &tokio_postgres::Transaction<'_>,
+    rls_tables: &[&str],
+) -> Result<PipelineControlHealth, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT
+                (
+                    SELECT COALESCE(
+                               bool_and(
+                                   COALESCE(c.relrowsecurity AND c.relforcerowsecurity, FALSE)
+                               ),
+                               FALSE
+                           )
+                      FROM unnest($1::text[]) AS expected(name)
+                      LEFT JOIN pg_class c
+                        ON c.relname = expected.name
+                       AND c.relnamespace = to_regnamespace(current_schema())
+                       AND c.relkind IN ('r', 'p')
+                ) AS tenant_isolation_passed,
+                (
+                    SELECT COUNT(*) = 2
+                      FROM pg_trigger t
+                      JOIN pg_class c ON c.oid = t.tgrelid
+                     WHERE c.relname = 'phase_outcomes'
+                       AND c.relnamespace = to_regnamespace(current_schema())
+                       AND NOT t.tgisinternal
+                       AND t.tgenabled <> 'D'
+                       AND t.tgname = ANY($2)
+                ) AS audit_immutability_passed",
+            &[&rls_tables, &PHASE_OUTCOME_IMMUTABILITY_TRIGGERS.as_slice()],
+        )
+        .await?;
+    Ok(PipelineControlHealth {
+        tenant_isolation_passed: row.get("tenant_isolation_passed"),
+        audit_immutability_passed: row.get("audit_immutability_passed"),
+    })
 }
 
 /// Hashes a JSON value for a hash-only operational surface: the forensic
@@ -1899,6 +1939,32 @@ mod tests {
             TraceAllowedUse::RankingModelTraining
         );
         assert!(from_storage_label::<TraceAllowedUse>("research".to_string(), "use").is_err());
+    }
+
+    /// The tenant-isolation control covers every versioned-pipeline table:
+    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the thirteen tables
+    /// the migrations define.
+    #[test]
+    fn the_isolation_control_covers_every_pipeline_table() {
+        let tables = pipeline_rls_tables().into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(
+            tables,
+            BTreeSet::from([
+                "pipeline_runs",
+                "phase_outcomes",
+                "pipeline_bundle_packages",
+                "pipeline_active_bundles",
+                "pipeline_bundle_policy_status",
+                "pipeline_receipt_artifacts",
+                "pipeline_run_settlements",
+                "pipeline_admission_usage",
+                "pipeline_review_claims",
+                "pipeline_review_assessments",
+                "pipeline_index_invalidations",
+                "pipeline_export_snapshots",
+                "pipeline_export_snapshot_items",
+            ])
+        );
     }
 
     #[test]
