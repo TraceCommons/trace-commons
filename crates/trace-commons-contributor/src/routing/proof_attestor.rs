@@ -53,12 +53,21 @@
 //! state, or a document whose digest does not match its sets, also pins
 //! nothing.
 //!
+//! The document's digest is a change detector, not an integrity check. It
+//! tells a device that the set changed (and drops verdicts cached under the
+//! old one) and catches a document that is internally inconsistent. It is not
+//! signed, so it adds nothing to what the TLS connection to ingest already
+//! establishes about who sent the document.
+//!
 //! **`TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` overrides it**, for an
 //! operator or a developer: when the variable is set at daemon start it wins
 //! outright and ingest is not asked. Set but empty or malformed, it pins
 //! nothing -- it never falls back to the published set, because an operator
-//! who set it meant it. The syntax is the server's own (`mrconfigid=<96
-//! hex>,...`, sets split by `;`).
+//! who set it meant it. Each set is written in the server's own syntax
+//! (`mrconfigid=<96 hex>,...`), but the device variable can hold several
+//! sets split by `;`, and the server's cannot: ingest reads exactly one set
+//! from its variable and publishes it as a one-element list. The `;` form is
+//! a device-side extension, for trying an image ingest does not pin yet.
 //!
 //! No pins, whichever way, means no key can be earned: nothing verifies.
 //!
@@ -88,7 +97,9 @@ pub const NEAR_AI_BACKEND: &str = "nearai";
 /// the key sent here is the key IronWire already sends here.
 pub const NEAR_AI_GATEWAY: &str = "https://cloud-api.near.ai/v1";
 
-/// The measurement pins, in the server's variable and syntax.
+/// The device's measurement-pin override. The server's variable name, and
+/// each set in the server's syntax; unlike the server, it accepts several
+/// sets split by `;` (see [`parse_pins`]).
 pub const NEAR_AI_EXPECTED_MEASUREMENTS_ENV: &str = "TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS";
 
 /// The control name a missing pin is refused under.
@@ -259,7 +270,8 @@ impl PinSource for IngestPinSource {
 pub struct CurrentPins {
     /// Any one matching admits an image. Empty admits none.
     pub sets: Vec<ExpectedMeasurements>,
-    /// Changes whenever `sets` does.
+    /// Changes whenever `sets` does. A change detector for the cache, not an
+    /// integrity check: nothing signs it.
     pub digest: String,
 }
 
@@ -405,7 +417,8 @@ pub fn pins_from_env() -> Option<Vec<ExpectedMeasurements>> {
 }
 
 /// `;`-separated sets, each in `ExpectedMeasurements`' own `key=value,`
-/// syntax. `None` when any set is malformed: a partly parsed pin list is a
+/// syntax -- the server's syntax for one set. The `;` separator is this
+/// device override's own: the server's variable holds a single set. `None` when any set is malformed: a partly parsed pin list is a
 /// list that believes it pins something it does not.
 #[must_use]
 pub fn parse_pins(raw: &str) -> Option<Vec<ExpectedMeasurements>> {
@@ -1379,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn pins_parse_in_the_servers_syntax_and_refuse_a_partial_list() {
+    fn pins_parse_as_server_sets_split_by_semicolon_and_refuse_a_partial_list() {
         let good = format!("mrtd={0},rtmr0={0};mrconfigid={0}", "aa".repeat(48));
         assert_eq!(parse_pins(&good).map(|p| p.len()), Some(2));
         let bad = format!("mrtd={};mrtd:deadbeef", "aa".repeat(48));
