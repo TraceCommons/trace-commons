@@ -789,6 +789,11 @@ fn certificate_signing_bytes(certificate: &serde_json::Value) -> Option<Vec<u8>>
 /// Ingest's collateral route, joined onto the ingest base.
 pub(crate) const COLLATERAL_PATH: &str = "/v1/attestation-collateral";
 
+/// The largest collateral body read from ingest. A real one is about 25 KB
+/// (PCK chain, CRLs, TCB info and QE identity); this leaves ample headroom
+/// while keeping a misbehaving answer from being buffered whole.
+pub(crate) const MAX_COLLATERAL_BYTES: usize = 1024 * 1024;
+
 /// Why collateral could not be had. Carries nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CollateralUnavailable;
@@ -800,12 +805,14 @@ pub(crate) struct CollateralUnavailable;
 /// the IronWire quote attestor (`crate::routing::proof_attestor`), so the two
 /// cannot come to fetch or parse it differently. The caller checks `url`
 /// against its allowlist first.
+///
+/// The body is read up to [`MAX_COLLATERAL_BYTES`] and refused past it.
 pub(crate) async fn fetch_collateral(
     http: &reqwest::Client,
     url: url::Url,
     quote: &[u8],
 ) -> Result<Collateral, CollateralUnavailable> {
-    let response = http
+    let mut response = http
         .post(url)
         .json(&serde_json::json!({ "quote_hex": hex::encode(quote) }))
         .send()
@@ -814,8 +821,21 @@ pub(crate) async fn fetch_collateral(
     if !response.status().is_success() {
         return Err(CollateralUnavailable);
     }
-    let body = response.text().await.map_err(|_| CollateralUnavailable)?;
-    parse_collateral(&body).map_err(|_| CollateralUnavailable)
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > MAX_COLLATERAL_BYTES as u64)
+    {
+        return Err(CollateralUnavailable);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| CollateralUnavailable)? {
+        if body.len().saturating_add(chunk.len()) > MAX_COLLATERAL_BYTES {
+            return Err(CollateralUnavailable);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let body = std::str::from_utf8(&body).map_err(|_| CollateralUnavailable)?;
+    parse_collateral(body).map_err(|_| CollateralUnavailable)
 }
 
 /// The HTTP implementation.

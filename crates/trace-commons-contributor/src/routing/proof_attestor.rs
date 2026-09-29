@@ -765,16 +765,256 @@ mod tests {
         );
     }
 
-    /// The gateway key sits in the same report, bound to the same nonce. It
-    /// must never come back.
+    /// A gateway key that a genuine, pinned quote really does bind, under our
+    /// nonce, is still never returned for a model. The report's only
+    /// quote-bound key sits in `gateway_attestation`; the model container has
+    /// an entry for another model only, or is absent altogether.
     #[tokio::test]
     async fn the_gateway_key_is_never_returned() {
-        let (report, nonce, _) = synthetic_report();
-        let (attestor, _) = attestor(report, nonce, real_pins(), clock_at(FIXTURE_CAPTURED_AT));
-        let Attestation::Keys(keys) = attestor.model_keys(NEAR_AI_BACKEND, MODEL).await else {
-            panic!("expected keys");
+        let (_, nonce, key) = synthetic_report();
+        let quote_hex = json(ECDSA_REPORT)["intel_quote"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let gateway = serde_json::json!({
+            "signing_algo": "ed25519",
+            "signing_address": key,
+            "request_nonce": nonce,
+            "intel_quote": quote_hex,
+            "report_data": format!("{key}{nonce}"),
+        });
+        let other_model = serde_json::json!({
+            "model_name": "Qwen/Qwen3.8-27B",
+            "signing_algo": "ed25519",
+            "signing_address": key,
+            "request_nonce": nonce,
+            "intel_quote": quote_hex,
+        });
+        let with_other_model = serde_json::json!({
+            "gateway_attestation": gateway,
+            "model_attestations": [other_model],
+        })
+        .to_string();
+        let gateway_only = serde_json::json!({ "gateway_attestation": gateway }).to_string();
+
+        // The premise, so the refusal below cannot be for some other reason:
+        // the gateway attestation binds the key under our nonce, and its
+        // quote verifies and is pinned.
+        assert_eq!(
+            trace_commons_attestation::receipt::gateway_ed25519_key(&with_other_model, &nonce),
+            Ok(key.clone())
+        );
+        let verified = verify_quote(
+            &hex::decode(&quote_hex).unwrap(),
+            &parse_collateral(COLLATERAL).unwrap(),
+            FIXTURE_CAPTURED_AT,
+        )
+        .expect("the gateway's quote verifies");
+        assert!(image_is_pinned(&real_pins(), &verified));
+        assert_eq!(verified.tcb_status, REQUIRED_TCB_STATUS);
+
+        for report in [with_other_model, gateway_only] {
+            let (attestor, _) = attestor(
+                report,
+                nonce.clone(),
+                real_pins(),
+                clock_at(FIXTURE_CAPTURED_AT),
+            );
+            assert_eq!(
+                attestor.model_keys(NEAR_AI_BACKEND, MODEL).await,
+                Attestation::NotAttested
+            );
+        }
+    }
+
+    /// A report with two entries for the model is attested only when both
+    /// hold up. One genuine, pinned quote beside one that fails DCAP, or
+    /// beside one that verifies but runs an image outside the pins, earns
+    /// nothing -- not the key of the good one.
+    #[tokio::test]
+    async fn a_report_mixing_a_good_quote_with_a_bad_one_is_not_attested() {
+        let (_, nonce, key) = synthetic_report();
+        let quote_hex = json(ECDSA_REPORT)["intel_quote"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut tampered = hex::decode(&quote_hex).unwrap();
+        // Inside the quote's signature data, past report_data: the JSON
+        // binding still reads the same key and nonce, and only DCAP can tell.
+        tampered[700] ^= 0x01;
+        let entry = |quote: &str| {
+            serde_json::json!({
+                "model_name": MODEL,
+                "signing_algo": "ed25519",
+                "signing_address": key,
+                "request_nonce": nonce,
+                "intel_quote": quote,
+            })
         };
-        assert!(!keys.contains(&"cd".repeat(32)));
+        let report = |second: &str| {
+            serde_json::json!({ "model_attestations": [entry(&quote_hex), entry(second)] })
+                .to_string()
+        };
+        let build = |report: String, second_off_pin: bool| {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let nonce = nonce.clone();
+            NearAiQuoteAttestor::with_parts(
+                Box::new(Fixture {
+                    report,
+                    reports: Arc::new(AtomicUsize::new(0)),
+                    collateral_ok: true,
+                }),
+                Arc::new(PinProvider::new(Some(real_pins()), None)),
+                Box::new(|| FIXTURE_CAPTURED_AT),
+                Box::new(move || Some(nonce.clone())),
+                Box::new(move |quote, collateral, now| {
+                    let mut verified = verify_quote(quote, collateral, now).ok()?;
+                    if second_off_pin && calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                        verified.mrtd = "00".repeat(48);
+                    }
+                    Some(verified)
+                }),
+            )
+        };
+
+        // Control: two good entries earn the key, so the report's shape is
+        // not what the refusals below turn on.
+        match build(report(&quote_hex), false)
+            .model_keys(NEAR_AI_BACKEND, MODEL)
+            .await
+        {
+            Attestation::Keys(keys) => {
+                assert!(!keys.is_empty() && keys.iter().all(|k| k == &key));
+            }
+            other => panic!("two good entries: {other:?}"),
+        }
+        assert_eq!(
+            build(report(&hex::encode(&tampered)), false)
+                .model_keys(NEAR_AI_BACKEND, MODEL)
+                .await,
+            Attestation::NotAttested,
+            "good + fails DCAP"
+        );
+        assert_eq!(
+            build(report(&quote_hex), true)
+                .model_keys(NEAR_AI_BACKEND, MODEL)
+                .await,
+            Attestation::NotAttested,
+            "good + verifies but off the pins"
+        );
+    }
+
+    /// A stand-in for ingest's collateral route that records every request
+    /// it receives, headers and body, and answers with the fixture or with
+    /// an oversized body.
+    struct CollateralServer {
+        base: String,
+        seen: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        _shutdown: tokio::sync::oneshot::Sender<()>,
+    }
+
+    async fn collateral_server(oversized: bool) -> CollateralServer {
+        use axum::routing::post;
+        let seen: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::default();
+        let app = axum::Router::new().route(
+            crate::witness::transport::COLLATERAL_PATH,
+            post({
+                let seen = Arc::clone(&seen);
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        let rendered = headers
+                            .iter()
+                            .map(|(name, value)| {
+                                format!("{}: {}", name, String::from_utf8_lossy(value.as_bytes()))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        seen.lock().unwrap().push((rendered, body.to_vec()));
+                        if oversized {
+                            // Valid collateral, padded past the bound with
+                            // whitespace JSON allows: only the bound refuses it.
+                            format!(
+                                "{COLLATERAL}{}",
+                                " ".repeat(crate::witness::transport::MAX_COLLATERAL_BYTES)
+                            )
+                        } else {
+                            COLLATERAL.to_string()
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+        CollateralServer {
+            base,
+            seen,
+            _shutdown: tx,
+        }
+    }
+
+    /// The contributor's NEAR AI key goes to the gateway only. The collateral
+    /// request to ingest carries it in no header and nowhere in its body.
+    #[tokio::test]
+    async fn the_near_ai_key_is_never_sent_with_the_collateral_request() {
+        const KEY: &str = "sk-near-ai-key-that-must-stay-on-the-gateway-path";
+        let server = collateral_server(false).await;
+        let source =
+            HttpAttestationSource::new(&HostAllowlist::permissive(), &server.base, KEY.into())
+                .expect("the source builds");
+        let quote = hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap();
+        assert!(source.collateral(&quote).await.is_ok(), "collateral served");
+
+        // Positive control: the recorder does capture an Authorization
+        // header when one is sent, so its absence below is a real absence.
+        reqwest::Client::new()
+            .post(format!(
+                "{}{}",
+                server.base,
+                crate::witness::transport::COLLATERAL_PATH
+            ))
+            .bearer_auth("control")
+            .body("{}")
+            .send()
+            .await
+            .expect("the control request is served");
+
+        let seen = server.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        let (headers, body) = &seen[0];
+        assert!(
+            headers.contains("application/json"),
+            "the attestor's request: {headers}"
+        );
+        assert!(!headers.to_ascii_lowercase().contains("authorization"));
+        assert!(!headers.contains(KEY));
+        assert!(!String::from_utf8_lossy(body).contains(KEY));
+        assert!(seen[1].0.contains("authorization: Bearer control"));
+    }
+
+    /// An ingest that answers with a body past the collateral bound is
+    /// refused, not buffered.
+    #[tokio::test]
+    async fn an_oversized_collateral_body_is_refused() {
+        let server = collateral_server(true).await;
+        let source =
+            HttpAttestationSource::new(&HostAllowlist::permissive(), &server.base, "sk".into())
+                .expect("the source builds");
+        let quote = hex::decode(json(ECDSA_REPORT)["intel_quote"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            source.collateral(&quote).await.err(),
+            Some(SourceUnavailable)
+        );
+        assert_eq!(server.seen.lock().unwrap().len(), 1, "the request was made");
     }
 
     #[tokio::test]
