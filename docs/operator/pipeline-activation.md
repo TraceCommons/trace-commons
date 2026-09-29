@@ -154,8 +154,19 @@ it stages anything. A refused receipt leaves no run and no staged object.
   `privacy_classification_failed`.
 
 The HTTP response for all three refusals is the generic `500` label
-`trace commons operation failed`, with no trace text. The label is in the
-hash-only log line.
+`trace commons operation failed`, with no trace text; it does not name the
+refusal. The log line (`Trace Commons ingestion operation failed`) does not
+name it either: it carries `error_hash`, the SHA-256 of the refusal label.
+Match the hash to its label:
+
+| Refusal label | `error_hash` in the log line |
+|---|---|
+| `authority_control_missing` | `sha256:ace28b6e3470e2f5351a7b47cd67562829124903550a18f71c7a614d6c5cb898` |
+| `privacy_control_missing` | `sha256:ee1bbda14beb581a856f01377bc4f99ae20a67027768b44afc0fec0d16ab720f` |
+| `privacy_classification_failed` | `sha256:eb9a2cfa8cab96c6cee0eab15377b489ba143ae27a68b54cc284dbb053225b1f` |
+
+To check a hash, compute it from the label:
+`printf %s authority_control_missing | shasum -a 256`.
 
 The stored source is the content after the boundary's re-scrub, and the
 boundary's findings feed Admission's privacy risk. The replay identity does
@@ -387,8 +398,20 @@ to NEAR.
   by default).
 - An error on one run's payout marks that leg's payout `failed` with a
   label, and the pass goes on to the next run. Only a database error ends
-  the pass. The worker does not retry a `failed` payout. Only a direct
+  the pass. The worker does not retry a `failed` payout, including one that
+  another ingest replica failed after this pass listed it. Only a direct
   `process_payout` for the run takes it up again.
+- This release has no operator route or tool that retries a `failed`
+  payout: nothing an operator can reach calls `process_payout`. An operator
+  sees the leg's payout as `failed` with its label (for example
+  `near_submit_failed`) in the run's forensic trace
+  (`GET /v1/admin/pipeline/runs/{run_id}/forensic`) and in the contributor
+  status, the outbox line as `failed` in the operational summary's NEAR
+  outbox counts, and the settled credit itself unchanged. The payout stays
+  `failed`: nothing in this release takes it up again. A later release adds
+  an operator retry route. A failed submit may still have reached NEAR, so
+  until then check a `failed` payout's outbox line against NEAR by hand, as
+  for `settlement_unreconciled` below.
 - When a submission stops being operable after its payout reached the NEAR
   outbox, the leg is marked `settlement_unreconciled`: the transfer may have
   happened. Find the leg's outbox row and reconcile it by hand. The
