@@ -18651,6 +18651,167 @@ async fn two_payout_passes_at_once_submit_one_line_once() {
     assert_eq!(near.submits.load(Ordering::SeqCst), 1);
 }
 
+/// A NEAR adapter that counts every `submit` call, delegates to a shared
+/// `RecordingNearAdapter`, and holds its first confirmation lookup open until
+/// the test lets it go: a payout pass caught after it listed its work and
+/// before it took the tenant lock for its submits.
+struct ConfirmationHoldingNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    submits: AtomicUsize,
+    lookups: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ConfirmationHoldingNearAdapter {
+    fn new(inner: Arc<RecordingNearAdapter>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submits: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
+    fn dependency_identity(&self) -> &str {
+        "confirmation_holding_near_test_only"
+    }
+
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        self.submits.fetch_add(1, Ordering::SeqCst);
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        if self.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Ruling F-I3: the payout pass never submits a `failed` payout again, even
+/// one that failed after the pass listed it as `pending`. The pass lists its
+/// work, then polls a `submitted` payout's confirmation without the lock,
+/// and only then takes the tenant lock for its submits. Here it is held in
+/// that confirmation lookup while a second replica's pass submits the other
+/// run's payout, which fails: its line and its payout are `failed`. When the
+/// first pass takes the lock, it submits nothing: a `failed` payout is taken
+/// up again only by a direct `process_payout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_payout_that_fails_after_the_pass_listed_it_is_not_submitted_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let holding = ConfirmationHoldingNearAdapter::new(recording.clone());
+    let first = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        holding.clone(),
+        None,
+    )
+    .await;
+    let second = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        recording.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-failed-after-listing-{}", uuid::Uuid::new_v4());
+
+    // Run A's payout is submitted and not yet confirmed, so the next pass
+    // polls it before it takes the lock.
+    let submitted = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(second.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(
+        trace_credit_settlement(&second, &tenant, submitted.run_id)
+            .await
+            .payout_state,
+        "submitted"
+    );
+    assert_eq!(recording.requests().len(), 1);
+    // Run B's payout is still to make.
+    let pending = submit_and_complete(&first, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(
+        trace_credit_settlement(&first, &tenant, pending.run_id)
+            .await
+            .payout_state,
+        "pending"
+    );
+
+    // The first pass lists both, and is held in run A's confirmation lookup.
+    let first_pass = {
+        let first = first.clone();
+        let tenant = tenant.clone();
+        tokio::spawn(async move { first.process_payouts(&tenant, 32).await })
+    };
+    tokio::time::timeout(HELD_CALL_BOUND, holding.entered.notified())
+        .await
+        .expect("the first pass reaches its confirmation lookup");
+
+    // Meanwhile a second replica's pass submits run B's payout, which fails.
+    recording.fail_next();
+    second.process_payouts(&tenant, 32).await.unwrap();
+    let failed = trace_credit_settlement(&second, &tenant, pending.run_id).await;
+    assert_eq!(failed.payout_state, "failed");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL)
+    );
+    let batch_id = failed
+        .settlement_batch_id
+        .expect("run B's leg carries its batch");
+    let line_status = |rows: Vec<NearOutboxRow>| {
+        rows.into_iter()
+            .find(|row| row.settlement_batch_id == batch_id)
+            .expect("run B's payout has its outbox line")
+            .status
+    };
+    assert_eq!(
+        line_status(near_outbox_rows(&backend, &tenant).await),
+        "failed"
+    );
+
+    // Released: the first pass takes the lock and submits nothing.
+    holding.release.notify_one();
+    tokio::time::timeout(HELD_CALL_BOUND, first_pass)
+        .await
+        .expect("the first pass finishes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        holding.submits.load(Ordering::SeqCst),
+        0,
+        "the pass does not submit a payout that failed after it was listed"
+    );
+    assert_eq!(recording.requests().len(), 1, "only run A was ever sent");
+    let still_failed = trace_credit_settlement(&first, &tenant, pending.run_id).await;
+    assert_eq!(still_failed.payout_state, "failed");
+    assert_eq!(
+        still_failed.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL)
+    );
+    assert_eq!(
+        line_status(near_outbox_rows(&backend, &tenant).await),
+        "failed"
+    );
+}
+
 /// Finding I1: the payout shares the tenant's NEAR submit lock with `main`'s
 /// NEAR outbox submitter (`try_acquire_near_credit_submit_lock`), so the two
 /// never submit for one tenant at once: while `main` holds it, the payout

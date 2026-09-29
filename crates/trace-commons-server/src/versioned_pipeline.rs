@@ -8262,7 +8262,7 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.process_payout_on(client, tenant_id, run_id, true)
+                self.process_payout_on(client, tenant_id, run_id, true, true)
                     .await
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
@@ -8286,7 +8286,9 @@ impl PipelineService {
 
     /// Pays out `run_ids` on `client`, recording a per-run error on its leg
     /// and going on (Ruling T10-5). `may_submit` is true only on the
-    /// connection that holds the tenant's NEAR submit lock.
+    /// connection that holds the tenant's NEAR submit lock. The pass never
+    /// takes up a `failed` payout again (Ruling F-I3), including one that
+    /// failed after the pass listed it: only `process_payout` retries one.
     async fn pay_out_runs_on(
         &self,
         client: &mut deadpool_postgres::Client,
@@ -8297,7 +8299,7 @@ impl PipelineService {
         let mut processed = 0;
         for &run_id in run_ids {
             match self
-                .process_payout_on(client, tenant_id, run_id, may_submit)
+                .process_payout_on(client, tenant_id, run_id, may_submit, false)
                 .await
             {
                 Ok(run) => {
@@ -8328,13 +8330,14 @@ impl PipelineService {
     }
 
     /// `process_payout`'s body, on `client`. `may_submit` as in
-    /// `pay_out_runs_on`.
+    /// `pay_out_runs_on`; `retry_failed` as in `dispatch_near_settlements`.
     async fn process_payout_on(
         &self,
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
         run_id: Uuid,
         may_submit: bool,
+        retry_failed: bool,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
@@ -8348,15 +8351,16 @@ impl PipelineService {
             return Ok(None);
         };
         if run.state == PipelineRunState::Complete {
-            self.dispatch_near_settlements(client, &run, may_submit)
+            self.dispatch_near_settlements(client, &run, may_submit, retry_failed)
                 .await?;
         }
         Ok(Some(run))
     }
 
     /// Port lines 5114 to 5309, for PR 3. For each completed `trace_credit`
-    /// leg of `run` on the `near` rail whose payout is `pending`,
-    /// `submitted`, or `failed`, pays each line of the leg's finalized batch
+    /// leg of `run` on the `near` rail whose payout is `pending` or
+    /// `submitted` -- or `failed`, only when `retry_failed` -- pays each line
+    /// of the leg's finalized batch
     /// through one `trace_near_credit_outbox` row, keyed by
     /// `pipeline_near_outbox_line_id` and tagged `instrument_id =
     /// 'trace_credit'`, then records the leg's payout state. It submits only
@@ -8395,6 +8399,11 @@ impl PipelineService {
     ///   (`NearPayoutAdapter::submit`).
     /// - A failed submit marks the line and the payout `failed` under
     ///   `near_submit_failed`; the pass does not list it again.
+    /// - `retry_failed` is true only from a direct `process_payout`
+    ///   (Ruling F-I3). Without it, a `failed` payout, or a `failed` line of
+    ///   a payout still `pending`, is never submitted again: another replica
+    ///   can fail a payout after this pass listed it as `pending`, and the
+    ///   re-read here sees that.
     /// - Confirmation evidence is hash-only (else `near_confirmation_invalid`);
     ///   the evidence and the `confirmed` status commit together.
     async fn dispatch_near_settlements(
@@ -8402,6 +8411,7 @@ impl PipelineService {
         client: &mut deadpool_postgres::Client,
         run: &PipelineRunRecord,
         may_submit: bool,
+        retry_failed: bool,
     ) -> anyhow::Result<()> {
         let Some((adapter, config)) = self.payout.as_ref() else {
             return Ok(());
@@ -8433,10 +8443,11 @@ impl PipelineService {
             settlement.instrument_id == InstrumentId::trace_credit().as_str()
                 && settlement.operation_state == "complete"
                 && settlement.payout_rail == "near"
-                && matches!(
-                    settlement.payout_state.as_str(),
-                    "pending" | "submitted" | "failed"
-                )
+                && match settlement.payout_state.as_str() {
+                    "pending" | "submitted" => true,
+                    "failed" => retry_failed,
+                    _ => false,
+                }
         }) {
             let Some(batch_id) = settlement.settlement_batch_id else {
                 continue;
@@ -8510,6 +8521,7 @@ impl PipelineService {
                 let outbox_id = *outbox_id;
                 match status.as_deref() {
                     Some("confirmed") | Some("disabled") => continue,
+                    Some("failed") if !retry_failed => continue,
                     Some("submitted") => {}
                     _ => {
                         if !may_submit {
