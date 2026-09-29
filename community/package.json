@@ -1,7 +1,7 @@
 {
   "scripts": {
     "check": "node scripts/check-community-site.mjs",
-    "test": "node --test scripts/",
+    "test": "node --test scripts/aasa.test.mjs",
     "render:aasa": "node scripts/render-aasa.mjs",
     "deploy:pages": "npm run render:aasa && npm run check && npm test && wrangler pages deploy public --project-name trace-commons-community --branch main --commit-dirty=true",
     "deploy:pages:preview": "npm run render:aasa && npm run check && npm test && wrangler pages deploy public --project-name trace-commons-community",

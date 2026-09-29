@@ -1167,6 +1167,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      # Pinned to the version the Tauri jobs use. `node --test` with a directory
+      # argument is a module path on Node 22 (the runner default), so
+      # `npm test` names the test file explicitly.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Site checks and AASA tests
         working-directory: community
         env:
