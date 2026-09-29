@@ -6197,6 +6197,11 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         account_unbound_ceiling: Arc::new(
             trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
         ),
+        account_native_creation_cap: Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
+                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ),
+        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -27593,6 +27598,11 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         account_ceremony_store: Arc::new(CeremonyStore::new()),
         account_unbound_ceiling: Arc::new(
             trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
+        ),
+        account_native_creation_cap: Arc::new(
+            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
+                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
+            ),
         ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),

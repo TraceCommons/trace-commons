@@ -257,6 +257,14 @@ export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value;
   `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
   again only after the count has dropped below and reached it a second time.
   Alert on it.
+- Each client IP (as the per-IP rate limiter reads it) may make at most
+  `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` successful
+  `create/finish` calls in a rolling 24 hours; the next gets the uniform deny.
+  Unset means **10**; `0` refuses every creation; a value that is not a
+  non-negative integer fails startup. The count is held in process, like the
+  per-minute limits, and holds only a salted hash of each IP: nothing about
+  the caller's address is written to the database. A restart clears it, and
+  with more than one ingest instance each keeps its own count.
 - Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
   capped and needs no new setting; like the browser sign-in it needs the
   login-resolver pool above.
