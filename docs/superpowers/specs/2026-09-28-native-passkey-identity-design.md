@@ -126,9 +126,8 @@ P10. **Two decisions on adjacent #1118 work**, recorded here so they are not
     lost. The embedded IronWire proof checker (#1128) requires Intel TCB
     status `UpToDate`, matching the server drill. The invite-lookup pay range
     (#1121) is shown to code holders only, labelled an estimate that is not yet
-    settled, and is to be listed in the counsel checklist
-    (`docs/legal-counsel-review-checklist.md`); #1121 does not carry that row
-    yet.
+    settled, and is listed in the counsel checklist
+    (`docs/legal-counsel-review-checklist.md`, added in #1121).
 
 ## Repo invariants this design must honor
 
