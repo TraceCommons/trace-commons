@@ -368,14 +368,19 @@ pub fn microcredits_to_settled_i64(amount: Microcredits) -> anyhow::Result<i64> 
     i64::try_from(amount.get()).map_err(|_| anyhow::anyhow!("credit_amount_overflow"))
 }
 
+/// The NEAR `settle_credit_receipt` call that pays one batch line out, on
+/// `near_contract_id` -- the contract `main`'s legacy NEAR path is
+/// configured with (Ruling T10-4). The contract is part of the call's
+/// idempotency key. (The port's name is kept.)
 pub fn disabled_near_call(
+    near_contract_id: &str,
     settlement_batch_id: Uuid,
     credit_account_hash: &str,
     source_list_hash: &str,
     amount_micros: i64,
 ) -> anyhow::Result<NearCreditReceiptCall> {
     NearCreditReceiptCall::settle(
-        "pipeline.test.near",
+        near_contract_id,
         NearCreditReceipt {
             settlement_batch_id,
             credit_account_hash: credit_account_hash.to_string(),
@@ -511,6 +516,7 @@ mod tests {
     async fn recording_near_adapter_collapses_a_repeated_key_and_confirms_only_a_submitted_one() {
         let adapter = RecordingNearAdapter::new();
         let call = disabled_near_call(
+            "trace-credits.testnet",
             Uuid::from_u128(1),
             &format!("sha256:{}", "1".repeat(64)),
             &format!("sha256:{}", "2".repeat(64)),

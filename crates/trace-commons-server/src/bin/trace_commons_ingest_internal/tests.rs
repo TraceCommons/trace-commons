@@ -10282,6 +10282,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        None,
     )
     .err()
     .unwrap();
@@ -10518,6 +10519,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        None,
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10536,6 +10538,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        None,
     )
     .unwrap()
     .unwrap();
@@ -10792,7 +10795,7 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
 /// service that is missing just one of those two controls, to isolate
 /// T2-2's own contribution to the overall qualification check from the
 /// pre-existing scorer/embedder/index/settlement checks. `payout`, when
-/// given, is the NEAR payout adapter and whether payout is enabled.
+/// given, is the NEAR payout adapter and its configuration.
 fn qualified_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -10801,7 +10804,7 @@ fn qualified_pipeline_service(
     include_privacy: bool,
     payout: Option<(
         Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
-        bool,
+        trace_commons_server::versioned_pipeline::PipelinePayoutConfig,
     )>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
@@ -10856,14 +10859,8 @@ fn qualified_pipeline_service(
     if include_privacy {
         builder = builder.with_privacy(Arc::new(QualifiedTestPrivacy));
     }
-    if let Some((adapter, enabled)) = payout {
-        builder = builder.with_payout(
-            adapter,
-            trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
-                enabled,
-                require_confirmation_evidence: true,
-            },
-        );
+    if let Some((adapter, config)) = payout {
+        builder = builder.with_payout(adapter, config);
     }
     Ok(Arc::new(builder.build()?))
 }
@@ -10986,6 +10983,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         PipelineLeaseConfig::default(),
         true,
         false,
+        None,
     )
     .err()
     .expect("an unqualified dependency with routed tenants and no opt-in is refused");
@@ -11010,6 +11008,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         PipelineLeaseConfig::default(),
         true,
         true,
+        None,
     )
     .expect("the opt-in lets an unqualified dependency start")
     .expect("an assembler was given, so a service is returned");
@@ -11032,6 +11031,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         PipelineLeaseConfig::default(),
         false,
         true,
+        None,
     )
     .err()
     .expect("the test opt-in never combines with the required flag");
@@ -11057,6 +11057,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         PipelineLeaseConfig::default(),
         true,
         false,
+        None,
     )
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
@@ -11082,6 +11083,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         PipelineLeaseConfig::default(),
         true,
         false,
+        None,
     )
     .err()
     .expect("a missing authority provider with routed tenants and no opt-in is refused");
@@ -11106,6 +11108,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         PipelineLeaseConfig::default(),
         true,
         false,
+        None,
     )
     .err()
     .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
@@ -11149,6 +11152,104 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     }
 }
 
+/// The NEAR credit contract the payout tests configure.
+const TEST_PAYOUT_NEAR_CONTRACT: &str = "trace-credits.testnet";
+
+/// A payout configuration with confirmation evidence required.
+fn payout_test_config(
+    enabled: bool,
+    near_contract_id: Option<&str>,
+) -> trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
+    trace_commons_server::versioned_pipeline::PipelinePayoutConfig {
+        enabled,
+        require_confirmation_evidence: true,
+        near_contract_id: near_contract_id.map(str::to_string),
+    }
+}
+
+/// Builds a qualified service whose payout is enabled on `near_contract_id`,
+/// or, when that is `None`, on the contract ingest hands the assembly in
+/// its context (what a correct assembly does, Ruling T10-4).
+struct PayoutAssembler {
+    near_contract_id: Option<&'static str>,
+}
+
+impl IngestPipelineRuntimeAssembler for PayoutAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        let near_contract_id = self
+            .near_contract_id
+            .map(str::to_string)
+            .or(context.near_contract_id);
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+            true,
+            true,
+            Some((
+                Arc::new(QualifiedTestNearAdapter(
+                    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::new(),
+                )),
+                payout_test_config(true, near_contract_id.as_deref()),
+            )),
+        )
+    }
+}
+
+/// Ruling T10-4: an enabled payout names the NEAR credit contract `main` is
+/// configured with. Ingest hands that contract to the assembly and refuses a
+/// runtime whose payout names another one, or any one when `main` has none.
+#[tokio::test]
+async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |assembler: &PayoutAssembler, configured: Option<&str>| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            true,
+            false,
+            configured,
+        )
+    };
+
+    let service = assemble(
+        &PayoutAssembler {
+            near_contract_id: None,
+        },
+        Some(TEST_PAYOUT_NEAR_CONTRACT),
+    )
+    .expect("a payout on the configured contract starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(service.payout_enabled());
+    assert_eq!(
+        service.payout_near_contract_id(),
+        Some(TEST_PAYOUT_NEAR_CONTRACT)
+    );
+
+    for configured in [Some(TEST_PAYOUT_NEAR_CONTRACT), None] {
+        let error = assemble(
+            &PayoutAssembler {
+                near_contract_id: Some("other-credits.testnet"),
+            },
+            configured,
+        )
+        .err()
+        .expect("a payout on another contract is refused");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_runtime_near_contract_mismatch",
+            "configured {configured:?}"
+        );
+    }
+}
+
 /// Task 10: the NEAR payout adapter counts toward production qualification
 /// only when payout is enabled. An otherwise fully qualified service is
 /// refused with an enabled payout on the unqualified `RecordingNearAdapter`,
@@ -11169,7 +11270,10 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
             None,
             true,
             true,
-            Some((adapter, enabled)),
+            Some((
+                adapter,
+                payout_test_config(enabled, Some(TEST_PAYOUT_NEAR_CONTRACT)),
+            )),
         )
         .expect("build the pipeline service")
     };
@@ -11208,6 +11312,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         PipelineLeaseConfig::default(),
         false,
         false,
+        None,
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")
     .expect("an assembler was given, so a service is returned");
@@ -87208,6 +87313,226 @@ async fn settlement_submit_worker_reads_db_authoritative_candidate_status() {
         calls.lock().expect("calls lock").len(),
         0,
         "external submitter is never called for a DB-submitted row"
+    );
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// A versioned-pipeline payout row in `trace_near_credit_outbox` (a
+/// non-NULL `instrument_id`, V94) of `tenant_id`, `pending`, with its own
+/// finalized `trace_credit` batch, written as the pipeline writes one.
+/// Returns the row's `near_outbox_id`.
+async fn insert_pipeline_near_outbox_row(backend: &PgBackend, tenant_id: &str) -> Uuid {
+    let batch_id = Uuid::new_v4();
+    let near_outbox_id = Uuid::new_v4();
+    let list_hash = sha256_prefixed(&format!("pipeline-batch:{batch_id}"));
+    let account_hash = sha256_prefixed("pipeline-account");
+    let call = NearCreditReceiptCall::settle(
+        "trace-credits.testnet",
+        NearCreditReceipt {
+            settlement_batch_id: batch_id,
+            credit_account_hash: account_hash.clone(),
+            policy_version: "pipeline-internal-v1".to_string(),
+            source_list_hash: list_hash.clone(),
+            attestation_hash: list_hash.clone(),
+            amount_micros: 1_000_000,
+            issuer_signature_hash: list_hash.clone(),
+        },
+    )
+    .expect("pipeline NEAR call");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("seed tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set seed tenant context");
+    tx.execute(
+        "INSERT INTO trace_credit_settlement_batches (
+            tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+            source_list_hash, settled_credit_points, settled_credit_micros,
+            actor_principal_ref, instrument_id
+         ) VALUES ($1, $2, 'pipeline-internal-v1', 'finalized', $3, $3, '1', 1000000,
+                   'principal_sha256:pipeline', 'trace_credit')",
+        &[&tenant_id, &batch_id, &list_hash],
+    )
+    .await
+    .expect("insert pipeline batch");
+    tx.execute(
+        "INSERT INTO trace_near_credit_outbox (
+            tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
+            near_call_json, status, instrument_id
+         ) VALUES ($1, $2, $3, $4, $5, 'pending', 'trace_credit')",
+        &[
+            &tenant_id,
+            &near_outbox_id,
+            &batch_id,
+            &account_hash,
+            &serde_json::to_value(&call).expect("call json"),
+        ],
+    )
+    .await
+    .expect("insert pipeline outbox row");
+    tx.commit().await.expect("commit seed");
+    near_outbox_id
+}
+
+/// The whole `trace_near_credit_outbox` row `near_outbox_id`, as text.
+async fn near_outbox_row_text(
+    backend: &PgBackend,
+    tenant_id: &str,
+    near_outbox_id: Uuid,
+) -> String {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("conn");
+    let tx = client.transaction().await.expect("read tx");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant_id],
+    )
+    .await
+    .expect("set read tenant context");
+    let text: String = tx
+        .query_one(
+            "SELECT to_jsonb(o)::TEXT FROM trace_near_credit_outbox o
+              WHERE tenant_id = $1 AND near_outbox_id = $2",
+            &[&tenant_id, &near_outbox_id],
+        )
+        .await
+        .expect("read outbox row")
+        .get(0);
+    tx.commit().await.expect("commit read");
+    text
+}
+
+/// Ruling T10-3: `main`'s NEAR outbox workers never submit or confirm a
+/// versioned-pipeline payout row (a non-NULL `instrument_id`); the pipeline
+/// pays those through its own NEAR payout adapter. The submit worker still
+/// submits the legacy row, the confirm worker still confirms it, and the
+/// pipeline row stays byte-identical through both, as `pending` and then as
+/// a confirm candidate (`submitted` with a transaction hash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn near_credit_outbox_workers_never_touch_a_pipeline_payout_row() {
+    let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let fake_submitter = FakeNearCreditSubmitter::default();
+    let submit_calls = fake_submitter.calls.clone();
+    Arc::make_mut(&mut state).near_credit_submitter = Some(Arc::new(fake_submitter));
+    let fake_confirmer = FakeNearCreditConfirmer::default();
+    let confirm_calls = fake_confirmer.calls.clone();
+    Arc::make_mut(&mut state).near_credit_confirmer = Some(Arc::new(fake_confirmer));
+
+    let _ = seed_settlement_credit(&state, "token-a", 1.0).await;
+    let Json(settlement) = credit_settlement_handler(
+        State(state.clone()),
+        auth_headers("admin-token-a"),
+        Json(TraceCreditSettlementRunRequest {
+            dry_run: false,
+            policy_version: "trace-credit-policy-v1".to_string(),
+            reason: "settlement beside a pipeline payout row".to_string(),
+            issuer_approval_evidence_hash: None,
+            near_contract_id: Some("trace-credits.testnet".to_string()),
+            ranking_model_version: None,
+            ranking_target_use: None,
+        }),
+    )
+    .await
+    .expect("settlement creates outbox");
+    assert_eq!(settlement.near_outbox_item_count, 1);
+    let legacy_outbox_id = read_all_near_credit_outbox_items(temp.path(), "tenant-a")
+        .expect("file read")[0]
+        .near_outbox_id;
+    let pipeline_outbox_id = insert_pipeline_near_outbox_row(backend.as_ref(), "tenant-a").await;
+    let pipeline_row = near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await;
+
+    let Json(submitted) = near_credit_outbox_submit_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxSubmitWorkerRequest {
+            purpose: Some("submit beside a pipeline payout row".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("submit worker runs");
+    assert_eq!(submitted.submitted, 1);
+    assert_eq!(
+        submitted.pending, 0,
+        "the pipeline row is no submit candidate"
+    );
+    let calls = submit_calls.lock().expect("calls lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].near_outbox_id, legacy_outbox_id);
+    assert_eq!(
+        near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await,
+        pipeline_row,
+        "the submit worker leaves the pipeline row untouched"
+    );
+
+    // Make the pipeline row a confirm candidate, as the pipeline's own submit
+    // leaves it, and let the confirm worker read the database.
+    backend
+        .update_trace_near_credit_outbox_status(
+            "tenant-a",
+            pipeline_outbox_id,
+            StorageTraceCreditSettlementNearStatus::Submitted,
+            Some(TEST_NEAR_TX_HASH_2.to_string()),
+            None,
+            None,
+        )
+        .await
+        .expect("pipeline row submitted")
+        .expect("pipeline row exists");
+    let pipeline_row = near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await;
+    Arc::make_mut(&mut state).db_reviewer_reads = true;
+    let Json(confirmed) = near_credit_outbox_confirm_worker_handler(
+        State(state.clone()),
+        auth_headers("utility-worker-token-a"),
+        Json(TraceNearCreditOutboxConfirmWorkerRequest {
+            purpose: Some("confirm beside a pipeline payout row".to_string()),
+            dry_run: false,
+            limit: 10,
+        }),
+    )
+    .await
+    .expect("confirm worker runs");
+    assert_eq!(confirmed.confirmed, 1);
+    assert_eq!(
+        confirmed.pending, 0,
+        "the pipeline row is no confirm candidate"
+    );
+    let calls = confirm_calls.lock().expect("calls lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].near_outbox_id, legacy_outbox_id);
+    assert_eq!(
+        near_outbox_row_text(backend.as_ref(), "tenant-a", pipeline_outbox_id).await,
+        pipeline_row,
+        "the confirm worker leaves the pipeline row untouched"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;

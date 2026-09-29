@@ -15,11 +15,19 @@ use super::*;
 /// carries the configured store's label and lease lengths, the same way M11
 /// pins the store name; `assemble_ingest_pipeline_runtime` refuses a service
 /// that does not.
+///
+/// `near_contract_id` is the NEAR credit contract `main`'s legacy NEAR path
+/// is configured with (`TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`).
+/// An assembly that enables payout passes it as
+/// `PipelinePayoutConfig::near_contract_id` (Ruling T10-4);
+/// `assemble_ingest_pipeline_runtime` refuses an enabled payout that names
+/// another contract, or any contract when none is configured.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
     pub object_store_name: String,
     pub lease_config: PipelineLeaseConfig,
+    pub near_contract_id: Option<String>,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -55,6 +63,9 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// `pipeline_test_dependencies_not_allowed_when_required`, regardless of
 /// qualification. The caller resolves both booleans from the environment (or
 /// from the tenant rollout gates); this function reads neither directly.
+/// `near_contract_id` is `main`'s configured NEAR credit contract, handed to
+/// the assembly in its context.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
     db_connections: Option<&TraceCorpusDbConnections>,
@@ -63,6 +74,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     lease_config: PipelineLeaseConfig,
     tenants_routed: bool,
     allow_test_dependencies: bool,
+    near_contract_id: Option<&str>,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -86,6 +98,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         artifact_store: configured_store.store.clone(),
         object_store_name: object_store_name.clone(),
         lease_config,
+        near_contract_id: near_contract_id.map(str::to_string),
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
@@ -99,6 +112,13 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     anyhow::ensure!(
         service.lease_config() == lease_config,
         "pipeline_runtime_lease_config_mismatch"
+    );
+    // Ruling T10-4: an enabled payout pays through the NEAR credit contract
+    // `main` is configured with, never one the assembly picked itself, and
+    // not at all when `main` has none.
+    anyhow::ensure!(
+        !service.payout_enabled() || service.payout_near_contract_id() == near_contract_id,
+        "pipeline_runtime_near_contract_mismatch"
     );
     if (production_required || tenants_routed)
         && !pipeline_runtime_is_production_qualified(&service)

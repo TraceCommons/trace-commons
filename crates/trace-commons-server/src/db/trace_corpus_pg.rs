@@ -132,14 +132,15 @@ const TRACE_CREDIT_HOLD_COLUMNS: &str = "\
 const TRACE_NEAR_CREDIT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash, near_call_json, \
     status, payout_near_account_id, created_at, submitted_at, near_transaction_hash, \
-    last_error_hash, confirmed_at";
+    last_error_hash, confirmed_at, instrument_id";
 
-// The account-hold outbox table has no payout designation; project a typed NULL
-// so the shared `row_to_near_credit_outbox_item` mapper can read the column.
+// The account-hold outbox table has no payout designation and no pipeline
+// instrument; project typed NULLs so the shared `row_to_near_credit_outbox_item`
+// mapper can read both columns.
 const TRACE_NEAR_CREDIT_ACCOUNT_OUTBOX_COLUMNS: &str = "\
     tenant_id, near_outbox_id, credit_hold_id AS settlement_batch_id, credit_account_hash, \
     near_call_json, status, NULL::text AS payout_near_account_id, created_at, submitted_at, \
-    near_transaction_hash, last_error_hash, confirmed_at";
+    near_transaction_hash, last_error_hash, confirmed_at, NULL::text AS instrument_id";
 
 const TRACE_BENCHMARK_REGISTRY_OUTBOX_COLUMNS: &str = "\
     tenant_id, benchmark_outbox_id, conversion_id, operation, registry_ref, \
@@ -627,6 +628,7 @@ fn row_to_near_credit_outbox_item(
         near_transaction_hash: row.get("near_transaction_hash"),
         last_error_hash: row.get("last_error_hash"),
         confirmed_at: row.get("confirmed_at"),
+        instrument_id: row.get("instrument_id"),
     })
 }
 

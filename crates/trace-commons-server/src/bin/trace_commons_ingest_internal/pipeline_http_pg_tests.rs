@@ -338,6 +338,7 @@ fn assemble_test_pipeline_service(
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         true,
         true,
+        None,
     )
     .expect("assemble the injected pipeline runtime")
     .expect("an assembler was given, so a service is returned")

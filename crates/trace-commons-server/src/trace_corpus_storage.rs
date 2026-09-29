@@ -925,6 +925,11 @@ pub struct TraceNearCreditOutboxItemRecord {
     pub near_transaction_hash: Option<String>,
     pub last_error_hash: Option<String>,
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// Set (V94) only on a versioned-pipeline payout row, which the
+    /// pipeline submits and confirms through its own NEAR payout adapter;
+    /// `None` on every row `main` writes, and on every account-hold row.
+    #[serde(default)]
+    pub instrument_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

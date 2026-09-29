@@ -3833,6 +3833,7 @@ impl AppState {
             pipeline_lease_config,
             pipeline_receipts_tenants_routed,
             pipeline_allow_test_dependencies,
+            credit_settlement_near_contract_id.as_deref(),
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
@@ -29969,7 +29970,7 @@ async fn run_near_credit_outbox_submit_worker(
     // Preview snapshot, used ONLY for the dry_run report. The live submit path
     // re-reads candidates UNDER the advisory lock below so a run that waited on the
     // lock observes the prior run's committed writes (never a stale pre-lock read).
-    let preview_items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let preview_items = read_near_credit_outbox_items_for_worker(state, tenant).await?;
     let preview_pending_total = preview_items
         .iter()
         .filter(|item| near_credit_outbox_item_is_submit_candidate(item))
@@ -30173,7 +30174,7 @@ async fn run_near_credit_outbox_confirm_worker(
     let limit = request
         .limit
         .clamp(1, TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT) as usize;
-    let items = read_near_credit_outbox_items_for_admin(state, tenant).await?;
+    let items = read_near_credit_outbox_items_for_worker(state, tenant).await?;
     let pending_total = items
         .iter()
         .filter(|item| near_credit_outbox_item_is_confirm_candidate(item))
@@ -31742,6 +31743,24 @@ async fn read_near_credit_outbox_items_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    read_near_credit_outbox_items(state, tenant, true).await
+}
+
+/// `read_near_credit_outbox_items_for_admin` for the NEAR outbox workers: the
+/// same read, without the versioned pipeline's payout rows
+/// (`near_credit_outbox_record_is_pipeline_payout`).
+async fn read_near_credit_outbox_items_for_worker(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
+    read_near_credit_outbox_items(state, tenant, false).await
+}
+
+async fn read_near_credit_outbox_items(
+    state: &AppState,
+    tenant: &TenantAuth,
+    include_pipeline_payout_rows: bool,
+) -> anyhow::Result<Vec<TraceNearCreditOutboxItem>> {
     if state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
         let db = state
             .db_mirror
@@ -31752,10 +31771,25 @@ async fn read_near_credit_outbox_items_for_admin(
             .await
             .context("failed to read NEAR credit outbox items from DB mirror")?
             .into_iter()
+            .filter(|record| {
+                include_pipeline_payout_rows
+                    || !near_credit_outbox_record_is_pipeline_payout(record)
+            })
             .map(near_credit_outbox_item_from_storage)
             .collect();
     }
     read_all_near_credit_outbox_items(&state.root, &tenant.tenant_id)
+}
+
+/// A versioned-pipeline payout row (a non-NULL `instrument_id`, V94). The
+/// pipeline submits and confirms those through its own NEAR payout adapter,
+/// so `main`'s NEAR outbox workers never select one (Ruling T10-3): one
+/// payout is never submitted twice, through two adapters. Admin listings
+/// still show it. The file store never holds one.
+fn near_credit_outbox_record_is_pipeline_payout(
+    record: &StorageTraceNearCreditOutboxItemRecord,
+) -> bool {
+    record.instrument_id.is_some()
 }
 
 /// Read submit candidates (`pending`/`failed` rows) for the under-lock submit pass.
@@ -31778,6 +31812,7 @@ async fn read_near_credit_outbox_submit_candidates_authoritative(
             .await
             .context("failed to read DB-authoritative NEAR credit outbox candidates")?
             .into_iter()
+            .filter(|record| !near_credit_outbox_record_is_pipeline_payout(record))
             .map(near_credit_outbox_item_from_storage)
             .collect::<anyhow::Result<Vec<_>>>()?
     } else {

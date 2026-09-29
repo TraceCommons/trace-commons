@@ -16356,8 +16356,12 @@ fn near_rail_trace_credit_adapter() -> Arc<dyn SettlementAdapter> {
     )
 }
 
+/// The NEAR credit contract the payout tests configure, as `main`'s own NEAR
+/// tests do (Ruling T10-4).
+const PAYOUT_TEST_NEAR_CONTRACT: &str = "trace-credits.testnet";
+
 /// Like `test_service_with_adapters`, with NEAR payout enabled through
-/// `near`, and an optional crash point.
+/// `near` on `PAYOUT_TEST_NEAR_CONTRACT`, and an optional crash point.
 async fn payout_test_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
@@ -16391,6 +16395,7 @@ async fn payout_test_service(
         PipelinePayoutConfig {
             enabled: true,
             require_confirmation_evidence: true,
+            near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
         },
     );
     if let Some(crash_point) = crash_point {
@@ -16476,6 +16481,7 @@ struct NearOutboxRow {
     status: String,
     instrument_id: Option<String>,
     amount_micros: Option<i64>,
+    near_call_json: serde_json::Value,
 }
 
 /// Every `trace_near_credit_outbox` row of `tenant_id`.
@@ -16489,7 +16495,8 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
     let rows = tx
         .query(
             "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
-                    (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros
+                    (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros,
+                    near_call_json
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1
               ORDER BY created_at, near_outbox_id",
@@ -16505,6 +16512,7 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
             status: row.get("status"),
             instrument_id: row.get("instrument_id"),
             amount_micros: row.get("amount_micros"),
+            near_call_json: row.get("near_call_json"),
         })
         .collect()
 }
@@ -16905,4 +16913,296 @@ async fn a_failed_near_submit_fails_the_payout_until_the_run_is_paid_again() {
     let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(settlement.payout_state, "submitted");
     assert_eq!(settlement.last_error_label, None);
+}
+
+/// Ruling T10-4: every payout call names the NEAR credit contract the
+/// payout is configured with -- `main`'s configured contract -- and that
+/// contract is part of the call's idempotency key. An enabled payout with no
+/// contract is refused when the service is built.
+#[tokio::test]
+async fn payout_calls_name_the_configured_near_contract() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-contract-{}", uuid::Uuid::new_v4());
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    let call: trace_commons_server::near_credit::NearCreditReceiptCall =
+        serde_json::from_value(outbox[0].near_call_json.clone()).unwrap();
+    assert_eq!(call.contract_id, PAYOUT_TEST_NEAR_CONTRACT);
+    call.validate()
+        .expect("the stored call's idempotency key covers its contract");
+    let elsewhere = trace_commons_server::near_credit::NearCreditReceiptCall::raw(
+        "other-credits.testnet",
+        call.method_name.clone(),
+        call.args.clone(),
+    )
+    .unwrap();
+    assert_ne!(
+        elsewhere.idempotency_key, call.idempotency_key,
+        "another contract is another call"
+    );
+    assert_eq!(near.requests()[0].idempotency_key, call.idempotency_key);
+
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &trace_credit_only_config(),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let refused = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(vec![near_rail_trace_credit_adapter()]).unwrap(),
+        uncapped_caps(&[InstrumentId::trace_credit().as_str()]),
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_payout(
+        near,
+        PipelinePayoutConfig {
+            enabled: true,
+            require_confirmation_evidence: true,
+            near_contract_id: None,
+        },
+    )
+    .build()
+    .err()
+    .expect("an enabled payout needs a NEAR contract");
+    assert_eq!(refused.to_string(), "payout_near_contract_missing");
+}
+
+/// Delegates to a shared `RecordingNearAdapter`, but answers the
+/// confirmation of any idempotency key in `bad_keys` with evidence that is
+/// not hash-only.
+struct BadEvidenceNearAdapter {
+    inner: Arc<RecordingNearAdapter>,
+    bad_keys: std::sync::Mutex<BTreeSet<String>>,
+}
+
+#[async_trait::async_trait]
+impl NearPayoutAdapter for BadEvidenceNearAdapter {
+    fn dependency_identity(&self) -> &str {
+        "bad_evidence_near_test_only"
+    }
+
+    async fn submit(
+        &self,
+        call: &trace_commons_server::near_credit::NearCreditReceiptCall,
+    ) -> anyhow::Result<String> {
+        NearPayoutAdapter::submit(self.inner.as_ref(), call).await
+    }
+
+    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+        if self.bad_keys.lock().unwrap().contains(idempotency_key) {
+            return Some(NearConfirmationEvidence {
+                transaction_hash_hash: "plain-transaction-reference".to_string(),
+                receipt_hash: format!("sha256:{}", "b".repeat(64)),
+            });
+        }
+        NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
+    }
+}
+
+/// Ruling T10-5: an error in one run's payout (here, confirmation evidence
+/// that is not hash-only) is recorded on that run's settlement row under a
+/// safe label, and the pass goes on: the next run is still paid in the same
+/// pass. The failed payout is not listed again.
+#[tokio::test]
+async fn a_payout_error_on_one_run_does_not_stop_the_pass() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = Arc::new(BadEvidenceNearAdapter {
+        inner: recording.clone(),
+        bad_keys: std::sync::Mutex::new(BTreeSet::new()),
+    });
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-error-{}", uuid::Uuid::new_v4());
+    let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 2);
+    assert_eq!(recording.requests().len(), 2);
+
+    let first_batch = trace_credit_settlement(&service, &tenant, first.run_id)
+        .await
+        .settlement_batch_id
+        .unwrap();
+    let first_key = near_outbox_rows(&backend, &tenant)
+        .await
+        .into_iter()
+        .find(|row| row.settlement_batch_id == first_batch)
+        .expect("the first run's outbox line")
+        .near_call_json["idempotency_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    near.bad_keys.lock().unwrap().insert(first_key);
+    confirm_every_near_request(&recording);
+
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        2,
+        "the pass goes on past the first run's error"
+    );
+    let first_leg = trace_credit_settlement(&service, &tenant, first.run_id).await;
+    assert_eq!(first_leg.payout_state, "failed");
+    assert_eq!(
+        first_leg.last_error_label.as_deref(),
+        Some("near_confirmation_invalid")
+    );
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, second.run_id)
+            .await
+            .payout_state,
+        "confirmed",
+        "the second run is paid in the same pass"
+    );
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert_eq!(recording.requests().len(), 2);
+}
+
+/// Ruling T10-6: a withdrawal after a NEAR submit (here, a crash right after
+/// the outbox recorded it) leaves a call that may have taken effect. The next
+/// pass submits nothing, looks nothing up, and flags the payout
+/// `settlement_unreconciled` (PR 2's rule for a dispatched leg), for an
+/// operator to reconcile against NEAR by hand.
+#[tokio::test]
+async fn a_withdrawal_after_a_near_submit_flags_the_payout_unreconciled() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let crashing = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        Some(PipelineCrashPoint::AfterNearSubmit),
+    )
+    .await;
+    let tenant = format!("payout-unreconciled-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
+    let error = crashing
+        .process_payouts(&tenant, 32)
+        .await
+        .expect_err("the payout pass crashes after the submit");
+    assert_eq!(error.to_string(), INJECTED_PIPELINE_CRASH);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "submitted"
+    );
+
+    withdraw(&crashing, &tenant, run.submission_id).await;
+
+    let restarted = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1, "nothing is submitted again");
+    assert_eq!(recording.requests().len(), 1);
+    let leg = trace_credit_settlement(&restarted, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "failed");
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(
+        outbox[0].status, "submitted",
+        "the outbox line is left as sent"
+    );
+    assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert_credit_settled_once(
+        &backend,
+        &restarted,
+        &tenant,
+        run.run_id,
+        "settled before the withdrawal",
+    )
+    .await;
+}
+
+/// Ruling T10-6, PR 2's rule for a dispatched leg: a failed NEAR submit may
+/// still have taken effect (the adapter was called), so a withdrawal after
+/// it flags the payout `settlement_unreconciled` too, and nothing is sent
+/// again. Only a payout with no outbox row -- nothing sent -- ends
+/// `submission_inoperable` (`payout_rechecks_the_guard_before_submit`).
+#[tokio::test]
+async fn a_withdrawal_after_a_failed_near_submit_flags_the_payout_unreconciled() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-failed-unreconciled-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    recording.fail_next();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.submits(), 1);
+    assert_eq!(
+        near_outbox_rows(&backend, &tenant).await[0].status,
+        "failed"
+    );
+
+    withdraw(&service, &tenant, run.submission_id).await;
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    assert_eq!(near.submits(), 1, "nothing is submitted again");
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.payout_state, "failed");
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
+    );
 }
