@@ -13834,7 +13834,7 @@ async fn zero_credit_runs_read_as_zero_not_pending() {
         1,
         "the zero-credit run's attestation entry must not be dropped by a batch-wide error"
     );
-    assert_eq!(entries[0].credit_microcredits, 0);
+    assert_eq!(entries[0].scored_microcredits, 0);
 }
 
 /// Task 13: `operational_summary` counts runs per (phase, state,

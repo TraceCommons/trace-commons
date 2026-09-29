@@ -739,7 +739,7 @@ mod tests {
             bundle_id: format!("sha256:{}", "a".repeat(64)),
             outcome_schema_id: "trace_commons.pipeline_outcome".to_string(),
             outcome_schema_version: 1,
-            credit_microcredits: 42,
+            scored_microcredits: 42,
             decision: serde_json::json!({
                 "awards": [{"instrument_id": "trace_credit", "atomic_units": "42"}]
             }),

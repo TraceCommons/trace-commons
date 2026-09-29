@@ -85,7 +85,7 @@ pub const PIPELINE_EXPORT_SOURCE_INVALIDATED: &str =
 /// (the Tauri app) cannot hold an integer above `2^53` exactly. `AtomicUnits`
 /// already serializes this way on its own; these two
 /// helpers give the same wire shape to the plain-`u64` amount fields in this
-/// module's product record types (`score_microcredits`, `credit_microcredits`,
+/// module's product record types (`score_microcredits`, `scored_microcredits`,
 /// and `PipelineContributorCredit`'s totals) via `#[serde(with = "...")]`.
 mod decimal_amount {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -223,6 +223,9 @@ pub struct PipelineShadowCreditQuality {
     pub chunks_capped: Option<bool>,
 }
 
+/// One run's committed Score outcome, as the versioned score attestation
+/// signs it: the outcome's provenance, the Trace Credit award Score
+/// computed, and the decision itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PipelineScoreAttestationEntry {
     pub submission_id: Uuid,
@@ -231,8 +234,13 @@ pub struct PipelineScoreAttestationEntry {
     pub bundle_id: String,
     pub outcome_schema_id: String,
     pub outcome_schema_version: u32,
+    /// The Trace Credit award Score computed, in microcredits. It is what
+    /// Score decided, not credit that was issued: Settle can still withhold
+    /// the award (one of `main`'s credit checks refused it) or forfeit it (a
+    /// withdrawal came first), and the contributor status says which
+    /// (Ruling F-M7). The same name as `PipelineContributorCredit`'s total.
     #[serde(with = "decimal_amount")]
-    pub credit_microcredits: u64,
+    pub scored_microcredits: u64,
     pub decision: serde_json::Value,
 }
 
@@ -1694,7 +1702,7 @@ fn instrument_status_from_row(row: &Row) -> Result<PipelineInstrumentStatus, Dat
 
 fn attestation_from_row(row: &Row) -> Result<PipelineScoreAttestationEntry, DatabaseError> {
     let decision = row.get::<_, serde_json::Value>("decision");
-    let credit_microcredits = score_microcredits(&decision).ok_or_else(|| {
+    let scored_microcredits = score_microcredits(&decision).ok_or_else(|| {
         DatabaseError::Serialization("score outcome has no microcredit amount".to_string())
     })?;
     let version: i32 = row.get("outcome_schema_version");
@@ -1707,7 +1715,7 @@ fn attestation_from_row(row: &Row) -> Result<PipelineScoreAttestationEntry, Data
         outcome_schema_version: u32::try_from(version).map_err(|_| {
             DatabaseError::Serialization("score outcome schema version is invalid".to_string())
         })?,
-        credit_microcredits,
+        scored_microcredits,
         decision,
     })
 }
@@ -2071,12 +2079,13 @@ mod tests {
             bundle_id: status.bundle_id.clone(),
             outcome_schema_id: "trace_commons.pipeline_score_outcome.v1".to_string(),
             outcome_schema_version: 1,
-            credit_microcredits: UNSAFE_FOR_JS_NUMBER,
+            scored_microcredits: UNSAFE_FOR_JS_NUMBER,
             decision: serde_json::json!({"awards": []}),
         };
         let entry_value = serde_json::to_value(&entry).unwrap();
+        assert!(entry_value.get("credit_microcredits").is_none());
         assert_eq!(
-            entry_value["credit_microcredits"],
+            entry_value["scored_microcredits"],
             serde_json::json!(UNSAFE_FOR_JS_NUMBER.to_string())
         );
         let entry_round_tripped: PipelineScoreAttestationEntry =

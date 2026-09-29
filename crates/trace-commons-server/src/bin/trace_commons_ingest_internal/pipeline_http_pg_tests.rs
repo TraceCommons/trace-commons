@@ -3196,7 +3196,7 @@ async fn pipeline_product_admin_reads_and_score_attestation_are_scoped_to_their_
     let submissions = claims["submissions"].as_array().expect("submissions");
     assert_eq!(submissions.len(), 1, "{claims}");
     assert_eq!(submissions[0]["run_id"], run.run_id.to_string());
-    assert_eq!(submissions[0]["credit_microcredits"], "0");
+    assert_eq!(submissions[0]["scored_microcredits"], "0");
     let (status, other) = get(fixture.base.other_token.clone(), attestation_uri).await;
     assert_eq!(status, StatusCode::OK, "{other}");
     assert_eq!(decode(&other)["submissions"], serde_json::json!([]));
