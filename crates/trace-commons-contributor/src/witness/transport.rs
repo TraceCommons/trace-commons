@@ -2525,6 +2525,7 @@ mod tests {
         std::fs::write(dir.path().join(format!("{reference}.res")), response).expect("res");
 
         let row = crate::routing::RoutedExchange {
+            proof: None,
             id: Some(3),
             started_at: chrono::Utc::now(),
             client_session_id: Some("session".to_string()),

@@ -194,6 +194,7 @@ mod tests {
 
     fn row(session: Option<&str>, offset: i64) -> RoutedExchange {
         RoutedExchange {
+            proof: None,
             id: None,
             started_at: at(offset),
             client_session_id: session.map(str::to_string),
