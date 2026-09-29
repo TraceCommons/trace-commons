@@ -6081,6 +6081,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         tenant_policies: Arc::new(tenant_policies),
         require_tenant_submission_policy,
         db_mirror,
+        pipeline_service: None,
+        pipeline_runtime_required: false,
+        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -10280,6 +10283,909 @@ fn tenant_rollout_gate_dependency_requires_matching_tenant_scope() {
     )
     .expect_err("missing tenant-scoped dependency is rejected");
     assert!(missing.to_string().contains("missing dependency"));
+}
+
+#[test]
+fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
+    let error = assemble_ingest_pipeline_runtime(
+        None,
+        None,
+        None,
+        true,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_required_but_not_injected"
+    );
+}
+
+/// An out-of-range or unparsable
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_*` refuses startup with the safe
+/// label `pipeline_lease_config_invalid`, never a raw parse error or a
+/// silently accepted value. Uses the real variable names -- no other test in
+/// this suite reads them, so setting and clearing them here does not race
+/// another test's env state.
+#[test]
+fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
+    // SAFETY: env mutation in tests is OK here -- these three variables are
+    // read only by `parse_pipeline_lease_config_from_env`, which nothing
+    // else in this suite calls concurrently.
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
+    }
+
+    // Unset every variable: the defaults, unchanged.
+    let defaults = parse_pipeline_lease_config_from_env().expect("defaults parse");
+    assert_eq!(defaults, PipelineLeaseConfig::default());
+
+    // Out of range (two hours plus one second): refused with the safe label.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "7201") };
+    let error =
+        parse_pipeline_lease_config_from_env().expect_err("an out-of-range Score lease is refused");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // Unparsable: refused with the same safe label, not a raw parse error.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "not-a-number") };
+    let error =
+        parse_pipeline_lease_config_from_env().expect_err("an unparsable Score lease is refused");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // A value that parses as `i64` but overflows
+    // `chrono::Duration::seconds` (above `i64::MAX / 1_000`) must refuse
+    // with the safe label, not panic.
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE,
+            "10000000000000000",
+        )
+    };
+    let error = parse_pipeline_lease_config_from_env()
+        .expect_err("a Score lease that overflows Duration::seconds is refused, not a panic");
+    assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+
+    // In range: accepted, and the configured seconds land on the right phase.
+    unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE, "120") };
+    let configured = parse_pipeline_lease_config_from_env().expect("120 seconds is in range");
+    assert_eq!(configured.score(), chrono::Duration::seconds(120));
+    assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
+    assert_eq!(configured.settle(), PipelineLeaseConfig::default().settle());
+
+    unsafe {
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
+        std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
+    }
+}
+
+#[test]
+fn pipeline_receipt_tenants_require_an_injected_runtime() {
+    let gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-a"],
+    );
+    let error = validate_pipeline_receipt_rollout(&gates, false)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "pipeline_receipts_configured_without_runtime"
+    );
+    assert!(validate_pipeline_receipt_rollout(&gates, true).is_ok());
+    assert!(validate_pipeline_receipt_rollout(&TraceTenantRolloutGates::default(), false).is_ok());
+}
+
+#[test]
+fn ingest_and_pipeline_derive_the_same_tenant_storage_ref() {
+    for tenant in ["tenant-a", "tenant-b", "a much longer tenant identifier"] {
+        assert_eq!(
+            tenant_storage_ref(tenant),
+            trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(tenant).as_str()
+        );
+    }
+}
+
+#[tokio::test]
+async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"status": "not_ready", "reason": "pipeline_runtime_absent"})
+    );
+}
+
+/// A PostgreSQL backend that points at a loopback port nothing listens on.
+/// `PgBackend::new` builds the pool lazily, so constructing it needs no
+/// database; any query through it fails at once.
+async fn pg_backend_without_a_database() -> Arc<PgBackend> {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    )
+}
+
+/// A minimal pipeline service over `backend` and `artifact_store`, recording
+/// `object_store_name` when one is given (else the builder's default).
+fn minimal_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+    use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = IsolatedPipelineIndex::new();
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(Vec::new())?,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// M11: ingest's assembly hands the configured store's name to the
+/// assembler and refuses a service that records any other label on its
+/// object refs.
+#[tokio::test]
+async fn pipeline_assembly_requires_the_configured_object_store_name() {
+    struct NameAssembler {
+        pass_the_name: bool,
+    }
+    impl IngestPipelineRuntimeAssembler for NameAssembler {
+        fn assemble(
+            &self,
+            context: pipeline_runtime::IngestPipelineRuntimeContext,
+        ) -> anyhow::Result<Arc<PipelineService>> {
+            minimal_pipeline_service(
+                context.backend,
+                context.artifact_store,
+                self.pass_the_name.then_some(context.object_store_name),
+            )
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+
+    let refused = assemble_ingest_pipeline_runtime(
+        Some(&NameAssembler {
+            pass_the_name: false,
+        }),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .err()
+    .expect("a service that ignores the configured store name is refused");
+    assert_eq!(
+        refused.to_string(),
+        "pipeline_runtime_object_store_mismatch"
+    );
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&NameAssembler {
+            pass_the_name: true,
+        }),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        service.object_store_name(),
+        TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
+    );
+}
+
+/// Wraps `ReferencePerplexityScorer` and overrides `production_qualified` to
+/// `true`. Real production scorers are injected by a proprietary assembler
+/// and never live in this tree; this exists only so the fail-closed tests
+/// below can prove the check does not block a genuinely qualified runtime.
+struct QualifiedTestScorer(trace_commons_gate_api::ReferencePerplexityScorer);
+
+impl trace_commons_gate_api::PerplexityScorer for QualifiedTestScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.0.score(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for QualifiedTestScorer {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_perplexity_scorer"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-test-perplexity-scorer.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `ReferenceEmbedder` the same way `QualifiedTestScorer` wraps the
+/// reference scorer.
+struct QualifiedTestEmbedder(trace_commons_gate_api::ReferenceEmbedder);
+
+impl trace_commons_gate_api::Embedder for QualifiedTestEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.0.embed(plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedEmbedder for QualifiedTestEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_embedder"
+    }
+
+    fn model_id(&self) -> &str {
+        "qualified-test-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-test-embedder.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `IsolatedPipelineIndex` the same way `QualifiedTestScorer` wraps the
+/// reference scorer, for both the reader and the writer half.
+struct QualifiedTestIndex(
+    Arc<trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex>,
+);
+
+impl trace_commons_gate_api::VectorIndexReader for QualifiedTestIndex {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<trace_commons_gate_api::IndexSnapshot> {
+        trace_commons_gate_api::VectorIndexReader::snapshot(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+        )
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<Uuid>,
+    ) -> anyhow::Result<Vec<trace_commons_gate_api::NearestNeighbor>> {
+        trace_commons_gate_api::VectorIndexReader::nearest(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            embedding,
+            k,
+            exclude_revision,
+        )
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for QualifiedTestIndex {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        trace_commons_gate_api::VectorIndexWriter::upsert(
+            self.0.as_ref(),
+            key,
+            embedding,
+            content_hash,
+        )
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        trace_commons_gate_api::VectorIndexWriter::invalidate_revision(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            revision_id,
+        )
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexReader for QualifiedTestIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_index_reader"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexWriter for QualifiedTestIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_test_index_writer"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A settlement adapter whose `production_qualified` override reports
+/// `true`. `settle` answers with an internal receipt for the expected result
+/// reference -- this double is never exercised past assembly in the tests
+/// that use it.
+struct QualifiedTestSettlementAdapter {
+    instrument_id: trace_commons_gate_api::pipeline::InstrumentId,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::SettlementAdapter for QualifiedTestSettlementAdapter {
+    fn instrument_id(&self) -> &trace_commons_gate_api::pipeline::InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "qualified_test_settlement_adapter"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        request: &trace_commons_gate_api::SettlementRequest,
+    ) -> Result<trace_commons_gate_api::SettlementReceipt, trace_commons_gate_api::SettlementError>
+    {
+        trace_commons_gate_api::SettlementReceipt::internal(request.expected_result_ref_hash())
+            .map_err(|_| trace_commons_gate_api::SettlementError::Rejected)
+    }
+}
+
+/// A pipeline service whose scorer, embedder, index, and settlement adapter
+/// are all the `Qualified*` test doubles above, so
+/// `pipeline_runtime_is_production_qualified` reports `true` for it. Same
+/// shape as `minimal_pipeline_service`, which stays unqualified (its
+/// settlement adapter registry is empty).
+fn qualified_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    object_store_name: Option<String>,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+
+    let scorer = Arc::new(QualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![],
+            include_index: false,
+            variant: None,
+        },
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::new("qualified_test_instrument")?,
+    });
+    let registry = SettlementAdapterRegistry::new(vec![adapter])?;
+    let mut builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder);
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Builds an unqualified pipeline service (`minimal_pipeline_service`)
+/// through the `IngestPipelineRuntimeAssembler` seam, passing the configured
+/// object store name through so the M11 store-name check in
+/// `assemble_ingest_pipeline_runtime` passes.
+struct UnqualifiedAssembler;
+
+impl IngestPipelineRuntimeAssembler for UnqualifiedAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        minimal_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// Builds a production-qualified pipeline service (`qualified_pipeline_service`)
+/// through the same seam.
+struct QualifiedAssembler;
+
+impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        qualified_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// A `TraceCorpusDbConnections` and `ConfiguredTraceArtifactStore` pair over
+/// a database-less backend, for the fail-closed dependency-qualification
+/// tests below -- none of them reaches the database, since the refusal (or
+/// its absence) is decided during assembly, before any query runs.
+async fn pipeline_runtime_fail_closed_fixture(
+    dir: &tempfile::TempDir,
+) -> (TraceCorpusDbConnections, ConfiguredTraceArtifactStore) {
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+    (connections, configured_store)
+}
+
+/// Routed tenants, an unqualified runtime, no
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`, no opt-in -- refused.
+/// A build that injects an assembler and lists
+/// tenants in `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` must not run real
+/// receipts through test doubles just because
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` was left unset.
+#[tokio::test]
+async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_routed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .err()
+    .expect("an unqualified dependency with routed tenants and no opt-in is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+}
+
+/// The same as above, with the test opt-in set --
+/// starts.
+#[tokio::test]
+async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        true,
+    )
+    .expect("the opt-in lets an unqualified dependency start")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+}
+
+/// The opt-in together with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` -- refused, regardless of
+/// tenant routing or dependency qualification.
+#[tokio::test]
+async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let error = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        true,
+        PipelineLeaseConfig::default(),
+        false,
+        true,
+    )
+    .err()
+    .expect("the test opt-in never combines with the required flag");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_test_dependencies_not_allowed_when_required"
+    );
+}
+
+/// A qualified runtime with routed tenants and no
+/// opt-in -- starts. The fail-closed check must not block a genuinely
+/// production-qualified dependency.
+#[tokio::test]
+async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&QualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        false,
+    )
+    .expect("assemble a qualified runtime")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+}
+
+/// No routed tenants, no required flag, an unqualified
+/// runtime -- starts, because no receipt can reach it.
+#[tokio::test]
+async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_routed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        false,
+        false,
+    )
+    .expect("no routed tenants and no required flag: an unqualified dependency starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+}
+
+/// A pipeline service whose PostgreSQL backend points at a loopback port
+/// nothing listens on: its readiness probe fails at once.
+async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
+    let dir = tempfile::tempdir().unwrap();
+    minimal_pipeline_service(
+        pg_backend_without_a_database().await,
+        test_artifact_store(dir.path()),
+        None,
+    )
+    .unwrap()
+}
+
+/// M12: a worker whose readiness probe fails reports
+/// `pipeline_worker_not_ready`, even when an earlier pass had reported
+/// ready.
+#[tokio::test]
+async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
+    use super::pipeline_runtime::{build_pipeline_app, run_pipeline_worker_pass};
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let service = pipeline_service_without_a_database().await;
+    Arc::make_mut(&mut state).pipeline_service = Some(service.clone());
+    state
+        .pipeline_worker_ready
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    run_pipeline_worker_pass(
+        async move { service.readiness().await },
+        Vec::<String>::new(),
+        |_tenant_id| async {},
+        &state.pipeline_worker_ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        !state
+            .pipeline_worker_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"status": "not_ready", "reason": "pipeline_worker_not_ready"})
+    );
+}
+
+/// I5: a panic while one tenant's batch runs ends only that batch. The pass
+/// goes on to the next tenant, the worker reports not ready for that pass,
+/// and a later pass without a panic reports ready again.
+#[tokio::test]
+async fn a_panicking_tenant_batch_marks_the_worker_not_ready_and_the_pass_continues() {
+    use super::pipeline_runtime::run_pipeline_worker_pass;
+
+    let ready = std::sync::atomic::AtomicBool::new(true);
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let drained = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let drain = |panicking: Option<&'static str>| {
+        let drained = drained.clone();
+        move |tenant_id: String| {
+            let drained = drained.clone();
+            async move {
+                if panicking == Some(tenant_id.as_str()) {
+                    panic!("test-only panic in a tenant batch");
+                }
+                drained.lock().unwrap().push(tenant_id);
+            }
+        }
+    };
+
+    run_pipeline_worker_pass(
+        async { Ok(()) },
+        vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        drain(Some("tenant-a")),
+        &ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        !ready.load(std::sync::atomic::Ordering::Relaxed),
+        "a pass with a panicking batch reports not ready"
+    );
+    assert_eq!(
+        *drained.lock().unwrap(),
+        vec!["tenant-b".to_string()],
+        "the pass continued past the panicking tenant"
+    );
+
+    run_pipeline_worker_pass(
+        async { Ok(()) },
+        vec!["tenant-a".to_string(), "tenant-b".to_string()],
+        drain(None),
+        &ready,
+        &stop_rx,
+    )
+    .await;
+    assert!(
+        ready.load(std::sync::atomic::Ordering::Relaxed),
+        "a later clean pass reports ready again"
+    );
+}
+
+#[tokio::test]
+async fn source_stays_public_on_the_pipeline_app() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/source")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn run_pipeline_app_stops_within_the_grace_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(run_pipeline_app(state, listener, async {
+        let _ = rx.await;
+    }));
+    tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), server)
+        .await
+        .expect("bounded shutdown")
+        .unwrap()
+        .unwrap();
+}
+
+/// A worker that never notices its own stop signal must be aborted once the
+/// shutdown grace period elapses, not left running. Merely dropping a
+/// `JoinHandle` detaches its task rather than cancelling it, so a shutdown
+/// path that only waits and logs on timeout -- without calling `abort()` --
+/// leaves that task running: exactly the kind of leftover background
+/// activity that can go on touching a shared database a later caller assumes
+/// is now quiescent. This exercises `join_or_abort`, the piece of
+/// `run_pipeline_app`'s shutdown path that must prevent that, directly: a
+/// spawned task that only ever awaits `std::future::pending()` (so it can
+/// never finish on its own, standing in for a worker pass that never checks
+/// `stop` mid-drain) must be aborted, and aborting a task drops its future
+/// even without the future ever being polled to completion -- observed here
+/// through a drop guard the stuck task holds.
+#[tokio::test]
+async fn join_or_abort_aborts_a_task_that_outlives_its_grace_period() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SetOnDrop(Arc<AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guard = SetOnDrop(dropped.clone());
+    let handle = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+
+    pipeline_runtime::join_or_abort(handle, std::time::Duration::from_millis(50)).await;
+
+    // `abort()` schedules cancellation; give the aborted task a moment to
+    // actually unwind and drop its guard before checking it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !dropped.load(Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a task that outlives its grace period must be aborted, not left running"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[test]
@@ -27481,6 +28387,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         tenant_policies: Arc::new(BTreeMap::new()),
         require_tenant_submission_policy: false,
         db_mirror: None,
+        pipeline_service: None,
+        pipeline_runtime_required: false,
+        pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -99847,6 +100756,15 @@ mod nearai_ceremony_pg_tests;
 /// CI selects this ignored module explicitly with a fresh database.
 #[path = "wallet_v2_pg_tests.rs"]
 mod wallet_v2_pg_tests;
+
+/// Spec section 3D acceptance: a receipt through the real HTTP router, auth,
+/// and worker, surviving a crash and restart. Nested here (not declared
+/// directly in `trace-commons-ingest.rs`) for the same reason as
+/// `admission_pg_tests` and `nearai_ceremony_pg_tests` above: it reuses this
+/// module's private test-state and fixture helpers, which are visible only
+/// to `tests`'s descendants.
+#[path = "pipeline_http_pg_tests.rs"]
+mod pipeline_http_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

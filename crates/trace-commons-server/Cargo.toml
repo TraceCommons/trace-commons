@@ -81,6 +81,7 @@ trace-commons-attestation = { path = "../trace-commons-attestation", features = 
     "receipt",
 ] }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
+trace-commons-gate-api = { path = "../trace-commons-gate-api" }
 trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-protocol = { path = "../trace-commons-protocol", features = [
