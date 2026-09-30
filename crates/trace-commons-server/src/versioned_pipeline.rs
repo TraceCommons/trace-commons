@@ -387,9 +387,11 @@ fn is_external_receipt_reuse_error(error: &anyhow::Error) -> bool {
 /// the first worker's own stale write runs, `record_lease_expired`'s
 /// token-only fence finds no row under the first worker's now-superseded
 /// token and changes nothing -- that attempt is silently lost, recorded
-/// neither as `lease_expired` nor as a charge reversed. Lease renewal (PR 4)
-/// is what closes both gaps, by extending a live lease before it expires
-/// rather than discovering the expiry after the fact.
+/// neither as `lease_expired` nor as a charge reversed. `PipelineLeaseRenewal`
+/// closes both gaps, by extending a live lease before it expires rather than
+/// discovering the expiry after the fact; the gap only reopens once a lease
+/// that was never renewed at all (a crashed worker, or one held past
+/// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` phase leases) is reclaimed.
 pub const PIPELINE_LEASE_EXPIRED_LABEL: &str = "lease_expired";
 /// Safe label `PipelineLeaseConfig::new` refuses with when a phase's
 /// configured lease falls outside [1 second, 2 hours].
@@ -399,6 +401,12 @@ const PIPELINE_LEASE_MAX_SECONDS: i64 = 2 * 60 * 60;
 const PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS: i64 = 5 * 60;
 const PIPELINE_LEASE_DEFAULT_SCORE_SECONDS: i64 = 30 * 60;
 const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
+/// A lease is renewed at most until this many phase leases after its claim
+/// (`PipelineLeaseRenewal::start`'s `lease_cap`): an honest phase that is
+/// merely slow keeps being renewed, but a phase that never comes back at all
+/// still surrenders its claim within a bounded multiple of its own
+/// configured lease, rather than being renewed forever.
+pub const PIPELINE_LEASE_RENEWAL_CAP_FACTOR: i32 = 4;
 
 /// Each pipeline phase gets
 /// its own claim-lease length, sized for how long that phase can actually
@@ -408,9 +416,10 @@ const PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS: i64 = 5 * 60;
 /// exceeds a short fixed lease, which used to make `commit_score` and the
 /// following `mark_retry` both fail on a stale lease and burn an attempt
 /// every time. The defaults below give Score six times the headroom Review
-/// and Settle get. Lease renewal mid-phase (extending a lease the phase
-/// still holds) is PR 4 and out of scope here -- this only sizes the one
-/// lease a phase gets when it is claimed.
+/// and Settle get. `PipelineLeaseRenewal` extends a lease the phase still
+/// holds, up to `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times the length set
+/// here -- this struct only sizes the one lease a phase gets when it is
+/// claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineLeaseConfig {
     review: Duration,
@@ -449,6 +458,16 @@ impl PipelineLeaseConfig {
 
     pub fn settle(&self) -> Duration {
         self.settle
+    }
+
+    /// The lease a claim of `phase` gets; Admission never runs as a claim and
+    /// falls back to Review, as the claim SQL's `ELSE` arm does.
+    pub fn for_phase(&self, phase: Phase) -> Duration {
+        match phase {
+            Phase::Score => self.score,
+            Phase::Settle => self.settle,
+            Phase::Admission | Phase::Review => self.review,
+        }
     }
 }
 
@@ -947,6 +966,11 @@ enum ReceiptCommit {
     StagingMissing,
 }
 
+/// Cheap to clone: the pool it wraps is already an `Arc`.
+/// `PipelineLeaseRenewal::start` clones one into its own background task,
+/// which takes its own short connection checkout rather than sharing the
+/// caller's.
+#[derive(Clone)]
 pub struct PgPipelineStore {
     backend: Arc<PgBackend>,
 }
@@ -1436,6 +1460,42 @@ impl PgPipelineStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Extends a lease this claim still holds. Never shortens it, never
+    /// extends past `lease_cap`, and changes nothing when the token no longer
+    /// matches or the lease already expired -- the same token-plus-liveness
+    /// fence every other lease-checked write uses, so a lost lease is simply
+    /// never renewed rather than renewed onto a run another worker now holds.
+    /// Called only by `PipelineLeaseRenewal`'s background task, on its own
+    /// connection checkout, never inside another transaction.
+    pub async fn renew_lease(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        lease_token: Uuid,
+        extension: Duration,
+        lease_cap: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let extension_ms = extension.num_milliseconds();
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET lease_expires_at = GREATEST(
+                            lease_expires_at,
+                            LEAST(NOW() + ($4::bigint * INTERVAL '1 millisecond'), $5)
+                        ),
+                        updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND lease_token = $3 AND lease_expires_at > NOW()
+                  RETURNING lease_expires_at",
+                &[&tenant_id, &run_id, &lease_token, &extension_ms, &lease_cap],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(row.map(|row| row.get(0)))
     }
 
     /// Commits the Review outcome together with its approved-content
@@ -5742,6 +5802,74 @@ impl PipelineServiceBuilder {
     }
 }
 
+/// Renews a claim's lease while its phase runs. Stopped when the phase ends,
+/// at the cap, or when the lease is lost. The commit fences
+/// (`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
+/// stay the only authority: renewal only keeps an honest slow phase from
+/// being reclaimed out from under it before it finishes, never a substitute
+/// for those checks.
+struct PipelineLeaseRenewal {
+    stop: tokio::sync::watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl PipelineLeaseRenewal {
+    /// `None` when `run` carries no phase to renew for or no lease token --
+    /// both should be impossible for a just-claimed run, but this is a
+    /// best-effort background helper, not a correctness gate, so it declines
+    /// quietly rather than panicking or failing the claim.
+    fn start(
+        store: PgPipelineStore,
+        run: &PipelineRunRecord,
+        config: PipelineLeaseConfig,
+    ) -> Option<Self> {
+        let phase = run.next_phase?;
+        let lease_token = run.lease_token?;
+        let lease = config.for_phase(phase);
+        let lease_cap = Utc::now() + lease * PIPELINE_LEASE_RENEWAL_CAP_FACTOR;
+        let interval = std::cmp::max(lease / 3, Duration::milliseconds(100))
+            .to_std()
+            .ok()?;
+        let tenant_id = run.tenant_id.clone();
+        let run_id = run.run_id;
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let join = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = stopped.changed() => return,
+                }
+                match store
+                    .renew_lease(&tenant_id, run_id, lease_token, lease, lease_cap)
+                    .await
+                {
+                    Ok(Some(expires_at)) if expires_at < lease_cap => {}
+                    // Either the cap was reached (no point renewing further:
+                    // the phase gives back its claim on its own next
+                    // lease-checked write, same as if this task never ran) or
+                    // the lease is already gone (lost to a reclaim, or the
+                    // phase itself already finished and cleared it) -- either
+                    // way, nothing left for this task to do.
+                    Ok(_) => return,
+                    Err(_) => tracing::warn!(
+                        label = "pipeline_lease_renewal_failed",
+                        "a lease renewal failed; the next interval tries again"
+                    ),
+                }
+            }
+        });
+        Some(Self { stop, join })
+    }
+
+    /// Signals the background task to stop and waits for it to actually
+    /// exit, so no renewal ever races the caller's own next claim of this
+    /// run.
+    async fn stop(self) {
+        let _ = self.stop.send(true);
+        let _ = self.join.await;
+    }
+}
+
 pub struct PipelineService {
     backend: Arc<PgBackend>,
     store: PgPipelineStore,
@@ -7251,19 +7379,31 @@ impl PipelineService {
 
     /// Claims the next due run for `tenant_id` and advances it one phase.
     /// The claim itself picks the lease by the claimed row's own
-    /// `next_phase`; see `PgPipelineStore::claim_next`.
+    /// `next_phase`; see `PgPipelineStore::claim_next`. A background task
+    /// renews that lease for as long as the phase actually runs (bounded by
+    /// `PIPELINE_LEASE_RENEWAL_CAP_FACTOR`), so a phase slower than its own
+    /// claim's lease is not mistaken for a crashed worker mid-run; the
+    /// renewal task never runs inside this call's own transactions, and is
+    /// always stopped before this call returns.
     pub async fn process_one(&self, tenant_id: &str) -> anyhow::Result<Option<PipelineRunRecord>> {
         let Some(run) = self.store.claim_next(tenant_id, self.lease_config).await? else {
             return Ok(None);
         };
-        self.process_claimed_run(run).await
+        let renewal = PipelineLeaseRenewal::start(self.store.clone(), &run, self.lease_config);
+        let result = self.process_claimed_run(run).await;
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
+        result
     }
 
     /// Claims a specific run and advances it one phase. The claim itself
     /// picks the lease by the row's own `next_phase` in SQL -- there is no
     /// separate read of the run before the claim, so a phase commit that
     /// lands concurrently can
-    /// never hand out a lease sized for a phase the row is no longer in.
+    /// never hand out a lease sized for a phase the row is no longer in. As
+    /// with `process_one`, a background task renews that lease for as long
+    /// as the phase runs, stopped before this call returns.
     pub async fn process_run(
         &self,
         tenant_id: &str,
@@ -7276,7 +7416,12 @@ impl PipelineService {
         else {
             return Ok(None);
         };
-        self.process_claimed_run(run).await
+        let renewal = PipelineLeaseRenewal::start(self.store.clone(), &run, self.lease_config);
+        let result = self.process_claimed_run(run).await;
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
+        result
     }
 
     /// Loads the run's bound bundle and dispatches its current phase,

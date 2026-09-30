@@ -69,6 +69,7 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineExportConsentScopes, PipelineExportSnapshot, PipelineProcessingStatus,
     PipelineProductStore, pipeline_control_health,
 };
+use trace_commons_server::versioned_pipeline_qualification::PipelineCheckEmitter;
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
 
@@ -535,6 +536,420 @@ async fn a_score_lease_that_always_expires_records_the_expiry_and_never_exhausts
             Some(PIPELINE_LEASE_EXPIRED_LABEL)
         );
     }
+}
+
+/// A Score phase can genuinely outrun its own claimed lease and still
+/// complete exactly once: `PipelineLeaseRenewal` keeps extending the live
+/// lease while the scorer runs (Score's lease is 2 s here, its cap 8 s,
+/// comfortably above the fixture's 5 s sleep), so a second worker (B)
+/// polling the same tenant's queue the whole time never gets a claim. B is
+/// only let loose once A's own claim for Score is visibly in place (a plain
+/// read, not a claim), so the two workers never race the initial claim
+/// itself -- only ever a claim on a run A already, visibly holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(2),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s/2s/1s is in bounds");
+    let embedder: Arc<dyn IdentifiedEmbedder> =
+        Arc::new(SlowEmbedder::new(std::time::Duration::from_secs(5)));
+    let service_a = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        lease_config,
+        embedder.clone(),
+    )
+    .await;
+    let package = MinimalPolicyBundle::minimal_package(
+        &minimal_config(true),
+        &ReferencePerplexityScorer::new(),
+        embedder.as_ref(),
+    )
+    .expect("build minimal bundle package");
+
+    let tenant = format!("two-workers-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let run_id = created.run_id;
+
+    let reviewed = service_a
+        .process_one(&tenant)
+        .await
+        .unwrap()
+        .expect("Review claims and completes under its own 1-second lease");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let attempt_count_before_score = reviewed.attempt_count;
+
+    // Drive A's Score claim (the long one) on its own task, so this task can
+    // watch for that claim to land before letting B start probing.
+    let service_a_scoring = service_a.clone();
+    let tenant_a = tenant.clone();
+    let score_task = tokio::spawn(async move { service_a_scoring.process_one(&tenant_a).await });
+
+    let observer = PgPipelineStore::new(backend.clone());
+    let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let current = observer.get_run(&tenant, run_id).await.unwrap();
+        if let Some(current) = current {
+            if current.state == PipelineRunState::Leased && current.next_phase == Some(Phase::Score)
+            {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < claim_deadline,
+            "A never claimed the Score phase"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // B: a second worker on the same database and tenant, polling the queue
+    // the whole time A scores. It must never claim the run *for Score* while
+    // A's renewed lease stays live. B keeps polling until it gets a claim or
+    // is told to stop; a claim it gets is only a violation if the run was
+    // still in Score at that moment -- once A's own Score commit legitimately
+    // lands and moves the run on to Settle, the row is fair game again, and
+    // B racing for *that* claim is expected, not a lease-renewal failure.
+    let store_b = PgPipelineStore::new(backend.clone());
+    let tenant_b = tenant.clone();
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let poller = tokio::spawn(async move {
+        let mut competing_score_claim = false;
+        loop {
+            if let Some(run) = store_b.claim_next(&tenant_b, lease_config).await.unwrap() {
+                competing_score_claim = run.next_phase == Some(Phase::Score);
+                break;
+            }
+            if *stop_rx.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                _ = stop_rx.changed() => {}
+            }
+        }
+        competing_score_claim
+    });
+
+    let scored = score_task
+        .await
+        .expect("A's task did not panic")
+        .unwrap()
+        .expect("Score completes once, under its renewed lease");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert_ne!(
+        scored.last_error_label.as_deref(),
+        Some(PIPELINE_LEASE_EXPIRED_LABEL)
+    );
+    assert_eq!(
+        scored.attempt_count,
+        attempt_count_before_score + 1,
+        "the Score phase cost exactly one charged attempt"
+    );
+
+    stop_tx.send(true).ok();
+    let competing_score_claim_seen =
+        tokio::time::timeout(std::time::Duration::from_secs(5), poller)
+            .await
+            .expect("the poller task must not hang")
+            .expect("the poller task must not panic");
+    assert!(
+        !competing_score_claim_seen,
+        "a second worker must never claim the Score phase while its lease stays renewed"
+    );
+
+    let outcomes = PgPipelineStore::new(backend.clone())
+        .list_outcomes(&tenant, run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.phase == Phase::Score)
+            .count(),
+        1,
+        "exactly one Score outcome is recorded"
+    );
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_lease_renewal",
+        Some(&package),
+        serde_json::json!({
+            "score_claims": 1,
+            "competing_claims": 0,
+            "score_outcomes": 1,
+        }),
+    );
+}
+
+/// A lease is renewed only up to `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times
+/// its own configured length: with a 1-second Score lease (cap 4 seconds)
+/// and a scorer that sleeps 7 seconds, the lease is never observed past the
+/// cap (plus a second of tolerance for scheduling jitter), a second worker
+/// reclaims the run once the cap passes, and A's own Score commit is
+/// refused under the lease it no longer holds -- the run ends up carrying
+/// B's lease token, not A's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn renewal_stops_at_the_lease_cap() {
+    let Some(backend) = runtime_backend(6).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s/1s/1s is in bounds; Score's own lease is 1s, so its cap is 4s");
+    let embedder = Arc::new(SlowEmbedder::new(std::time::Duration::from_secs(7)));
+    let service_a = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        lease_config,
+        embedder,
+    )
+    .await;
+
+    let tenant = format!("renewal-cap-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service_a, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let run_id = created.run_id;
+
+    let reviewed = service_a
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review completes under its own 1-second lease");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+
+    // Drive A's Score claim (the long one) on its own task, so this task can
+    // watch for that claim to land before starting the reader's clock and
+    // letting B start probing -- B must never race A for the claim itself.
+    let service_a_scoring = service_a.clone();
+    let tenant_a = tenant.clone();
+    let score_task =
+        tokio::spawn(async move { service_a_scoring.process_run(&tenant_a, run_id).await });
+
+    let observer = PgPipelineStore::new(backend.clone());
+    let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let claim_time = loop {
+        if let Some(current) = observer.get_run(&tenant, run_id).await.unwrap() {
+            if current.state == PipelineRunState::Leased && current.next_phase == Some(Phase::Score)
+            {
+                break chrono::Utc::now();
+            }
+        }
+        assert!(
+            std::time::Instant::now() < claim_deadline,
+            "A never claimed the Score phase"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    // A reader samples the lease's own expiry the whole time A scores, and
+    // must never see A's own lease later than the cap (plus a second of
+    // tolerance). It locks onto whichever lease token it first observes
+    // (A's) and ignores any later token: once B reclaims the run past the
+    // cap, the row legitimately carries a fresh, unrelated lease of B's own,
+    // and that is not a renewal of A's lease past its cap.
+    let reader_backend = backend.clone();
+    let reader_tenant = tenant.clone();
+    let (reader_stop, mut reader_stopped) = tokio::sync::watch::channel(false);
+    let reader = tokio::spawn(async move {
+        let store = PgPipelineStore::new(reader_backend);
+        let mut max_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut lease_a: Option<uuid::Uuid> = None;
+        loop {
+            if let Some(run) = store.get_run(&reader_tenant, run_id).await.unwrap() {
+                if let (Some(token), Some(expires_at)) = (run.lease_token, run.lease_expires_at) {
+                    let token_a = *lease_a.get_or_insert(token);
+                    if token == token_a {
+                        max_seen = Some(max_seen.map_or(expires_at, |seen| seen.max(expires_at)));
+                    }
+                }
+            }
+            if *reader_stopped.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                _ = reader_stopped.changed() => {}
+            }
+        }
+        max_seen
+    });
+
+    // B polls until the cap has passed and it can reclaim the run.
+    let store_b = PgPipelineStore::new(backend.clone());
+    let tenant_b = tenant.clone();
+    let b_task = tokio::spawn(async move {
+        loop {
+            if let Some(claimed) = store_b.claim_next(&tenant_b, lease_config).await.unwrap() {
+                return claimed;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    });
+
+    let score_result = score_task.await.expect("A's task did not panic");
+
+    reader_stop.send(true).ok();
+    let max_seen = tokio::time::timeout(std::time::Duration::from_secs(5), reader)
+        .await
+        .expect("the reader task must not hang")
+        .expect("the reader task must not panic")
+        .expect("the lease was observed at least once");
+    let cap_with_tolerance =
+        claim_time + chrono::Duration::seconds(4) + chrono::Duration::seconds(1);
+    assert!(
+        max_seen <= cap_with_tolerance,
+        "the lease was extended past the cap plus tolerance: {max_seen} > {cap_with_tolerance}"
+    );
+
+    let claimed_by_b = tokio::time::timeout(std::time::Duration::from_secs(10), b_task)
+        .await
+        .expect("B must reclaim the run once the cap passes")
+        .expect("B's task did not panic");
+
+    // A's own Score commit is refused: its attempt found nothing left to
+    // update once B's reclaim moved the run onto a different token.
+    assert!(score_result.unwrap().is_none());
+
+    let final_run = PgPipelineStore::new(backend.clone())
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run still exists");
+    assert_eq!(final_run.lease_token, claimed_by_b.lease_token);
+}
+
+/// A lease token that no longer matches the run's current claim is never
+/// renewed: once a second claim (`claim_next`) has moved the run onto its
+/// own token, `renew_lease` under the old token finds no row -- the same
+/// token-only fence `record_lease_expired` uses -- and the reclaimed lease's
+/// own expiry is left exactly as that second claim set it.
+#[tokio::test]
+async fn a_lost_lease_is_never_renewed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("lost-lease-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    let first = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    let lost_token = first.lease_token.unwrap();
+
+    expire_lease(&backend, &tenant, run.run_id).await;
+    let lease_config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(1),
+        chrono::Duration::seconds(2),
+        chrono::Duration::seconds(1),
+    )
+    .expect("1s/2s/1s is in bounds");
+    let second = store
+        .claim_next(&tenant, lease_config)
+        .await
+        .unwrap()
+        .expect("the expired lease is reclaimed");
+    assert_ne!(second.lease_token, Some(lost_token));
+
+    let result = store
+        .renew_lease(
+            &tenant,
+            run.run_id,
+            lost_token,
+            chrono::Duration::seconds(1),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, None, "a token no longer current is never renewed");
+
+    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        current.lease_expires_at, second.lease_expires_at,
+        "the stale renewal attempt must not have touched the reclaimed lease"
+    );
+}
+
+/// `renew_lease` never shortens a lease: a 1-second extension request
+/// against a claim that already holds 60 seconds leaves the original,
+/// longer expiry untouched (the `GREATEST` in the update SQL).
+#[tokio::test]
+async fn renewal_never_shortens_a_lease() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("renewal-no-shorten-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_token = claimed.lease_token.unwrap();
+    let original_expiry = claimed.lease_expires_at.unwrap();
+
+    let renewed = store
+        .renew_lease(
+            &tenant,
+            run.run_id,
+            lease_token,
+            chrono::Duration::seconds(1),
+            chrono::Utc::now() + chrono::Duration::seconds(120),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renewed, Some(original_expiry));
+
+    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(current.lease_expires_at, Some(original_expiry));
+}
+
+/// `for_phase` picks each phase's own configured lease, and Admission --
+/// which never runs as a claim -- falls back to Review, the same as the
+/// claim SQL's `ELSE` arm (`claim_next`, `claim_run_with_lease_config`).
+#[test]
+fn lease_for_phase_matches_the_config() {
+    let config = PipelineLeaseConfig::new(
+        chrono::Duration::seconds(5),
+        chrono::Duration::seconds(10),
+        chrono::Duration::seconds(15),
+    )
+    .expect("5s/10s/15s is in bounds");
+    assert_eq!(config.for_phase(Phase::Score), config.score());
+    assert_eq!(config.for_phase(Phase::Review), config.review());
+    assert_eq!(config.for_phase(Phase::Settle), config.settle());
+    assert_eq!(config.for_phase(Phase::Admission), config.review());
 }
 
 /// The stale-lease-vs-charged-failure case B: the phase itself fails for
