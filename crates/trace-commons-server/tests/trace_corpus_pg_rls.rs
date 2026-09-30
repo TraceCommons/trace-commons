@@ -1040,6 +1040,11 @@ async fn assert_raw_trace_rls_counts(
         .await
         .expect("count raw Trace Commons rows under RLS");
 
+    assert_eq!(
+        row.columns().len(),
+        28,
+        "{context}: all RLS counts are present"
+    );
     for (index, column) in row.columns().iter().enumerate() {
         assert_eq!(
             row.get::<_, i64>(index),

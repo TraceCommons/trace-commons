@@ -321,9 +321,11 @@ public static class DigestText
     /// The daemon composes the same sentence for its own local notifier
     /// (<c>daemon::notify::contribution_text</c>), the Linux shell in
     /// <c>notify::contribution_body</c>, and macOS in
-    /// <c>DigestCopy.contributionLine</c>. All four follow the same rules and
-    /// are tested against them separately, because each platform words the
-    /// surrounding text differently.
+    /// <c>DigestCopy.contributionLine</c>. All four follow the same rule -- a
+    /// project is named only when exactly one distinct, non-blank label is
+    /// present (the WYSIWYG design's evening-digest examples, K9 #1118) --
+    /// and each pins the design's two example sentences verbatim. Unlike
+    /// <see cref="Body"/>, this half never lists several projects.
     /// </remarks>
     public static string? ContributionLine(
         int contributedCount,
@@ -338,7 +340,18 @@ public static class DigestText
         }
 
         string noun = contributedCount == 1 ? "session" : "sessions";
-        string from = JoinProjects(projectLabels);
+        var named = new List<string>(projectLabels.Count);
+        foreach (string label in projectLabels)
+        {
+            if (!string.IsNullOrWhiteSpace(label) && !named.Contains(label, StringComparer.Ordinal))
+            {
+                named.Add(label);
+            }
+        }
+
+        // One project: the same from-clause the waiting half builds.
+        // More than one: no clause at all.
+        string from = named.Count == 1 ? JoinProjects(named) : string.Empty;
         string line = $"{contributedCount} {noun} contributed{from}.";
 
         // Only when there is some: "0 credit pending" reads as a failure
@@ -368,11 +381,9 @@ public static class DigestText
     /// digest, not a manifest.
     /// </summary>
     /// <remarks>
-    /// Three, matching the daemon's <c>digest_text</c> and
-    /// <c>contribution_text</c>, the Linux shell's <c>contribution_body</c>,
-    /// and macOS's <c>DigestCopy.joined</c>. This shell listed every name,
-    /// so the same eight-project contributor read a one-line summary on
-    /// Linux and macOS and a paragraph on Windows.
+    /// Three, matching the daemon's <c>digest_text</c> for the waiting half.
+    /// The contribution half no longer lists projects at all past one (see
+    /// <see cref="ContributionLine"/>).
     /// </remarks>
     private const int MaxNamedProjects = 3;
 

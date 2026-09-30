@@ -572,6 +572,12 @@ impl PgBackend {
             issued_by_label: row.get("issued_by_label"),
             credential_binding_hash: row.get("credential_binding_hash"),
             note_label: row.get("note_label"),
+            issuer_display_name: row.get("issuer_display_name"),
+            credit_range: {
+                let min: Option<i64> = row.get("credit_range_min");
+                let max: Option<i64> = row.get("credit_range_max");
+                min.zip(max)
+            },
             revoked_at: row.get("revoked_at"),
         })
     }
@@ -717,8 +723,9 @@ impl PgBackend {
                     invite_subject_hash, policy_label, tenant_mode, fixed_tenant_id,
                     tenant_template_id, policy_version, allowed_consent_scopes,
                     allowed_uses, max_uses, expires_at, issuance_source,
-                    issued_by_label, credential_binding_hash, note_label
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                    issued_by_label, credential_binding_hash, note_label,
+                    issuer_display_name, credit_range_min, credit_range_max
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                  ON CONFLICT (invite_subject_hash) DO NOTHING
                  RETURNING invite_subject_hash",
                 &[
@@ -736,6 +743,9 @@ impl PgBackend {
                     &write.issued_by_label,
                     &write.credential_binding_hash,
                     &write.note_label,
+                    &write.issuer_display_name,
+                    &write.credit_range.map(|(min, _)| min),
+                    &write.credit_range.map(|(_, max)| max),
                 ],
             )
             .await;
@@ -778,6 +788,40 @@ impl PgBackend {
             .await
             .map_err(DatabaseError::Postgres)?;
         Ok(updated == 1)
+    }
+
+    /// Read-only lookup of one invite by hash, for the non-redeeming
+    /// `POST /v1/invite/lookup`. Unlike the redemption path this returns
+    /// revoked and expired rows too, so the caller can name why an invite is
+    /// no longer usable, and it takes no lock and writes nothing: neither
+    /// `consumed_uses` nor any other column changes.
+    ///
+    /// Runs on the registry pool, whose V42 policy authorizes the by-hash read.
+    pub async fn peek_invite_grant(
+        &self,
+        invite_subject_hash: &str,
+    ) -> Result<Option<InvitePeek>, DatabaseError> {
+        let pool = self.invite_registry_pool()?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT {INVITE_GRANT_COLUMNS}, consumed_uses
+                       FROM onboarding_invite_grants
+                      WHERE invite_subject_hash = $1"
+                ),
+                &[&invite_subject_hash],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        row.map(|row| {
+            let consumed_uses: i32 = row.get("consumed_uses");
+            Self::invite_entry_from_row(row).map(|entry| InvitePeek {
+                entry,
+                consumed_uses: consumed_uses.max(0) as u32,
+            })
+        })
+        .transpose()
     }
 
     /// Authoritative in-transaction re-check on the RUNTIME pool. Sets the
@@ -860,6 +904,13 @@ impl PgBackend {
     }
 }
 
+/// An invite as the non-redeeming lookup sees it.
+#[derive(Debug, Clone)]
+pub struct InvitePeek {
+    pub entry: crate::trace_invite_registry::InviteEntry,
+    pub consumed_uses: u32,
+}
+
 /// Resolved grant for a redeemed invite.
 #[derive(Debug, Clone)]
 pub struct InviteRedemption {
@@ -873,7 +924,8 @@ pub struct InviteRedemption {
 const INVITE_GRANT_COLUMNS: &str = "invite_subject_hash, policy_label, tenant_mode,
     fixed_tenant_id, tenant_template_id, policy_version, allowed_consent_scopes,
     allowed_uses, max_uses, expires_at, issuance_source, issued_by_label,
-    credential_binding_hash, note_label, revoked_at";
+    credential_binding_hash, note_label, issuer_display_name,
+    credit_range_min, credit_range_max, revoked_at";
 
 /// Serialises `run_migrations` across processes sharing one database.
 ///
@@ -1532,8 +1584,9 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_receipt_content",
         include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
     ),
-    // V96 is claimed by a pull request in flight; V97 depends only on V30
-    // (trace_accounts) and V90 (trace_ingest_runtime).
+    // V96 was never used: #1121 held it in flight and took V103 when it
+    // rebased onto main. V97 depends only on V30 (trace_accounts) and V90
+    // (trace_ingest_runtime).
     (
         97,
         "account_bindings",
@@ -1567,6 +1620,18 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         102,
         "passkey_ceiling_counts_closed",
         include_str!("../../../../migrations/V102__passkey_ceiling_counts_closed.sql"),
+    ),
+    // V103: the invite's public face. Depends only on V42.
+    (
+        103,
+        "invite_public_face",
+        include_str!("../../../../migrations/V103__invite_public_face.sql"),
+    ),
+    // V104 replaces V91's function body and depends only on V81 and V91.
+    (
+        104,
+        "legacy_invite_link_device_guards",
+        include_str!("../../../../migrations/V104__legacy_invite_link_device_guards.sql"),
     ),
 ];
 

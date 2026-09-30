@@ -16,9 +16,9 @@ use rand::RngCore as _;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair as _, UnparsedPublicKey};
 use sha2::{Digest, Sha256};
 use trace_commons_protocol::legacy_invite_link::{
-    LegacyInviteLinkChallenge, LegacyInviteLinkRecord, LegacyInviteLinkRequest,
-    LegacyInviteLinkResponse, LegacyInviteLinkStatement, legacy_invite_link_record_bytes,
-    legacy_invite_link_statement_bytes,
+    LegacyInviteLinkChallenge, LegacyInviteLinkRecord, LegacyInviteLinkRecordKind,
+    LegacyInviteLinkRequest, LegacyInviteLinkResponse, LegacyInviteLinkStatement,
+    legacy_invite_link_record_bytes, legacy_invite_link_statement_bytes,
 };
 use uuid::Uuid;
 
@@ -54,6 +54,12 @@ pub enum LinkRefusal {
     InviteRevoked,
     #[error("legacy_link_tenant_claimed")]
     TenantClaimed,
+    /// The account already holds this legacy tenant's link, but under a
+    /// different invite than the one this device joined with. That invite
+    /// was never granted to the account, so this device cannot attest under
+    /// the link (V104).
+    #[error("legacy_link_invite_not_linked")]
+    InviteNotLinked,
     #[error("legacy_link_unavailable")]
     Unavailable,
 }
@@ -70,6 +76,7 @@ impl LinkRefusal {
             Self::TenantPooled => "legacy_link_tenant_pooled",
             Self::InviteRevoked => "legacy_link_invite_revoked",
             Self::TenantClaimed => "legacy_link_tenant_claimed",
+            Self::InviteNotLinked => "legacy_link_invite_not_linked",
             Self::Unavailable => "legacy_link_unavailable",
         }
     }
@@ -197,9 +204,17 @@ pub enum LinkDbOutcome {
 /// signature verified.
 #[derive(Debug, Clone)]
 pub struct LinkDbAttempt {
+    /// A link record (`kind` is `Link`).
     pub record: LegacyInviteLinkRecord,
     pub device_public_key: Vec<u8>,
+    /// Countersignature over `record` as a link.
     pub server_signature: String,
+    /// Countersignature over the same record as a `DeviceAttestation`,
+    /// under the attestation domain. Used only when the link already exists
+    /// for this account from another device, and the database records an
+    /// attestation instead (V91/V104). Both are computed before the call so
+    /// either can be stored in the transaction that decides.
+    pub attestation_server_signature: String,
 }
 
 /// A new challenge row for the database to store, hash-only.
@@ -332,13 +347,19 @@ pub async fn link_legacy_invite(
         device_signature: B64.encode(&signature),
         linked_at: now_unix(),
         server_kid: signer.kid().to_string(),
+        kind: LegacyInviteLinkRecordKind::Link,
     };
     let server_signature = signer.countersign(&record);
+    let attestation_server_signature = signer.countersign(&LegacyInviteLinkRecord {
+        kind: LegacyInviteLinkRecordKind::DeviceAttestation,
+        ..record.clone()
+    });
     let outcome = db
         .link_legacy_invite(&LinkDbAttempt {
             record,
             device_public_key: public_key,
             server_signature,
+            attestation_server_signature,
         })
         .await
         .map_err(|_| LinkRefusal::Unavailable)?;

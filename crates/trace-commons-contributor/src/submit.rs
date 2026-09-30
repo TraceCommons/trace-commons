@@ -461,6 +461,10 @@ pub async fn submit_sessions(
     })?;
     let mut outcomes = Vec::with_capacity(sessions.len());
     for (source, session_ref) in sessions {
+        // The CLI's `submit`: a person ran the command, so the receipt says a
+        // person approved it, with the `--verdict` they passed (K7). Set per
+        // session because `submit_loaded` takes it one-shot.
+        ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
         outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
     }
     Ok(outcomes)
@@ -514,6 +518,20 @@ pub struct SubmitContext<'a> {
     /// work. Set by the daemon's upload pass, never by a review a person
     /// asked for. See `HttpWitnessTransport::with_background_workload`.
     background_witness: bool,
+    /// The queue entry's own provenance for the submission about to run:
+    /// whether it reached upload without the contributor deciding
+    /// (`QueueEntry::approved_unattended`), and the verdict they gave, if
+    /// any (`QueueEntry::approved_verdict`). Set by `daemon::uploader`
+    /// before every `submit_loaded`, via [`Self::set_upload_provenance`],
+    /// and taken once at the top of `submit_loaded` like `approved_envelope`
+    /// -- a value left behind would apply to whatever session came next.
+    ///
+    /// `None` for a caller that never sets it, and the receipt then records
+    /// provenance as UNRECORDED (`approved_unattended: None`) rather than
+    /// guessing "you approved". Both production drivers set it:
+    /// `daemon::uploader` from the queue entry, and [`submit_sessions`] (the
+    /// CLI's `submit`, run by a person) with `false` and its `--verdict`.
+    upload_provenance: Option<(bool, Option<String>)>,
     /// The delay a saturated witness asked for on the last submission, in
     /// seconds; zero for none. Reset at the start of each submission, like
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
@@ -587,6 +605,7 @@ impl<'a> SubmitContext<'a> {
             last_receipt_shipped: ReceiptShipped::NoCall,
             last_sent_witness: None,
             background_witness: false,
+            upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             receipt_override: None,
@@ -1210,6 +1229,24 @@ impl<'a> SubmitContext<'a> {
         self.background_witness = true;
     }
 
+    /// Record the queue entry's provenance for the very next submission this
+    /// context runs (K7). One-shot, like `use_approved_envelope`: taken at
+    /// the top of `submit_loaded` so it cannot leak onto whatever session
+    /// comes after this one.
+    ///
+    /// `daemon::uploader::upload_entry` calls this immediately before
+    /// `submit_loaded`, with the entry's own `approved_unattended` and
+    /// `approved_verdict`, so the receipt this call produces -- and, from it,
+    /// the history row -- can say whether a person approved this session or
+    /// an armed folder sent it without asking.
+    pub fn set_upload_provenance(
+        &mut self,
+        approved_unattended: bool,
+        approved_verdict: Option<String>,
+    ) {
+        self.upload_provenance = Some((approved_unattended, approved_verdict));
+    }
+
     /// The delay, in seconds, a saturated witness asked for on the most
     /// recent submission, or `None` if the witness was not saturated.
     /// Meaningful immediately after a submission returns `Failed` with
@@ -1269,6 +1306,14 @@ impl<'a> SubmitContext<'a> {
         // behind would apply to whatever session came next.
         let approved_envelope = self.approved_envelope.take();
         let approved_witness = self.approved_witness.take();
+        // Same one-shot rule as `approved_envelope` above: taken here so it
+        // cannot apply to a later submission this context happens to run.
+        // Absent for a caller that never set it, which is recorded as
+        // unrecorded (`None`), never as "you approved" (K7).
+        let (provenance_unattended, provenance_verdict) = match self.upload_provenance.take() {
+            Some((unattended, verdict)) => (Some(unattended), verdict),
+            None => (None, None),
+        };
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
 
         if opts.no_reasoning {
@@ -1624,6 +1669,8 @@ impl<'a> SubmitContext<'a> {
                         source: transcript.source.into(),
                         submitted_at: Utc::now(),
                         status: "submitted".into(),
+                        approved_unattended: provenance_unattended,
+                        approved_verdict: provenance_verdict.clone(),
                     };
                     self.store.append_receipt(&receipt)?;
                     self.receipts.push(receipt);
@@ -1661,6 +1708,8 @@ impl<'a> SubmitContext<'a> {
                     source: transcript.source.to_string(),
                     submitted_at: Utc::now(),
                     status: receipt.status.clone(),
+                    approved_unattended: provenance_unattended,
+                    approved_verdict: provenance_verdict.clone(),
                 };
                 match self.store.append_receipt(&r) {
                     Ok(()) => {
@@ -1726,6 +1775,38 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+/// The NEAR AI measurement pins ingest enforces, read with this device's own
+/// credential (`GET /v1/contributors/me/near-ai-measurements`).
+///
+/// The same empty-scope mint as [`status`]: a device-authenticated read that
+/// does not depend on the scopes chosen for submission. The document carries
+/// pins only; what a client may pin from it is
+/// [`NearAiMeasurementPins::usable_sets`], never the raw `sets`.
+///
+/// [`NearAiMeasurementPins::usable_sets`]: trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins::usable_sets
+pub async fn near_ai_measurement_pins(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins> {
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for the measurement read")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_json::<(), _>(
+            Method::GET,
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            &[],
+            None,
+        )
+        .await
+        .context("fetching NEAR AI measurement pins")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2234,7 +2315,7 @@ async fn mint_claim(
 /// Mint a claim for a status read-back: an empty consent_scopes/allowed_uses
 /// request, which the issuer resolves to the caller's full grant ceiling
 /// regardless of what was requested for submission.
-async fn mint_status_claim(
+pub(crate) async fn mint_status_claim(
     issuer: &IssuerClient,
     cfg: &ContributorConfig,
     device: &DeviceIdentity,
@@ -2339,7 +2420,7 @@ fn ensure_certified_grant(
     Ok(())
 }
 
-fn build_ingest_client(
+pub(crate) fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
 ) -> std::result::Result<Client, OcError> {
@@ -3705,6 +3786,150 @@ mod tests {
         assert_eq!(receipts[0].session_hash, verified_hash);
     }
 
+    /// K7: `set_upload_provenance` is what lets a history row say "you
+    /// approved · Worked" rather than "armed · went without asking". A
+    /// person's own approval -- `daemon::uploader` would call this with
+    /// `approved_unattended: false` for an entry nobody's armed folder
+    /// decided -- must land on the written receipt unattended-false, with
+    /// whatever verdict was given.
+    #[tokio::test]
+    async fn upload_provenance_for_a_persons_approval_lands_on_the_written_receipt() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.set_upload_provenance(false, Some("worked".to_string()));
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(false),
+            "a person approved this one"
+        );
+        assert_eq!(receipts[0].approved_verdict.as_deref(), Some("worked"));
+    }
+
+    /// The other half: an armed folder's send must be recorded as
+    /// unattended, with whatever verdict it carries (ordinarily none, since
+    /// nobody was asked).
+    #[tokio::test]
+    async fn upload_provenance_for_an_unattended_send_lands_on_the_written_receipt() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.set_upload_provenance(true, None);
+        let (source, session_ref) = fixture_selection().remove(0);
+
+        let outcome = ctx.submit_one(source.as_ref(), &session_ref).await.unwrap();
+        assert!(
+            matches!(outcome, SubmitOutcome::Submitted { .. }),
+            "got {outcome:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(true),
+            "an armed folder sent this one without asking"
+        );
+        assert_eq!(receipts[0].approved_verdict, None);
+    }
+
+    /// One-shot, like `use_approved_envelope`: a second submission in the
+    /// same context must not inherit the first one's provenance when
+    /// nothing set it for that call. Removing the `.take()` in favour of a
+    /// plain read would make this fail by leaking `true` / `Some("failed")`
+    /// onto the second receipt.
+    #[tokio::test]
+    async fn upload_provenance_does_not_leak_onto_a_later_submission() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            ..Default::default()
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+
+        let trajectory_dir = tempfile::tempdir().unwrap();
+        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
+        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
+        let mut selection = trajectory_selection(trajectory_dir.path());
+        let (source_a, ref_a) = selection.remove(0);
+        let (source_b, ref_b) = selection.remove(0);
+
+        ctx.set_upload_provenance(true, Some("failed".to_string()));
+        ctx.submit_one(source_a.as_ref(), &ref_a).await.unwrap();
+        // Nothing set for this call: must not inherit the previous one's.
+        ctx.submit_one(source_b.as_ref(), &ref_b).await.unwrap();
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].approved_unattended, Some(true));
+        assert_eq!(receipts[0].approved_verdict.as_deref(), Some("failed"));
+        assert_eq!(
+            receipts[1].approved_unattended, None,
+            "provenance must not leak onto a later submission; unset is unrecorded"
+        );
+        assert_eq!(receipts[1].approved_verdict, None);
+    }
+
+    /// K7 review: the CLI's `submit --verdict` is a person approving, and
+    /// the verdict they passed is recorded on the receipt rather than
+    /// dropped.
+    #[tokio::test]
+    async fn cli_submit_records_a_persons_approval_and_its_verdict() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            verdict: Some(crate::envelope::ContributorVerdict::Partly),
+            ..Default::default()
+        };
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| matches!(o, SubmitOutcome::Submitted { .. })),
+            "got {outcomes:?}"
+        );
+        let receipts = store.load_receipts().unwrap();
+        assert!(!receipts.is_empty());
+        for receipt in &receipts {
+            assert_eq!(receipt.approved_unattended, Some(false));
+            assert_eq!(receipt.approved_verdict.as_deref(), Some("partly"));
+        }
+    }
+
     #[tokio::test]
     async fn submit_context_reruns_the_canary_after_invalidation() {
         // A long-lived daemon re-checks the privacy filter periodically.
@@ -4534,6 +4759,8 @@ mod tests {
                 source: "claude-code".to_string(),
                 submitted_at: Utc::now(),
                 status: "submitted".to_string(),
+                approved_unattended: None,
+                approved_verdict: None,
             })
             .unwrap();
 
@@ -5041,6 +5268,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         };
         let call = crate::routing::attested::attested_final_call(&[row], dir.path())
             .expect("the fixture must be attestable, or these tests prove nothing");

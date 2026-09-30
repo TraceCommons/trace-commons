@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::config::{ConfigStore, DAEMON_QUEUE_FILE};
 use crate::daemon::approved_envelope::WITNESS_PIN_PREFIX;
+use crate::daemon::policy::{ProjectMode, ProjectPolicy};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +55,83 @@ pub enum QueueState {
     /// The session changed after this entry was offered; a fresh entry
     /// replaced it.
     Superseded,
+}
+
+/// The shape of a session, for the queue rows, the review sheet's header and
+/// the past-session picker: when it started and ended, and how many prompts
+/// the person gave.
+///
+/// `user_turns` counts what someone reading the session would call a turn --
+/// a prompt they typed -- and is deliberately not `preview_turns`'
+/// `turn_count`, which indexes every event of the redacted envelope, tool
+/// calls and results included.
+/// Where a group transcript's delegated members begin: the adapter's
+/// `subagent_group` / `subagent_transcript` markers.
+fn is_delegated_boundary(event: &crate::source::SessionEvent) -> bool {
+    matches!(
+        event.structured.get("record_type").and_then(|v| v.as_str()),
+        Some("subagent_group" | "subagent_transcript")
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionShape {
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub user_turns: u32,
+}
+
+impl SessionShape {
+    /// The shape of the conversation a person had.
+    ///
+    /// Only the parent transcript counts: a Claude Code group appends each
+    /// delegated transcript behind a `subagent_transcript` marker, and a
+    /// subagent's opening prompt is the agent's, not the person's. A user
+    /// event counts as a turn only when `preview::task_prompt` finds a
+    /// request in it, so injected wrappers -- system reminders, command
+    /// metadata, AGENTS.md and environment preambles -- are not turns, and
+    /// the count agrees with what the card calls the task.
+    ///
+    /// `started_at` is the earlier of the source's declared start and the
+    /// first event timestamp, so it is never after `ended_at`.
+    pub fn of(transcript: &crate::source::SessionTranscript) -> Self {
+        let first = transcript.events.iter().filter_map(|e| e.timestamp).min();
+        let last = transcript.events.iter().filter_map(|e| e.timestamp).max();
+        let started_at = match (transcript.started_at, first) {
+            (Some(declared), Some(first)) => Some(declared.min(first)),
+            (declared, first) => declared.or(first),
+        };
+        let user_turns = transcript
+            .events
+            .iter()
+            .take_while(|e| !is_delegated_boundary(e))
+            .filter(|e| e.kind == crate::source::SessionEventKind::User)
+            .filter(|e| {
+                e.content
+                    .as_deref()
+                    .and_then(crate::daemon::preview::task_prompt)
+                    .is_some()
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        Self {
+            started_at,
+            ended_at: last,
+            user_turns,
+        }
+    }
+
+    /// Wall-clock length, when both ends are known and in order.
+    pub fn duration_secs(&self) -> Option<i64> {
+        match (self.started_at, self.ended_at) {
+            (Some(start), Some(end)) if end >= start => Some((end - start).num_seconds()),
+            _ => None,
+        }
+    }
 }
 
 /// One session offered to the contributor.
@@ -321,6 +399,11 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// When the session ran and how many prompts it had, from the loaded
+    /// transcript. Metadata, not content: timestamps and a count, never a
+    /// word of what was said. `None` on an entry written before this existed.
+    #[serde(default)]
+    pub shape: Option<SessionShape>,
     /// The `modified_at` of the observation this entry was built from --
     /// the group mtime for a claude-code session, the file's own mtime for
     /// every single-file source. Pairs with `size_bytes`, which is the
@@ -1842,9 +1925,180 @@ impl Queue {
     }
 }
 
+/// The menu-bar badge (K6): `Pending` entries that need a decision from a
+/// person. Never `queue_depth` -- see `status.decisions_owed`.
+///
+/// An armed folder's `Pending` entries are excluded by default: they will go
+/// out unattended once they settle or the automatic-contribution gate clears,
+/// so the design never asks about them (`arming_rewordings`, `gate_held`,
+/// `automatic_contribution_held` are the notices for that path, not this
+/// count). This holds whether the entry is merely unsettled
+/// (`armed_not_settled`) or held by the gate (`TickReport::gate_blocked`,
+/// `automatic_gate`): both are "armed means no decision", so neither counts,
+/// exactly like the design rule "armed folders never move it".
+///
+/// Two exceptions inside an armed folder DO need a person, so they count:
+///
+/// - [`QueueEntry::held_for_review`] -- revoked for a reason in
+///   [`REASONS_NEEDING_A_PERSON`] that no unattended re-approval can satisfy
+///   (`watcher::visit_session` already refuses to auto-approve these).
+/// - [`ProjectPolicy::holds_back_unattended`] -- a pre-grant session: it was
+///   already on disk when the automatic grant armed the folder, so the grant
+///   deliberately leaves it for a person rather than sweeping it in.
+///
+/// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
+/// that is the ordinary Ask-me case the badge exists for.
+///
+/// An `Ignore`d folder counts nothing but a `held_for_review` entry. Setting
+/// `Ignore` refuses what was waiting (`refuse_pending_for_project`), so a
+/// `Pending` entry there is only a transient (a failed queue save, say), and
+/// the contributor has already said "never offer these": the badge must not
+/// ask them to decide about it. The check is therefore `== NotifyOnly`, not
+/// `!= AutoUpload`.
+///
+/// Deliberately one small function, with one predicate
+/// ([`needs_a_person`]), so a state that must also count or must not --
+/// K5's returned-from-keep entries and from-now backlog (#1134), and a
+/// `scrub_check` manual hold (#1139), once those land -- has exactly one
+/// place to add its rule, rather than a second badge-counting path drifting
+/// from this one. Extend `needs_a_person`, not `status_value`.
+pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy) -> usize {
+    queue
+        .pending()
+        .into_iter()
+        .filter(|entry| needs_a_person(entry, policy))
+        .count()
+}
+
+/// Whether one `Pending` entry is a decision owed to a person. See
+/// [`decisions_owed`] for each rule and why.
+fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy) -> bool {
+    if entry.held_for_review() {
+        return true;
+    }
+    match policy.resolve(&entry.project_key) {
+        ProjectMode::NotifyOnly => true,
+        ProjectMode::AutoUpload => {
+            policy.holds_back_unattended(&entry.project_key, &entry.path.to_string_lossy())
+        }
+        ProjectMode::Ignore => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(
+        kind: crate::source::SessionEventKind,
+        at: Option<&str>,
+        content: Option<&str>,
+    ) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            kind,
+            timestamp: at.map(|t| t.parse().unwrap()),
+            content: content.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn marker(record_type: &str) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            structured: serde_json::json!({ "record_type": record_type, "index": 0 }),
+            ..Default::default()
+        }
+    }
+
+    /// K1: a session's turns are the prompts the person typed in the parent
+    /// transcript. Injected wrappers (a system reminder, a Codex AGENTS.md
+    /// preamble) are not turns, and neither is anything behind a Claude Code
+    /// group's delegated-transcript boundary.
+    #[test]
+    fn a_session_shape_counts_only_the_persons_prompts() {
+        use crate::source::SessionEventKind::{Assistant, ToolCall, ToolResult, User};
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                event(
+                    User,
+                    Some("2026-09-12T10:00:00Z"),
+                    Some("# AGENTS.md instructions for x\n<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>"),
+                ),
+                event(
+                    User,
+                    Some("2026-09-12T10:00:05Z"),
+                    Some("add a rate limiter"),
+                ),
+                event(Assistant, Some("2026-09-12T10:01:00Z"), Some("ok")),
+                event(ToolCall, None, None),
+                event(ToolResult, Some("2026-09-12T10:05:00Z"), None),
+                event(
+                    User,
+                    Some("2026-09-12T10:06:00Z"),
+                    Some("<system-reminder>be careful</system-reminder>"),
+                ),
+                event(User, Some("2026-09-12T11:00:00Z"), Some("now add a test")),
+                marker("subagent_group"),
+                marker("subagent_transcript"),
+                event(
+                    User,
+                    Some("2026-09-12T11:10:00Z"),
+                    Some("search the repo for callers"),
+                ),
+                event(Assistant, Some("2026-09-12T11:18:00Z"), Some("found 3")),
+            ],
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&transcript);
+        assert_eq!(
+            shape.user_turns, 2,
+            "two typed prompts, no wrappers, no subagent"
+        );
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(
+            shape.ended_at,
+            Some("2026-09-12T11:18:00Z".parse().unwrap()),
+            "the delegated work is part of the session's span"
+        );
+        assert_eq!(shape.duration_secs(), Some(78 * 60));
+    }
+
+    /// The start is the earlier of the declared start and the first event, so
+    /// a declared start later than the events cannot give a null duration.
+    #[test]
+    fn a_session_shape_starts_at_the_earlier_of_declared_and_first_event() {
+        use crate::source::SessionEventKind::User;
+        let events = vec![
+            event(User, Some("2026-09-12T10:00:00Z"), Some("go")),
+            event(User, Some("2026-09-12T10:30:00Z"), Some("again")),
+        ];
+        let later = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T10:10:00Z".parse().unwrap()),
+            events: events.clone(),
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&later);
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(shape.duration_secs(), Some(30 * 60));
+        let earlier = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T09:59:00Z".parse().unwrap()),
+            events,
+            ..Default::default()
+        };
+        assert_eq!(SessionShape::of(&earlier).started_at, earlier.started_at);
+        assert_eq!(SessionShape::default().duration_secs(), None);
+        let backwards = SessionShape {
+            started_at: Some("2026-09-12T11:00:00Z".parse().unwrap()),
+            ended_at: Some("2026-09-12T10:00:00Z".parse().unwrap()),
+            user_turns: 0,
+        };
+        assert_eq!(backwards.duration_secs(), None, "no negative lengths");
+    }
 
     /// R5, the queue half: an unattended approval held after the witness
     /// goes back to waiting with its certified review pinned, and nothing
@@ -2494,6 +2748,24 @@ mod tests {
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].subagent_count, 0);
         assert_eq!(loaded.all()[0].subagents_dropped, 0);
+    }
+
+    /// K1: a line queued before `shape` existed still loads, with no shape.
+    /// It is not backfilled: the entry gets a shape when its session is next
+    /// loaded (it grows, or is re-offered), and `list_pending` reports the
+    /// shape fields as null until then.
+    #[test]
+    fn a_queue_line_written_before_the_session_shape_still_loads() {
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("shape");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].shape, None);
     }
 
     #[test]
@@ -3477,5 +3749,169 @@ mod tests {
         value.as_object_mut().unwrap().remove("session_cwd");
         let loaded: QueueEntry = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.session_cwd, None);
+    }
+
+    // -- `decisions_owed` (K6): the badge's exact count -----------------
+
+    /// An Ask-me folder is the ordinary case the badge exists for: every
+    /// `Pending` entry in it needs a person, so it counts.
+    #[test]
+    fn decisions_owed_counts_an_ask_me_pending() {
+        let policy = ProjectPolicy::new(); // unset project keys resolve NotifyOnly ("Ask me")
+        let q = queue_of(vec![entry_in("/w/ask-me", QueueState::Pending)]);
+        assert_eq!(decisions_owed(&q, &policy), 1);
+    }
+
+    /// A mixed queue, each entry a different reason to count or not: an
+    /// Ask-me `Pending` (counts), an Ask-me entry already `Approved` (no
+    /// decision left), an armed `Pending` that is settling (goes out
+    /// unattended), and an armed `Pending` held for review (needs a person).
+    /// Replaces a single-entry case that could not fail: an `Approved` entry
+    /// is never in `pending()` whatever the filter says.
+    #[test]
+    fn decisions_owed_counts_only_the_owed_entries_of_a_mixed_queue() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut decided = entry_in("/w/ask-me", QueueState::Approved);
+        decided.session_hash = "sha256:decided".into();
+        decided.path = PathBuf::from("/w/ask-me/decided.jsonl");
+        let mut settling = entry_in("/w/armed", QueueState::Pending);
+        settling.session_hash = "sha256:settling".into();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.session_hash = "sha256:held".into();
+        held.path = PathBuf::from("/w/armed/held.jsonl");
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        let q = queue_of(vec![ask_me, decided, settling, held]);
+        assert_eq!(q.pending().len(), 3);
+        assert_eq!(
+            decisions_owed(&q, &policy),
+            2,
+            "the Ask-me pending and the held-for-review one"
+        );
+    }
+
+    /// `Ignore` asks nobody: a `Pending` entry left in an ignored folder
+    /// (setting `Ignore` normally refuses them, so this is a transient) is
+    /// not a decision the contributor owes. Pins the `== NotifyOnly` rule.
+    #[test]
+    fn decisions_owed_does_not_count_a_pending_entry_in_an_ignored_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/ignored",
+                ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/ignored", QueueState::Pending)]);
+        assert_eq!(q.pending().len(), 1);
+        assert_eq!(decisions_owed(&q, &policy), 0);
+    }
+
+    /// A fresh session in an armed folder stays `Pending` while it is
+    /// unsettled, or while the automatic-contribution gate blocks it
+    /// (`TickReport::gate_blocked`) -- queue and policy alone cannot tell
+    /// those two apart, and they must not be told apart here: both are
+    /// "armed means no decision" ("armed folders never move it"), and the
+    /// design would not ask about either. It goes out unattended once
+    /// settled or ungated, so it must not inflate the badge meanwhile.
+    #[test]
+    fn decisions_owed_excludes_a_gate_held_armed_pending() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/gated",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/gated", QueueState::Pending)]);
+        assert_eq!(
+            decisions_owed(&q, &policy),
+            0,
+            "an armed pending session, gate-held or merely unsettled, asks nobody yet"
+        );
+    }
+
+    /// `held_for_review` entries -- revoked for a reason in
+    /// `REASONS_NEEDING_A_PERSON` -- need a person even inside an armed
+    /// folder: the watcher already refuses to re-approve these unattended,
+    /// so the badge must not disagree with it.
+    #[test]
+    fn decisions_owed_counts_a_held_for_review_entry() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        assert!(held.held_for_review());
+        let q = queue_of(vec![held]);
+        assert_eq!(decisions_owed(&q, &policy), 1);
+    }
+
+    /// A session already on disk when the automatic grant armed a folder is
+    /// deliberately held back from unattended approval
+    /// (`holds_back_unattended`) -- the grant arms nothing already on disk.
+    /// It still needs a person, so it counts even though its folder is
+    /// armed.
+    #[test]
+    fn decisions_owed_counts_a_grant_held_back_pre_grant_session() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/grant-armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        policy.armed_by_grant.insert("/w/grant-armed".to_string());
+        let pre_grant = entry_in("/w/grant-armed", QueueState::Pending);
+        policy
+            .sessions_on_disk_at_grant
+            .insert(pre_grant.path.to_string_lossy().to_string());
+        assert!(policy.holds_back_unattended("/w/grant-armed", &pre_grant.path.to_string_lossy()));
+        let q = queue_of(vec![pre_grant]);
+        assert_eq!(decisions_owed(&q, &policy), 1);
+    }
+
+    /// The whole point: `decisions_owed` is not `queue_depth`. A queue
+    /// mixing an Ask-me pending, an armed-and-settled-away entry, and a
+    /// gate-held armed pending reports only the one decision actually
+    /// owed, while `queue_depth` (still `pending().len()`, unchanged for
+    /// compatibility) would have counted the gate-held one too.
+    #[test]
+    fn decisions_owed_differs_from_queue_depth_when_a_gate_holds_an_armed_entry() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/gated",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut gated = entry_in("/w/gated", QueueState::Pending);
+        gated.session_hash = "sha256:gated".into();
+        let q = queue_of(vec![ask_me, gated]);
+        assert_eq!(q.pending().len(), 2, "queue_depth counts both");
+        assert_eq!(
+            decisions_owed(&q, &policy),
+            1,
+            "decisions_owed excludes the gate-held armed one"
+        );
     }
 }

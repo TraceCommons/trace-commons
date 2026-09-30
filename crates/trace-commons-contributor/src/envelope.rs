@@ -434,6 +434,16 @@ impl ContributorVerdict {
         }
     }
 
+    /// The wire name [`Self::parse`] reads, for a receipt or history row
+    /// that records which verdict was given.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Worked => "worked",
+            Self::Partly => "partly",
+            Self::Failed => "failed",
+        }
+    }
+
     /// The `TaskSuccess` this verdict maps to. Shared by `outcome` (below)
     /// and `apply_verdict`, which cannot delegate to `outcome` itself --
     /// assigning a whole `OutcomeMetadata` there would clobber the stored
@@ -1201,6 +1211,7 @@ mod tests {
             output_tokens: Some(200),
             cost_usd: Some(0.02),
             status: 200,
+            ..Default::default()
         }
     }
 
