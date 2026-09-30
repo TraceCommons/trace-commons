@@ -194,6 +194,16 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         service.novelty_utility_checks() == novelty_utility_checks,
         "pipeline_runtime_novelty_utility_checks_mismatch"
     );
+    // Zaki review 1, round 2, finding 15: a compatibility award's ledger
+    // row names the pipeline's issuer, as `main`'s names its issuing gate
+    // worker. A runtime that processes a tenant through the compatibility
+    // bundle cannot run without one.
+    anyhow::ensure!(
+        !(tenants_processed
+            && service.binds_compatibility_bundle()
+            && novelty_utility_checks.issuer_principal_ref.is_none()),
+        "pipeline_credit_issuer_principal_missing"
+    );
     if (production_required || tenants_processed)
         && !pipeline_runtime_is_production_qualified(&service)
     {

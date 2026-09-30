@@ -11218,6 +11218,7 @@ fn qualified_compatibility_pipeline_service(
     artifact_store: Arc<dyn TraceArtifactStore>,
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
     object_store_name: Option<String>,
+    checks: PipelineNoveltyUtilityChecks,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11254,7 +11255,8 @@ fn qualified_compatibility_pipeline_service(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
-    .with_privacy(Arc::new(QualifiedTestPrivacy));
+    .with_privacy(Arc::new(QualifiedTestPrivacy))
+    .with_novelty_utility_checks(checks);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -11279,6 +11281,7 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
             test_artifact_store(dir.path()),
             config,
             None,
+            PipelineNoveltyUtilityChecks::default(),
         )
         .expect("build a qualified compatibility service")
     };
@@ -11333,6 +11336,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
             context.artifact_store,
             &config,
             Some(context.object_store_name),
+            context.novelty_utility_checks,
         )
     }
 }
@@ -11381,6 +11385,49 @@ async fn pipeline_runtime_compatibility_inserts_under_mains_threshold() {
         error.to_string(),
         "pipeline_runtime_embed_insert_novelty_mismatch"
     );
+}
+
+/// Zaki review 1, round 2, finding 15: a runtime that routes or drains a
+/// tenant through the compatibility bundle refuses to start without the
+/// pipeline's credit issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`),
+/// the principal its ledger rows name; with one it starts, and so does a
+/// runtime that processes no tenant.
+#[tokio::test]
+async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issuer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |tenants_processed: bool, checks: &PipelineNoveltyUtilityChecks| {
+        assemble_ingest_pipeline_runtime(
+            Some(&CompatibilityAssembler {
+                embed_insert_novelty_micros: None,
+            }),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            tenants_processed,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            checks,
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
+        )
+    };
+    let no_issuer = PipelineNoveltyUtilityChecks::default();
+    let error = assemble(true, &no_issuer)
+        .err()
+        .expect("a processing compatibility runtime without an issuer is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_credit_issuer_principal_missing"
+    );
+    assemble(false, &no_issuer).expect("a runtime that processes no tenant starts");
+    let with_issuer = PipelineNoveltyUtilityChecks {
+        issuer_principal_ref: Some(format!("principal_sha256:{}", "c".repeat(64))),
+        ..PipelineNoveltyUtilityChecks::default()
+    };
+    assemble(true, &with_issuer).expect("with the issuer it starts");
 }
 
 /// Builds an unqualified pipeline service (`minimal_pipeline_service`)

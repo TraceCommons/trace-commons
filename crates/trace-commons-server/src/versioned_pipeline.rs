@@ -5530,6 +5530,12 @@ impl PipelineService {
             .map(|(_, config)| config.controls)
     }
 
+    /// Whether the default bundle is the compatibility bundle.
+    pub fn binds_compatibility_bundle(&self) -> bool {
+        crate::versioned_pipeline_bundle::package_compatibility_config(&self.default_package)
+            .is_some()
+    }
+
     /// The index-insert threshold of the default bundle's compatibility
     /// configuration (`CompatibilityBundleConfig::embed_insert_novelty_micros`);
     /// `None` when the default bundle is not the compatibility bundle.
@@ -8581,6 +8587,23 @@ impl PipelineService {
             ),
         };
         let ledger_event_type_label = enum_string(&ledger_event_type)?;
+        // Zaki review 1, round 2, finding 15: `main` records the principal
+        // that issued a `NoveltyUtility` event -- its calling gate worker --
+        // as the event's actor. The pipeline issues it as its configured
+        // issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), the
+        // principal Settle checks against `main`'s central-issuer list. A
+        // runtime that routes or drains a compatibility bundle refuses to
+        // start without one, so the contributor stands in only on a runtime
+        // that processes no tenant. A `PipelineScore` event keeps the
+        // contributor, as PR 2 wrote it.
+        let actor_principal_ref = match trace_credit_event {
+            PipelineTraceCreditEvent::NoveltyUtility => self
+                .novelty_utility_checks
+                .issuer_principal_ref
+                .clone()
+                .unwrap_or_else(|| account_ref.to_string()),
+            PipelineTraceCreditEvent::PipelineScore => account_ref.to_string(),
+        };
         // Zaki review 1, item 4 (owner: as `main`): a batched leg's line
         // settles under `main`'s settlement key -- the principal's account,
         // `account:{account_id}`, when it is linked to one -- and records the
@@ -8695,7 +8718,7 @@ impl PipelineService {
                 event_type, points_delta, reason, external_ref, actor_principal_ref,
                 actor_role, settlement_state, pipeline_run_id, score_outcome_id, instrument_id
              ) VALUES (
-                $1,$2,$3,$4,$5,$12,$6,$7,$8,$5,$13,$14,$9,$10,$11
+                $1,$2,$3,$4,$5,$12,$6,$7,$8,$15,$13,$14,$9,$10,$11
              )
              ON CONFLICT (tenant_id, credit_event_id) DO NOTHING",
             &[
@@ -8713,6 +8736,7 @@ impl PipelineService {
                 &ledger_event_type_label,
                 &actor_role,
                 &settlement_state,
+                &actor_principal_ref,
             ],
         )
         .await?;

@@ -4630,6 +4630,11 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
     }
 }
 
+/// The pipeline credit issuer the compatibility HTTP tests configure
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`).
+const TEST_PIPELINE_CREDIT_ISSUER: &str =
+    "principal_sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
 /// real boot uses, over `configured_store`.
@@ -4660,7 +4665,12 @@ fn assemble_compatibility_pipeline_service(
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
-        &PipelineNoveltyUtilityChecks::default(),
+        // A runtime that routes the compatibility bundle needs the
+        // pipeline's credit issuer (Zaki review 1, round 2, finding 15).
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
         TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("assemble the injected compatibility pipeline runtime")

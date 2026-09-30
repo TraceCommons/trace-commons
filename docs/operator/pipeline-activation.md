@@ -600,8 +600,12 @@ compatibility configuration holds another
 (`pipeline_runtime_embed_insert_novelty_mismatch`). When both gate
 floors pass, Score awards the `NoveltyUtility` delta to `trace_credit`, and
 Settle records it as one `NoveltyUtility` ledger event, written as `main`
-writes that event: settlement state `final`, actor role `vector_worker`, and
-the reason `novelty_utility:compatibility_quality_novelty_v1`. That event type
+writes that event: settlement state `final`, actor role `vector_worker`, the
+actor the pipeline's issuer (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`,
+where `main` records its issuing gate worker), and the reason
+`novelty_utility:compatibility_quality_novelty_v1`. A runtime that routes or
+drains a tenant through the compatibility bundle refuses to start without
+that issuer (`pipeline_credit_issuer_principal_missing`). That event type
 does not settle on `main`, so the pipeline never batches or pays it, and the
 contributor status reports the leg as `not_settlement_eligible`.
 

@@ -22249,3 +22249,60 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
         "the paid leg stays held"
     );
 }
+
+/// Finding 15: a compatibility run's `NoveltyUtility` ledger row names the
+/// principal that issued it -- the configured pipeline issuer
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), the principal
+/// Settle checks against `main`'s central-issuer list -- as `main` records
+/// its issuing gate worker, never the contributor, under the gate worker's
+/// role (`vector_worker`).
+#[tokio::test]
+async fn a_novelty_utility_ledger_row_names_the_pipeline_issuer() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let issuer = format!("principal_sha256:{}", "d".repeat(64));
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(issuer.clone()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+    )
+    .await;
+    let tenant = format!("compat-issuer-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-issuer-contributor";
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT credit_account_ref, actor_principal_ref, actor_role, event_type
+               FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("the run's ledger row");
+    tx.commit().await.unwrap();
+    assert_eq!(row.get::<_, String>("event_type"), "novelty_utility");
+    assert_eq!(row.get::<_, String>("credit_account_ref"), principal);
+    assert_eq!(
+        row.get::<_, String>("actor_principal_ref"),
+        issuer,
+        "the issuer, not the contributor"
+    );
+    assert_eq!(row.get::<_, String>("actor_role"), "vector_worker");
+}
