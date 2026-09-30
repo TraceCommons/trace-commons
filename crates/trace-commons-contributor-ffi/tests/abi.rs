@@ -4924,15 +4924,22 @@ fn an_arming_rewording_notice_crosses_the_abi_as_the_rust_builds_it() {
         "id": 4, "project_id": "p-1", "project_label": "api",
         "was": "model_scrubbed", "now": "patterns_only",
     });
-    let arg = CString::new(wire.to_string()).unwrap();
-    let json = take_owned(unsafe {
-        trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
-    });
-    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    let expected =
-        serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
-            .unwrap();
-    assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+    for upgrade in [false, true] {
+        let mut wire = wire.clone();
+        wire["scrub_check_defaulted"] = serde_json::json!(upgrade);
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe {
+            trace_commons_contributor_ffi::tc_arming_reworded_notice(arg.as_ptr())
+        });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::arming_reworded_notice_for_wire(&wire).expect("readable"))
+                .unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the notice unchanged");
+        if upgrade {
+            assert_eq!(parsed["title"], "The Scrub check is now Automatic for api");
+        }
+    }
     for text in ["not json", "[]", "\"x\""] {
         let arg = CString::new(text).unwrap();
         assert!(

@@ -695,14 +695,20 @@ It stays until a shell calls `acknowledge_arming_rewordings` with its `id`
 sets the project's mode, which answers it. A void takes it with it. The
 rewording itself is audited as `arming-reworded` with the project label.
 
-Today no rewording is recorded: every shell's arming offer says "will be
+For claim narrowings, every shell's arming offer currently says "will be
 scrubbed" whatever R1's disclosure is, so the words in force have not
-changed. It fires when the arming offer becomes disclosure-dependent
+changed. That notice fires when the arming offer becomes disclosure-dependent
 (`arming_wording::project_arming_claim`), or when a folder's disclosure drops
 to patterns-only. The words are
 `consent_copy::arming_reworded_notice_for_wire` (`tc_arming_reworded_notice`);
 its `ask_first_action` button is `set_project_mode` with the element's
 `project_id` and `notify_only`.
+
+The Automatic-default upgrade also uses this persisted notice channel.
+An element with `scrub_check_defaulted: true` announces the new review holds;
+its `was` and `now` claims are unchanged. The shared formatter selects the
+upgrade wording, including the existing Ask me first action. An upgrade and
+a claim-narrowing notice can coexist and are acknowledged by their own ids.
 
 #### `automatic_contribution_held`
 
@@ -2367,8 +2373,10 @@ or a count of them.
 { "reasons": { "dismissed-by-contributor": 2, "expired-without-decision": 1 } }
 ```
 
-A count, by `reason_label`, across every entry currently on the queue in any
-state. This method is **not** named `eligibility_reasons`, and does not
+A count, by `reason_label`, across resolved entries currently on the queue.
+Pending, approved, and uploading entries are excluded: sessions held for
+review are still waiting, not terminal outcomes. This method is **not**
+named `eligibility_reasons`, and does not
 explain sessions that were never offered at all. Every `reason_label` this
 method can report belongs to an entry that already exists in the queue (in
 practice: dismissed, refused, expired, and superseded entries). It cannot
@@ -3664,8 +3672,9 @@ it as unanswered and asks once.
 The Settings row "Scrub check" (K4 of #1118). `set_settings` takes a string,
 `"automatic"` or `"manual"`; anything else, including another case, a boolean
 or `null`, is `bad_params` / `settings-invalid-value` and changes nothing.
-`get_settings` always reports the key: `null` until one of the two has been
-chosen, then the string. It is persisted with the other settings and read at
+`get_settings` always reports the key as one of the two strings, never
+`null`: `"automatic"` until the contributor chooses otherwise. It is persisted
+with the other settings and read at
 each watcher pass and each upload, so a change reaches a running daemon
 without a restart.
 
@@ -3673,10 +3682,19 @@ It decides what happens to a session in a folder set to share automatically
 (`auto_upload`), and only there. A person's own `approve` is never held by it:
 they are the second look.
 
+An existing settings file with an absent/null choice records
+`scrub_check_defaulted_on_upgrade: true`, retained through unrelated saves.
+An older armed policy with no settings file also records that provenance;
+a new-format policy distinguishes fresh installs from those upgrades.
+At startup, already-armed folders receive a one-time persisted notice in
+`arming_rewordings` with `scrub_check_defaulted: true`. All shells render it
+through the shared notice formatter and acknowledge its exact id. Fresh
+installs and explicit Manual choices receive no upgrade notice. A saved
+policy migration marker prevents replay after acknowledgement or later arming.
+
 | Value | Armed folders |
 |---|---|
-| `null` (never chosen, **the default**) | exactly as before this setting existed: every settled session sends on its own, with no second-look hold. |
-| `automatic` | send on their own, **except** a session that is worth a second look (`second_look` would be `nothing-matched`, `looks-unsure` or `trimmed-to-fit` for the envelope about to be sent, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
+| `automatic` (**the default**) | send on their own, **except** a session that is worth a second look (`second_look` would be `nothing-matched`, `looks-unsure` or `trimmed-to-fit` for the envelope about to be sent, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
 | `manual` | nothing is sent without a person. The watcher approves nothing on anyone's behalf, and an approval made before the switch is held under `scrub-check-manual` when the uploader reaches it. |
 
 **Where the Automatic hold happens.** The watcher approves an armed session
@@ -3692,6 +3710,12 @@ local-redaction path nothing has left the machine
 when a session is held. With a witness configured, the witness has already
 seen the session (as with `witness-risk-review-required`): the hold stops the
 upload to the commons, not the send to the enclave.
+
+A session newly held for a person receives a full review window from its
+first hold (`review_started_at`); its original discovery time is preserved.
+Repeated holds and restarts do not extend that window. On witness routes,
+the first hold has already incurred witness/claim work; approving it may
+repeat that work before upload.
 
 **What a hold leaves on the entry.** The entry goes back to `Pending` with
 `reason_label` `second-look-review-required`, and the envelope the hold was
@@ -3728,15 +3752,15 @@ reply then carries `scrub_check_returned_to_waiting`, the count moved
 key is **absent** on any call that did not switch to Manual, including one
 that sets Manual when it was already Manual.
 
-**The default is `null`: today's behaviour, no hold.** A settings file written
-before this key existed loads that way, and every existing armed folder keeps
-sending what it sent before. The second-look hold is opt-in -- a shell's
-Customize path sets `automatic` -- pending a product decision on whether it
-should become the default. Holding by default would change, on upgrade, what
-every armed folder does with a session where nothing matched or one trimmed to
-fit, and that is not a change this setting makes on its own. `null` cannot be
-set: once chosen, the Scrub check is `automatic` or `manual`, each of which
-holds at least as much as the default. A shell renders the choice with
+**The default is `automatic`** (decided on #1139). A fresh install holds a
+session worth a second look in an armed folder without anyone choosing
+anything. An upgraded install does too: a settings file written before this
+key existed, or one holding the `null` an earlier build wrote for "never
+chosen", loads as `automatic`, so on upgrade an armed folder starts holding
+the sessions where nothing matched, something looks unsure, or it was trimmed
+to fit. An explicit `"manual"` is kept across restarts and upgrades; only an
+unset value becomes `automatic`. `null` cannot be set: it is not a mode, and
+a caller that means the default sends `"automatic"`. A shell renders the choice with
 `consent_copy::SCRUB_CHECK_*` (DRAFT, NEEDS APPROVAL), whose Automatic
 sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the

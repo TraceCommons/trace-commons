@@ -211,6 +211,12 @@ pub struct QueueEntry {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub discovered_at: DateTime<Utc>,
+    /// The first time these bytes were held for a person's review. A newly
+    /// held approved backlog gets a full review TTL without changing its
+    /// discovery provenance. Kept across repeats and restarts, so a hold
+    /// cannot renew its own deadline forever; absent on older queue lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_started_at: Option<DateTime<Utc>>,
     pub state: QueueState,
     /// A fixed label, never a message body or response text.
     pub reason_label: Option<String>,
@@ -778,6 +784,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         retry_after: None,
         transient_redaction_failures: 0,
         submission_id: None,
+        review_started_at: None,
         // Provenance carries over; the approval and every term it was given
         // under -- scopes, envelope-determining inputs, and the artifact
         // that was shown -- do not.
@@ -1720,6 +1727,11 @@ impl Queue {
     /// Manual no longer allows. A person's own approval is never touched, and
     /// an entry already `Uploading` is left to its pass.
     pub fn return_unattended_to_waiting(&mut self) -> usize {
+        self.return_unattended_to_waiting_at(Utc::now())
+    }
+
+    /// The settings change's clock starts the Manual review window.
+    pub fn return_unattended_to_waiting_at(&mut self, now: DateTime<Utc>) -> usize {
         let ids: Vec<Uuid> = self
             .entries
             .iter()
@@ -1727,7 +1739,7 @@ impl Queue {
             .map(|e| e.entry_id)
             .collect();
         for id in &ids {
-            self.revoke_approval(*id, super::second_look::REASON_SCRUB_CHECK_MANUAL);
+            self.revoke_approval_at(*id, super::second_look::REASON_SCRUB_CHECK_MANUAL, now);
         }
         ids.len()
     }
@@ -1746,7 +1758,19 @@ impl Queue {
         reason_label: &str,
         pin: Option<(&str, super::second_look::ScrubCounts)>,
     ) -> bool {
-        if !self.revoke_approval(entry_id, reason_label) {
+        self.hold_with_scrub_pin_at(entry_id, reason_label, pin, Utc::now())
+    }
+
+    /// The upload pass supplies its own clock, so the review deadline and
+    /// that pass's expiry decision agree even for an old approved backlog.
+    pub fn hold_with_scrub_pin_at(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: Option<(&str, super::second_look::ScrubCounts)>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if !self.revoke_approval_at(entry_id, reason_label, now) {
             return false;
         }
         if let Some((digest, counts)) = pin {
@@ -1761,9 +1785,23 @@ impl Queue {
     /// contributor, because the terms it was approved under no longer hold.
     /// Returns whether anything changed.
     pub fn revoke_approval(&mut self, entry_id: Uuid, reason_label: &str) -> bool {
+        self.revoke_approval_at(entry_id, reason_label, Utc::now())
+    }
+
+    fn revoke_approval_at(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
+        if REASONS_NEEDING_A_PERSON.contains(&reason_label)
+            || reason_label == super::second_look::REASON_SCRUB_CHECK_MANUAL
+        {
+            e.review_started_at.get_or_insert(now);
+        }
         e.state = QueueState::Pending;
         e.reason_label = Some(reason_label.to_string());
         e.retry_after = None;
@@ -2154,6 +2192,9 @@ impl Queue {
     ///
     /// `blocked_on_health` suspends the clock entirely: an entry the daemon
     /// could not have uploaded even with permission has not been declined.
+    /// A review hold starts its own TTL, without rewriting discovery. A
+    /// later explicit re-offer already dated by its caller still gets that
+    /// later date, as it did before the review clock existed.
     pub fn expire(&mut self, now: DateTime<Utc>, ttl_days: i64, blocked_on_health: bool) -> usize {
         if blocked_on_health {
             return 0;
@@ -2161,7 +2202,10 @@ impl Queue {
         let cutoff = now - Duration::days(ttl_days);
         let mut expired = 0;
         for e in self.entries.iter_mut() {
-            if e.state == QueueState::Pending && e.discovered_at < cutoff {
+            let waiting_since = e
+                .review_started_at
+                .map_or(e.discovered_at, |review| review.max(e.discovered_at));
+            if e.state == QueueState::Pending && waiting_since < cutoff {
                 e.state = QueueState::Expired;
                 e.reason_label = Some(REASON_EXPIRED.to_string());
                 expired += 1;
@@ -2881,6 +2925,114 @@ mod tests {
         q.upsert(entry("sha256:aa", "2026-08-01T12:00:00Z"), 500)
             .unwrap();
         assert_eq!(q.expire(at("2026-08-08T12:00:00Z"), 14, false), 0);
+    }
+
+    #[test]
+    fn a_new_scrub_hold_does_not_expire_with_the_old_backlog() {
+        let now = at("2026-09-30T12:00:00Z");
+        let mut q = Queue::new();
+        let e = QueueEntry {
+            discovered_at: now - Duration::days(20),
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        let discovered = e.discovered_at;
+        q.push_for_test(e);
+        assert!(q.hold_with_scrub_pin_at(
+            id,
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            None,
+            now,
+        ));
+        assert_eq!(q.get(id).unwrap().discovered_at, discovered);
+        assert_eq!(q.get(id).unwrap().review_started_at, Some(now));
+        assert_eq!(
+            q.expire(now, 14, false),
+            0,
+            "new review is not old discovery"
+        );
+        assert!(q.get(id).unwrap().held_for_review());
+        assert_eq!(q.expire(now + Duration::days(14), 14, false), 0);
+        assert_eq!(
+            q.expire(now + Duration::days(14) + Duration::seconds(1), 14, false),
+            1
+        );
+    }
+
+    #[test]
+    fn a_review_deadline_survives_reload_and_repeated_holds() {
+        let now = at("2026-09-30T12:00:00Z");
+        for reason in [
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            super::super::second_look::REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let (_d, store) = temp_store();
+            let mut q = Queue::new();
+            let e = QueueEntry {
+                discovered_at: now - Duration::days(20),
+                approved_unattended: true,
+                ..entry_in("/w/alpha", QueueState::Approved)
+            };
+            let id = e.entry_id;
+            q.push_for_test(e);
+            assert!(q.hold_with_scrub_pin_at(id, reason, None, now));
+            q.save(&store).unwrap();
+            let mut loaded = Queue::load(&store).unwrap();
+            assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
+            let repeated = now + Duration::days(13);
+            assert!(loaded.hold_with_scrub_pin_at(id, reason, None, repeated));
+            assert_eq!(loaded.get(id).unwrap().review_started_at, Some(now));
+            assert_eq!(loaded.expire(repeated, 14, false), 0);
+            assert_eq!(
+                loaded.expire(now + Duration::days(14) + Duration::seconds(1), 14, false),
+                1,
+                "{reason} must not extend its deadline on a repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_to_manual_starts_review_without_rewriting_discovery() {
+        let now = at("2026-09-30T12:00:00Z");
+        let mut q = Queue::new();
+        let e = QueueEntry {
+            discovered_at: at("2026-08-08T12:00:00Z"),
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        let discovered = e.discovered_at;
+        q.push_for_test(e);
+        assert_eq!(q.return_unattended_to_waiting_at(now), 1);
+        let review = q
+            .get(id)
+            .unwrap()
+            .review_started_at
+            .expect("Manual starts review");
+        assert_eq!(q.get(id).unwrap().discovered_at, discovered);
+        assert_eq!(review, now);
+        assert_eq!(q.expire(review + Duration::days(13), 14, false), 0);
+        assert_eq!(
+            q.return_unattended_to_waiting_at(now + Duration::days(13)),
+            0
+        );
+        assert_eq!(q.get(id).unwrap().review_started_at, Some(review));
+        assert_eq!(q.expire(review + Duration::days(15), 14, false), 1);
+    }
+
+    #[test]
+    fn an_older_queue_line_without_a_review_clock_keeps_its_original_expiry() {
+        let (_d, store) = temp_store();
+        let e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        let mut line = serde_json::to_value(&e).unwrap();
+        line.as_object_mut().unwrap().remove("review_started_at");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, line.to_string().as_bytes())
+            .unwrap();
+        let mut loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.get(e.entry_id).unwrap().review_started_at, None);
+        assert_eq!(loaded.expire(at("2026-08-23T12:00:00Z"), 14, false), 1);
     }
 
     #[test]

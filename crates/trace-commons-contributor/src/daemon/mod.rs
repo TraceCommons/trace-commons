@@ -1099,11 +1099,12 @@ async fn drain_approved(
                     second_look = ?reasons,
                     "held a session approved on the contributor's behalf for a person"
                 );
-                q.hold_with_scrub_pin(
+                q.hold_with_scrub_pin_at(
                     entry.entry_id,
                     &reason_label,
                     pin.as_ref()
                         .map(|(digest, counts)| (digest.as_str(), *counts)),
+                    now,
                 );
             }
             uploader::UploadDecision::Failed { reason_label } => {
@@ -1989,7 +1990,7 @@ mod tests {
                     "{}\n",
                     serde_json::json!({
                         "type": "user",
-                        "message": {"role": "user", "content": "fix the parser please"},
+                        "message": {"role": "user", "content": "fix the parser please, then mail alice.smith@example.org"},
                         "cwd": project_cwd,
                         "timestamp": "2026-08-08T10:00:00Z",
                         "version": "2.0.1",
@@ -2704,36 +2705,30 @@ mod tests {
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
     }
 
-    /// The opt-in Automatic Scrub check (K4 of #1118), through a real upload
-    /// pass. This harness's own session reads "fix the parser please", which
-    /// the scrubber removes nothing from. Under the default (never chosen)
-    /// it is sent, as the other tests here show. Once Automatic is chosen,
-    /// the same session is held for a person with `nothing-matched` and
-    /// nothing is uploaded for it, while a session the scrubber did remove
-    /// something from still goes.
+    /// The Automatic Scrub check (K4 of #1118), which is the default, through
+    /// a real upload pass. This harness's own session carries an address the
+    /// scrubber removes, so it passes the check (the other tests here rely on
+    /// that). A second armed session the scrubber removes nothing from is,
+    /// with nothing chosen, held for a person with `nothing-matched` and
+    /// nothing is uploaded for it, while the marked one still goes.
     #[tokio::test]
-    async fn once_automatic_is_chosen_an_armed_session_where_nothing_matched_is_held() {
+    async fn by_default_an_armed_session_where_nothing_matched_is_held() {
         let h = TransientRetryHarness::new().await;
-        let unmarked = h.entry();
-        assert_eq!(unmarked.state, queue::QueueState::Approved, "armed");
-        assert!(unmarked.approved_unattended);
+        let marked = h.entry().entry_id;
         assert_eq!(
             h.shared.settings.lock().unwrap().scrub_check,
-            None,
-            "the default is never chosen"
+            settings::ScrubCheck::Automatic,
+            "the default is Automatic"
         );
-        h.shared.settings.lock().unwrap().scrub_check = Some(settings::ScrubCheck::Automatic);
-        h.add_session(
-            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
-            "tidy the lexer, then mail alice.smith@example.org",
-        )
-        .await;
-        let marked = h
+        h.add_session("9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e", "tidy the lexer")
+            .await;
+        let unmarked = h
             .entries()
             .into_iter()
-            .find(|e| e.entry_id != unmarked.entry_id)
-            .expect("the session with an address in it")
-            .entry_id;
+            .find(|e| e.entry_id != marked)
+            .expect("the session with nothing in it to remove");
+        assert_eq!(unmarked.state, queue::QueueState::Approved, "armed");
+        assert!(unmarked.approved_unattended);
 
         h.pass(TransientRetryHarness::now()).await;
 
@@ -2772,8 +2767,11 @@ mod tests {
     #[tokio::test]
     async fn a_saturated_witness_holds_sessions_and_is_asked_again_only_when_due() {
         let h = TransientRetryHarness::with_witness().await;
-        h.add_session("8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d", "tidy the lexer too")
-            .await;
+        h.add_session(
+            "8d8d8d8d-8d8d-8d8d-8d8d-8d8d8d8d8d8d",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
         assert_eq!(h.entries().len(), 2);
         assert!(
             h.entries()
