@@ -19,8 +19,14 @@
 --     The binding row has no close timestamp of its own, and needs none.
 --     Closed rows are already outside the unbound ceiling's count (V98), so
 --     without this they accumulated without bound.
--- Either kind is reaped only when it holds no LIVE SESSION (unrevoked and
--- unexpired), so a session is never reaped from under its holder.
+-- A LIVE SESSION DOES NOT PUT THE REAP OFF (decided 2026-09-30). An earlier
+-- draft skipped any account holding an unrevoked, unexpired session. Native
+-- sessions last 12 hours, so signing in twice a day kept an unbound account,
+-- and its slot under the unbound ceiling, forever. Each kind is now reaped on
+-- its clock alone, and its sessions are deleted in the same transaction as
+-- the account, by the ON DELETE CASCADE from trace_accounts. A request already
+-- in flight on one of those sessions may finish; the next is refused, because
+-- the session row is gone. The guard therefore reads no session at all.
 --
 -- Numbering: S1 is V97, S2 V98 and S3 V100. This was drafted as V99 and
 -- became V101 when it was rebased onto a main that already held V100, since
@@ -83,9 +89,8 @@
 --      is skipped).
 --   2. the account row is locked FOR UPDATE SKIP LOCKED. Inserting any row
 --      keyed to the account takes a key-share lock on it through the foreign
---      key, so a concurrent sign-in makes the candidate skipped; one that
---      commits earlier is seen by 3.
---   3. live sessions are re-checked in a fresh statement, under both locks.
+--      key, so a sign-in still in progress makes the candidate skipped. Its
+--      session, once committed, does not save the account on a later tick.
 -- Nothing waits on a lock the reaper cannot take, but the cascade itself can
 -- wait on a child row (a session being updated) held by a transaction that
 -- then waits on the reaper's account lock. That is a deadlock; the
@@ -132,8 +137,6 @@ GRANT UPDATE (created_at) ON trace_account_bindings TO trace_unbound_account_rea
 GRANT SELECT (tenant_id, account_id, created_at, closed_at), DELETE
     ON trace_accounts TO trace_unbound_account_reaper_guard;
 GRANT UPDATE (created_at) ON trace_accounts TO trace_unbound_account_reaper_guard;
-GRANT SELECT (tenant_id, account_id, last_seen_at, expires_at, revoked_at)
-    ON trace_sessions TO trace_unbound_account_reaper_guard;
 
 -- Role-scoped permissive policies; the shared tenant-isolation policies stay
 -- for everyone else.
@@ -157,9 +160,6 @@ DROP POLICY IF EXISTS trace_unbound_reaper_delete ON trace_accounts;
 CREATE POLICY trace_unbound_reaper_delete ON trace_accounts
     FOR DELETE TO trace_unbound_account_reaper_guard USING (TRUE);
 
-DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_sessions;
-CREATE POLICY trace_unbound_reaper_read ON trace_sessions
-    FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
 -- An earlier draft read trace_submissions under this name.
 DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_submissions;
 
@@ -167,8 +167,10 @@ DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_submissions;
 -- scratch databases only; the draft, numbered V99, was never released).
 -- That draft deleted the tenant, so it gave the guard SELECT/DELETE/UPDATE
 -- on trace_tenants with three policies there, and a SELECT grant plus a trace_unbound_reaper_scope
--- policy on every tenant-keyed table. None of it is used now. Each step is a
+-- policy on every tenant-keyed table. It also read trace_sessions, to keep
+-- an account with a live session. None of it is used now. Each step is a
 -- no-op on a fresh database.
+DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_sessions;
 DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_tenants;
 DROP POLICY IF EXISTS trace_unbound_reaper_lock ON trace_tenants;
 DROP POLICY IF EXISTS trace_unbound_reaper_delete ON trace_tenants;
@@ -183,20 +185,20 @@ BEGIN
     LOOP
         EXECUTE format('DROP POLICY IF EXISTS trace_unbound_reaper_scope ON %s', r.rel);
     END LOOP;
-    -- Every table the guard holds any privilege on, other than the three it
+    -- Every table the guard holds any privilege on, other than the two it
     -- needs. A table-level REVOKE ALL also revokes its column privileges.
     FOR r IN
         SELECT DISTINCT format('%I.%I', cp.table_schema, cp.table_name) AS rel
           FROM information_schema.column_privileges cp
          WHERE cp.grantee = 'trace_unbound_account_reaper_guard'
            AND cp.table_schema = 'public'
-           AND cp.table_name NOT IN ('trace_account_bindings', 'trace_accounts', 'trace_sessions')
+           AND cp.table_name NOT IN ('trace_account_bindings', 'trace_accounts')
         UNION
         SELECT DISTINCT format('%I.%I', tp.table_schema, tp.table_name)
           FROM information_schema.table_privileges tp
          WHERE tp.grantee = 'trace_unbound_account_reaper_guard'
            AND tp.table_schema = 'public'
-           AND tp.table_name NOT IN ('trace_account_bindings', 'trace_accounts', 'trace_sessions')
+           AND tp.table_name NOT IN ('trace_account_bindings', 'trace_accounts')
     LOOP
         EXECUTE format('REVOKE ALL ON %s FROM trace_unbound_account_reaper_guard', r.rel);
     END LOOP;
@@ -242,10 +244,6 @@ BEGIN
                 ON a.tenant_id = b.tenant_id AND a.account_id = b.account_id
              WHERE b.state = 'closed' AND a.closed_at < v_closed_cutoff
           ) k
-         WHERE NOT EXISTS (
-                SELECT 1 FROM public.trace_sessions s
-                 WHERE s.tenant_id = k.tenant_id AND s.account_id = k.account_id
-                   AND s.revoked_at IS NULL AND s.expires_at > v_now)
          ORDER BY k.since, k.tenant_id, k.account_id
          LIMIT p_limit::BIGINT * 10
     LOOP
@@ -267,16 +265,10 @@ BEGIN
                 v_skipped := v_skipped + 1;
                 CONTINUE;
             END IF;
-            -- Re-check under both locks.
-            IF EXISTS (
-                SELECT 1 FROM public.trace_sessions s
-                 WHERE s.tenant_id = c.tenant_id AND s.account_id = c.account_id
-                   AND s.revoked_at IS NULL AND s.expires_at > clock_timestamp()) THEN
-                v_skipped := v_skipped + 1;
-                CONTINUE;
-            END IF;
-            -- The account alone. Its tenant row is never deleted. A
-            -- non-cascading account-keyed row raises 23503 below.
+            -- The account alone, and with it, by cascade and in this same
+            -- sub-transaction, its sessions, live or not. Its tenant row is
+            -- never deleted. A non-cascading account-keyed row raises 23503
+            -- below.
             DELETE FROM public.trace_accounts a
              WHERE a.tenant_id = c.tenant_id AND a.account_id = c.account_id;
             IF c.state = 'unbound' THEN

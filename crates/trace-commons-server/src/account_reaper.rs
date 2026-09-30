@@ -12,14 +12,13 @@
 //! - a `closed` account 30 days after `trace_accounts.closed_at`, which S3
 //!   sets in the transaction that closes the binding.
 //!
-//! Either way the account is reaped only once it holds no live session. The
-//! reap deletes the account and what cascades from it (binding, credentials,
-//! sessions, login links); the tenant row is never deleted. An account-keyed
-//! row that does not cascade refuses the candidate. The delete is a
-//! cross-tenant sweep, so
-//! it runs through `trace_reap_unbound_accounts`, a `SECURITY DEFINER`
-//! function, on its own small pool whose login holds only the
-//! `trace_unbound_account_reaper` role. It never touches the runtime pool.
+//! A live session does not put the reap off (decided 2026-09-30): the reap
+//! deletes the account and what cascades from it (binding, credentials,
+//! sessions, login links) in one transaction; the tenant row is never
+//! deleted. An account-keyed row that does not cascade refuses the candidate.
+//! The delete is a cross-tenant sweep, so it runs through
+//! `trace_reap_unbound_accounts`, a `SECURITY DEFINER` function, on its own
+//! small pool whose login holds only the `trace_unbound_account_reaper` role. It never touches the runtime pool.
 //!
 //! Everything the sweep reports is a count. No tenant, account, credential
 //! or session identifier leaves the database.
@@ -41,6 +40,8 @@ pub const MAX_TTL_DAYS: i64 = 3650;
 /// The most accounts one call may delete; the SQL function enforces it too.
 pub const MAX_BATCH: i32 = 1000;
 pub const DEFAULT_BATCH: i32 = 100;
+/// The one function the reaper login may execute (V101).
+const REAP_FUNCTION_SIGNATURE: &str = "public.trace_reap_unbound_accounts(bigint, bigint, integer)";
 /// How long boot waits for the reaper login before failing.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -52,9 +53,9 @@ pub struct ReapSummary {
     pub reaped_unbound: u64,
     /// Closed accounts deleted, likewise.
     pub reaped_closed: u64,
-    /// Candidates left alone: locked by a concurrent request, holding a live
-    /// session since the scan, refused by a non-cascading foreign key into the
-    /// account, timed out on a lock, or chosen as a deadlock victim.
+    /// Candidates left alone: locked by a concurrent request, refused by a
+    /// non-cascading foreign key into the account, timed out on a lock, or
+    /// chosen as a deadlock victim.
     pub skipped: u64,
 }
 
@@ -88,10 +89,25 @@ impl UnboundAccountReaper {
         Ok(Self { pool })
     }
 
-    /// Take one connection from the pool, so a login that cannot connect
-    /// fails boot instead of the first tick.
+    /// Take one connection from the pool and check that the login may
+    /// execute the reaper function, so a login that cannot connect, or one
+    /// that connects without `trace_unbound_account_reaper`, fails boot
+    /// instead of the first tick. Fails closed: a missing function (the
+    /// migration has not run) is refused too, not treated as a pass.
     pub async fn verify_login(&self) -> Result<(), DatabaseError> {
-        let _connection = self.pool.get().await?;
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT to_regprocedure($1) IS NOT NULL
+                        AND has_function_privilege(to_regprocedure($1), 'EXECUTE')",
+                &[&REAP_FUNCTION_SIGNATURE],
+            )
+            .await?;
+        if !row.get::<_, bool>(0) {
+            return Err(DatabaseError::Pool(
+                "unbound_reaper_execute_denied".to_string(),
+            ));
+        }
         Ok(())
     }
 

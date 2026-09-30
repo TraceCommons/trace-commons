@@ -4064,12 +4064,25 @@ impl AppState {
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
         let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
         if let Some(reaper) = &unbound_account_reaper {
-            // The pool connects lazily; take one connection now so a reaper
-            // login that cannot connect fails boot, not the first tick.
-            reaper.reaper.verify_login().await.map_err(|_| {
-                anyhow::anyhow!(
-                    "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
-                )
+            // The pool connects lazily; take one connection now and check the
+            // login may execute the reaper function, so a login that cannot
+            // connect, or lacks trace_unbound_account_reaper, fails boot, not
+            // the first tick. The error names the variable, never the URL.
+            reaper.reaper.verify_login().await.map_err(|error| {
+                let denied = matches!(
+                    &error,
+                    trace_commons_server::error::DatabaseError::Pool(label)
+                        if label == "unbound_reaper_execute_denied"
+                );
+                if denied {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} connects but cannot execute trace_reap_unbound_accounts (unbound_reaper_execute_denied)"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
+                    )
+                }
             })?;
         }
         // Fail closed on configuration. An enabled bypass missing its signing

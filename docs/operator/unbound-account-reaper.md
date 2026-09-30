@@ -14,19 +14,26 @@ accounts (no binding row) are never touched.
 | `closed` | 30 days | `trace_accounts.closed_at` | `TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS` |
 
 Decided 2026-09-29. An unbound account is reaped on its bound status, not on
-use: signing in again does not extend its window. An earlier draft kept an
-account that signed in again for 30 days of idleness, which let one sign-in
-hold an unbound account, and a slot under the unbound ceiling, for a month.
+use: signing in again does not extend its window, and neither does holding a
+live session (see below). An earlier draft kept an account that signed in
+again for 30 days of idleness, which let one sign-in hold an unbound account,
+and a slot under the unbound ceiling, for a month.
 
 S3 sets `closed_at` in the same transaction that moves the binding to
 `closed`, so `closed_at` is the close time. Closed accounts are not counted
 against the unbound ceiling, so without the second window they would pile up
 without limit.
 
-Either kind is kept while it holds a **live session**, one that is unrevoked
-and unexpired. A session is never reaped out from under the person holding it.
-S3 revokes every session when it closes an account, so this matters only for
-unbound accounts.
+**A live session does not put the reap off** (decided 2026-09-30). An earlier
+draft kept either kind while it held an unrevoked, unexpired session. Native
+sessions last 12 hours, so signing in about twice a day kept an unbound
+account, and its slot under the unbound ceiling, indefinitely. Now each kind
+is reaped once its window has passed, whatever sessions it holds, and those
+sessions are deleted in the same transaction as the account, by the
+`ON DELETE CASCADE` from `trace_accounts`. A request already in flight on one
+of them may finish; the next request with that session is refused, because
+the session row is gone. S3 revokes every session when it closes an account,
+so in practice this changes only unbound accounts.
 
 ## What is deleted, and what is refused
 
@@ -39,6 +46,14 @@ The tenant row stays, possibly empty, and so does every row keyed to the
 tenant rather than the account. That includes `trace_account_audit` and the
 hash-chained `trace_audit_events`. What else the tenant holds does not matter
 and does not refuse the candidate.
+
+**Accepted: empty tenants accumulate** (decided 2026-09-30). Every passkey
+creation makes its own tenant, so each reap leaves one empty tenant row and
+its audit rows behind. Code that enumerates every tenant (the leaderboard,
+corpus-analytics and register-stats totals in `db/postgres.rs`) iterates
+those too. A later sweep, or those enumerations skipping tenants with no
+account, is tracked in
+[#1153](https://github.com/TraceCommons/trace-commons/issues/1153).
 
 The same cascade from `trace_accounts` also reaches
 `trace_account_principals`, `trace_near_identities`,
@@ -68,9 +83,14 @@ tenant delete, which the reaper no longer does.
 
 Off unless `TRACE_COMMONS_UNBOUND_REAPER_ENABLED=true`. When it is on, boot
 fails closed if `TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL` is missing. Boot
-also takes one connection from the reaper pool, so a login that the server
-rejects, or a host that cannot be reached within 10 seconds, fails boot rather
-than the first tick. That error never contains the URL.
+also takes one connection from the reaper pool and checks
+`has_function_privilege` for EXECUTE on
+`trace_reap_unbound_accounts(bigint, bigint, integer)`. A login that the
+server rejects, a host that cannot be reached within 10 seconds, a login that
+connects without `trace_unbound_account_reaper`, or a database where the
+function does not exist fails boot rather than the first tick. The first two
+report a connection failure and the last two `unbound_reaper_execute_denied`.
+Neither error contains the URL.
 
 | Variable | Default | Bounds |
 |---|---|---|
@@ -92,8 +112,10 @@ V101 creates two NOLOGIN roles:
 
 - `trace_unbound_account_reaper_guard` owns the `SECURITY DEFINER` function
   `trace_reap_unbound_accounts(BIGINT, BIGINT, INTEGER)`. It holds
-  column-scoped grants and permissive policies on `trace_account_bindings`,
-  `trace_accounts` and `trace_sessions`, and on nothing else.
+  column-scoped grants and permissive policies on `trace_account_bindings`
+  and `trace_accounts`, and on nothing else. It reads no session: sessions
+  no longer gate the reap, and the cascade that deletes them runs as the
+  table owner.
 - `trace_unbound_account_reaper` holds EXECUTE on that function and nothing
   else.
 
@@ -116,8 +138,8 @@ liveness registry as `unbound_account_reaper`.
 
 `skipped` counts candidates that were left alone for any of these reasons:
 
-- locked by a concurrent bind, sign-in or other write to the account;
-- holding a live session since the scan;
+- locked by a concurrent bind, sign-in or other write to the account (a
+  sign-in that commits does not save the account on a later tick);
 - refused by a non-cascading foreign key into the account (23503);
 - lost a lock wait (a 3-second `lock_timeout`);
 - aborted by PostgreSQL's deadlock detector (40P01).

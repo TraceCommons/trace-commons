@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 const URL_VAR: &str = "TRACE_COMMONS_UNBOUND_REAPER_PG_TEST_DATABASE_URL";
 const LOGIN: &str = "unbound_reaper_test_login";
+/// A login that connects but holds no reaper role.
+const UNGRANTED: &str = "unbound_reaper_test_ungranted";
 const UNBOUND_TTL_DAYS: i64 = 7;
 const CLOSED_TTL_DAYS: i64 = 30;
 
@@ -344,7 +346,7 @@ async fn an_unbound_account_past_the_ttl_is_deleted_with_all_its_rows() {
 
 /// Decision 1 (2026-09-29): reap on bound status, not on use. An account that
 /// signed in again on day 2 used to move to a 30-day idle window; now it goes
-/// at day 8 like any other unbound account, once its sessions are dead.
+/// at day 8 like any other unbound account.
 #[tokio::test]
 async fn an_unbound_account_that_signed_in_again_is_reaped_at_eight_days() {
     let Some(fx) = fixture().await else { return };
@@ -361,22 +363,35 @@ async fn an_unbound_account_that_signed_in_again_is_reaped_at_eight_days() {
     }
 }
 
+/// Decision (2026-09-30, #1127 review): a live session no longer puts the
+/// reap off. Native sessions last 12 hours, so under the earlier rule signing
+/// in twice a day held an unbound account, and its slot under the unbound
+/// ceiling, forever. The account is reaped on its clock alone, and its
+/// sessions go in the same transaction, by the cascade from trace_accounts.
 #[tokio::test]
-async fn an_unbound_account_with_a_live_session_survives() {
+async fn an_account_with_a_live_session_is_reaped_and_its_sessions_go_with_it() {
     let Some(fx) = fixture().await else { return };
-    // Same shape as above, but the day-2 sign-in holds a session that is
-    // still unrevoked and unexpired.
+    // Created 8 days ago; a sign-in on day 2 holds a session that is still
+    // unrevoked and unexpired.
     let live = seed_created(&fx, 8).await;
     insert_native_session(&fx.admin, &live, 6 * 24, 0, 7 * 24).await;
-    // Unexpired but revoked is not live.
+    // Unexpired but revoked.
     let revoked = seed(&fx, Binding::Unbound, 90, Some((60, 2, true))).await;
-    // Unrevoked but expired is not live.
+    // Unrevoked but expired.
     let expired = seed(&fx, Binding::Unbound, 90, Some((5, -1, false))).await;
+    // A closed account holding a live session, which S3's close should never
+    // leave behind, is reaped on its own clock too.
+    let closed = seed_closed(&fx, 400, 31).await;
+    insert_session(&fx.admin, &closed.tenant, closed.account, 0, 5, false).await;
+    // Still inside its window: a live session changes nothing either way.
+    let young = seed(&fx, Binding::Unbound, 6, Some((0, 5, false))).await;
 
-    assert_eq!(counts(fx.reap(100).await), (2, 0, 0));
-    assert_eq!(rows(&fx, &live.tenant).await[..5], [1, 1, 1, 1, 2]);
-    assert_eq!(rows(&fx, &revoked.tenant).await, REAPED);
-    assert_eq!(rows(&fx, &expired.tenant).await, REAPED);
+    assert_eq!(counts(fx.reap(100).await), (3, 1, 0));
+    for s in [&live, &revoked, &expired] {
+        assert_eq!(rows(&fx, &s.tenant).await, REAPED);
+    }
+    assert_eq!(rows(&fx, &closed.tenant).await, [1, 0, 0, 0, 0, 2, 1]);
+    assert_eq!(rows(&fx, &young.tenant).await[..5], [1, 1, 1, 1, 1]);
 }
 
 #[tokio::test]
@@ -635,7 +650,7 @@ async fn an_account_that_binds_during_the_sweep_survives() {
 }
 
 #[tokio::test]
-async fn an_account_that_signs_in_during_the_sweep_survives() {
+async fn an_account_that_signs_in_during_the_sweep_is_skipped_then_reaped() {
     let Some(fx) = fixture().await else { return };
     let target = seed_created(&fx, 8).await;
 
@@ -658,9 +673,10 @@ async fn an_account_that_signs_in_during_the_sweep_survives() {
     assert_eq!(counts(fx.reap(100).await), (0, 0, 1));
     tx.commit().await.unwrap();
 
-    // Committed, the new session is live, so the account is not a candidate.
-    assert_eq!(counts(fx.reap(100).await), (0, 0, 0));
-    assert_eq!(rows(&fx, &target.tenant).await[..5], [1, 1, 1, 1, 2]);
+    // Committed, the new session is live, but a live session no longer puts
+    // the reap off: the next sweep takes the account and both sessions.
+    assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
+    assert_eq!(rows(&fx, &target.tenant).await, REAPED);
 }
 
 /// An account-keyed insert that begins between the reaper's session re-check
@@ -933,19 +949,42 @@ async fn it_works_as_the_non_superuser_role_and_not_by_bypassing_row_security() 
     assert_eq!(rows(&fx, &target.tenant).await, REAPED);
 }
 
-/// Boot does one `pool.get()` on the reaper pool, so a login that cannot
-/// connect fails boot rather than the first tick.
+/// Boot takes one connection from the reaper pool and checks that the login
+/// may execute the reaper function, so a login that cannot connect, or one
+/// that connects without `trace_unbound_account_reaper`, fails boot rather
+/// than the first tick.
 #[tokio::test]
 async fn a_bad_reaper_login_fails_the_startup_check() {
     let Some(fx) = fixture().await else { return };
     fx.reaper
         .verify_login()
         .await
-        .expect("the real login connects");
+        .expect("the real login connects and may execute the function");
     let mut bad = reqwest::Url::parse(&fx.reaper_url).unwrap();
     bad.set_username("unbound_reaper_no_such_login").unwrap();
     let bad = UnboundAccountReaper::connect(bad.as_str()).expect("builds lazily");
     assert!(bad.verify_login().await.is_err());
+
+    // Connects, but was never granted the reaper role.
+    fx.admin
+        .batch_execute(&format!(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{UNGRANTED}') \
+             THEN CREATE ROLE {UNGRANTED} LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; \
+             REVOKE trace_unbound_account_reaper FROM {UNGRANTED};"
+        ))
+        .await
+        .unwrap();
+    let mut ungranted = reqwest::Url::parse(&fx.reaper_url).unwrap();
+    ungranted.set_username(UNGRANTED).unwrap();
+    let ungranted = UnboundAccountReaper::connect(ungranted.as_str()).expect("builds lazily");
+    let error = ungranted
+        .verify_login()
+        .await
+        .expect_err("a login without EXECUTE fails the startup check");
+    assert!(
+        error.to_string().contains("unbound_reaper_execute_denied"),
+        "{error}"
+    );
 }
 
 /// Re-applying V101 changes nothing and leaves the reaper working. The
@@ -968,9 +1007,9 @@ async fn reapplying_the_migration_changes_nothing() {
 
 /// A database that ran the earlier draft of V101 (CI and scratch only) held a
 /// guard grant and a `trace_unbound_reaper_scope` policy on every tenant-keyed
-/// table, and grants and policies on trace_tenants. Re-applying V101 must
-/// remove all of it, leaving the guard with privileges and policies on exactly
-/// the three tables it reads.
+/// table, grants and policies on trace_tenants, and a read on trace_sessions.
+/// Re-applying V101 must remove all of it, leaving the guard with privileges
+/// and policies on exactly the two tables it locks and deletes from.
 #[tokio::test]
 async fn reapplying_the_migration_removes_the_earlier_drafts_scope_grants() {
     let Some(fx) = fixture().await else { return };
@@ -995,6 +1034,11 @@ async fn reapplying_the_migration_removes_the_earlier_drafts_scope_grants() {
              GRANT SELECT (tenant_id) ON trace_login_links TO trace_unbound_account_reaper_guard;
              DROP POLICY IF EXISTS trace_unbound_reaper_scope ON trace_login_links;
              CREATE POLICY trace_unbound_reaper_scope ON trace_login_links
+                 FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);
+             GRANT SELECT (tenant_id, account_id, last_seen_at, expires_at, revoked_at)
+                 ON trace_sessions TO trace_unbound_account_reaper_guard;
+             DROP POLICY IF EXISTS trace_unbound_reaper_read ON trace_sessions;
+             CREATE POLICY trace_unbound_reaper_read ON trace_sessions
                  FOR SELECT TO trace_unbound_account_reaper_guard USING (TRUE);",
         )
         .await
@@ -1011,10 +1055,12 @@ async fn reapplying_the_migration_removes_the_earlier_drafts_scope_grants() {
         .await
         .unwrap();
 
-    let three = ["trace_account_bindings", "trace_accounts", "trace_sessions"];
+    // Since sessions stopped gating the reap, the guard reads no session:
+    // the cascade from trace_accounts deletes them as the table owner.
+    let two = ["trace_account_bindings", "trace_accounts"];
     let (policy_tables, granted) = guard_tables(&fx).await;
-    assert_eq!(policy_tables, three, "policies left on other tables");
-    assert_eq!(granted, three, "grants left on other tables");
+    assert_eq!(policy_tables, two, "policies left on other tables");
+    assert_eq!(granted, two, "grants left on other tables");
 
     let target = seed(&fx, Binding::Unbound, 90, None).await;
     assert_eq!(counts(fx.reap(100).await), (1, 0, 0));
