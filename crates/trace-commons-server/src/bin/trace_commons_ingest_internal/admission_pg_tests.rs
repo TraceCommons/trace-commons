@@ -226,6 +226,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             issued_by_label: None,
             credential_binding_hash: None,
             note_label: None,
+            issuer_display_name: None,
+            credit_range: None,
         })
         .await
         .unwrap();
@@ -1812,6 +1814,8 @@ async fn account_replacement_is_default_off_and_validates_offered_evidence() {
         issued_by_label: None,
         credential_binding_hash: None,
         note_label: None,
+        issuer_display_name: None,
+        credit_range: None,
     })
     .await
     .unwrap();
