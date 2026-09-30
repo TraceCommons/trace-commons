@@ -1545,12 +1545,20 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "native_passkey_creation",
         include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
     ),
-    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V99 is claimed
-    // by S5 (the unbound reaper) in flight; V100 depends only on V97 and V90.
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V100 depends
+    // only on V97 and V90. V99 was never used: S5 held it in flight and took
+    // V101 when it rebased onto main.
     (
         100,
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
+    ),
+    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // and V97.
+    (
+        101,
+        "unbound_account_reaper",
+        include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
     ),
 ];
 
