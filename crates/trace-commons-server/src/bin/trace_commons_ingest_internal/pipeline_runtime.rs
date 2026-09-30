@@ -443,13 +443,6 @@ pub(crate) async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_
     }
 }
 
-/// Starts the owned pipeline worker loop. `None` when no pipeline runtime is
-/// injected -- there is nothing to drain, and the repository binary injects
-/// none.
-///
-/// Each iteration runs one `run_pipeline_worker_pass` over the
-/// `PipelineReceipts` rollout tenants, then sleeps
-/// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
 /// The tenants the pipeline worker drains on each pass, each once, in order:
 /// the tenants whose receipts are routed to the pipeline
 /// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) and the drain list
@@ -465,6 +458,14 @@ pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
     tenant_ids.into_iter().collect()
 }
 
+/// Starts the owned pipeline worker loop. `None` when no pipeline runtime is
+/// injected -- there is nothing to drain, and the repository binary injects
+/// none.
+///
+/// Each iteration runs one `run_pipeline_worker_pass` over
+/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants and
+/// the drain list, read once at start), then sleeps
+/// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
 fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
     let tenant_ids = pipeline_worker_tenant_ids(&state);

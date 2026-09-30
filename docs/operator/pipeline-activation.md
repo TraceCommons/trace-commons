@@ -66,8 +66,10 @@ The pipeline's own tables (V92 to V95, V101 and V102) grant the ingest runtime g
 `trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
 pipeline also reads and writes tables from V62 and earlier -- submissions,
 object refs, derived records, tombstones, withdrawals, credit holds, the
-Trace Credit ledger and settlement batches, export manifests, and the NEAR
-outbox -- which no pipeline migration grants anything on; an ingest login in
+Trace Credit ledger and settlement batches, export manifests, the NEAR
+outbox, and, for Settle and the payout, the account links
+(`trace_account_principals`) and NEAR identities (`trace_near_identities`)
+-- which no pipeline migration grants anything on; an ingest login in
 the group needs the pilot's V62-era table grants for those too, or the
 pipeline fails closed with `permission denied`. To withdraw a submission
 that belongs to a source session, both withdrawal routes also need the
