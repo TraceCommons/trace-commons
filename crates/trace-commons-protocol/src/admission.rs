@@ -221,6 +221,22 @@ pub fn is_anchored_tenant(tenant_id: &str) -> bool {
         .any(|prefix| tenant_id.strip_prefix(prefix).is_some_and(is_hash))
 }
 
+/// Whether `tenant_id` begins with one of [`ANCHOR_NAMESPACES`], matched
+/// ASCII case-insensitively and with any suffix.
+///
+/// Broader than [`is_anchored_tenant`] on purpose: it answers "does this ID
+/// claim an account namespace at all", which is the rule fixed invite creation
+/// refuses on (#1015) and the legacy invite identity check excludes on. One
+/// helper, used by the server and the contributor daemon alike, so the daemon
+/// never offers a move the server would refuse.
+pub fn uses_anchor_namespace(tenant_id: &str) -> bool {
+    ANCHOR_NAMESPACES.iter().any(|prefix| {
+        tenant_id
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
+}
+
 impl AdmissionEvidence {
     pub fn signing_bytes(&self) -> Result<Vec<u8>, EvidenceMalformed> {
         if self.profile != EVIDENCE_DOMAIN
@@ -359,6 +375,25 @@ mod tests {
             assert!(!is_anchored_tenant(&tenant), "{tenant}");
         }
     }
+    #[test]
+    fn an_anchor_namespace_matches_in_any_ascii_case_and_with_any_suffix() {
+        for tenant in [
+            "near-",
+            "nearai-",
+            "near-foo",
+            "NEAR-foo",
+            "Near-foo",
+            "nearai-anything",
+            "NearAI-anything",
+            "NEARAI-xyz",
+        ] {
+            assert!(uses_anchor_namespace(tenant), "{tenant}");
+        }
+        for tenant in ["", "near", "nearish-foo", "tenant-near-foo", "neär-foo"] {
+            assert!(!uses_anchor_namespace(tenant), "{tenant}");
+        }
+    }
+
     #[test]
     fn evidence_v2_signs_admission_policy_inputs_and_refuses_v1() {
         let evidence = AdmissionEvidence {

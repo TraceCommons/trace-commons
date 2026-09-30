@@ -2406,6 +2406,19 @@ pub enum TraceSourceSessionStatus {
     Withdrawn,
 }
 
+/// One version of a withdrawn source session whose withdrawal is not yet
+/// complete, as `list_incomplete_source_session_withdrawals` finds it from
+/// actual state. Identifiers only: no content, path, or contributor identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceIncompleteSourceSessionWithdrawal {
+    /// The account the version's source-session mapping is keyed to.
+    pub account_id: Uuid,
+    pub submission_id: Uuid,
+    /// False when the version has no `trace_withdrawals` row yet: an account
+    /// merge joined it to a session the other account had withdrawn.
+    pub withdrawal_recorded: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct TraceSourceSessionWithdrawal {
     pub withdrawn_at: DateTime<Utc>,
@@ -2470,6 +2483,29 @@ pub trait TraceCorpusStore: Send + Sync {
         // A legacy-only backend has no source mappings. New-account ingest
         // still fails closed because `claim_trace_source_session` refuses.
         Ok(None)
+    }
+
+    /// Every version of a withdrawn source session whose withdrawal is not
+    /// complete, keyed on actual state rather than on a record of intent: the
+    /// version has no `trace_withdrawals` row, or it still has an object ref
+    /// not marked deleted, a vector entry not invalidated, a dedup cluster
+    /// assignment, a derived record not revoked, or a token attachment not
+    /// deleted (outside `held_retention_policy_ids`, which a legal hold keeps).
+    ///
+    /// A withdrawal writes its tombstone and `revoked` status first and marks
+    /// object refs deleted last, so a failure anywhere in between leaves the
+    /// version here, and running the withdrawal tail again completes it.
+    /// `account_id` narrows the scan to one account (an account merge); None
+    /// scans the tenant (the periodic reconciler). At most `limit` rows.
+    async fn list_incomplete_source_session_withdrawals(
+        &self,
+        _tenant_id: &str,
+        _account_id: Option<Uuid>,
+        _held_retention_policy_ids: &[String],
+        _limit: i64,
+    ) -> Result<Vec<TraceIncompleteSourceSessionWithdrawal>, DatabaseError> {
+        // No source mappings on a legacy-only backend, so nothing to finish.
+        Ok(Vec::new())
     }
     fn supports_token_bundles(&self) -> bool {
         false

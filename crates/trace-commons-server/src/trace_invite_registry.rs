@@ -40,12 +40,11 @@ pub const RESERVED_ACCOUNT_TENANT_PREFIXES: [&str; 2] =
     trace_commons_protocol::admission::ANCHOR_NAMESPACES;
 
 /// Fixed invite grants must not claim a provisioned account tenant namespace.
+///
+/// The shared protocol rule, so the server and the contributor daemon match
+/// the reserved list the same way.
 pub fn fixed_invite_tenant_uses_reserved_namespace(tenant_id: &str) -> bool {
-    RESERVED_ACCOUNT_TENANT_PREFIXES.iter().any(|prefix| {
-        tenant_id
-            .get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    })
+    trace_commons_protocol::admission::uses_anchor_namespace(tenant_id)
 }
 
 #[derive(Debug, Clone)]

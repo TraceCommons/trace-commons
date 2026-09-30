@@ -17759,6 +17759,10 @@ fn trace_artifact_kind_from_storage(kind: StorageTraceObjectArtifactKind) -> Tra
 ///    corpus status and a transition may have left bytes at an earlier path.
 ///
 /// Errors propagate: withdrawal must not report success while content survives.
+///
+/// Marking the object refs deleted is the LAST durable step of a withdrawal:
+/// the source-session withdrawal reconciler keys on a ref not marked deleted,
+/// so everything a failure could leave behind has to come before it.
 async fn delete_withdrawn_trace_objects(
     state: &AppState,
     db: &Arc<dyn Database>,
@@ -17768,6 +17772,18 @@ async fn delete_withdrawn_trace_objects(
     token_bundles::cleanup(state, tenant_id, Some(submission_id)).await?;
     if let Some(record) = read_submission_record(&state.root, tenant_id, submission_id)? {
         delete_trace_objects_for_record(state, &record)?;
+    }
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        TraceCorpusStatus::Rejected,
+        TraceCorpusStatus::Revoked,
+        TraceCorpusStatus::Expired,
+        TraceCorpusStatus::Purged,
+    ] {
+        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
+        remove_file_if_exists(&state.root.join(&object_key))?;
     }
 
     let tenant_ref = tenant_storage_ref(tenant_id);
@@ -17800,19 +17816,6 @@ async fn delete_withdrawn_trace_objects(
             &object_ref.object_key,
         )
         .await?;
-    }
-
-    for status in [
-        TraceCorpusStatus::Accepted,
-        TraceCorpusStatus::Quarantined,
-        TraceCorpusStatus::AwaitingPiiBackstop,
-        TraceCorpusStatus::Rejected,
-        TraceCorpusStatus::Revoked,
-        TraceCorpusStatus::Expired,
-        TraceCorpusStatus::Purged,
-    ] {
-        let object_key = trace_envelope_object_key(tenant_id, status, submission_id);
-        remove_file_if_exists(&state.root.join(&object_key))?;
     }
     Ok(())
 }
@@ -17938,6 +17941,11 @@ async fn write_file_tombstone_to_db(
 /// keep its content alive in derived form: the vector index (both the DB rows
 /// and the gate service's in-memory ANN index), the dedup clusters, and future
 /// export / benchmark membership.
+///
+/// The gate's in-memory index is evicted BEFORE the DB rows are invalidated:
+/// a gate failure then leaves the vector entry live in the DB, where the
+/// source-session withdrawal reconciler finds it and runs this again. The gate
+/// delete is idempotent (a miss is still "gone").
 async fn evict_withdrawn_trace_from_derived_surfaces(
     state: &AppState,
     db: &Arc<dyn Database>,
@@ -17946,8 +17954,6 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
 ) -> anyhow::Result<()> {
     let vector_entry_ids = db
         .list_trace_vector_entry_ids_for_submission(tenant_id, submission_id)
-        .await?;
-    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
         .await?;
     // Canonical tenant_storage_ref: it must match the form the gate worker
     // used at insertion time, or a sharded index routes the delete to the
@@ -17959,6 +17965,8 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
             .invalidate_vector_entry(&gate_tenant, vector_entry_id)
             .context("VectorInvalidationFailed")?;
     }
+    db.invalidate_trace_vector_entries_for_submission(tenant_id, submission_id)
+        .await?;
 
     db.clear_trace_dedup_cluster_for_submission(tenant_id, submission_id)
         .await?;
@@ -17977,6 +17985,78 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
         StorageTraceExportManifestItemInvalidationReason::Revoked,
     )
     .await?;
+    Ok(())
+}
+
+/// Everything a withdrawal does after its DB tombstone and `revoked` status
+/// have landed, for every withdrawn version in `affected_ids`: the file-side
+/// tombstone and records, eviction from derived surfaces, deletion of every
+/// stored object (token bundles included), and one hash-only revoke audit
+/// event per version. Credit needs no step here: unsettled credit on a
+/// revoked record is never batched.
+///
+/// Shared by the withdrawal route, account merge, and the source-session
+/// withdrawal reconciler, so a version whose withdrawal a merge or the
+/// reconciler completes is treated exactly as a withdrawn one. Idempotent: a
+/// retry converges rather than leaving content behind. `audit_tenant` is the
+/// actor recorded on the tombstone and the audit events: the synthetic
+/// account-actor ref on the account routes, the worker principal on the
+/// reconciler. Never contributor identity.
+async fn complete_trace_withdrawal(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    audit_tenant: &TenantAuth,
+    affected_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    // The file side records the withdrawal too, before any content is deleted:
+    // the file tombstone's redaction hash is read from the stored envelope.
+    // Its DB row is written from the same tombstone.
+    for affected_id in affected_ids.iter().copied() {
+        revoke_withdrawn_trace_file_records(
+            state,
+            db,
+            tenant_id,
+            affected_id,
+            &audit_tenant.principal_ref,
+        )
+        .await?;
+    }
+
+    // Retained mappings make this list stable across retries. Complete the
+    // external deletion for every content version before reporting success.
+    // Object refs are marked deleted last, so a failure anywhere here leaves
+    // a version the reconciler still finds.
+    for affected_id in affected_ids.iter().copied() {
+        evict_withdrawn_trace_from_derived_surfaces(state, db, tenant_id, affected_id).await?;
+        delete_withdrawn_trace_objects(state, db, tenant_id, affected_id).await?;
+    }
+
+    // Hash-only audit, one event per withdrawn version. The reason is a fixed
+    // label. It is appended only once the content is gone, so a failed run
+    // followed by a reconciled one still records one event per version.
+    for affected_id in affected_ids.iter().copied() {
+        let audit_event =
+            TraceCommonsAuditEvent::revoked(audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
+        if let Err(error) = append_audit_event_with_db_mirror(
+            state,
+            audit_tenant,
+            audit_event,
+            StorageTraceAuditAction::Revoke,
+            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+        )
+        .await
+        {
+            // The content is already gone and the tombstone is durable; a
+            // failed audit append must not resurrect either. Log hash-only
+            // and continue.
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                submission_id = %affected_id,
+                "Trace Commons withdrawal audit append failed"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -18149,64 +18229,15 @@ async fn account_trace_withdraw_handler(
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
     });
 
-    // The file side records the withdrawal too, before any content is deleted:
-    // the file tombstone's redaction hash is read from the stored envelope.
-    // Its DB row is written from the same tombstone.
-    let tombstone_actor = account_audit_tenant(&ctx).principal_ref;
-    for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(
-            state.as_ref(),
-            &db,
-            &ctx.tenant_id,
-            affected_id,
-            &tombstone_actor,
-        )
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
-    }
-
-    // Retained mappings make this list stable across retries. Complete the
-    // external deletion for every content version before reporting success.
-    for affected_id in affected_ids.iter().copied() {
-        evict_withdrawn_trace_from_derived_surfaces(
-            state.as_ref(),
-            &db,
-            &ctx.tenant_id,
-            affected_id,
-        )
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
-        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
-    }
-
-    // Hash-only audit, one event per withdrawn version. The reason is a fixed
-    // label; the actor is the synthetic account-actor ref, never contributor
-    // identity.
-    let audit_tenant = account_audit_tenant(&ctx);
-    for affected_id in affected_ids.iter().copied() {
-        let audit_event =
-            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
-        if let Err(error) = append_audit_event_with_db_mirror(
-            state.as_ref(),
-            &audit_tenant,
-            audit_event,
-            StorageTraceAuditAction::Revoke,
-            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
-        )
-        .await
-        {
-            // The content is already gone and the tombstone is durable; a
-            // failed audit append must not resurrect either. Log hash-only
-            // and continue.
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(&error),
-                submission_id = %affected_id,
-                "Trace Commons withdrawal audit append failed"
-            );
-        }
-    }
+    complete_trace_withdrawal(
+        state.as_ref(),
+        &db,
+        &ctx.tenant_id,
+        &account_audit_tenant(&ctx),
+        &affected_ids,
+    )
+    .await
+    .map_err(|error| withdrawal_failed(&error))?;
 
     let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
@@ -20720,6 +20751,109 @@ async fn account_merge_start_handler(
     })))
 }
 
+/// How many incomplete withdrawn versions one merge confirm completes inline.
+/// More than that is left to the revocation-propagation reconciler, and the
+/// response says completion is pending. A work bound, not a policy.
+const MERGE_WITHDRAWAL_COMPLETION_LIMIT: i64 = 500;
+
+/// Counts from one source-session withdrawal reconciliation pass. Counts only:
+/// hash-only by construction.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SourceSessionWithdrawalReconcileSummary {
+    /// Incomplete withdrawn versions found.
+    checked: usize,
+    /// Versions whose withdrawal this pass completed.
+    completed: usize,
+    /// Versions whose completion failed; the next pass finds them again.
+    failed: usize,
+}
+
+/// Complete every source-session withdrawal that actual state says is not
+/// finished, for `tenant_id` (and one account, if `account_id` is set).
+///
+/// Keyed on state, not on a record of intent: see
+/// `list_incomplete_source_session_withdrawals`. Two sources feed it:
+///
+/// - an account merge, which can join one account's live version to a
+///   session the other account had withdrawn (V78: a withdrawal on either
+///   side wins). That version has no `trace_withdrawals` row, so it is first
+///   withdrawn through `withdraw_trace_source_session`, which is idempotent
+///   and keeps the session's first `withdrawn_at`;
+/// - a source-session-mapped withdrawal whose tail failed after the DB
+///   tombstone and `revoked` status landed: its object refs, vector entry,
+///   dedup cluster, derived records, or token attachments are still there.
+///
+/// Each version then runs the idempotent `complete_trace_withdrawal` tail on
+/// its own, so one failure does not hold up the rest, and a failed version is
+/// found again on the next pass. Runs at merge confirm (scoped to the
+/// survivor) and from the revocation-propagation worker (its authenticated
+/// tenant only). The in-process scheduler covers only its token's tenant;
+/// other tenants require their own worker invocation or external schedule.
+/// Failures are logged hash-only and persisted incomplete state feeds the
+/// tenant's operational withdrawal-completion alert.
+async fn reconcile_source_session_withdrawals(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    account_id: Option<Uuid>,
+    audit_tenant: &TenantAuth,
+    limit: i64,
+    dry_run: bool,
+) -> anyhow::Result<SourceSessionWithdrawalReconcileSummary> {
+    let held_retention_policy_ids = state
+        .legal_hold_retention_policy_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let incomplete = db
+        .list_incomplete_source_session_withdrawals(
+            tenant_id,
+            account_id,
+            &held_retention_policy_ids,
+            limit,
+        )
+        .await
+        .context("failed to list incomplete source-session withdrawals")?;
+    let mut summary = SourceSessionWithdrawalReconcileSummary {
+        checked: incomplete.len(),
+        ..SourceSessionWithdrawalReconcileSummary::default()
+    };
+    if dry_run {
+        return Ok(summary);
+    }
+    for version in incomplete {
+        let outcome: anyhow::Result<()> = async {
+            if !version.withdrawal_recorded {
+                // Tombstone and revoke first, bytes second, as the route does.
+                db.withdraw_trace_source_session(
+                    tenant_id,
+                    version.account_id,
+                    version.submission_id,
+                    Utc::now(),
+                )
+                .await?
+                .context("TraceSourceSessionMappingMissing")?;
+            }
+            complete_trace_withdrawal(state, db, tenant_id, audit_tenant, &[version.submission_id])
+                .await
+        }
+        .await;
+        match outcome {
+            Ok(()) => summary.completed += 1,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    submission_id = %version.submission_id,
+                    "Trace Commons source-session withdrawal completion failed; the next reconcile retries it"
+                );
+            }
+        }
+    }
+    Ok(summary)
+}
+
 /// `POST /v1/account/merge/confirm` — execute a staged device-principal merge
 /// (Slice 3b Task 8). This is the IRREVERSIBLE step: it atomically re-keys
 /// account B's principals + strong authenticators onto the caller's account and
@@ -20733,6 +20867,18 @@ async fn account_merge_start_handler(
 /// or a closed survivor/absorbed account all affect zero rows and yield a UNIFORM
 /// 400 — no existence oracle. `execute_merge` writes the `account_merged` audit on
 /// success; this handler adds none. Hash-only: returns counts only.
+///
+/// After the merge commits, a withdrawal either account made wins across the
+/// merged session: [`reconcile_source_session_withdrawals`] completes it for
+/// the survivor. The merge is committed and irreversible by then, and the
+/// proposal is consumed, so a failure there cannot be retried through this
+/// route and is not reported as one: the response is still `200`, with
+/// `withdrawal_completion_pending: true`. Each completion writes the DB revoke
+/// and tombstone before deleting content. Remaining work is re-derived from
+/// actual state and finished by a revocation-propagation worker run for this
+/// tenant. The scheduler covers only its token's tenant, so other tenants need
+/// an explicit worker run; see the account-merge operator runbook. Persisted
+/// incomplete state also feeds the tenant's operational pending alert.
 async fn account_merge_confirm_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -20758,10 +20904,42 @@ async fn account_merge_confirm_handler(
         ));
     };
 
+    let withdrawal_completion_pending = match reconcile_source_session_withdrawals(
+        state.as_ref(),
+        &db,
+        &ctx.tenant_id,
+        Some(ctx.account_id.as_uuid()),
+        &account_audit_tenant(&ctx),
+        MERGE_WITHDRAWAL_COMPLETION_LIMIT,
+        false,
+    )
+    .await
+    {
+        Ok(summary) => {
+            summary.failed > 0
+                || i64::try_from(summary.checked).unwrap_or(i64::MAX)
+                    >= MERGE_WITHDRAWAL_COMPLETION_LIMIT
+        }
+        Err(error) => {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "Trace Commons merge withdrawal lookup failed"
+            );
+            true
+        }
+    };
+    if withdrawal_completion_pending {
+        tracing::warn!(
+            tenant_storage_ref = %tenant_storage_ref(&ctx.tenant_id),
+            "Trace Commons merge committed with withdrawal completion pending; run the revocation-propagation worker for this tenant"
+        );
+    }
+
     Ok(Json(serde_json::json!({
         "merged": true,
         "principals_moved": merge.principals_moved,
         "authenticators_moved": merge.authenticators_moved,
+        "withdrawal_completion_pending": withdrawal_completion_pending,
     })))
 }
 
@@ -48855,6 +49033,19 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             .promotion_gates
             .ranking_worker_run_actionable_skip_count,
     );
+    body.push_str("# HELP trace_commons_operational_withdrawal_completion_pending Whether persisted source-session withdrawals need completion for this tenant.\n");
+    body.push_str("# TYPE trace_commons_operational_withdrawal_completion_pending gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_withdrawal_completion_pending",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        usize::from(
+            response
+                .revocation_propagation
+                .withdrawal_completion_pending,
+        ),
+    );
     body.push_str("# HELP trace_commons_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.\n");
     body.push_str("# TYPE trace_commons_operational_revocation_propagation_latest_run gauge\n");
     for (state, value) in [
@@ -52746,6 +52937,13 @@ struct TraceRevocationPropagationWorkerResponse {
     skipped: usize,
     pending: usize,
     next_attempt_scheduled: usize,
+    /// Source-session withdrawals this run found incomplete from actual
+    /// state (see `reconcile_source_session_withdrawals`). Separate from the
+    /// propagation-item counts above, which the scheduler's outage check
+    /// reads.
+    withdrawal_completions_checked: usize,
+    withdrawal_completions_completed: usize,
+    withdrawal_completions_failed: usize,
 }
 
 async fn revocation_propagation_worker_handler(
@@ -62063,9 +62261,23 @@ async fn run_revocation_propagation_worker(
         skipped: 0,
         pending: if request.dry_run { due_items.len() } else { 0 },
         next_attempt_scheduled: 0,
+        withdrawal_completions_checked: 0,
+        withdrawal_completions_completed: 0,
+        withdrawal_completions_failed: 0,
     };
 
     if request.dry_run {
+        let reconciled = reconcile_source_session_withdrawals(
+            state,
+            db,
+            &tenant.tenant_id,
+            None,
+            tenant,
+            i64::from(limit),
+            true,
+        )
+        .await?;
+        response.withdrawal_completions_checked = reconciled.checked;
         append_revocation_propagation_audit(state, tenant, &response).await?;
         log_revocation_propagation_worker_summary(tenant, &response);
         return Ok(response);
@@ -62199,6 +62411,22 @@ async fn run_revocation_propagation_worker(
         }
     }
 
+    // Withdrawals complete from actual state, on the same credential scope:
+    // this worker already pushes revocations to derived surfaces.
+    let reconciled = reconcile_source_session_withdrawals(
+        state,
+        db,
+        &tenant.tenant_id,
+        None,
+        tenant,
+        i64::from(limit),
+        false,
+    )
+    .await?;
+    response.withdrawal_completions_checked = reconciled.checked;
+    response.withdrawal_completions_completed = reconciled.completed;
+    response.withdrawal_completions_failed = reconciled.failed;
+
     append_revocation_propagation_audit(state, tenant, &response).await?;
     log_revocation_propagation_worker_summary(tenant, &response);
     Ok(response)
@@ -62249,6 +62477,9 @@ fn log_revocation_propagation_worker_summary(
         skipped_count = fields.skipped,
         pending_count = fields.pending,
         next_attempt_scheduled_count = fields.next_attempt_scheduled,
+        withdrawal_completions_checked_count = response.withdrawal_completions_checked,
+        withdrawal_completions_completed_count = response.withdrawal_completions_completed,
+        withdrawal_completions_failed_count = response.withdrawal_completions_failed,
         "Trace Commons revocation propagation worker completed"
     );
 }
@@ -63136,6 +63367,22 @@ async fn append_revocation_propagation_audit(
         "next_attempt_scheduled".to_string(),
         response.next_attempt_scheduled.min(u32::MAX as usize) as u32,
     );
+    for (label, count) in [
+        (
+            "withdrawal_completions_checked",
+            response.withdrawal_completions_checked,
+        ),
+        (
+            "withdrawal_completions_completed",
+            response.withdrawal_completions_completed,
+        ),
+        (
+            "withdrawal_completions_failed",
+            response.withdrawal_completions_failed,
+        ),
+    ] {
+        action_counts.insert(label.to_string(), count.min(u32::MAX as usize) as u32);
+    }
     let purpose_hash = response.purpose_hash.clone();
     append_audit_event_with_db_mirror(
         state,
@@ -78754,6 +79001,8 @@ impl TraceOperationalObjectStoreSummary {
 
 #[derive(Debug, Clone, Serialize)]
 struct TraceOperationalRevocationPropagationSummary {
+    /// Re-derived from durable DB state, independent of the latest worker run.
+    withdrawal_completion_pending: bool,
     latest_run_recorded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_run_at: Option<DateTime<Utc>>,
@@ -78793,6 +79042,7 @@ struct TraceOperationalRevocationPropagationSummary {
 impl Default for TraceOperationalRevocationPropagationSummary {
     fn default() -> Self {
         Self {
+            withdrawal_completion_pending: false,
             latest_run_recorded: false,
             latest_run_at: None,
             latest_run_dry_run: false,
@@ -78905,6 +79155,23 @@ async fn read_revocation_propagation_summary_for_admin(
         read_all_audit_events(&state.root, &tenant.tenant_id)?
     };
     let mut summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)?;
+    if let Some(db) = state.db_mirror.as_ref() {
+        let held_retention_policy_ids = state
+            .legal_hold_retention_policy_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        summary.withdrawal_completion_pending = !db
+            .list_incomplete_source_session_withdrawals(
+                &tenant.tenant_id,
+                None,
+                &held_retention_policy_ids,
+                1,
+            )
+            .await
+            .context("failed to read pending source-session withdrawal completion state")?
+            .is_empty();
+    }
     summary.worker_cache_invalidator_required = state.require_external_worker_cache_invalidator;
     summary.worker_cache_invalidator_configured = state.worker_cache_invalidator.is_some();
     summary.worker_cache_invalidator_ready =
