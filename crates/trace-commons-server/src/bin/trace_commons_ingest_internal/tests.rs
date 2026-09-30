@@ -6268,6 +6268,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -28576,6 +28577,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
+        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
@@ -96205,7 +96207,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        12,
+        13,
         "every spawned driver loop must register; got {seen:?}"
     );
 }
@@ -101376,6 +101378,10 @@ async fn near_provisioning_default_disabled_returns_uniform_denial() {
 }
 #[path = "admission_pg_tests.rs"]
 mod admission_pg_tests;
+
+/// The migrated PostgreSQL the two ignored ceremony suites below share.
+#[path = "migrated_pg_fixture.rs"]
+mod migrated_pg_fixture;
 
 /// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
 ///
