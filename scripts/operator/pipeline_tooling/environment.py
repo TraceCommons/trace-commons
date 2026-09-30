@@ -1,10 +1,12 @@
 """Run and Environment: the child-process boundary for pipeline tooling.
 
-`_invoke` is the one place a child process starts. Every Docker, cargo, and
-psql call in this module goes through it, and nothing else in this module
-calls `subprocess` directly -- that keeps the whole surface replaceable by a
-single monkeypatch of `_invoke` in tests, so the self-tests need no Docker
-and no cargo.
+`_invoke` is the one place a Docker, cargo, or psql child process starts.
+Every such call in this module goes through it, so the self-tests can
+replace the whole surface with a single monkeypatch and need no Docker and
+no cargo. `_code_revision_hash`'s one `git ls-files` call is the exception:
+it runs once, at `Run.create()` time, to build the tree hash the self-tests
+never exercise (they construct `Run` directly instead), so it calls
+`subprocess` on its own.
 """
 
 from __future__ import annotations
@@ -256,27 +258,47 @@ class Environment:
         self._container = None
         self._host = None
         self._port = None
+        self._lock_acquired = False
         self._scenarios = []
         self._scenario_counter = 0
 
     # -- context manager -------------------------------------------------
 
     def __enter__(self):
-        if self._postgres_admin_url:
-            self._enter_admin_mode()
-        else:
-            self._enter_container_mode()
-        self._psql(_LOGIN_RESOLVER_ROLES_SQL)
+        # A failure partway through setup (the readiness wait, the port
+        # read, the login-resolver SQL, ...) must not leak whatever was
+        # already created: Python never calls `__exit__` when `__enter__`
+        # raises, so the same teardown `__exit__` runs has to run here too,
+        # before the original error propagates. `_teardown` is itself safe
+        # to call no matter how little setup completed (see its callees).
+        try:
+            if self._postgres_admin_url:
+                self._enter_admin_mode()
+            else:
+                self._enter_container_mode()
+            self._psql(_LOGIN_RESOLVER_ROLES_SQL)
+        except BaseException:
+            self._teardown()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        self._teardown()
+        return False
+
+    def _teardown(self):
         for scenario in self._scenarios:
             self._drop_scenario_databases(scenario)
         if self._postgres_admin_url:
-            self._exit_admin_mode()
+            # Only drop the lock database if this Environment is the one
+            # that created it. `_enter_admin_mode` raising
+            # `pipeline_tooling_server_busy` means someone else's lock
+            # database already exists; dropping it here would release a
+            # different, still-running process's lock.
+            if self._lock_acquired:
+                self._exit_admin_mode()
         else:
             self._exit_container_mode()
-        return False
 
     # -- admin-url mode ----------------------------------------------------
 
@@ -293,6 +315,7 @@ class Environment:
         )
         if returncode != 0:
             raise ToolingError("pipeline_tooling_server_busy")
+        self._lock_acquired = True
 
     def _exit_admin_mode(self):
         returncode, _ = _invoke_psql(
@@ -375,9 +398,9 @@ class Environment:
     def _url_for_database(self, database):
         return f"postgres://trace@{self._host}:{self._port}/{database}"
 
-    def _psql(self, sql, *, database="postgres"):
+    def _psql_command(self, database="postgres"):
         if self._container is not None:
-            command = [
+            return [
                 "docker",
                 "exec",
                 "-i",
@@ -391,9 +414,12 @@ class Environment:
                 "-d",
                 database,
             ]
-        else:
-            command = ["psql", self._url_for_database(database), "-v", "ON_ERROR_STOP=1", "-qtA"]
-        returncode, output = _invoke_psql(command, env=child_environment({}), input_text=sql)
+        return ["psql", self._url_for_database(database), "-v", "ON_ERROR_STOP=1", "-qtA"]
+
+    def _psql(self, sql, *, database="postgres"):
+        returncode, output = _invoke_psql(
+            self._psql_command(database), env=child_environment({}), input_text=sql
+        )
         require(returncode == 0, "pipeline_tooling_sql_failed")
         return output
 
@@ -428,21 +454,8 @@ class Environment:
             scenario.upgrade_database,
         )
         statements = "".join(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE);\n' for name in names)
-        if self._container is not None:
-            command = [
-                "docker",
-                "exec",
-                "-i",
-                self._container,
-                "psql",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-U",
-                "trace",
-                "-qtA",
-            ]
-        else:
-            command = ["psql", self._url_for_database("postgres"), "-v", "ON_ERROR_STOP=1", "-qtA"]
-        returncode, _ = _invoke(command, env=child_environment({}), capture=True, input_text=statements)
+        returncode, _ = _invoke_psql(
+            self._psql_command(), env=child_environment({}), input_text=statements
+        )
         if returncode != 0:
             self._run.cleanup_failed = True

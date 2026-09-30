@@ -190,9 +190,7 @@ def require_current_pass_results(run, results, required):
     """`required` maps check id to `checks.CheckSpec`. Every required check
     must have a passing, current result from this exact run, against this
     exact code revision, with its required digests present."""
-    from datetime import datetime as _datetime
-
-    now = _datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     for check_id, spec in required.items():
         result = results.get(check_id)
         if result is None:

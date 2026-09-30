@@ -267,9 +267,9 @@ def main() -> int:
     # The upstream contract-test-manifest cross-check
     # (validate_contract_manifest / resolve_evidence_id) is not run here
     # (P4-D14): docs/superpowers/specs/2026-09-11-versioned-pipeline-
-    # contract-test-manifest.json still names the pre-extraction scenario
-    # and evidence ids from the Ironclaw worktree. Add the check back once
-    # that manifest gets its own PR 4 refresh.
+    # contract-test-manifest.json's test ids name tests that do not exist in
+    # this tree. An upstream contract PR (flow rule 1) refreshes them; add
+    # the check back after that PR lands.
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")

@@ -405,7 +405,10 @@ class AdminUrlLockTests(unittest.TestCase):
         self.assertEqual(len(creates), 1)
         self.assertEqual(len(drops), 1)
 
+        busy_calls = []
+
         def fake_invoke_busy(command, *, env, capture=False, input_text=None, log_path=None):
+            busy_calls.append((list(command), input_text))
             if input_text and "CREATE DATABASE pipeline_tooling_lock" in input_text:
                 return 1, "ERROR: database exists"
             return (0, "0") if capture else (0, None)
@@ -419,6 +422,81 @@ class AdminUrlLockTests(unittest.TestCase):
                     ):
                         pass
             self.assertEqual(str(ctx.exception), "pipeline_tooling_server_busy")
+            # A busy server means someone else's lock database already
+            # exists: entering must never attempt to drop it.
+            busy_drops = [
+                text for _, text in busy_calls if text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in text
+            ]
+            self.assertEqual(busy_drops, [])
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+
+class EnterFailureTeardownTests(unittest.TestCase):
+    """I1: `__enter__` must tear down whatever it already created before
+    re-raising, because Python never calls `__exit__` when `__enter__`
+    itself raises."""
+
+    def test_container_readiness_failure_removes_the_container(self):
+        calls = []
+
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            calls.append(list(command))
+            if command[:2] == ["docker", "run"]:
+                return 0, "deadbeefcontainerid\n"
+            if "pg_isready" in command:
+                # Never ready: `_enter_container_mode` exhausts its 60
+                # tries and raises before the port is ever read.
+                return 2, "no response\n"
+            if command[:2] == ["docker", "rm"]:
+                return 0, "removed\n"
+            if command[:3] == ["docker", "ps", "-a"]:
+                return 0, ""
+            return 0, ""
+
+        run = _scratch_run()
+        try:
+            with mock.patch.object(environment, "_invoke", fake_invoke), mock.patch.object(
+                environment.time, "sleep", return_value=None
+            ):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    with environment.Environment(run):
+                        pass
+            self.assertEqual(str(ctx.exception), "pipeline_tooling_container_not_ready")
+            rm_calls = [c for c in calls if c[:2] == ["docker", "rm"]]
+            self.assertEqual(len(rm_calls), 1)
+            self.assertIn(f"tc-pipeline-{run.run_id}", rm_calls[0])
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+    def test_admin_url_role_sql_failure_drops_the_lock_database(self):
+        calls = []
+
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            calls.append((list(command), input_text))
+            if input_text and "CREATE DATABASE pipeline_tooling_lock" in input_text:
+                return 0, ""
+            if input_text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in input_text:
+                return 0, ""
+            if input_text and "CREATE ROLE trace_login_resolver" in input_text:
+                # The step after the lock database is acquired: login-
+                # resolver role creation fails.
+                return 1, "ERROR: permission denied"
+            return 0, ""
+
+        run = _scratch_run()
+        try:
+            with mock.patch.object(environment, "_invoke", fake_invoke):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    with environment.Environment(
+                        run, postgres_admin_url="postgres://trace@127.0.0.1:55431/postgres"
+                    ):
+                        pass
+            self.assertEqual(str(ctx.exception), "pipeline_tooling_sql_failed")
+            drops = [
+                text for _, text in calls if text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in text
+            ]
+            self.assertEqual(len(drops), 1)
         finally:
             shutil.rmtree(run.run_dir, ignore_errors=True)
 
