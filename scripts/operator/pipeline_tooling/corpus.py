@@ -36,14 +36,14 @@ fixture's `mismatches` recomputed here from its observed and expected fields.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import uuid
 from pathlib import Path
 
 from .environment import ROOT, run_child
-from .errors import require
+from .errors import ToolingError, require
+from .files import sha256_digest
 from .results import canonical
 
 CORPUS_SCHEMA = "trace_commons.pipeline_corpus.v1"
@@ -85,7 +85,9 @@ _VOLATILE = frozenset({"duration_ms", "time_in_phase_ms", "next_attempt_at"})
 _PRIVATE_REPORT_FIELDS = frozenset(
     {"input", "text", "trace_text", "secret", "secret_probe", "token", "account_id", "email"}
 )
-_SECRET_PREFIXES = ("ghp_", "github_pat_", "sk-")
+# Secret-shaped values: provider token prefixes, and the `token-...` shape
+# of a static bearer credential (the harness's own tokens have it).
+_SECRET_PREFIXES = ("ghp_", "github_pat_", "sk-", "token-")
 # A run the worker finished: `complete`, or `rejected` (Admission or Review
 # rejected it; its run is complete too).
 _TERMINAL_STATES = ("complete", "rejected")
@@ -128,10 +130,6 @@ _MANIFEST_DIGEST_FIELDS = (
 )
 
 
-def _sha256(data):
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
 def load_direct_corpus(path, expected_digest=None):
     """Loads and validates a `trace_commons.pipeline_corpus.v1` file. Returns
     `(corpus, digest)` -- the parsed JSON and the `sha256:` digest of its raw
@@ -153,7 +151,7 @@ def load_direct_corpus(path, expected_digest=None):
         uuid.UUID(fixture["trace_id"])
         uuid.UUID(fixture["submission_id"])
         require(bool(fixture.get("secret_probe")), "empty_secret_probe")
-    actual = _sha256(data)
+    actual = sha256_digest(data)
     require(expected_digest is None or actual == expected_digest, "corpus_digest_mismatch")
     return corpus, actual
 
@@ -246,7 +244,7 @@ def safe_report_value(value):
         return [safe_report_value(item) for item in value]
     if isinstance(value, str):
         if _REPORT_UUID.fullmatch(value):
-            return _sha256(value.encode())
+            return sha256_digest(value.encode())
         require(_REPORT_LABEL.fullmatch(value) is not None, "unsafe_report_value")
         require(not value.startswith(_SECRET_PREFIXES), "unsafe_report_value")
         return value
@@ -270,6 +268,8 @@ def fixture_mismatches(item):
             found.append(field)
     if item["instrument_count"] != item["expected_instrument_count"]:
         found.append("instrument_count")
+    if item["instrument_states"] != item["expected_instrument_states"]:
+        found.append("instrument_states")
     for flag in _REQUIRED_FLAGS:
         if item[flag] is not True:
             found.append(flag)
@@ -280,7 +280,16 @@ def validate_report(report):
     """Ports `lab.py`'s `validate_report` to the v1 corpus report. A report
     with recorded fixture failures is valid; one whose failures do not match
     its own fields, whose digests do not verify, or that carries anything
-    but labels, hashes, counts, and booleans is not."""
+    but labels, hashes, counts, and booleans is not. A report missing a
+    field or holding one of the wrong type fails with the label
+    `corpus_report_malformed`, never a traceback."""
+    try:
+        _validate_report(report)
+    except (KeyError, TypeError, AttributeError, IndexError) as error:
+        raise ToolingError("corpus_report_malformed") from error
+
+
+def _validate_report(report):
     require(isinstance(report, dict) and report.get("schema") == REPORT_SCHEMA, "unsupported_report_schema")
     require(report.get("scope") == "local_test" and report.get("production_ready") is False, "invalid_report_scope")
     require(report.get("external_payout_enabled") is False, "payout_enabled")
@@ -290,14 +299,14 @@ def validate_report(report):
     for field in ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "report_digest"):
         require(isinstance(report.get(field), str) and _REPORT_HASH.fullmatch(report[field]), "invalid_report_hash")
     unsigned = {key: value for key, value in report.items() if key != "report_digest"}
-    require(_sha256(canonical(unsigned)) == report["report_digest"], "report_digest_mismatch")
+    require(sha256_digest(canonical(unsigned)) == report["report_digest"], "report_digest_mismatch")
     manifest = report.get("policy_manifest")
     require(
         isinstance(manifest, dict) and all(isinstance(manifest.get(phase), dict) for phase in PHASES),
         "report_manifest_invalid",
     )
     configuration = {phase: manifest[phase].get("configuration_hash") for phase in PHASES}
-    require(_sha256(canonical(configuration)) == report["configuration_digest"], "configuration_digest_mismatch")
+    require(sha256_digest(canonical(configuration)) == report["configuration_digest"], "configuration_digest_mismatch")
 
     sections = report.get("partitions")
     require(isinstance(sections, list), "report_partitions_invalid")
@@ -318,6 +327,11 @@ def validate_report(report):
             "completion_count_mismatch",
         )
         for item in fixtures:
+            require(
+                item["instrument_states"]
+                == {instrument["instrument_id"]: instrument["internal_settlement_state"] for instrument in item["instruments"]},
+                "instrument_states_mismatch",
+            )
             require(item.get("mismatches") == fixture_mismatches(item), "qualification_mismatch_not_failed")
         require(
             sum(bool(item["mismatches"]) for item in fixtures) == section.get("failure_count"),

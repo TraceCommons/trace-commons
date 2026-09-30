@@ -4,6 +4,7 @@ Python 3 standard library only (no `psycopg`, no `pytest`: see the plan's
 global constraints). Submodules:
 
 - `errors`   -- `ToolingError`, `StepFailed`, `require`.
+- `files`    -- `sha256_digest`, `atomic_write` (the one shared copy of each).
 - `environment` -- `Run`, `Environment`, `Scenario`, `child_environment`,
   `run_child`.
 - `cargo`    -- `cargo_test`, the zero-match-filter guard.

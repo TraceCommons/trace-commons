@@ -17,14 +17,12 @@ the package by its hash.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
-import os
-import tempfile
 from pathlib import Path
 
 from .corpus import validate_report
 from .errors import require
+from .files import atomic_write, sha256_digest
 from .results import canonical, validate_evidence
 
 CATALOG_SCHEMA = "trace_commons.pipeline_lab_catalog.v1"
@@ -41,34 +39,16 @@ RECORD_SCHEMAS = frozenset(
 )
 
 
-def _digest(data):
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _atomic_write(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
-        temporary = Path(output.name)
-        output.write(data)
-        output.flush()
-        os.fsync(output.fileno())
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def archive(catalog_path, data, kind):
     """Writes `data` once as `lab-records/<kind>-<sha256>.json` beside the
     catalog and returns that path relative to the catalog's directory. The
     same digest with different bytes is refused."""
-    identity = _digest(data)
+    identity = sha256_digest(data)
     destination = Path(catalog_path).parent / "lab-records" / f"{kind}-{identity[7:]}.json"
     if destination.exists():
         require(destination.read_bytes() == data, "immutable_record_conflict")
     else:
-        _atomic_write(destination, data)
+        atomic_write(destination, data)
     return destination.relative_to(Path(catalog_path).parent).as_posix()
 
 
@@ -123,5 +103,5 @@ def update_catalog(catalog_path, report_path, records=()):
             previous.append(record)
         previous.sort(key=lambda item: item["report_digest"])
         bundles.sort(key=lambda item: item["bundle_id"])
-        _atomic_write(catalog_path, json.dumps(catalog, indent=2, sort_keys=True, allow_nan=False).encode() + b"\n")
+        atomic_write(catalog_path, json.dumps(catalog, indent=2, sort_keys=True, allow_nan=False).encode() + b"\n")
     return catalog

@@ -13,7 +13,6 @@ keys this tooling uses (see the plan's global constraints).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .errors import ToolingError, require
+from .files import sha256_digest
 
 SCHEMA = "trace_commons.pipeline_check_result.v1"
 
@@ -58,10 +58,6 @@ def canonical(value):
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode()
-
-
-def _digest(data):
-    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def validate_evidence(value):
@@ -168,7 +164,7 @@ def load_results(run):
         evidence_path = results_dir / f"{check_id}.evidence.json"
         require(evidence_path.is_file(), "check_evidence_missing")
         evidence_value = json.loads(evidence_path.read_text())
-        require(_digest(canonical(evidence_value)) == raw["evidence_hash"], "check_evidence_hash_mismatch")
+        require(sha256_digest(canonical(evidence_value)) == raw["evidence_hash"], "check_evidence_hash_mismatch")
 
         results[check_id] = CheckResult(
             schema=raw["schema"],

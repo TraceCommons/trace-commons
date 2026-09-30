@@ -10,13 +10,10 @@ convention: hash-only, label-only operational surfaces).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import secrets
 import sys
-import tempfile
 from pathlib import Path
 
 from pipeline_tooling.cargo import cargo_test
@@ -33,6 +30,7 @@ from pipeline_tooling.corpus import (
 )
 from pipeline_tooling.environment import ROOT, Environment, Run, child_environment, run_child
 from pipeline_tooling.errors import StepFailed, ToolingError, require
+from pipeline_tooling.files import atomic_write, sha256_digest
 from pipeline_tooling.results import load_results, require_current_pass_results, validate_evidence
 
 # Where routine outputs go (the latest bounded report of each kind), and the
@@ -177,21 +175,6 @@ def run_test(args, run):
                 _run_postgres_step(run, environment, step)
 
 
-def _sha256(data):
-    return "sha256:" + hashlib.sha256(data).hexdigest()
-
-
-def _atomic_write(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
-        temporary = Path(output.name)
-        output.write(data)
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def _corpus_source(args):
     """`(bundle, package, trusted_key)`: exactly one of a built-in bundle or
     a signed package with its trusted key."""
@@ -209,7 +192,7 @@ def _corpus_partitions(run, corpus_path, expected_digest):
     export first (bootstrap, then holdout); any other file is one direct
     corpus. `expected_digest` checks the bytes of the file given."""
     raw = corpus_path.read_bytes()
-    require(expected_digest is None or _sha256(raw) == expected_digest, "corpus_digest_mismatch")
+    require(expected_digest is None or sha256_digest(raw) == expected_digest, "corpus_digest_mismatch")
     try:
         value = json.loads(raw)
     except ValueError as error:
@@ -230,24 +213,36 @@ def _write_local_report(label, report_bytes, report):
     view. The JSON bytes are the harness's own, so they keep the hash the
     check evidence names."""
     json_path = LOCAL_DIR / f"pipeline-{label}-corpus-report.json"
-    _atomic_write(json_path, report_bytes)
-    _atomic_write(json_path.with_suffix(".md"), markdown(report).encode())
+    atomic_write(json_path, report_bytes)
+    atomic_write(json_path.with_suffix(".md"), markdown(report).encode())
     return json_path
+
+
+def _read_json(path, label):
+    """The JSON value in `path`; an unreadable or malformed file fails with
+    `label`, never a traceback."""
+    try:
+        return json.loads(Path(path).read_bytes())
+    except (OSError, ValueError) as error:
+        raise ToolingError(label) from error
 
 
 def _keep_failed_report(report_path, label):
     """After a failed harness run: keep a report that still validates (it
-    names each fixture's mismatches) and say where it is. A missing or
-    invalid report is left in the run directory only."""
+    names each fixture's mismatches) and say where it is. Nothing here may
+    replace the harness's own failure: a missing, malformed, or invalid
+    report, or a write that fails, is left in the run directory silently,
+    and the caller re-raises the step failure with its exit code."""
     try:
         report_bytes = report_path.read_bytes()
         report = json.loads(report_bytes)
         validate_report(report)
-    except (OSError, ValueError, ToolingError):
+        json_path = _write_local_report(label, report_bytes, report)
+        shown = json_path.relative_to(ROOT) if json_path.is_relative_to(ROOT) else json_path.name
+        line = f"PipelineRunReport: failures={report['failure_count']} report={shown}"
+    except Exception:  # noqa: BLE001 -- the step failure must win (see above)
         return
-    json_path = _write_local_report(label, report_bytes, report)
-    shown = json_path.relative_to(ROOT) if json_path.is_relative_to(ROOT) else json_path.name
-    print(f"PipelineRunReport: failures={report['failure_count']} report={shown}")
+    print(line)
 
 
 def run_corpus(args, run):
@@ -301,7 +296,10 @@ def run_corpus(args, run):
 
     require(report_path.is_file(), "corpus_report_missing")
     report_bytes = report_path.read_bytes()
-    report = json.loads(report_bytes)
+    try:
+        report = json.loads(report_bytes)
+    except ValueError as error:
+        raise ToolingError("corpus_report_malformed") from error
     validate_report(report)
     require(report["check_id"] == check_id, "corpus_report_check_mismatch")
     require([section["corpus_digest"] for section in report["partitions"]] == digests, "corpus_digest_mismatch")
@@ -316,7 +314,7 @@ def run_corpus(args, run):
         == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
         "corpus_report_package_mismatch",
     )
-    evidence = json.loads((run.results_dir / f"{check_id}.evidence.json").read_bytes())
+    evidence = _read_json(run.results_dir / f"{check_id}.evidence.json", "corpus_evidence_malformed")
     validate_evidence(evidence)
     require(
         evidence
@@ -326,7 +324,7 @@ def run_corpus(args, run):
             "replay_same_run": report["replay_same_run_count"],
             "changed_content_refused": report["changed_content_refused_count"],
             "tenant_isolation": True,
-            "report_hash": _sha256(report_bytes),
+            "report_hash": sha256_digest(report_bytes),
         },
         "corpus_evidence_mismatch",
     )
@@ -355,12 +353,16 @@ def run_package(args, run):
     key_output.parent.mkdir(parents=True, exist_ok=True)
     cargo_test(run, "package_write", INGEST_TEST_ARGS, PACKAGE_WRITER, child_environment(extra), exact=True, ignored=True)
 
-    signed = json.loads(output.read_bytes())
-    bundle_id = signed.get("package", {}).get("bundle_id")
-    package_hash = signed.get("signature", {}).get("package_hash")
+    signed = _read_json(output, "package_output_invalid")
+    package = signed.get("package") if isinstance(signed, dict) else None
+    signature = signed.get("signature") if isinstance(signed, dict) else None
+    bundle_id = package.get("bundle_id") if isinstance(package, dict) else None
+    package_hash = signature.get("package_hash") if isinstance(signature, dict) else None
     require(
-        isinstance(bundle_id, str) and _HASH.fullmatch(bundle_id) and isinstance(package_hash, str)
-        and _HASH.fullmatch(package_hash),
+        isinstance(bundle_id, str)
+        and _HASH.fullmatch(bundle_id) is not None
+        and isinstance(package_hash, str)
+        and _HASH.fullmatch(package_hash) is not None,
         "package_output_invalid",
     )
     require(key_output.is_file(), "package_trusted_key_missing")

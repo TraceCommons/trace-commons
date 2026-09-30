@@ -999,6 +999,8 @@ def _fixture_report(label, **overrides):
         "expected_settlement_state": "complete",
         "instrument_count": 1,
         "expected_instrument_count": 1,
+        "instrument_states": {"storage_rebate": "not_applicable"},
+        "expected_instrument_states": {"storage_rebate": "not_applicable"},
         "mismatches": [],
     }
     item.update(overrides)
@@ -1068,6 +1070,12 @@ def _corpus_report(check_id, partitions):
     }
     report["report_digest"] = _digest(results.canonical(report))
     return report
+
+
+def _resigned(report):
+    """`report` with its `report_digest` recomputed over its other fields."""
+    unsigned = {key: value for key, value in report.items() if key != "report_digest"}
+    return {**unsigned, "report_digest": _digest(results.canonical(unsigned))}
 
 
 def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
@@ -1330,6 +1338,37 @@ class CorpusRunTests(_CorpusRunCase):
         self.assertIn("admission_decision", local_report.with_suffix(".md").read_text())
         self.assertNotIn("PipelineRunOK", self.stdout.getvalue())
 
+    def test_a_failing_harness_with_a_malformed_report_keeps_its_exit_code(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        log_path = self.run.log_path("corpus_run")
+        malformed_reports = (
+            b"{not json",
+            b"[]",
+            b'{"schema": "trace_commons.pipeline_corpus_report.v1"}',
+            # Signed, so it passes the digest check and reaches the
+            # partitions, where a non-object section used to raise.
+            results.canonical(_resigned({**_corpus_report("pipeline_http_corpus_minimal", []), "partitions": [None]})),
+        )
+        for index, malformed in enumerate(malformed_reports):
+            with self.subTest(index=index):
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+
+                def failing_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                    Path(env["TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH"]).write_bytes(malformed)
+                    raise errors.StepFailed(step, 101, log_path)
+
+                code = self._main(
+                    ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL],
+                    cargo=failing_cargo,
+                )
+                self.assertEqual(code, 101)
+                lines = [line for line in self.stderr.getvalue().splitlines() if line]
+                self.assertEqual(len(lines), 1, self.stderr.getvalue())
+                self.assertTrue(lines[0].startswith("PipelineFailure: step_failed:corpus_run exit=101 log="))
+                self.assertEqual(self.stdout.getvalue(), "")
+                self.assertFalse((self.tmp / "local" / "pipeline-minimal-corpus-report.json").exists())
+
     def test_run_archives_only_with_archive(self):
         corpus_path = self.tmp / "corpus.json"
         corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
@@ -1387,22 +1426,47 @@ class CorpusReportValidationTests(unittest.TestCase):
             report["partitions"][0]["fixtures"][0].update(overrides)
             return resign(report)
 
+        def without_fixture_field(field):
+            report = json.loads(json.dumps(base))
+            del report["partitions"][0]["fixtures"][0][field]
+            return resign(report)
+
+        withheld_instruments = [dict(_fixture_report("alpha_fixture")["instruments"][0],
+                                     internal_settlement_state="withheld")]
         cases = {
             # A raw run id would be hashed by `safe_report_value`: the report
             # must already carry only its hash.
             "unsafe_report": with_fixture(reason_label=str(uuid.uuid4())),
             "unsafe_report_value": with_fixture(reason_label="free text with spaces"),
+            # A static bearer credential's shape (ruling T9-7).
+            "unsafe_report_value:token": with_fixture(reason_label="token-corpus-lab-admin"),
+            # The leg states must be the ones the fixture's instruments show...
+            "instrument_states_mismatch": with_fixture(instrument_states={"storage_rebate": "withheld"}),
+            # ...and a withheld leg where a credit was expected is a failure
+            # the fixture must name (ruling T9-6).
+            "qualification_mismatch_not_failed:withheld": with_fixture(
+                instruments=withheld_instruments, instrument_states={"storage_rebate": "withheld"}
+            ),
+            "corpus_report_malformed": with_fixture(instruments=[None]),
+            "corpus_report_malformed:missing": without_fixture_field("state"),
             "private_report_field": with_fixture(secret_probe="x"),
             "report_digest_mismatch": dict(base, report_digest=_fake_hash("other")),
             "qualification_mismatch_not_failed": with_fixture(admission_decision="reject"),
             "invalid_report_scope": resign(dict(base, production_ready=True)),
             "unsupported_report_schema": resign(dict(base, schema="trace_commons.pipeline_corpus_report.v5")),
         }
-        for label, report in cases.items():
-            with self.subTest(label=label):
+        for case, report in cases.items():
+            label = case.split(":")[0]
+            with self.subTest(case=case):
                 with self.assertRaises(errors.ToolingError) as ctx:
                     corpus.validate_report(report)
                 self.assertEqual(str(ctx.exception), label)
+        for malformed in ([], "report", 3, None, {"schema": corpus.REPORT_SCHEMA, "scope": "local_test",
+                                                   "production_ready": False, "external_payout_enabled": False,
+                                                   "safe_blockers": 7}):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(errors.ToolingError):
+                    corpus.validate_report(malformed)
 
         failed = with_fixture(admission_decision="reject", mismatches=["admission_decision"])
         failed["partitions"][0]["failure_count"] = 1
@@ -1448,6 +1512,23 @@ class PackageCommandTests(_CorpusRunCase):
             self.stdout.getvalue().strip(),
             f"PipelinePackageOK: bundle={_fake_hash('bundle')} package={_fake_hash('package')}",
         )
+
+        for written in (b"{not json", b"[]", b'{"package": [], "signature": 3}'):
+            with self.subTest(written=written):
+                self.calls.clear()
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+
+                def malformed_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                    self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+                    Path(env["TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT"]).write_bytes(written)
+                    Path(env["TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT"]).write_text("{}")
+
+                code = self._main(
+                    ["package", "--bundle", "minimal", "--output", str(output), "--public-key-output", str(key_output)],
+                    cargo=malformed_cargo,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: package_output_invalid")
 
         for extra, label in (
             (["--signing-key", str(self.tmp / "key.der")], "package_signing_key_and_key_id_required"),

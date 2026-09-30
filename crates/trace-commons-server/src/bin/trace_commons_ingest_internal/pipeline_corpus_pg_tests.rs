@@ -109,6 +109,21 @@ const ADMIN_TOKEN: &str = "token-corpus-lab-admin";
 const OTHER_CONTRIBUTOR_TOKEN: &str = "token-corpus-other-contributor";
 const OTHER_ADMIN_TOKEN: &str = "token-corpus-other-admin";
 
+/// The harness's own bearer tokens. They are probes too: none may appear in
+/// a request body, a response body, the report, or the evidence.
+const HARNESS_TOKENS: [&str; 5] = [
+    CONTRIBUTOR_TOKEN,
+    REVIEWER_TOKEN,
+    ADMIN_TOKEN,
+    OTHER_CONTRIBUTOR_TOKEN,
+    OTHER_ADMIN_TOKEN,
+];
+
+/// The error label a pipeline receipt answers for changed content under an
+/// idempotency key already used (`pipeline_content_conflict` in
+/// `trace-commons-ingest.rs`).
+const RECEIPT_CONTENT_CONFLICT_LABEL: &str = "receipt id reused with different content";
+
 /// The `compatibility` bundle's `NoveltyUtility` delta, as the PR 3
 /// compatibility HTTP test configures it.
 const COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS: u64 = 2_500_000;
@@ -244,7 +259,9 @@ fn load_corpus(path: &Path) -> Result<(CorpusFile, String), &'static str> {
 /// scoring and settlement are `complete` for a four-outcome run and
 /// `missing` and `incomplete` otherwise; consent is `allowed`; the
 /// instrument count is the bundle's award count for a four-outcome run and
-/// 0 otherwise.
+/// 0 otherwise. Each instrument leg's internal settlement state is the one
+/// the bundle's award reaches when it is credited (ruling T9-6:
+/// `bundle_award_states`), and there are no legs otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FixtureExpectations {
     admission_decision: String,
@@ -254,10 +271,11 @@ struct FixtureExpectations {
     scoring_state: String,
     settlement_state: String,
     instrument_count: usize,
+    instrument_states: BTreeMap<String, String>,
 }
 
 impl CorpusFixture {
-    fn expectations(&self, award_count: usize) -> FixtureExpectations {
+    fn expectations(&self, award_states: &BTreeMap<String, String>) -> FixtureExpectations {
         let complete = self.expected_outcome_count == 4;
         FixtureExpectations {
             admission_decision: self.expected_admission_decision.clone(),
@@ -279,31 +297,58 @@ impl CorpusFixture {
                 .clone()
                 .unwrap_or_else(|| if complete { "complete" } else { "incomplete" }.to_string()),
             instrument_count: self.expected_instrument_count.unwrap_or(if complete {
-                award_count
+                award_states.len()
             } else {
                 0
             }),
+            instrument_states: if complete {
+                award_states.clone()
+            } else {
+                BTreeMap::new()
+            },
         }
     }
 }
 
-/// How many instruments one admitted run of `package` settles: each
-/// configured award of a minimal-family bundle, and the one `trace_credit`
-/// leg of a compatibility bundle whose `NoveltyUtility` delta is positive
-/// (its local floors are zero, so every scored run passes them).
-fn bundle_award_count(package: &BundlePackage) -> Result<usize, &'static str> {
+/// The instrument legs one admitted run of `package` settles, each with the
+/// internal settlement state a credited leg reaches (the status route's
+/// `internal_settlement_state`). A minimal-family bundle settles each
+/// configured award: `trace_credit` as a finalized batch (its `Accepted`
+/// ledger event is batched and finalized in the Settle transaction), any
+/// other instrument `not_applicable`. A compatibility bundle whose
+/// `NoveltyUtility` delta is positive settles one `trace_credit` leg as
+/// `not_settlement_eligible` (credited with a ledger event `main` never
+/// batches; `withheld` is a refused credit). Its local floors are zero, so
+/// every scored run passes them.
+fn bundle_award_states(package: &BundlePackage) -> Result<BTreeMap<String, String>, &'static str> {
     let config = package
         .artifacts
         .get(&package.manifest.score.configuration_hash)
         .ok_or("corpus_package_configuration_missing")?;
+    let trace_credit = InstrumentId::trace_credit().as_str().to_string();
     if package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION {
         let config: CompatibilityBundleConfig =
             serde_json::from_slice(config).map_err(|_| "corpus_package_configuration_invalid")?;
-        Ok(usize::from(config.novelty_utility_microcredits > 0))
+        Ok(if config.novelty_utility_microcredits > 0 {
+            BTreeMap::from([(trace_credit, "not_settlement_eligible".to_string())])
+        } else {
+            BTreeMap::new()
+        })
     } else {
         let config: PipelineBundleConfig =
             serde_json::from_slice(config).map_err(|_| "corpus_package_configuration_invalid")?;
-        Ok(config.instrument_awards.len())
+        Ok(config
+            .instrument_awards
+            .iter()
+            .map(|award| {
+                let state = if award.instrument_id == trace_credit {
+                    "finalized"
+                } else {
+                    "not_applicable"
+                };
+                (award.instrument_id.clone(), state.to_string())
+            })
+            .collect())
     }
 }
 
@@ -545,11 +590,21 @@ fn assemble_corpus_service(
 // The request builder (port lines 1580-1633).
 // ---------------------------------------------------------------------------
 
-/// The fixture's envelope. The port's builder gives it the fixture's input,
-/// identities, creation time, and deterministic event and revocation ids;
-/// then, as the PR 3 compatibility HTTP test builds its Medium-risk
-/// envelope, it becomes metadata only (the server re-scrub classifies any
-/// message text Medium) and takes the fixture's `privacy_risk`.
+/// The fixture's envelope (ruling T9-5). The port's builder gives it the
+/// fixture's input, identities, creation time, and deterministic event and
+/// revocation ids, and the contributor side's local redaction runs first
+/// (it removes, for example, a credential in the input).
+///
+/// - A Low-risk fixture sends that redacted text. The server re-scrub
+///   classifies message text Medium with `ConsentContentFlag` as its only
+///   basis, which the pipeline reads as Low.
+/// - A Medium or High fixture stays metadata only, as the PR 3
+///   compatibility HTTP test builds its Medium envelope, and takes its label
+///   as a tool name so that two such fixtures stay distinct.
+///
+/// Every envelope consents to model training, as `model_training_envelope`
+/// does: the allowed use a compatibility award needs to be credited rather
+/// than withheld (ruling T9-6).
 async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributionEnvelope {
     let turn = RawTraceCaptureTurn {
         user_input: fixture.input.clone(),
@@ -586,13 +641,22 @@ async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributionEnvelope 
         .redact_trace(raw)
         .await
         .expect("corpus_redaction_failed");
-    make_metadata_only_low_risk(&mut envelope);
     envelope.privacy.residual_pii_risk = match fixture.privacy_risk.as_str() {
         "low" => ResidualPiiRisk::Low,
-        "medium" => ResidualPiiRisk::Medium,
-        "high" => ResidualPiiRisk::High,
+        "medium" | "high" => {
+            make_metadata_only_low_risk(&mut envelope);
+            set_metadata_only_tool_name(&mut envelope, &fixture.label);
+            if fixture.privacy_risk == "medium" {
+                ResidualPiiRisk::Medium
+            } else {
+                ResidualPiiRisk::High
+            }
+        }
         _ => unreachable!("CorpusFile::validate refuses any other privacy risk"),
     };
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
     envelope
 }
 
@@ -600,19 +664,18 @@ async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributionEnvelope 
 // Driving one fixture through HTTP.
 // ---------------------------------------------------------------------------
 
-/// The HTTP client, and every non-success body the harness saw: none may
-/// carry a fixture's probe.
+/// The HTTP client, every request body the harness sent, and every
+/// response body it received (success bodies too): none may carry a probe.
 struct CorpusHttp {
     client: reqwest::Client,
     base: String,
-    error_bodies: Vec<String>,
+    sent_bodies: Vec<Vec<u8>>,
+    received_bodies: Vec<String>,
 }
 
 impl CorpusHttp {
-    fn record(&mut self, status: reqwest::StatusCode, body: &serde_json::Value) {
-        if !status.is_success() {
-            self.error_bodies.push(body.to_string());
-        }
+    fn record(&mut self, body: &serde_json::Value) {
+        self.received_bodies.push(body.to_string());
     }
 
     async fn submit(
@@ -620,8 +683,9 @@ impl CorpusHttp {
         token: &str,
         body: &[u8],
     ) -> (reqwest::StatusCode, serde_json::Value) {
+        self.sent_bodies.push(body.to_vec());
         let (status, value) = post_trace(&self.client, &self.base, token, body).await;
-        self.record(status, &value);
+        self.record(&value);
         (status, value)
     }
 
@@ -630,9 +694,15 @@ impl CorpusHttp {
         token: &str,
         submission_id: Uuid,
     ) -> (reqwest::StatusCode, serde_json::Value) {
+        // The body `post_submission_status` sends, serialized the same way.
+        self.sent_bodies.push(
+            serde_json::json!({ "submission_ids": [submission_id] })
+                .to_string()
+                .into_bytes(),
+        );
         let (status, value) =
             post_submission_status(&self.client, &self.base, token, &[submission_id]).await;
-        self.record(status, &value);
+        self.record(&value);
         (status, value)
     }
 
@@ -643,6 +713,10 @@ impl CorpusHttp {
         token: &str,
         body: Option<serde_json::Value>,
     ) -> (reqwest::StatusCode, serde_json::Value) {
+        if let Some(body) = &body {
+            // `send_http` sends `body.to_string()`.
+            self.sent_bodies.push(body.to_string().into_bytes());
+        }
         let (status, value) = send_http(
             &self.client,
             method,
@@ -651,7 +725,7 @@ impl CorpusHttp {
             body,
         )
         .await;
-        self.record(status, &value);
+        self.record(&value);
         (status, value)
     }
 
@@ -849,8 +923,9 @@ async fn drive_fixture(http: &mut CorpusHttp, fixture: &CorpusFixture) -> Fixtur
         && receipt["status"] == "processing"
         && replayed_run == Some(run_id);
 
-    let (status, _) = http.submit(CONTRIBUTOR_TOKEN, &changed_body).await;
-    observed.changed_content_refused = status == reqwest::StatusCode::CONFLICT;
+    let (status, refused) = http.submit(CONTRIBUTOR_TOKEN, &changed_body).await;
+    observed.changed_content_refused = status == reqwest::StatusCode::CONFLICT
+        && refused["error"] == RECEIPT_CONTENT_CONFLICT_LABEL;
 
     // The status route omits what the caller cannot see (as `main`'s does)
     // rather than answering 404; the forensic route answers 404.
@@ -946,6 +1021,9 @@ fn fixture_mismatches(item: &serde_json::Value) -> Vec<&'static str> {
     }
     if item["instrument_count"] != item["expected_instrument_count"] {
         found.push("instrument_count");
+    }
+    if item["instrument_states"] != item["expected_instrument_states"] {
+        found.push("instrument_states");
     }
     for flag in [
         "replay_same_run",
@@ -1055,6 +1133,16 @@ fn fixture_report(
         "expected_settlement_state": expected.settlement_state,
         "instrument_count": instruments.len(),
         "expected_instrument_count": expected.instrument_count,
+        "instrument_states": instruments
+            .iter()
+            .map(|instrument| {
+                (
+                    instrument.instrument_id.clone(),
+                    instrument.internal_settlement_state.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+        "expected_instrument_states": expected.instrument_states,
     });
     let mismatches = fixture_mismatches(&item);
     item["mismatches"] = serde_json::json!(mismatches);
@@ -1140,6 +1228,19 @@ fn corpus_report(
     Ok(report)
 }
 
+/// Every string that must never leave the harness: each fixture's
+/// `secret_probe` and `server_privacy_probe`, and the harness's own bearer
+/// tokens.
+fn corpus_probes<'a>(fixtures: impl Iterator<Item = &'a CorpusFixture>) -> Vec<&'a str> {
+    fixtures
+        .flat_map(|fixture| {
+            std::iter::once(fixture.secret_probe.as_str())
+                .chain(fixture.server_privacy_probe.as_deref())
+        })
+        .chain(HARNESS_TOKENS)
+        .collect()
+}
+
 fn contains_probe(haystack: &[u8], probes: &[&str]) -> bool {
     probes.iter().any(|probe| {
         !probe.is_empty()
@@ -1176,7 +1277,7 @@ async fn pipeline_corpus_run() {
         Err(label) => panic!("{label}"),
     };
     let package = config.package().unwrap_or_else(|label| panic!("{label}"));
-    let award_count = bundle_award_count(&package).unwrap_or_else(|label| panic!("{label}"));
+    let award_states = bundle_award_states(&package).unwrap_or_else(|label| panic!("{label}"));
     let corpora: Vec<(&str, CorpusFile, String)> = config
         .partitions
         .iter()
@@ -1196,14 +1297,11 @@ async fn pipeline_corpus_run() {
             "duplicate_corpus_identity"
         );
     }
-    let probes: Vec<&str> = corpora
-        .iter()
-        .flat_map(|(_, corpus, _)| &corpus.fixtures)
-        .flat_map(|fixture| {
-            std::iter::once(fixture.secret_probe.as_str())
-                .chain(fixture.server_privacy_probe.as_deref())
-        })
-        .collect();
+    let probes = corpus_probes(
+        corpora
+            .iter()
+            .flat_map(|(_, corpus, _)| corpus.fixtures.iter()),
+    );
 
     let runtime = runtime_backend(8)
         .await
@@ -1281,14 +1379,15 @@ async fn pipeline_corpus_run() {
     let mut http = CorpusHttp {
         client,
         base,
-        error_bodies: Vec::new(),
+        sent_bodies: Vec::new(),
+        received_bodies: Vec::new(),
     };
 
     let mut sections = Vec::new();
     for (partition, corpus, digest) in &corpora {
         let mut fixtures = Vec::new();
         for fixture in &corpus.fixtures {
-            let expected = fixture.expectations(award_count);
+            let expected = fixture.expectations(&award_states);
             let observed = drive_fixture(&mut http, fixture).await;
             fixtures.push(fixture_report(fixture, &expected, &observed));
         }
@@ -1308,21 +1407,26 @@ async fn pipeline_corpus_run() {
         .expect("the report serialises");
     report_bytes.push(b'\n');
     assert!(
-        !contains_probe(&report_bytes, &probes),
-        "corpus_probe_in_report"
+        !http
+            .sent_bodies
+            .iter()
+            .any(|body| contains_probe(body, &probes)),
+        "corpus_probe_in_request"
     );
     assert!(
         !http
-            .error_bodies
+            .received_bodies
             .iter()
             .any(|body| contains_probe(body.as_bytes(), &probes)),
-        "corpus_probe_in_http_error_body"
+        "corpus_probe_in_http_body"
+    );
+    assert!(
+        !contains_probe(&report_bytes, &probes),
+        "corpus_probe_in_report"
     );
     write_atomically(&config.report_path, &report_bytes);
-    assert_eq!(
-        report["failure_count"], 0,
-        "corpus_fixture_mismatch: the report names each fixture's mismatches"
-    );
+    // The report names each fixture's mismatches.
+    assert_eq!(report["failure_count"], 0, "corpus_fixture_mismatch");
 
     let evidence = serde_json::json!({
         "fixtures": report["fixture_count"],
@@ -1515,12 +1619,18 @@ fn fixture_expectations_default_from_the_outcome_count() {
     let minimal = corpus_bundle_package("minimal").expect("the minimal package builds");
     let compatibility =
         corpus_bundle_package("compatibility").expect("the compatibility package builds");
-    assert_eq!(bundle_award_count(&minimal), Ok(1));
-    assert_eq!(bundle_award_count(&compatibility), Ok(1));
+    let storage_rebate =
+        BTreeMap::from([("storage_rebate".to_string(), "not_applicable".to_string())]);
+    let credited = BTreeMap::from([(
+        "trace_credit".to_string(),
+        "not_settlement_eligible".to_string(),
+    )]);
+    assert_eq!(bundle_award_states(&minimal), Ok(storage_rebate.clone()));
+    assert_eq!(bundle_award_states(&compatibility), Ok(credited.clone()));
     let scorer = ReferencePerplexityScorer::new();
     let embedder = ReferenceEmbedder::new();
     let no_delta = compatibility_reference_package(0, &scorer, &embedder).unwrap();
-    assert_eq!(bundle_award_count(&no_delta), Ok(0));
+    assert_eq!(bundle_award_states(&no_delta), Ok(BTreeMap::new()));
 
     let fixture = |label: &str| {
         corpus
@@ -1530,7 +1640,7 @@ fn fixture_expectations_default_from_the_outcome_count() {
             .expect("main's corpus names this fixture")
     };
     assert_eq!(
-        fixture("clean_tool_plan").expectations(1),
+        fixture("clean_tool_plan").expectations(&storage_rebate),
         FixtureExpectations {
             admission_decision: "admit".into(),
             outcome_count: 4,
@@ -1539,10 +1649,11 @@ fn fixture_expectations_default_from_the_outcome_count() {
             scoring_state: "complete".into(),
             settlement_state: "complete".into(),
             instrument_count: 1,
+            instrument_states: storage_rebate.clone(),
         }
     );
     assert_eq!(
-        fixture("privacy_quarantine_approved").expectations(1),
+        fixture("privacy_quarantine_approved").expectations(&credited),
         FixtureExpectations {
             admission_decision: "quarantine".into(),
             outcome_count: 4,
@@ -1551,10 +1662,11 @@ fn fixture_expectations_default_from_the_outcome_count() {
             scoring_state: "complete".into(),
             settlement_state: "complete".into(),
             instrument_count: 1,
+            instrument_states: credited.clone(),
         }
     );
     assert_eq!(
-        fixture("privacy_risk_rejected").expectations(1),
+        fixture("privacy_risk_rejected").expectations(&credited),
         FixtureExpectations {
             admission_decision: "reject".into(),
             outcome_count: 1,
@@ -1563,16 +1675,18 @@ fn fixture_expectations_default_from_the_outcome_count() {
             scoring_state: "missing".into(),
             settlement_state: "incomplete".into(),
             instrument_count: 0,
+            instrument_states: BTreeMap::new(),
         }
     );
-    let review_rejected = fixture("privacy_quarantine_rejected").expectations(1);
+    let review_rejected = fixture("privacy_quarantine_rejected").expectations(&credited);
     assert_eq!(
         (
             review_rejected.scoring_state.as_str(),
             review_rejected.settlement_state.as_str(),
-            review_rejected.instrument_count
+            review_rejected.instrument_count,
+            review_rejected.instrument_states.len(),
         ),
-        ("missing", "incomplete", 0)
+        ("missing", "incomplete", 0, 0)
     );
 
     // An HF export states every expectation; those win over the derivation.
@@ -1580,9 +1694,75 @@ fn fixture_expectations_default_from_the_outcome_count() {
     explicit["expected_instrument_count"] = 3.into();
     explicit["expected_privacy_state"] = "medium".into();
     let explicit: CorpusFixture = serde_json::from_value(explicit).unwrap();
-    let expected = explicit.expectations(1);
+    let expected = explicit.expectations(&credited);
     assert_eq!(expected.instrument_count, 3);
     assert_eq!(expected.privacy_state, "medium");
+    assert_eq!(expected.instrument_states, credited);
+}
+
+/// Rulings T9-5 and T9-6: a Low-risk fixture sends its text after local
+/// redaction (so `locally_redacted_secret`'s credential is gone from the
+/// request bytes), a Medium or High fixture sends metadata only with its
+/// label as a distinct tool name, and every envelope allows model training.
+/// The probe set holds every fixture probe and the harness's own tokens.
+#[tokio::test]
+async fn fixture_envelopes_send_redacted_text_for_low_risk_and_metadata_otherwise() {
+    let (corpus, _) = load_corpus(&main_corpus_path()).expect("main's corpus loads");
+    let probes = corpus_probes(corpus.fixtures.iter());
+    for token in HARNESS_TOKENS {
+        assert!(probes.contains(&token), "{token} is a probe");
+    }
+    for fixture in &corpus.fixtures {
+        assert!(probes.contains(&fixture.secret_probe.as_str()));
+        let envelope = fixture_envelope(fixture).await;
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        assert!(
+            !contains_probe(&bytes, &probes),
+            "{}: no probe in the request bytes",
+            fixture.label
+        );
+        assert_eq!(envelope.consent.scopes, vec![ConsentScope::ModelTraining]);
+        assert_eq!(
+            envelope.trace_card.allowed_uses,
+            vec![TraceAllowedUse::ModelTraining]
+        );
+        let text: Vec<&str> = envelope
+            .events
+            .iter()
+            .filter_map(|event| event.redacted_content.as_deref())
+            .collect();
+        if fixture.privacy_risk == "low" {
+            assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+            assert!(envelope.consent.message_text_included);
+            assert!(!text.is_empty(), "{}: the text is sent", fixture.label);
+        } else {
+            assert!(text.is_empty(), "{}: metadata only", fixture.label);
+            assert!(
+                envelope
+                    .events
+                    .iter()
+                    .any(|event| event.tool_name.as_deref() == Some(fixture.label.as_str())),
+                "{}: its label is its tool name",
+                fixture.label
+            );
+        }
+    }
+    let clean = corpus
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.label == "clean_tool_plan")
+        .unwrap();
+    let clean_bytes = serde_json::to_vec(&fixture_envelope(clean).await).unwrap();
+    assert!(contains_probe(&clean_bytes, &["smallest safe change"]));
+    let secret = corpus
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.label == "locally_redacted_secret")
+        .unwrap();
+    assert!(
+        secret.input.contains(&secret.secret_probe),
+        "the fixture's input holds its probe until local redaction removes it"
+    );
 }
 
 #[test]
@@ -1654,7 +1834,10 @@ fn corpus_run_config_refuses_bad_check_ids_and_a_package_with_a_bundle() {
 fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     let fixture: CorpusFixture =
         serde_json::from_value(fixture_value("clean_fixture", 7, 8)).unwrap();
-    let expected = fixture.expectations(1);
+    let expected = fixture.expectations(&BTreeMap::from([(
+        "storage_rebate".to_string(),
+        "not_applicable".to_string(),
+    )]));
     let run_id = Uuid::new_v4();
     let outcome_id = Uuid::new_v4();
     let phase = |name: &str| trace_commons_server::versioned_pipeline_product::PipelinePhaseTrace {
@@ -1715,6 +1898,10 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
 
     let report = fixture_report(&fixture, &expected, &observed);
     assert_eq!(report["mismatches"], serde_json::json!([]), "{report}");
+    assert_eq!(
+        report["instrument_states"],
+        serde_json::json!({"storage_rebate": "not_applicable"})
+    );
     assert_eq!(report["admission_decision"], "admit");
     assert_eq!(report["privacy_state"], "low");
     assert_eq!(report["instrument_count"], 1);
@@ -1734,6 +1921,18 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     assert_eq!(
         report["mismatches"],
         serde_json::json!(["admission_decision"])
+    );
+
+    // A withheld leg where the bundle's award is credited is a mismatch,
+    // though the leg completed and the count is met (ruling T9-6).
+    let mut withheld = observed.clone();
+    withheld.status.as_mut().unwrap().instruments[0].internal_settlement_state = "withheld".into();
+    let report = fixture_report(&fixture, &expected, &withheld);
+    assert_eq!(report["settlement_state"], "complete");
+    assert_eq!(report["instrument_count"], 1);
+    assert_eq!(
+        report["mismatches"],
+        serde_json::json!(["instrument_states"])
     );
 
     let mut parked = observed.clone();
