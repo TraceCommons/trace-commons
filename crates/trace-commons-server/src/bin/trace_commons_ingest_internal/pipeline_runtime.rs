@@ -485,7 +485,8 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 ///
 /// Then, whatever the runs did, it runs the follow-up steps `cadence` finds
 /// due (`PipelineFollowUpCadence::due_steps`, with the steps this service
-/// woke): it processes up to
+/// woke): it releases the tenant's parked runs whose submission is no
+/// longer operable (`release_inoperable_parked_runs`), processes up to
 /// `PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT` of the tenant's due
 /// index invalidations (`process_index_invalidations`, which removes a
 /// withdrawn or cancelled revision from the index), and pays out up to
@@ -530,6 +531,17 @@ pub(crate) async fn drain_pipeline_tenant(
         std::time::Instant::now(),
     );
     if due.index_invalidations {
+        // A run parked for review whose submission expired, was purged, or
+        // was revoked or withdrawn without the pipeline's follow-up is
+        // reached by nothing else (Zaki review 1, round 2, finding 9).
+        if let Err(error) = service.release_inoperable_parked_runs(&tenant_id).await {
+            tracing::warn!(
+                error_class = "pipeline_worker_parked_run_release_failed",
+                tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker parked run release failed"
+            );
+        }
         match service
             .process_index_invalidations(
                 &tenant_id,

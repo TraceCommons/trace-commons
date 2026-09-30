@@ -21973,3 +21973,89 @@ async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
         0
     );
 }
+
+/// Finding 9: a run parked in `awaiting_review` whose submission stops being
+/// operable while nobody claims or assesses it -- it expires, `main`'s
+/// retention purges it, `main` revokes it, or a withdrawal lands without
+/// the pipeline's follow-up -- is released by the worker
+/// (`release_inoperable_parked_runs`) and ended by Review as
+/// `submission_inoperable`, as `claim_review` and `record_review_assessment`
+/// would. A parked run whose submission is still operable stays parked.
+#[tokio::test]
+async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-parked-inoperable-{}", uuid::Uuid::new_v4());
+    let untouched = quarantined_and_parked(&service, &tenant).await;
+    for (cause, statement) in [
+        (
+            "expired",
+            "UPDATE trace_submissions SET expires_at = NOW() - INTERVAL '1 second'
+              WHERE tenant_id = $1 AND submission_id = $2",
+        ),
+        (
+            "purged",
+            "UPDATE trace_submissions SET status = 'purged', purged_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+        ),
+        (
+            "revoked",
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+        ),
+        (
+            "withdrawn",
+            "INSERT INTO trace_withdrawals (
+                tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             ) VALUES ($1, $2, NOW(), 'quarantined', 'not_distributed')",
+        ),
+    ] {
+        let parked = quarantined_and_parked(&service, &tenant).await;
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(statement, &[&tenant, &parked.submission_id])
+            .await
+            .unwrap_or_else(|error| panic!("{cause}: {error}"));
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            service
+                .release_inoperable_parked_runs(&tenant)
+                .await
+                .unwrap(),
+            1,
+            "{cause}: the worker releases the parked run"
+        );
+        let ended = service
+            .process_run(&tenant, parked.run_id)
+            .await
+            .unwrap()
+            .expect("the runner claims the released run");
+        assert_eq!(ended.state, PipelineRunState::Failed, "{cause}");
+        assert_eq!(
+            ended.last_error_label.as_deref(),
+            Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+            "{cause}"
+        );
+    }
+    assert_eq!(
+        service
+            .store()
+            .get_run(&tenant, untouched.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::AwaitingReview,
+        "an operable submission's parked run stays parked"
+    );
+}

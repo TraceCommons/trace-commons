@@ -1938,6 +1938,55 @@ impl PgPipelineStore {
         .transpose()
     }
 
+    /// Releases every run of `tenant_id` parked in `awaiting_review` whose
+    /// submission is no longer operable -- the rule `review_submission_is_operable`
+    /// applies: status `received` or `quarantined`, never revoked, purged or
+    /// withdrawn, not expired by the database clock, no `trace_withdrawals`
+    /// row -- back to `pending`, due at once (`release_awaiting_review`), so
+    /// Review ends it under `submission_inoperable`, as `claim_review` and
+    /// `record_review_assessment` would (Zaki review 1, round 2, finding 9).
+    /// Locks only the run rows it releases, skipping any another session
+    /// holds. Returns how many it released.
+    pub async fn release_inoperable_parked_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let released = tx
+            .execute(
+                "UPDATE pipeline_runs
+                    SET state = 'pending', next_attempt_at = NOW(), last_error_label = NULL,
+                        updated_at = NOW()
+                  WHERE tenant_id = $1
+                    AND run_id IN (
+                        SELECT p.run_id FROM pipeline_runs p
+                         WHERE p.tenant_id = $1 AND p.state = 'awaiting_review'
+                           AND NOT EXISTS (
+                               SELECT 1 FROM trace_submissions s
+                                WHERE s.tenant_id = p.tenant_id
+                                  AND s.submission_id = p.submission_id
+                                  AND s.status IN ('received', 'quarantined')
+                                  AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                                  AND s.withdrawn_at IS NULL
+                                  AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM trace_withdrawals w
+                                       WHERE w.tenant_id = s.tenant_id
+                                         AND w.submission_id = s.submission_id
+                                  )
+                           )
+                         ORDER BY p.run_id
+                         FOR UPDATE OF p SKIP LOCKED
+                    )
+                    AND state = 'awaiting_review'",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(released)
+    }
+
     /// Runs waiting for a human assessment, oldest first, label-only fields
     /// (brief Step 3). Ruling T3-2 adds `awaiting_review` to the states
     /// selected -- the port's `list_policy_interventions`-adjacent draft
@@ -3249,12 +3298,16 @@ impl PgPipelineStore {
     /// selects `awaiting_review`, so a parked run does no further work on
     /// its own; `record_review_assessment` moves it back to `pending`, due
     /// at once, once an assessment lands (Ruling T3-3). A parked run whose
-    /// submission is later withdrawn, expired, or purged stays parked here
-    /// -- nothing in this call moves it -- but `claim_review` and
-    /// `record_review_assessment` each check the submission's operability
-    /// themselves and release such a run back to `pending` when they find
-    /// it inoperable (Ruling T3-6), so the run still ends under
-    /// `submission_inoperable` rather than staying parked forever.
+    /// submission later stops being operable (withdrawn, revoked, expired,
+    /// or purged) is released back to `pending` by whichever comes first:
+    /// `claim_review` or `record_review_assessment`, which check the
+    /// submission's operability themselves (Ruling T3-6); the pipeline
+    /// withdrawal and the follow-up of `main`'s revocation; or the worker,
+    /// which releases every such run of a tenant on its invalidation step
+    /// (`release_inoperable_parked_runs`; Zaki review 1, round 2, finding 9),
+    /// since after expiry or purge nobody else reaches it: the review queue
+    /// hides it and no claim query selects it. Review then ends the run under
+    /// `submission_inoperable` rather than leaving it parked forever.
     ///
     /// Fenced by the lease exactly like `mark_transient_retry`: the lease
     /// is cleared and the claim's attempt is given back
@@ -5595,6 +5648,13 @@ impl PipelineService {
             );
         }
         Ok(requeued)
+    }
+
+    /// Releases `tenant_id`'s parked runs whose submission is no longer
+    /// operable (`PgPipelineStore::release_inoperable_parked_runs`); the
+    /// worker runs it on its invalidation step.
+    pub async fn release_inoperable_parked_runs(&self, tenant_id: &str) -> anyhow::Result<u64> {
+        Ok(self.store.release_inoperable_parked_runs(tenant_id).await?)
     }
 
     /// Processes up to `limit` of `tenant_id`'s due index invalidations and
