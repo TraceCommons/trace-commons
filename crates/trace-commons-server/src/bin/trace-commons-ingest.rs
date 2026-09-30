@@ -3933,6 +3933,12 @@ impl AppState {
                 require_adapter_auth: near_credit_require_adapter_auth,
             },
             &pipeline_novelty_utility_checks,
+            // Zaki review 1, round 2, finding 14: `main`'s own index-insert
+            // threshold, with `main`'s default.
+            parse_usize_env(
+                TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS,
+                TRACE_COMMONS_GATE_DEFAULT_EMBED_INSERT_NOVELTY_MICROS,
+            )? as u64,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;

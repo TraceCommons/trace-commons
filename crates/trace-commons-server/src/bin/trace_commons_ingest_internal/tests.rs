@@ -10407,6 +10407,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .err()
     .unwrap();
@@ -10859,6 +10860,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .err()
     .expect("a service that ignores the configured store name is refused");
@@ -10881,6 +10883,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .unwrap()
     .unwrap();
@@ -11214,6 +11217,7 @@ fn qualified_compatibility_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
+    object_store_name: Option<String>,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11236,7 +11240,7 @@ fn qualified_compatibility_pipeline_service(
         instrument_id: InstrumentId::trace_credit(),
     });
     let registry = SettlementAdapterRegistry::new(vec![adapter])?;
-    let builder = PipelineServiceBuilder::new(
+    let mut builder = PipelineServiceBuilder::new(
         backend,
         artifact_store,
         package,
@@ -11251,6 +11255,9 @@ fn qualified_compatibility_pipeline_service(
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
     .with_privacy(Arc::new(QualifiedTestPrivacy));
+    if let Some(object_store_name) = object_store_name {
+        builder = builder.with_object_store_name(object_store_name);
+    }
     Ok(Arc::new(builder.build()?))
 }
 
@@ -11271,6 +11278,7 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
             backend.clone(),
             test_artifact_store(dir.path()),
             config,
+            None,
         )
         .expect("build a qualified compatibility service")
     };
@@ -11287,11 +11295,92 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
         2_000_000,
         0,
         500_000,
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("main's pilot floors validate");
     let production = service(&pilot);
     assert!(production.dependency_qualification().bundle);
     assert!(pipeline_runtime_is_production_qualified(&production));
+}
+
+/// Builds a qualified compatibility service through the seam, with main's
+/// pilot floors and the index-insert threshold ingest hands it, or
+/// `embed_insert_novelty_micros` when set.
+struct CompatibilityAssembler {
+    embed_insert_novelty_micros: Option<u64>,
+}
+
+impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+        let reference = CompatibilityBundleConfig::local_reference();
+        let config = CompatibilityBundleConfig::production_compatible(
+            reference.scorer_model_id,
+            reference.projection_id,
+            reference.index_id,
+            2_000_000,
+            0,
+            500_000,
+            self.embed_insert_novelty_micros
+                .unwrap_or(context.embed_insert_novelty_micros),
+        )?;
+        qualified_compatibility_pipeline_service(
+            context.backend,
+            context.artifact_store,
+            &config,
+            Some(context.object_store_name),
+        )
+    }
+}
+
+/// Zaki review 1, round 2, finding 14: a compatibility bundle inserts a
+/// chunk into the index under `main`'s own threshold
+/// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`). Ingest hands it to
+/// the assembly and refuses a runtime whose compatibility configuration
+/// holds another -- the novelty floor, for one.
+#[tokio::test]
+async fn pipeline_runtime_compatibility_inserts_under_mains_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    let assemble = |assembler: &CompatibilityAssembler| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
+        )
+    };
+
+    let service = assemble(&CompatibilityAssembler {
+        embed_insert_novelty_micros: None,
+    })
+    .expect("a compatibility bundle at main's threshold starts")
+    .expect("an assembler was given, so a service is returned");
+    assert_eq!(
+        service.compatibility_embed_insert_novelty_micros(),
+        Some(TEST_EMBED_INSERT_NOVELTY_MICROS)
+    );
+    let error = assemble(&CompatibilityAssembler {
+        embed_insert_novelty_micros: Some(500_000),
+    })
+    .err()
+    .expect("a compatibility bundle at the novelty floor is refused");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_runtime_embed_insert_novelty_mismatch"
+    );
 }
 
 /// Builds an unqualified pipeline service (`minimal_pipeline_service`)
@@ -11416,6 +11505,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .err()
     .expect("an unqualified dependency with routed tenants and no opt-in is refused");
@@ -11451,6 +11541,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_onl
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
         )
     };
     let no_receipts = TraceTenantRolloutGates::default();
@@ -11492,6 +11583,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("the opt-in lets an unqualified dependency start")
     .expect("an assembler was given, so a service is returned");
@@ -11518,6 +11610,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .err()
     .expect("the test opt-in never combines with the required flag");
@@ -11547,6 +11640,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("assemble a qualified runtime")
     .expect("an assembler was given, so a service is returned");
@@ -11576,6 +11670,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .err()
     .expect("a missing authority provider with routed tenants and no opt-in is refused");
@@ -11604,6 +11699,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .err()
     .expect("a missing privacy boundary with routed tenants and no opt-in is refused");
@@ -11657,6 +11753,11 @@ const TEST_PAYOUT_NEAR_CONTRACT: &str = "trace-credits.testnet";
 /// `main`'s NEAR outbox scheduler cadence as the assembly tests configure it
 /// (its default).
 const TEST_NEAR_CONFIRMATION_INTERVAL: StdDuration = StdDuration::from_secs(60);
+
+/// `main`'s default index-insert threshold
+/// (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`), as the assembly tests
+/// hand it to the runtime.
+const TEST_EMBED_INSERT_NOVELTY_MICROS: u64 = 50_000;
 
 /// `main`'s NEAR payout controls the pipeline tests assemble with: the
 /// injected adapter pays (`http`), and no adapter credential is required.
@@ -11739,6 +11840,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
         )
     };
 
@@ -11835,6 +11937,7 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &checks,
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
         )
     };
 
@@ -11871,6 +11974,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
             &PipelineNoveltyUtilityChecks::default(),
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
         )
     };
 
@@ -11923,6 +12027,7 @@ async fn pipeline_runtime_payout_follows_mains_near_payout_controls() {
             TEST_NEAR_CONFIRMATION_INTERVAL,
             mains,
             &PipelineNoveltyUtilityChecks::default(),
+            TEST_EMBED_INSERT_NOVELTY_MICROS,
         )
     };
 
@@ -12030,6 +12135,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("no routed tenants and no required flag: an unqualified dependency starts")
     .expect("an assembler was given, so a service is returned");

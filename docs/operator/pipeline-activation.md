@@ -592,7 +592,12 @@ floors positive, `main`'s pilot value, is accepted. A runtime that routes or
 drains a tenant must bind a qualifiable configuration: the local reference
 configuration (all floors zero) fails the qualification gate
 (`pipeline_runtime_dependencies_not_production_qualified`) unless
-`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. When both gate
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. Score inserts a
+chunk into the index under `main`'s own threshold,
+`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS` (50000 unless configured),
+never the novelty floor: ingest hands it to the runtime and refuses one whose
+compatibility configuration holds another
+(`pipeline_runtime_embed_insert_novelty_mismatch`). When both gate
 floors pass, Score awards the `NoveltyUtility` delta to `trace_credit`, and
 Settle records it as one `NoveltyUtility` ledger event, written as `main`
 writes that event: settlement state `final`, actor role `vector_worker`, and

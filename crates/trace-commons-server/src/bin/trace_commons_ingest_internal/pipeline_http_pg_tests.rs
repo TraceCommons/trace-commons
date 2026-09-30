@@ -352,6 +352,7 @@ fn assemble_test_pipeline_service(
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("assemble the injected pipeline runtime")
     .expect("an assembler was given, so a service is returned")
@@ -4660,6 +4661,7 @@ fn assemble_compatibility_pipeline_service(
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
         &PipelineNoveltyUtilityChecks::default(),
+        TEST_EMBED_INSERT_NOVELTY_MICROS,
     )
     .expect("assemble the injected compatibility pipeline runtime")
     .expect("an assembler was given, so a service is returned")

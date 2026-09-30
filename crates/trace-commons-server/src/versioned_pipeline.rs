@@ -5530,6 +5530,14 @@ impl PipelineService {
             .map(|(_, config)| config.controls)
     }
 
+    /// The index-insert threshold of the default bundle's compatibility
+    /// configuration (`CompatibilityBundleConfig::embed_insert_novelty_micros`);
+    /// `None` when the default bundle is not the compatibility bundle.
+    pub fn compatibility_embed_insert_novelty_micros(&self) -> Option<u64> {
+        crate::versioned_pipeline_bundle::package_compatibility_config(&self.default_package)
+            .map(|config| config.embed_insert_novelty_micros)
+    }
+
     /// The NEAR credit contract an enabled payout names
     /// (`PipelinePayoutConfig::near_contract_id`); `None` while payout is
     /// disabled.

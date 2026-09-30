@@ -137,6 +137,11 @@ impl CompatibilityBundleConfig {
         }
     }
 
+    /// A production-compatible configuration with `main`'s gate settings:
+    /// its three floors, and `embed_insert_novelty_micros`, `main`'s own
+    /// index-insert threshold (`TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS`,
+    /// which ingest hands the assembly), never the novelty floor (Zaki review
+    /// 1, round 2, finding 14).
     pub fn production_compatible(
         scorer_model_id: String,
         projection_id: String,
@@ -144,6 +149,7 @@ impl CompatibilityBundleConfig {
         perplexity_floor_micros: u64,
         tail_fraction_floor_micros: u64,
         novelty_floor_micros: u64,
+        embed_insert_novelty_micros: u64,
     ) -> anyhow::Result<Self> {
         let config = Self {
             qualification: CompatibilityQualification::ProductionCompatible,
@@ -153,7 +159,7 @@ impl CompatibilityBundleConfig {
             perplexity_floor_micros,
             tail_fraction_floor_micros,
             novelty_floor_micros,
-            embed_insert_novelty_micros: novelty_floor_micros,
+            embed_insert_novelty_micros,
             top_k: 8,
             chunk_target_tokens: 2048,
             chunk_max_tokens: 3072,
@@ -1369,6 +1375,7 @@ mod tests {
                 perplexity,
                 tail,
                 novelty,
+                50_000,
             )
         };
         assert_eq!(
@@ -1379,6 +1386,24 @@ mod tests {
         config(2_000_000, 0, 500_000).expect("the pilot's zero tail floor is accepted");
         config(1, 0, 0).expect("one positive floor is enough, as on main");
         config(0, 0, 1).expect("one positive floor is enough, as on main");
+    }
+
+    /// Finding 14: the index-insert threshold is `main`'s own setting,
+    /// passed in, not the novelty floor.
+    #[test]
+    fn production_compatibility_takes_mains_index_insert_threshold() {
+        let config = CompatibilityBundleConfig::production_compatible(
+            "scorer.v1".to_string(),
+            MINIMAL_PROJECTION_ID.to_string(),
+            MINIMAL_INDEX_ID.to_string(),
+            2_000_000,
+            0,
+            500_000,
+            50_000,
+        )
+        .unwrap();
+        assert_eq!(config.embed_insert_novelty_micros, 50_000);
+        assert_eq!(config.novelty_floor_micros, 500_000);
     }
 
     #[test]
