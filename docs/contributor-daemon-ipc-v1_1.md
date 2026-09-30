@@ -2824,7 +2824,7 @@ The native shells get the words through the C ABI rather than linking the
 crate: `tc_route_disclosure_copy(facts_json)` takes this method's result as
 sent and returns `{"facts": .., "copy": ..}`, or NULL for anything it cannot
 read; `tc_route_disclosure_unreadable_copy()` returns the sentences a surface
-shows in that case (`panel`, `session`); and `tc_certificate_detail_copy()`
+shows in that case, under the section title (`title`, `panel`, `session`); and `tc_certificate_detail_copy()`
 returns the labels for `certificate_detail`. GTK calls
 `consent_copy::route_disclosure_for_wire` directly. No shell writes a
 disclosure sentence of its own.

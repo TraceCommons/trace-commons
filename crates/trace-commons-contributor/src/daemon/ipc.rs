@@ -1459,13 +1459,17 @@ impl DaemonShared {
     /// A count and a byte total on `status` are the only place the
     /// condition can be told, which is why it lands here rather than on a
     /// queue entry.
+    ///
+    /// Only entries a pass would try now are simulated: an approved entry
+    /// paced behind a future `retry_after` (a transient classifier failure,
+    /// a witness at capacity) is not held by the cap until it is due.
     pub fn daily_budget(&self, now: chrono::DateTime<Utc>) -> super::uploader::DailyBudget {
         let approved: Vec<super::queue::QueueEntry> = {
             let queue = self.queue.lock().expect("queue lock");
             queue
                 .all()
                 .iter()
-                .filter(|e| e.state == super::queue::QueueState::Approved)
+                .filter(|e| e.ready_for_upload(now))
                 .cloned()
                 .collect()
         };
@@ -9334,6 +9338,41 @@ mod tests {
         assert_eq!(b["max_uploads_per_day"], 50);
         assert_eq!(b["uploads_remaining"], 38);
         assert!(!b["resets_at"].is_null());
+    }
+
+    #[test]
+    fn a_scheduled_retry_does_not_count_as_blocked_by_the_daily_cap() {
+        // An entry waiting out a transient classifier failure is approved,
+        // but no pass will try it before its `retry_after`. Counting it
+        // against today's cap reports pressure, or blocked entries, that no
+        // upload is actually facing yet. Once it is due it counts again.
+        let s = shared();
+        let now = Utc::now();
+        {
+            let mut state = s.state.lock().unwrap();
+            state.day_bucket = Some(now.format("%Y-%m-%d").to_string());
+            state.uploads_today = 50;
+        }
+        let mut waiting = approved_entry(1_024);
+        waiting.reason_label = Some(crate::submit::REASON_TRANSIENT_REDACTION.into());
+        waiting.retry_after = Some(now + chrono::Duration::minutes(30));
+        {
+            let mut q = s.queue.lock().unwrap();
+            let max = s.settings.lock().unwrap().max_queue_entries;
+            q.upsert(waiting, max).unwrap();
+        }
+        let budget = s.daily_budget(now);
+        assert_eq!(budget.uploads_remaining, 0);
+        assert_eq!(
+            budget.blocked_entries, 0,
+            "a retry scheduled for later is not held by the cap now"
+        );
+        assert_eq!(
+            s.daily_budget(now + chrono::Duration::minutes(31))
+                .blocked_entries,
+            1,
+            "once due, the same entry is held by the spent cap"
+        );
     }
 
     #[test]

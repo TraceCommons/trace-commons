@@ -1,0 +1,43 @@
+{
+  "login_finish": {
+    "id": "AQIDBA",
+    "rawId": "AQIDBA",
+    "type": "public-key",
+    "response": {
+      "authenticatorData": "AAEC",
+      "clientDataJSON": "e30",
+      "signature": "MEUC",
+      "userHandle": "AAECAwQFBgcICQoLDA0ODw"
+    }
+  },
+  "login_finish_without_user_handle": {
+    "id": "AQIDBA",
+    "rawId": "AQIDBA",
+    "type": "public-key",
+    "response": {
+      "authenticatorData": "AAEC",
+      "clientDataJSON": "e30",
+      "signature": "MEUC",
+      "userHandle": null
+    }
+  },
+  "register_finish": {
+    "id": "AQIDBA",
+    "rawId": "AQIDBA",
+    "type": "public-key",
+    "response": {
+      "attestationObject": "o2Nm",
+      "clientDataJSON": "e30"
+    },
+    "label": "Phone"
+  },
+  "register_finish_without_label": {
+    "id": "AQIDBA",
+    "rawId": "AQIDBA",
+    "type": "public-key",
+    "response": {
+      "attestationObject": "o2Nm",
+      "clientDataJSON": "e30"
+    }
+  }
+}
