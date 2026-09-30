@@ -319,6 +319,7 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_status",
     "near_ai_credential_cancel",
     "near_ai_credential_forget",
+    "near_ai_credential_migrate",
     "near_ai_balance",
     "near_ai_funding",
     "get_public_profile",
@@ -722,8 +723,16 @@ impl DaemonShared {
         super::legacy_migration::recover(&store)?;
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
-        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|_| {
+        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|error| {
             let mut settings = DaemonSettings::load(&store)?;
+            settings.cloud_storage_failure =
+                super::cloud_credential_lifecycle::classify_load_failure(&settings, &error);
+            // The label only: never the reference, never a platform string.
+            tracing::warn!(
+                reason =
+                    super::nearai_credential::storage_failure_label(settings.cloud_storage_failure),
+                "Private AI credential not loaded at startup"
+            );
             settings.near_ai_inference = None;
             settings.near_ai_session = None;
             settings.cloud_storage_unavailable = true;
@@ -2187,6 +2196,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "near_ai_credential_start",
         "near-ai-credential-requires-async",
     ),
+    (
+        "near_ai_credential_migrate",
+        "near-ai-credential-requires-async",
+    ),
     ("native_wallet_flow", "near-signup-requires-async"),
     ("near_ai_funding", "near-ai-funding-requires-async"),
     ("witness_preview_request", "witness-review-requires-async"),
@@ -3571,6 +3584,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "near_ai_account_enroll" => super::nearai_onboarding::handle_enroll(shared, req).await,
         "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
+        "near_ai_credential_migrate" => super::nearai_credential::handle_migrate(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
         // override exists so the reconcile that makes the answer true of the
@@ -11928,7 +11942,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 33);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 34);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12358,7 +12372,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 50, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 40, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 41, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

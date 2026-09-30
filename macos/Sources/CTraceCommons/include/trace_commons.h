@@ -746,6 +746,10 @@ int32_t     tc_private_inference_state_tone(const char* state);
 #define TC_CREDENTIAL_ACTION_OBTAIN 31
 #define TC_CREDENTIAL_ACTION_CANCEL 32
 #define TC_CREDENTIAL_ACTION_FORGET 33
+/* Copy a sign-in an earlier build kept in the macOS login keychain into the
+ * store this build uses (near_ai_credential_migrate). Offered only for
+ * "migration_available", which only macOS produces. */
+#define TC_CREDENTIAL_ACTION_MIGRATE 34
 
 /* Why a connect control is not on offer, or the EMPTY STRING.
  *

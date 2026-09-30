@@ -9,7 +9,9 @@ use crate::daemon::credential_store::{
     CredentialError, CredentialReference, CredentialStore, SecretBackend,
 };
 use crate::daemon::nearai_credential::session::coordination;
-use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
+use crate::daemon::settings::{
+    CloudStorageFailure, DaemonSettings, NearAiInferenceCredential, NearAiSession,
+};
 use crate::daemon::stored_cloud_credentials::StoredCloudCredentials;
 
 const JOURNAL: &str = "cloud-credential-cleanup.json";
@@ -158,6 +160,90 @@ pub(crate) fn sweep_legacy_cloud_reference(store: &ConfigStore, reference: Crede
     {
         let _ = store;
         let _ = reference;
+    }
+}
+
+/// Which startup failure a load error is, from the typed store error it
+/// carries. `anyhow` keeps the `CredentialError` a `?` converted, so the
+/// variant survives to here.
+pub(crate) fn classify_load_failure(
+    settings: &DaemonSettings,
+    error: &anyhow::Error,
+) -> CloudStorageFailure {
+    match error.downcast_ref::<CredentialError>() {
+        Some(CredentialError::Unentitled) => CloudStorageFailure::Unentitled,
+        // The store answered and holds nothing under the reference settings
+        // name. On macOS the one other place it can be is the legacy
+        // keychain a pre-move build wrote. Elsewhere there is no other place,
+        // and a missing entry stays "could not be read".
+        #[cfg(target_os = "macos")]
+        Some(CredentialError::NoEntry) if settings.cloud_credentials.is_some() => {
+            CloudStorageFailure::LegacyOnly
+        }
+        _ => {
+            let _ = settings;
+            CloudStorageFailure::Unavailable
+        }
+    }
+}
+
+/// What a contributor-initiated move of a legacy-keychain entry found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyMigration {
+    /// The active entry is in the data-protection store now: copied just
+    /// now, or already there from an earlier move.
+    Migrated,
+    /// Neither store holds it. Nothing is left to move.
+    NothingToMigrate,
+}
+
+/// Copy the active Cloud entry from the legacy keychain into the
+/// data-protection store, under the same reference.
+///
+/// Called only from `near_ai_credential_migrate`, which a contributor
+/// invokes; the legacy read here may prompt, and that is the moment they
+/// chose for it. Never from startup.
+///
+/// It copies and does not move. The legacy entry is the contributor's live
+/// `sk-` key; deleting it here would leave a downgrade with nothing. It
+/// stays until a later ceremony supersedes this reference, when the
+/// ceremony tail sweeps it as it sweeps any superseded legacy entry.
+///
+/// The legacy bytes are decoded and checked against the binding the settings
+/// record before anything is written, and `prepare_at` reads back what it
+/// wrote. The storage lock is held throughout, so no ceremony can publish a
+/// different reference in between.
+pub(crate) fn migrate_legacy_cloud_entry(store: &ConfigStore) -> Result<LegacyMigration> {
+    #[cfg(target_os = "macos")]
+    {
+        let lifecycle = native(store)?;
+        let locks = coordination(store.dir())?;
+        let _storage = locks.storage.lock().map_err(|_| unavailable())?;
+        let settings = DaemonSettings::load(store)?;
+        let Some(metadata) = settings.cloud_credentials.clone() else {
+            return Ok(LegacyMigration::NothingToMigrate);
+        };
+        let reference = metadata.reference();
+        match lifecycle.credentials.load_bytes(&reference) {
+            Ok(_) => return Ok(LegacyMigration::Migrated),
+            Err(CredentialError::NoEntry) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let legacy = CredentialStore::new(legacy_secret_backend(store).ok_or_else(unavailable)?);
+        let bundle = match legacy.load(&reference, metadata.binding_digest()) {
+            Ok(bundle) => bundle,
+            Err(CredentialError::NoEntry) => return Ok(LegacyMigration::NothingToMigrate),
+            Err(error) => return Err(error.into()),
+        };
+        lifecycle.credentials.prepare_at(&reference, &bundle)?;
+        let _commit = locks.commit.lock().map_err(|_| unavailable())?;
+        ensure_current(&DaemonSettings::load(store)?, &settings)?;
+        Ok(LegacyMigration::Migrated)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = store;
+        Err(anyhow!("near_ai_credential_migration_unsupported"))
     }
 }
 

@@ -113,6 +113,13 @@ fn record_change(dir: &std::path::Path) {
         .or_default() += 1;
 }
 
+/// A legacy-keychain entry was copied into the current store. Same
+/// ordering rule as [`record_change`]: the copy is written before this is
+/// called, so a daemon that reacts reads the credential, not its absence.
+pub(crate) fn record_change_after_migration(dir: &std::path::Path) {
+    record_change(dir);
+}
+
 #[cfg(test)]
 pub(crate) fn record_change_for_test(dir: &std::path::Path) {
     record_change(dir);
