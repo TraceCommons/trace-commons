@@ -4,10 +4,28 @@
 # The failure this guards against is total: an app carrying the keychain
 # entitlement without a profile that grants it is killed at exec. Every check
 # that existed before this one stayed green through that.
+#
+# It serves both macOS apps: the native shell (ai.tracecommons.shell) and the
+# Tauri desktop app (ai.tracecommons.desktop). Each has its own App ID and
+# profile, but both must request the same keychain access group, because the
+# contributor crate's ACCESS_GROUP is one constant and a credential written
+# by one app has to be readable by the other. So the group below is fixed,
+# and everything app-specific -- the bundle id, the executable name -- is
+# read from the bundle's own Info.plist.
 set -euo pipefail
 
-APP="${1:?usage: verify-macos-entitlements.sh <path to TraceCommons.app>}"
+APP="${1:?usage: verify-macos-entitlements.sh <path to a TraceCommons .app>}"
 PROFILE="$APP/Contents/embedded.provisionprofile"
+ACCESS_GROUP="KXSWJN7WY8.ai.tracecommons.shell"
+TEAM_ID="KXSWJN7WY8"
+
+INFO="$APP/Contents/Info.plist"
+test -f "$INFO" || { echo "FAIL: no Contents/Info.plist in $APP"; exit 1; }
+BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$INFO" 2>/dev/null)" \
+  || { echo "FAIL: Info.plist carries no CFBundleIdentifier"; exit 1; }
+EXECUTABLE="$(plutil -extract CFBundleExecutable raw -o - "$INFO" 2>/dev/null)" \
+  || { echo "FAIL: Info.plist carries no CFBundleExecutable"; exit 1; }
+echo "bundle $BUNDLE_ID, executable $EXECUTABLE"
 
 echo "--- the profile is embedded"
 test -f "$PROFILE" || { echo "FAIL: no embedded.provisionprofile in the bundle"; exit 1; }
@@ -24,7 +42,7 @@ ENTS="$(codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -convert 
   || { echo "FAIL: could not read the signed entitlements; is the bundle signed?"; exit 1; }
 SIGNED_GROUPS="$(printf '%s' "$ENTS" | plutil -extract keychain-access-groups xml1 -o - - 2>/dev/null)" \
   || { echo "FAIL: the signature carries no keychain-access-groups array"; exit 1; }
-printf '%s' "$SIGNED_GROUPS" | grep -q "<string>KXSWJN7WY8.ai.tracecommons.shell</string>" \
+printf '%s' "$SIGNED_GROUPS" | grep -qF "<string>$ACCESS_GROUP</string>" \
   || { echo "FAIL: keychain access group absent from keychain-access-groups"; exit 1; }
 
 echo "--- the profile grants what the entitlement requests"
@@ -34,6 +52,23 @@ GRANTED="$(printf '%s' "$PLIST" | plutil -extract Entitlements.keychain-access-g
   || { echo "FAIL: profile carries no Entitlements.keychain-access-groups"; exit 1; }
 echo "$GRANTED" | grep -qE "KXSWJN7WY8\.(\*|ai\.tracecommons\.shell)" \
   || { echo "FAIL: profile does not grant the requested access group"; exit 1; }
+
+echo "--- the profile is this app's profile"
+# A profile names exactly one App ID. The signed application-identifier has
+# to be that App ID, and it has to be this bundle's: embed the native shell's
+# profile in the desktop app (or the reverse) and every check above still
+# passes, because both profiles grant $TEAM_ID.* -- and the kernel kills the
+# app at exec. This is the static half of what the launch check proves.
+# The dots in the key are escaped: plutil splits keypaths on unescaped dots.
+EXPECTED_APP_ID="$TEAM_ID.$BUNDLE_ID"
+SIGNED_APP_ID="$(printf '%s' "$ENTS" | plutil -extract 'com\.apple\.application-identifier' raw -o - - 2>/dev/null)" \
+  || { echo "FAIL: the signature carries no com.apple.application-identifier"; exit 1; }
+PROFILE_APP_ID="$(printf '%s' "$PLIST" | plutil -extract 'Entitlements.com\.apple\.application-identifier' raw -o - - 2>/dev/null)" \
+  || { echo "FAIL: profile carries no Entitlements.com.apple.application-identifier"; exit 1; }
+test "$SIGNED_APP_ID" = "$EXPECTED_APP_ID" \
+  || { echo "FAIL: signed application-identifier $SIGNED_APP_ID is not $EXPECTED_APP_ID"; exit 1; }
+test "$PROFILE_APP_ID" = "$EXPECTED_APP_ID" \
+  || { echo "FAIL: embedded profile is for $PROFILE_APP_ID, not $EXPECTED_APP_ID"; exit 1; }
 
 echo "--- the profile is not near expiry"
 EXPIRES="$(printf '%s' "$PLIST" | plutil -extract ExpirationDate raw -o - - 2>/dev/null)" \
@@ -54,7 +89,7 @@ if [ "${TC_VERIFY_STATIC_ONLY:-}" = 1 ]; then
 fi
 
 echo "--- the signed app can actually reach its store"
-BIN="$APP/Contents/MacOS/TraceCommonsApp"
+BIN="$APP/Contents/MacOS/$EXECUTABLE"
 # A backgrounded job's failure does not trip `set -e`, so a wrong executable
 # name produces output byte-identical to a kernel kill at exec. Name it here.
 test -x "$BIN" || { echo "FAIL: $BIN is missing or not executable"; exit 1; }

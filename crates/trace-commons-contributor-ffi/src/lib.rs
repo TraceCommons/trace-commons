@@ -2138,8 +2138,16 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// stops a daemon from starting.
 ///
 /// Returns an owned JSON array; free it with [`tc_string_free`]. Each
-/// element carries `source`, `path`, `exists`, `session_count`,
-/// `most_recent` (RFC 3339 or null) and `relocated_by_env`.
+/// element carries `source` (`claude-code`, `codex`, `gemini-cli` or
+/// `cline`), `path`, `exists`, `session_count`, `most_recent` (RFC 3339 or
+/// null), `relocated_by_env` and `answers_at` (the vendor this tool's own
+/// calls answer at by default, e.g. `"Anthropic"`, or null for a tool with
+/// no single default -- see [`tc_discover_opencode_export`]'s doc for why
+/// OpenCode is one of those and is absent from this list entirely).
+///
+/// `answers_at` is a fixed label this build ships with, never something
+/// checked against the tool actually installed: it names what the released
+/// tool defaults to, not what a contributor may have reconfigured it to do.
 ///
 /// This is the one place in this ABI that deliberately returns a filesystem
 /// path. Everywhere else a path is withheld, because elsewhere the caller is
@@ -2156,6 +2164,50 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
         let found = trace_commons_contributor::source::discovery::probe_this_machine();
         let json = serde_json::to_string(&found).unwrap_or_else(|_| "[]".to_string());
         Ok(to_owned_cstring(&json))
+    })
+}
+
+/// Describe a folder the contributor has already named as their OpenCode
+/// export directory, so a Customize screen can say "N sessions found" for
+/// the folder they just picked rather than trusting the folder name alone.
+///
+/// Needs no handle, like [`tc_discover_sources`], and for a stronger reason:
+/// OpenCode has no conventional per-user store to guess at before anyone has
+/// said anything -- its export folder is picked by the contributor, one at a
+/// time -- so it is not one of [`tc_discover_sources`]'s rows at all, blind
+/// or otherwise. This call exists so OpenCode can still be described once a
+/// folder is actually named, whether that is moments after a folder chooser
+/// closes or on a later run, reading back whatever this contributor already
+/// declared (`opencode_source` in the daemon's settings).
+///
+/// Returns an owned JSON object with the same shape as one row of
+/// [`tc_discover_sources`] -- `source` (always `"opencode"`), `path`,
+/// `exists`, `session_count`, `most_recent`, `relocated_by_env` (always
+/// `false`: nothing relocates this folder but the contributor) and
+/// `answers_at` (always `null`: OpenCode ships with no single default
+/// vendor to name). Free it with [`tc_string_free`].
+///
+/// Reads directory entries and metadata only, and never opens a session
+/// file, per the same rule [`tc_discover_sources`] follows.
+///
+/// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
+/// `invalid-utf8`, and NULL on a caught panic.
+///
+/// # Safety
+/// `path` must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_discover_opencode_export(path: *const c_char) -> *mut c_char {
+    guard_forwarding(|| {
+        let path = unsafe { borrow_str(path) }?;
+        let candidate = trace_commons_contributor::source::discovery::describe_opencode(
+            std::path::Path::new(path),
+        );
+        let json = serde_json::to_string(&candidate).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+    .unwrap_or_else(|err| {
+        set_last_error(&err);
+        std::ptr::null_mut()
     })
 }
 
