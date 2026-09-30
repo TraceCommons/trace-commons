@@ -51,6 +51,35 @@ struct HealthCopy: Equatable {
         )
     }
 
+    /// The banner for approved sessions held because the privacy witness is
+    /// busy, built from `status.witness_capacity` in the Rust's words
+    /// (`tc_witness_capacity_notice`): the title, the counted body, and the
+    /// next try in local time when the daemon gave one.
+    ///
+    /// Separate from `forLabel` for the reason `forBudget` is: the health
+    /// slot can be held by a higher label, and the sessions are still
+    /// waiting. Nil when nothing is waiting or the notice cannot be read --
+    /// the label, if it holds the slot, then falls back to `forLabel`'s
+    /// on-hold line rather than disappearing.
+    ///
+    /// `.waiting`: nothing is broken, nothing left the machine, and the
+    /// daemon retries on its own.
+    static func forWitnessCapacity(_ capacity: WitnessCapacity) -> HealthCopy? {
+        guard capacity.waiting,
+            let json = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: capacity.wireJSON),
+            let notice = WitnessCapacityNotice.decode(fromJSON: json)
+        else { return nil }
+        let detail = [notice.body, notice.nextRetryLine(for: capacity)]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+        return HealthCopy(
+            title: notice.title,
+            detail: detail,
+            severity: .waiting,
+            actionTitle: nil
+        )
+    }
+
     static func forLabel(_ label: String) -> HealthCopy {
         switch label {
         case "not-logged-in":

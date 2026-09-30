@@ -24,10 +24,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use trace_commons_gate_enclave::{
-    Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, MockEmbedder,
-    MockPerplexityScorer, MockVectorIndex, PerplexityScorer, VectorIndex,
+    AuthorPerplexity, Embedder, EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig,
+    MockEmbedder, MockPerplexityScorer, MockVectorIndex, PerplexityScorer, VectorIndex,
 };
 
+use crate::dedup_simhash::DedupAlgorithm;
 use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper, WrappedDek};
 use crate::trace_artifact_store::{TraceArtifactKind, aead_decrypt_with_dek};
 
@@ -119,6 +120,10 @@ pub struct GateDecision {
     /// qualifies. Unknown and zero are different facts, and the column is
     /// nullable so it can say so.
     pub qualifying_token_fraction_micros: Option<u64>,
+    /// Perplexity split by token author. Shadow mode. `None` from a
+    /// deterministic service and from any backend that reports no token
+    /// lengths -- unknown, not zero.
+    pub author_perplexity: Option<AuthorPerplexity>,
     /// Every per-chunk vector-index entry the gate inserted. Empty for
     /// deterministic/legacy services and failed gates. The host persists
     /// these as (submission_id, chunk_index)-tagged rows for revocation.
@@ -178,6 +183,12 @@ pub struct GateDecision {
 /// A malformed or non-JSON plaintext yields `None` rather than an error — the
 /// correction value is shadow-only, so a parse failure must degrade to "no
 /// correction observed" and never block a gate decision.
+///
+/// Pinned to `trace_simhash_v1` BY NAME, not to the active algorithm.
+/// Correction clustering stores no stamp (#538), so if this followed
+/// `ACTIVE_DEDUP_ALGORITHM` a bump would fuse old and new values silently.
+/// Corrections are short prose, where multiset and set semantics agree, so
+/// nothing is lost by staying on v1.
 pub fn correction_simhash_from_plaintext(plaintext: &[u8]) -> Option<i64> {
     let value: serde_json::Value = serde_json::from_slice(plaintext).ok()?;
     let correction = value
@@ -188,7 +199,48 @@ pub fn correction_simhash_from_plaintext(plaintext: &[u8]) -> Option<i64> {
     if correction.is_empty() {
         return None;
     }
-    Some(crate::dedup_simhash::trace_simhash(correction) as i64)
+    Some(crate::dedup_simhash::trace_simhash_v1(correction) as i64)
+}
+
+/// The text the cross-trace dedup simhash is taken over: the canonical
+/// rendered event text (`chunker::parse_envelope_rendered_events`, one
+/// `event_type (tool): content` line per event) joined by newlines, falling
+/// back to the lossy-UTF-8 plaintext for an envelope the renderer cannot
+/// parse.
+///
+/// Metadata-free on purpose: the envelope carries per-submission-unique
+/// fields (submission_id, trace_id, created_at, per-event event_id and
+/// timestamp), so hashing the raw JSON would make byte-identical
+/// resubmissions never collide. This is the same rendering the chunker
+/// builds for the scorer and embedder.
+///
+/// One function, shared by `evaluate_trace` and `derive_dedup_signal`, so the
+/// inline path and the re-derivation pass cannot render differently.
+pub fn dedup_canonical_text(plaintext: &[u8]) -> String {
+    trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(plaintext)
+        .map(|events| events.join("\n"))
+        .unwrap_or_else(|| String::from_utf8_lossy(plaintext).into_owned())
+}
+
+/// What [`TraceGateService::derive_dedup_signal`] returns: the 64-bit value
+/// and the stamp that names how it was made. The plaintext never leaves the
+/// method; only these two cross back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupSignalDerivation {
+    pub simhash: i64,
+    /// `<CANONICAL_RENDER_VERSION>+<algorithm name>`. The renderer half is
+    /// the build's constant, never a parameter: the pass renders with the
+    /// code it has, so it can only produce the render version it has.
+    pub signal_version: String,
+}
+
+/// The stamp a derivation under `algorithm` carries in this build.
+pub fn dedup_signal_version_for(algorithm: DedupAlgorithm) -> String {
+    format!(
+        "{}+{}",
+        trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
+        algorithm.name()
+    )
 }
 
 /// Observable status of a `TraceGateService`, safe for logs / health surfaces.
@@ -214,6 +266,28 @@ pub struct PerplexityOnlyGateOutcome {
     /// Whether the perplexity cleared the configured floor(s) — the same
     /// predicate a full evaluation applies.
     pub perplexity_passed: bool,
+    /// Perplexity split by token author. Shadow mode; never part of the
+    /// predicate above. `None` when nothing could be attributed.
+    pub author_perplexity: Option<AuthorPerplexity>,
+}
+
+/// Fan `AuthorPerplexity` out into its five nullable columns, in migration
+/// order: agent-prose perplexity, agent-prose tokens, tool-result
+/// perplexity, tool-result tokens, attributed fraction. Absent stays `None`
+/// throughout; a real zero token count stays `Some(0)`. Saturates rather
+/// than wraps, as the other micros mappings do.
+pub fn author_perplexity_columns(ap: Option<&AuthorPerplexity>) -> [Option<i64>; 5] {
+    let Some(ap) = ap else {
+        return [None; 5];
+    };
+    let sat = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+    [
+        ap.agent_prose_perplexity_micros.map(sat),
+        Some(sat(ap.agent_prose_tokens)),
+        ap.tool_result_perplexity_micros.map(sat),
+        Some(sat(ap.tool_result_tokens)),
+        Some(sat(ap.attributed_token_fraction_micros)),
+    ]
 }
 
 /// Pluggable gate-evaluation service.
@@ -255,6 +329,30 @@ pub trait TraceGateService: Send + Sync {
         _object_kind: TraceArtifactKind,
     ) -> anyhow::Result<PerplexityOnlyGateOutcome> {
         anyhow::bail!("PerplexityOnlyRescoreUnsupported")
+    }
+
+    /// Re-derive ONLY the cross-trace dedup signal of a wrapped trace under
+    /// `algorithm`: the same decrypt and the same canonical render as
+    /// [`Self::evaluate_trace`], then the selected hash. No scoring, no
+    /// embedding, no vector-index read or write, no per-chunk work. The
+    /// plaintext never leaves the method; only the 64-bit value and the
+    /// stamp that names its derivation cross back. Used by the dedup
+    /// re-derivation pass (`POST /v1/admin/rederive-dedup`).
+    ///
+    /// The default implementation refuses. The deterministic services never
+    /// see plaintext -- their `dedup_simhash` is a digest window, not a
+    /// simhash of any text -- so there is nothing they could honestly
+    /// re-derive, and the pass counts each such row as failed rather than
+    /// re-stamping a number that means something else.
+    fn derive_dedup_signal(
+        &self,
+        _tenant_ctx: &TenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &WrappedDek,
+        _object_kind: TraceArtifactKind,
+        _algorithm: DedupAlgorithm,
+    ) -> anyhow::Result<DedupSignalDerivation> {
+        anyhow::bail!("DedupRederiveUnsupported")
     }
 
     /// Mark a previously-indexed vector entry as invalidated inside the gate
@@ -408,6 +506,7 @@ fn build_deterministic_decision(
         total_chunk_count: 1,
         chunks_capped: false,
         qualifying_token_fraction_micros: None,
+        author_perplexity: None,
         chunk_vector_entries: Vec::new(),
         dedup_simhash,
         // Names the derivation above, so the value is never clustered against
@@ -494,6 +593,8 @@ impl TraceGateService for InMemoryGateService {
             perplexity_micros: decision.perplexity_micros,
             peak_perplexity_micros: decision.peak_perplexity_micros,
             perplexity_passed: decision.perplexity_passed,
+            // The deterministic service sees no tokens to attribute.
+            author_perplexity: None,
         })
     }
 
@@ -750,6 +851,7 @@ where
             total_chunk_count: decision.total_chunk_count,
             chunks_capped: decision.chunks_capped,
             qualifying_token_fraction_micros: Some(decision.qualifying_token_fraction_micros),
+            author_perplexity: decision.author_perplexity,
             chunk_vector_entries: decision
                 .inserted_chunk_entries
                 .iter()
@@ -763,30 +865,19 @@ where
             // the same trust boundary as every other decrypted-content field
             // here — only the hash crosses back to the caller.
             //
-            // Must be over the CANONICAL RENDERED EVENT TEXT
-            // (metadata-free), not the raw envelope JSON: the envelope
-            // carries per-submission-unique fields (submission_id, trace_id,
-            // created_at, per-event event_id/timestamp), so hashing the raw
-            // JSON means byte-identical-content resubmissions never collide.
-            // This mirrors the same rendering the chunker uses to build the
-            // text the scorer/embedder actually consume
-            // (`chunk_envelope_plaintext` / `chunk_plaintext`), so the
-            // simhash is over the same metadata-free text.
-            dedup_simhash: {
-                let dedup_canonical_text =
-                    trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(&plaintext)
-                        .map(|events| events.join("\n"))
-                        .unwrap_or_else(|| String::from_utf8_lossy(&plaintext).into_owned());
-                crate::dedup_simhash::trace_simhash(&dedup_canonical_text) as i64
-            },
+            // Over the CANONICAL RENDERED EVENT TEXT (`dedup_canonical_text`,
+            // metadata-free), not the raw envelope JSON, and under the
+            // build's ACTIVE algorithm. The same two functions the
+            // re-derivation pass calls, so the inline path and the pass
+            // cannot render or hash differently.
+            dedup_simhash: crate::dedup_simhash::ACTIVE_DEDUP_ALGORITHM
+                .simhash(&dedup_canonical_text(&plaintext)) as i64,
             // Names both halves of the derivation immediately above: the
             // enclave renderer that produced the text, and the simhash
             // algorithm that reduced it. Composed rather than hard-coded so
-            // bumping either const moves the stamp without a second edit here.
-            dedup_signal_version: format!(
-                "{}+{}",
-                trace_commons_gate_enclave::chunker::CANONICAL_RENDER_VERSION,
-                crate::dedup_simhash::DEDUP_SIMHASH_ALGORITHM
+            // moving either constant moves the stamp without a second edit.
+            dedup_signal_version: dedup_signal_version_for(
+                crate::dedup_simhash::ACTIVE_DEDUP_ALGORITHM,
             ),
             // Same trust boundary and the same `plaintext` in scope: the
             // correction's simhash is computed here so the correction text
@@ -824,6 +915,32 @@ where
             perplexity_micros: outcome.perplexity_micros,
             peak_perplexity_micros: outcome.peak_perplexity_micros,
             perplexity_passed: outcome.perplexity_passed,
+            author_perplexity: outcome.author_perplexity,
+        })
+    }
+
+    fn derive_dedup_signal(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+        algorithm: DedupAlgorithm,
+    ) -> anyhow::Result<DedupSignalDerivation> {
+        // Exactly what `evaluate_trace` does up to the hash: the same DEK
+        // unwrap under the canonical KEK context, the same AEAD decrypt, the
+        // same render. The orchestrator is not consulted at all -- no
+        // scoring, no embedding, no index read or write.
+        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
+            artifact_kind: object_kind.clone(),
+        };
+        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        Ok(DedupSignalDerivation {
+            simhash: algorithm.simhash(&dedup_canonical_text(&plaintext)) as i64,
+            signal_version: dedup_signal_version_for(algorithm),
         })
     }
 
@@ -1315,8 +1432,9 @@ mod enclave_gate_service_tests {
         let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
         assert_eq!(
             correction_simhash_from_plaintext(&plaintext),
-            Some(crate::dedup_simhash::trace_simhash(correction) as i64),
-            "the correction simhash must be over the correction text alone"
+            Some(crate::dedup_simhash::trace_simhash_v1(correction) as i64),
+            "the correction simhash must be over the correction text alone, \
+             under v1 by name whatever the active algorithm is"
         );
 
         // The SAME correction inside a different session must produce the same
@@ -1384,7 +1502,7 @@ mod enclave_gate_service_tests {
         }));
         assert_eq!(
             with_correction.correction_simhash,
-            Some(crate::dedup_simhash::trace_simhash(correction) as i64)
+            Some(crate::dedup_simhash::trace_simhash_v1(correction) as i64)
         );
 
         let without_correction = evaluate(serde_json::json!({
@@ -1395,5 +1513,272 @@ mod enclave_gate_service_tests {
             without_correction.correction_simhash, None,
             "an envelope with no correction must not produce a correction signal"
         );
+    }
+
+    // ---- dedup re-derivation ----
+
+    /// A fixture envelope in the shape `parse_envelope_rendered_events`
+    /// parses, with the per-submission-unique metadata the render omits.
+    fn dedup_fixture_envelope(submission_id: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "submission_id": submission_id,
+            "trace_id": "9ea3d5c8-0c61-4f6e-9d55-4c3a9a7e0001",
+            "created_at": "2026-09-21T10:00:00Z",
+            "events": [
+                {"event_id": "e1", "timestamp": "2026-09-21T10:00:01Z",
+                 "event_type": "user_message",
+                 "redacted_content": "please make the failing dedup test pass"},
+                {"event_id": "e2", "timestamp": "2026-09-21T10:00:02Z",
+                 "event_type": "tool_call", "tool_name": "Read",
+                 "redacted_content": "crates/trace-commons-server/src/dedup_simhash.rs"},
+                {"event_id": "e3", "timestamp": "2026-09-21T10:00:03Z",
+                 "event_type": "tool_result", "tool_name": "Read",
+                 "redacted_content": "pub fn trace_simhash(canonical_text: &str) -> u64 {"},
+                {"event_id": "e4", "timestamp": "2026-09-21T10:00:04Z",
+                 "event_type": "assistant_message",
+                 "redacted_content": "The multiset vote is owned by the repeated shingles."},
+            ],
+        }))
+        .expect("fixture serializes")
+    }
+
+    /// `dedup_canonical_text` is the render `evaluate_trace` hashed before
+    /// the refactor, proven by pinning the v1 value that render produced. A
+    /// change to either the renderer or this function moves the number.
+    #[test]
+    fn dedup_canonical_text_is_the_metadata_free_render_the_inline_path_hashed() {
+        let plaintext = dedup_fixture_envelope("11111111-1111-1111-1111-111111111111");
+        let text = dedup_canonical_text(&plaintext);
+        let expected_lines: Vec<String> =
+            trace_commons_gate_enclave::chunker::parse_envelope_rendered_events(&plaintext)
+                .expect("fixture renders");
+        assert_eq!(text, expected_lines.join("\n"));
+        assert!(
+            !text.contains("11111111-1111"),
+            "submission id is not rendered"
+        );
+        assert!(
+            !text.contains("2026-09-21T10:00"),
+            "timestamps are not rendered"
+        );
+        // The same events under other ids render identically.
+        let other = dedup_fixture_envelope("22222222-2222-2222-2222-222222222222");
+        assert_eq!(text, dedup_canonical_text(&other));
+        // Pinned v1 value of this render, computed by the pre-refactor
+        // inline body (`parse_envelope_rendered_events(..).join("\n")` then
+        // `trace_simhash`). If this moves, stored v1 rows no longer match
+        // what the pass derives for them.
+        assert_eq!(
+            crate::dedup_simhash::trace_simhash_v1(&text),
+            crate::dedup_simhash::trace_simhash_v1(&expected_lines.join("\n"))
+        );
+        assert_eq!(
+            crate::dedup_simhash::trace_simhash_v1(&text),
+            DEDUP_FIXTURE_V1_SIMHASH
+        );
+        // Unparseable plaintext falls back to the lossy text itself.
+        assert_eq!(dedup_canonical_text(b"not json"), "not json");
+    }
+
+    /// The v1 simhash of `dedup_fixture_envelope`'s render, recorded
+    /// 2026-09-21 (`trace_simhash_v1` is pinned byte-identical to the
+    /// pre-refactor body in `dedup_simhash::tests`, and the renderer is
+    /// unchanged). See the test above.
+    const DEDUP_FIXTURE_V1_SIMHASH: u64 = 6_976_818_991_405_403_136;
+
+    #[test]
+    fn dedup_signal_version_composes_the_render_version_with_the_algorithm() {
+        assert_eq!(
+            dedup_signal_version_for(DedupAlgorithm::V1),
+            "events.v1+fnv1a-2shingle.v1"
+        );
+        assert_eq!(
+            dedup_signal_version_for(DedupAlgorithm::V1),
+            crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+            "in this build the v1 stamp is the legacy literal"
+        );
+        assert_eq!(
+            dedup_signal_version_for(DedupAlgorithm::V2),
+            "events.v1+fnv1a-3shingle-set.v2"
+        );
+    }
+
+    /// The default `derive_dedup_signal` refuses, so a backend that never
+    /// sees plaintext fails each row closed rather than inventing a value.
+    #[test]
+    fn deterministic_services_refuse_to_derive_a_dedup_signal() {
+        let decryptor = fixture_decryptor();
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext = aead_encrypt_with_dek(&dek, &dedup_fixture_envelope("x")).unwrap();
+        for svc in [
+            Box::new(InMemoryGateService::new("t", "sha256:t")) as Box<dyn TraceGateService>,
+            Box::new(LegacyDeterministicGateService::new()),
+        ] {
+            let err = svc
+                .derive_dedup_signal(
+                    &tenant,
+                    &ciphertext,
+                    &wrapped,
+                    TraceArtifactKind::ContributionEnvelope,
+                    DedupAlgorithm::V2,
+                )
+                .expect_err("deterministic services must refuse");
+            assert!(
+                format!("{err}").contains("DedupRederiveUnsupported"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// The enclave path derives exactly what `evaluate_trace` stamps for the
+    /// same envelope under v1, and the v2 value of the same render under v2,
+    /// through the same decrypt path -- and touches no index.
+    #[test]
+    fn enclave_derive_dedup_signal_matches_evaluate_trace_and_targets_either_algorithm() {
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let plaintext = dedup_fixture_envelope("33333333-3333-3333-3333-333333333333");
+        let ciphertext = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt fixture");
+
+        let v1 = svc
+            .derive_dedup_signal(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+                DedupAlgorithm::V1,
+            )
+            .expect("v1 derivation");
+        let v2 = svc
+            .derive_dedup_signal(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+                DedupAlgorithm::V2,
+            )
+            .expect("v2 derivation");
+        let text = dedup_canonical_text(&plaintext);
+        assert_eq!(
+            v1,
+            DedupSignalDerivation {
+                simhash: crate::dedup_simhash::trace_simhash_v1(&text) as i64,
+                signal_version: "events.v1+fnv1a-2shingle.v1".to_string(),
+            }
+        );
+        assert_eq!(
+            v2,
+            DedupSignalDerivation {
+                simhash: crate::dedup_simhash::trace_simhash_v2(&text) as i64,
+                signal_version: "events.v1+fnv1a-3shingle-set.v2".to_string(),
+            }
+        );
+
+        // Deriving inserted nothing: a full evaluation afterwards still sees
+        // an empty index for this tenant (maximal novelty), and stamps the
+        // value the active algorithm's derivation produced.
+        let decision = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("evaluate_trace");
+        assert!(
+            decision.novelty_score_micros >= 900_000,
+            "derive_dedup_signal must not insert into the vector index; novelty {}",
+            decision.novelty_score_micros
+        );
+        let active = svc
+            .derive_dedup_signal(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+                crate::dedup_simhash::ACTIVE_DEDUP_ALGORITHM,
+            )
+            .expect("active derivation");
+        assert_eq!(decision.dedup_simhash, active.simhash);
+        assert_eq!(decision.dedup_signal_version, active.signal_version);
+
+        // A tampered DEK context fails closed here as it does in evaluate.
+        let mut tampered = wrapped.clone();
+        tampered.context_hash = "sha256:tampered".into();
+        let err = svc
+            .derive_dedup_signal(
+                &tenant,
+                &ciphertext,
+                &tampered,
+                TraceArtifactKind::ContributionEnvelope,
+                DedupAlgorithm::V2,
+            )
+            .expect_err("tampered context must fail");
+        assert!(format!("{err}").contains("KekContextMismatch"));
+    }
+
+    #[test]
+    fn author_perplexity_columns_keep_absent_and_zero_apart() {
+        assert_eq!(author_perplexity_columns(None), [None; 5]);
+        let ap = AuthorPerplexity {
+            agent_prose_perplexity_micros: Some(4_540_000),
+            agent_prose_tokens: 397,
+            tool_result_perplexity_micros: None,
+            tool_result_tokens: 0,
+            attributed_token_fraction_micros: 850_000,
+        };
+        assert_eq!(
+            author_perplexity_columns(Some(&ap)),
+            [Some(4_540_000), Some(397), None, Some(0), Some(850_000)]
+        );
+    }
+
+    #[test]
+    fn author_perplexity_columns_saturate_instead_of_wrapping() {
+        let ap = AuthorPerplexity {
+            agent_prose_perplexity_micros: Some(u64::MAX),
+            agent_prose_tokens: u64::MAX,
+            tool_result_perplexity_micros: None,
+            tool_result_tokens: 0,
+            attributed_token_fraction_micros: 0,
+        };
+        let cols = author_perplexity_columns(Some(&ap));
+        assert_eq!(cols[0], Some(i64::MAX));
+        assert_eq!(cols[1], Some(i64::MAX));
+    }
+
+    #[test]
+    fn a_scorer_without_token_lengths_reports_no_author_perplexity() {
+        // The mock scorer reports no token lengths, so nothing can be
+        // attributed: unknown, not zero -- on both service paths.
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext =
+            aead_encrypt_with_dek(&dek, b"a fresh trace plaintext").expect("encrypt fixture");
+
+        let decision = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("evaluate_trace should succeed");
+        assert_eq!(decision.author_perplexity, None);
+
+        let outcome = svc
+            .evaluate_trace_perplexity_only(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("perplexity-only evaluation should succeed");
+        assert_eq!(outcome.author_perplexity, None);
     }
 }

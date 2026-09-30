@@ -15,6 +15,96 @@ final class DaemonFieldDecodingTests: XCTestCase {
         return try decoder.decode(type, from: Data(json.utf8))
     }
 
+    // MARK: - Void notices
+
+    /// `grant_voids` is R6's void notice. A daemon that predates it has
+    /// nothing to report, which is the only safe reading of silence; a
+    /// daemon that has it hands each element through with its id.
+    func testStatusDecodesGrantVoids() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null},
+         "grant_voids":[{"id":4,"kind":"project","project_id":"p","project_label":"api",
+                         "reasons":["witness-changed"],"voided_at":"2026-09-26T12:00:00Z"}]}
+        """)
+        XCTAssertEqual(status.grantVoids.map(\.id), [4])
+    }
+
+    // MARK: - Legacy invite migration
+
+    /// The notice after a legacy invite identity moved to a NEAR AI
+    /// account. A daemon that predates the field has nothing to show.
+    func testStatusDecodesTheLegacyMigrationNotice() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null},
+         "legacy_invite_migration":{"offered":false,
+                                    "notice":{"folders_kept":1,"automatic_grant_kept":false}}}
+        """)
+        XCTAssertNotNil(status.legacyInviteMigration.noticeJSON)
+        let older = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertNil(older.legacyInviteMigration.noticeJSON)
+    }
+
+    // MARK: - Witness capacity
+
+    /// Sessions held on a busy witness, beside `health` because a higher
+    /// label can mask `witness-saturated`.
+    func testStatusDecodesWitnessCapacity() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":"queue-full","since":null},
+         "witness_capacity":{"waiting_sessions":2,"next_retry_at":"2030-01-01T00:01:00Z"}}
+        """)
+        XCTAssertEqual(status.witnessCapacity.waitingSessions, 2)
+        XCTAssertNotNil(status.witnessCapacity.nextRetryAt)
+    }
+
+    func testStatusFromAnOlderDaemonHasNothingWaitingOnTheWitness() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertFalse(status.witnessCapacity.waiting)
+    }
+
+    // MARK: - Switch-on notices
+
+    /// `arming_rewordings` (K5) and `automatic_contribution_held` decode off
+    /// status, beside `health`.
+    func testStatusDecodesRewordingsAndWhatTheGateHolds() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":"queue-full","since":null},
+         "arming_rewordings":[{"id":7,"project_id":"p","project_label":"api",
+                               "was":"model_scrubbed","now":"patterns_only"}],
+         "automatic_contribution_held":{"held_sessions":2,"reasons":["r"],
+                                        "projects":[{"project_id":"p","project_label":"api","held_sessions":2}]}}
+        """)
+        XCTAssertEqual(status.armingRewordings.map(\.id), [7])
+        XCTAssertEqual(status.gateHeld.heldSessions, 2)
+    }
+
+    func testStatusFromAnOlderDaemonHasNoRewordingsAndHoldsNothing() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertEqual(status.armingRewordings, [])
+        XCTAssertFalse(status.gateHeld.held)
+    }
+
+    func testStatusFromAnOlderDaemonHasNoGrantVoids() throws {
+        let status = try decode(DaemonStatus.self, """
+        {"schema_version":"v","logged_in":true,"paused":false,"queue_depth":0,
+         "health":{"last_error_label":null,"since":null}}
+        """)
+        XCTAssertEqual(status.grantVoids, [])
+    }
+
     func testQueueEntryDecodesProjectAndSessionPaths() throws {
         let entry = try decode(QueueEntry.self, """
         {"entry_id":"e1","session_hash":"sha256:a","source":"claude_code",

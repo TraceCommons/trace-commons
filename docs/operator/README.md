@@ -27,6 +27,10 @@ the link.
 | Publishing the public `tracecommons.ai` leaderboard | [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) |
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
+| Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
+| Running the versioned pipeline lab (design stage) | [`./pipeline-lab.md`](./pipeline-lab.md) |
+| Qualifying a versioned pipeline candidate (design stage) | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
+| Activating or containing the versioned pipeline (design stage) | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Building or admitting a bake-off corpus | [`./corpus-validity-battery.md`](./corpus-validity-battery.md) |
@@ -36,24 +40,35 @@ the link.
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
 | Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
+| Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
+| Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
+| Publishing executable mission packages | [`./mission-packages.md`](./mission-packages.md) |
+| Publishing participant reward offers or provisioning account access | [`./participant-rewards.md`](./participant-rewards.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
 | Onboarding an internal pilot contributor | [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) |
 | Managing the HuggingFace dataset / model cache | [`./hf-dataset-cache-hygiene.md`](./hf-dataset-cache-hygiene.md) |
 | Recording GPU instance spend | [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) |
 | Rotating cloud-KMS keys | [`./key-rotation.md`](./key-rotation.md) |
 | Swapping the gate model or embedder | [`./model-swap.md`](./model-swap.md) |
+| Re-deriving the dedup simhash and reclustering the corpus | [`./dedup-recluster.md`](./dedup-recluster.md) |
+| Measuring how many submissions pass R1 (certified full redaction pipeline) | [`./r1-pipeline-measurement.md`](./r1-pipeline-measurement.md) |
 | Restoring from backup | [`./backup-restore.md`](./backup-restore.md) |
 | Recovering a corrupted vector index | [`./vector-replay.md`](./vector-replay.md) |
 | Investigating an audit-chain failure | [`./audit-trail-forensics.md`](./audit-trail-forensics.md) |
+| A tenant's audited writes fail after a file append failed in required-mirror mode | [`./audit-trail-forensics.md#repairing-a-required-mirror-lockout`](./audit-trail-forensics.md#repairing-a-required-mirror-lockout) |
 | Reading hash-only error classes from logs | [`./hash-only-logging.md`](./hash-only-logging.md) |
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
+| Operating explicit contributor inference connection selection | [`./inference-connection.md`](./inference-connection.md) |
 | Taking attested inference from dormant to enforced | [`./attested-inference.md`](./attested-inference.md) |
 | Switching on invite-free (uninvited, receipt-backed) contribution | [`./invite-free-admission.md`](./invite-free-admission.md) |
+| Preparing authenticated account contribution admission | [`./account-trust.md`](./account-trust.md) |
+| Linking legacy invite tenants to NEAR accounts, marking pooled tenants, or retiring a shared event invite | [`./legacy-invite-migration.md`](./legacy-invite-migration.md) |
+| Counting legacy invite tenants, accounts, links and readiness blockers before account admission | [`./legacy-invite-counts.md`](./legacy-invite-counts.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
@@ -101,7 +116,9 @@ Every runbook in this directory, with a one-line description.
   redeploy moves `compose_hash` and therefore MRCONFIGID) with the
   stale-container trap, what a contributor needs, and rollback to dormant.
 - [`./audit-trail-forensics.md`](./audit-trail-forensics.md) — how to query
-  and verify the audit chain when investigating a dispute or anomaly.
+  and verify the audit chain when investigating a dispute or anomaly, and
+  how to repair a required-mirror lockout or roll forward after a binary
+  rollback (`/v1/admin/audit-chain-repair`).
 - [`./backup-restore.md`](./backup-restore.md) — what is backed up where,
   restore procedures, and honest RPO/RTO targets.
 - [`./corpus-validity-battery.md`](./corpus-validity-battery.md) — the
@@ -118,6 +135,10 @@ Every runbook in this directory, with a one-line description.
   channel that install method actually uses. Produces a committed pass record
   under [`./verification-records/`](./verification-records/) which gates the
   next `app-v*` tag.
+- [`./dedup-recluster.md`](./dedup-recluster.md) — moving the cross-trace
+  dedup simhash to a new algorithm: `POST /v1/admin/rederive-dedup`, the
+  dry-run report, the before/after measurement script, and the two-build
+  rollout that keeps stamps from ever mixing.
 - [`./deployment.md`](./deployment.md) — end-to-end first-deploy walkthrough;
   the authoritative top-of-funnel doc.
 - [`../../deploy/witness/README.md`](../../deploy/witness/README.md) — deploying
@@ -155,6 +176,19 @@ Every runbook in this directory, with a one-line description.
   procedure, including drill validation and rollback.
 - [Large-trace chunked scoring](large-trace-chunked-scoring.md) — chunking
   knobs, peak/representative columns, per-chunk revocation.
+- [`./legacy-invite-counts.md`](./legacy-invite-counts.md) — the read-only,
+  counts-only inventory of legacy invite identities (pooled and individual),
+  devices per tenant, wallet and NEAR AI accounts, links, ambiguous claims and
+  readiness blockers; runs before and after V81.
+- [`./legacy-invite-migration.md`](./legacy-invite-migration.md) — legacy
+  `tenant-…` invite identities under account admission: coexistence, the
+  tenant-level link to a NEAR account (V81), the operator-set pooled-tenant
+  marker, conflict resolution, readiness rules, and the cutover for shared
+  event invites.
+- [`./mission-insight-rewards.md`](./mission-insight-rewards.md): provision reward roles, pin program terms, reserve capacity, review claims, and inspect award history.
+- [`./mission-packages.md`](./mission-packages.md) — publish immutable
+  executable mission packages, operate anonymous discovery, and interpret
+  local attempt lifecycle records.
 - [`./model-swap.md`](./model-swap.md) — procedure for upgrading the
   perplexity model or embedder and the gate-version implications.
 - [`./operational-summary.md`](./operational-summary.md) — field-by-field
@@ -163,6 +197,14 @@ Every runbook in this directory, with a one-line description.
   workflows for `trace-commons-{review,admin,worker,tenant}`: install,
   env-var matrix, common sequences, defense-in-depth notes, and an
   error-variant troubleshooting table.
+- [`./participant-rewards.md`](./participant-rewards.md): publish readable offers, provision account access, and inspect participant reservations and history.
+- [`./pipeline-activation.md`](./pipeline-activation.md) — design stage:
+  activation, containment, rollback, and legacy-writer retirement for
+  qualified bundles.
+- [`./pipeline-lab.md`](./pipeline-lab.md) — design stage: local corpus,
+  package, report, catalog, and qualification workflow.
+- [`./pipeline-qualification.md`](./pipeline-qualification.md) — design stage:
+  package trust, operational evidence, restore checks, and promotion gates.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted
@@ -180,6 +222,10 @@ Every runbook in this directory, with a one-line description.
 - [`./pilot-contributor-onboarding.md`](./pilot-contributor-onboarding.md) —
   contributor-facing setup flow for invite code, workload JWT, Ironclaw
   opt-in, profile handle registration, and leaderboard expectations.
+- [`./r1-pipeline-measurement.md`](./r1-pipeline-measurement.md) — read-only
+  SQL counting submissions whose stored witness certificate names a pipeline
+  on the R1 allowlist, by version, witness presence and tenant namespace;
+  works on schemas before V76 and says which source it used.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —

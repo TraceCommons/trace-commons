@@ -126,18 +126,40 @@ AS $$
     );
 $$;
 
+-- The three readers below run with the caller's tenant cleared, and that is
+-- load-bearing: row policies combine with OR, so a definer function entered
+-- with a tenant still set also sees that tenant's rows through
+-- `trace_corpus_tenant_isolation` -- its withdrawn pages included.
+--
+-- They clear it in the body rather than with a `SET trace_commons.trace_tenant_id = ''`
+-- clause on the function. PostgreSQL checks such a clause when the function is
+-- created and, for a parameter it has no definition of, allows it only to a
+-- true superuser: a database migrated by its own non-superuser owner, which is
+-- every managed PostgreSQL, died here with `permission denied to set
+-- parameter`. `set_config` needs no privilege. It is transaction-local rather
+-- than function-local, so each function puts the caller's value back before it
+-- returns; the server calls these inside a tenant-scoped write transaction and
+-- keeps going. An error needs no restore: it aborts the (sub)transaction, which
+-- reverts the setting with everything else. STABLE stands -- the net effect on
+-- the session is nil.
+
 CREATE OR REPLACE FUNCTION trace_public_run_retained_source(
     owner_tenant_id TEXT,
     owner_account_id UUID,
     owner_submission_id UUID
 )
 RETURNS TABLE (retained_source_slug TEXT)
-LANGUAGE SQL
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
-SET trace_commons.trace_tenant_id = ''
 AS $$
+#variable_conflict use_column
+DECLARE
+    caller_tenant TEXT := current_setting('trace_commons.trace_tenant_id', true);
+BEGIN
+    PERFORM set_config('trace_commons.trace_tenant_id', '', true);
+    RETURN QUERY
     SELECT source_run.slug
     FROM trace_public_runs AS owner_run
     JOIN trace_public_runs AS source_run
@@ -145,6 +167,8 @@ AS $$
     WHERE owner_run.tenant_id = owner_tenant_id
       AND owner_run.account_id = owner_account_id
       AND owner_run.submission_id = owner_submission_id;
+    PERFORM set_config('trace_commons.trace_tenant_id', COALESCE(caller_tenant, ''), true);
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION trace_public_run_page(
@@ -167,12 +191,17 @@ RETURNS TABLE (
     source_unavailable BOOLEAN,
     variations JSONB
 )
-LANGUAGE SQL
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
-SET trace_commons.trace_tenant_id = ''
 AS $$
+#variable_conflict use_column
+DECLARE
+    caller_tenant TEXT := current_setting('trace_commons.trace_tenant_id', true);
+BEGIN
+    PERFORM set_config('trace_commons.trace_tenant_id', '', true);
+    RETURN QUERY
     SELECT
         run.slug,
         run.title,
@@ -219,21 +248,36 @@ AS $$
     LEFT JOIN trace_public_runs AS source_run
         ON source_run.publication_id = run.source_publication_id
     WHERE run.slug = requested_slug;
+    PERFORM set_config('trace_commons.trace_tenant_id', COALESCE(caller_tenant, ''), true);
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION trace_resolve_public_run_source(requested_slug TEXT)
 RETURNS TABLE (publication_id UUID, slug TEXT, title TEXT)
-LANGUAGE SQL
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
-SET trace_commons.trace_tenant_id = ''
 AS $$
+#variable_conflict use_column
+DECLARE
+    caller_tenant TEXT := current_setting('trace_commons.trace_tenant_id', true);
+BEGIN
+    PERFORM set_config('trace_commons.trace_tenant_id', '', true);
+    RETURN QUERY
     SELECT run.publication_id, run.slug, run.title
     FROM trace_public_runs AS run
     WHERE run.slug = requested_slug;
+    PERFORM set_config('trace_commons.trace_tenant_id', COALESCE(caller_tenant, ''), true);
+END;
 $$;
 
+-- A function's new owner must hold CREATE on its schema. Through PostgreSQL 14
+-- every role had that by way of PUBLIC; from 15 on PUBLIC does not, and the
+-- transfers below were refused -- `permission denied for schema public` -- to
+-- anyone but a superuser. Granted for the transfers and taken back after them,
+-- as V59 does.
+GRANT CREATE ON SCHEMA public TO trace_public_run_reader, trace_public_run_graph_guard;
 GRANT trace_public_run_reader TO CURRENT_USER;
 ALTER FUNCTION trace_public_run_page(TEXT, INTEGER) OWNER TO trace_public_run_reader;
 ALTER FUNCTION trace_resolve_public_run_source(TEXT) OWNER TO trace_public_run_reader;
@@ -245,6 +289,7 @@ ALTER FUNCTION trace_public_run_would_cycle(UUID, UUID)
 ALTER FUNCTION trace_public_run_retained_source(TEXT, UUID, UUID)
     OWNER TO trace_public_run_graph_guard;
 REVOKE trace_public_run_graph_guard FROM CURRENT_USER;
+REVOKE CREATE ON SCHEMA public FROM trace_public_run_reader, trace_public_run_graph_guard;
 
 REVOKE ALL ON FUNCTION trace_public_run_page(TEXT, INTEGER) FROM PUBLIC;
 REVOKE ALL ON FUNCTION trace_resolve_public_run_source(TEXT) FROM PUBLIC;

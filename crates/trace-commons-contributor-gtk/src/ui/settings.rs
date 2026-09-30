@@ -179,6 +179,11 @@ pub struct SettingsView {
     /// to a session, and what the last submission this process made
     /// actually did. Rebuilt on each render, because both are labels.
     witness_status: gtk::Box,
+    /// K11's disclosure: what leaves this machine, to whom, and where the
+    /// witness came from. Its title and card are rebuilt from the daemon's
+    /// `route_disclosure` on each witness render; every row is
+    /// `crate::disclosure`'s.
+    disclosure: gtk::Box,
     /// The address, the signing key and the pins. Built once and only ever
     /// refilled, for the same reason the routing fields are: a refresh runs
     /// on every daemon event and would otherwise replace a half-typed
@@ -376,6 +381,14 @@ impl SettingsView {
             .build();
         private_inference_card.append(&private_inference_link);
         content.append(&private_inference_card);
+
+        // K11: where sessions go, above the witness it names. Its title and
+        // card are both drawn by `render_disclosure` -- the title only when
+        // the disclosure could be read -- so it stays hidden until the
+        // daemon answers.
+        let disclosure = gtk::Box::new(gtk::Orientation::Vertical, space::XL);
+        disclosure.set_visible(false);
+        content.append(&disclosure);
 
         // The witness card. Its own section rather than a row on the card
         // above: routing is about what a tool sends, this is about who does
@@ -682,6 +695,7 @@ impl SettingsView {
             private_inference_link,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
+            disclosure,
             witness_form,
             witness_url,
             witness_signing_address,
@@ -3069,7 +3083,11 @@ fn witness_write(
         .witness
         .as_ref()
         .is_some_and(|previous| previous.admission_evidence);
-    cfg.witness = Some(settings);
+    // Recorded as entered in Settings, for the disclosure screens (K11).
+    cfg.set_witness(
+        settings,
+        trace_commons_contributor::config::WitnessOrigin::Settings,
+    );
     store
         .save_config(&cfg)
         .map_err(|_| WITNESS_CONFIG_WRITE_FAILED)
@@ -3093,7 +3111,7 @@ fn witness_clear(dir: &std::path::Path) -> Result<bool, &'static str> {
     if cfg.witness.is_none() {
         return Ok(false);
     }
-    cfg.witness = None;
+    cfg.clear_witness();
     store
         .save_config(&cfg)
         .map_err(|_| WITNESS_CONFIG_WRITE_FAILED)?;
@@ -3108,6 +3126,27 @@ fn text_of(view: &gtk::TextView) -> String {
         .to_string()
 }
 
+/// K11: ask the daemon what leaves this machine and draw the core's words
+/// for it. A failed call is drawn as unreadable, never as a route, and
+/// without the section title, which would head a disclosure that is not
+/// there.
+fn render_disclosure(app: &Rc<App>) {
+    app.call("route_disclosure", serde_json::json!({}), |app, result| {
+        let panel = crate::disclosure::panel(result.as_ref().ok());
+        let section = &app.settings.disclosure;
+        while let Some(child) = section.first_child() {
+            section.remove(&child);
+        }
+        if let Some(title) = &panel.title {
+            section.append(&style::section(title));
+        }
+        let card = style::card(gtk::Orientation::Vertical, space::S);
+        super::fill_disclosure_rows(&card, &panel.rows);
+        section.append(&card);
+        section.set_visible(true);
+    });
+}
+
 /// Paint the card from the configuration on disk, and from what the last
 /// submission this process made actually did.
 ///
@@ -3117,6 +3156,8 @@ fn text_of(view: &gtk::TextView) -> String {
 /// here" and "nothing left this machine" must survive a greyscale
 /// screenshot.
 pub fn render_witness(app: &Rc<App>) {
+    // The disclosure names the witness, so it is repainted with it.
+    render_disclosure(app);
     let status = witness_read(&app.worker.dir);
     let state = status.state;
     let actions = witness_actions(state);
@@ -3575,6 +3616,8 @@ mod witness_tests {
                 public_since: None,
                 witness,
                 inference_receipt_endpoint: None,
+                consent_scopes_chosen: false,
+                witness_origin: None,
                 inference_receipt_check_attestation: false,
             })
             .unwrap();
@@ -3772,8 +3815,26 @@ mod witness_tests {
         assert_eq!(status.url.as_deref(), Some("https://witness.example"));
         assert_eq!(status.signing_address.as_deref(), Some("0xabc"));
         assert_eq!(status.pinned_measurement_count, 1);
+        // K11: recorded as entered in Settings, for the disclosure screens.
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            store.load_config().unwrap().unwrap().witness_origin_view(),
+            Some(
+                trace_commons_contributor::config::WitnessOriginView::Recorded(
+                    trace_commons_contributor::config::WitnessOrigin::Settings
+                )
+            )
+        );
 
         assert_eq!(witness_clear(dir.path()), Ok(true));
+        assert!(
+            store
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .witness_origin
+                .is_none()
+        );
         assert_eq!(witness_read(dir.path()).state, WitnessTrustState::Absent);
         // Idempotent: clearing what is not there is not a failure.
         assert_eq!(witness_clear(dir.path()), Ok(false));

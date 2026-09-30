@@ -55,7 +55,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use sha2::{Digest as _, Sha256};
 use sha3::Keccak256;
@@ -67,18 +67,20 @@ use trace_commons_protocol::admission::{
 };
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, RawTraceCaptureTurn, RawTraceContribution, RecordedTraceContributionOptions,
-    ResidualPiiRisk, TraceAllowedUse, TraceContributionEventType,
+    TraceAllowedUse, TraceContributionEventType,
+};
+use trace_commons_protocol::witness_provenance::{
+    AttestationClass, FinalCallAttestation, InferenceProvenance,
 };
 
 use trace_commons_server::admission_evidence::{AdmissionProviderTrust, verify_admission_evidence};
 use trace_commons_server::near_attestation::receipt::{
     ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind,
 };
-use trace_commons_server::redaction_witness::certificate::{
-    CertificateDetails, WitnessCertificate,
-};
+use trace_commons_server::redaction_witness::certificate::{CertificateError, WitnessCertificate};
+use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
-    WitnessPin, verify_witness_certificate,
+    WitnessPin, WitnessVerificationError, verify_witness_certificate,
 };
 use trace_commons_server::witness_service::http::{
     WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, WitnessLoadBound, witness_router,
@@ -162,6 +164,9 @@ fn witness(trust: Option<AdmissionProviderTrust>) -> (axum::Router, String) {
         signer.clone() as Arc<dyn Signer>,
         Arc::new(FixtureEnclave(address.clone())),
         1024 * 1024,
+    )
+    .with_certificate_issuance(
+        trace_commons_server::witness_service::WitnessCertificateIssuance::V2,
     )
     .with_contribution_redactor(Arc::new(PipelineContributionRedaction::deterministic_only(
         Vec::new(),
@@ -358,36 +363,23 @@ async fn post_admission(router: &axum::Router, body: Vec<u8>) -> Witnessed {
 
 /// Rebuild the server-side certificate from the wire header, as ingest's
 /// `witness_headers` does, so `verify_witness_certificate` can be run over it.
-fn certificate_from_wire(certificate_json: &str) -> WitnessCertificate {
-    let value: serde_json::Value =
-        serde_json::from_str(certificate_json).expect("certificate header is JSON");
-    let verdict = match value["residual_risk_verdict"]
-        .as_str()
-        .expect("verdict present")
-    {
-        "low" => ResidualPiiRisk::Low,
-        "medium" => ResidualPiiRisk::Medium,
-        "high" => ResidualPiiRisk::High,
-        other => panic!("unknown verdict {other}"),
-    };
-    WitnessCertificate::from_wire(
-        value["redacted_sha256"]
-            .as_str()
-            .expect("digest present")
-            .to_string(),
-        CertificateDetails {
-            residual_risk_verdict: verdict,
-            redaction_policy_version: value["redaction_policy_version"]
-                .as_str()
-                .expect("policy present")
-                .to_string(),
-            witness_measurement: value["witness_measurement"]
-                .as_str()
-                .expect("measurement present")
-                .to_string(),
-            timestamp: value["timestamp"].as_i64().expect("timestamp present"),
-        },
-    )
+fn certificate_from_wire(certificate_json: &str, signature: &str) -> WitnessCertificate {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        WITNESS_CERTIFICATE_HEADER,
+        certificate_json
+            .parse()
+            .expect("certificate is a header value"),
+    );
+    headers.insert(
+        WITNESS_SIGNATURE_HEADER,
+        signature.parse().expect("signature is a header value"),
+    );
+    let (certificate, parsed_signature) = witness_headers(&headers)
+        .expect("ingest decodes the witness headers")
+        .expect("both witness headers are present");
+    assert_eq!(parsed_signature, signature);
+    certificate
 }
 
 fn trust_for(provider_tee: Vec<String>, gateway: Vec<String>) -> AdmissionProviderTrust {
@@ -450,12 +442,45 @@ async fn a_client_request_admitted_by_the_witness_is_admitted_by_ingest() {
         serde_json::from_str(&witnessed.evidence_json).expect("ingest parses the evidence header");
     let pin = WitnessPin::new(&witness_address, [MEASUREMENT.to_string()]).expect("pin");
     let verified = verify_witness_certificate(
-        certificate_from_wire(&witnessed.certificate_json),
+        certificate_from_wire(
+            &witnessed.certificate_json,
+            &witnessed.certificate_signature,
+        ),
         &witnessed.certificate_signature,
         Some(&pin),
         &witnessed.envelope_bytes,
     )
     .expect("ingest must verify the certificate the witness issued");
+    // Admission has its own provider pin, while certificate provenance uses
+    // the independent inference policy. This fixture configures only the
+    // former, so the v2 certificate must make the conservative claim.
+    assert_eq!(
+        verified.inference_provenance(),
+        Some(InferenceProvenance::Unattested)
+    );
+    let mut tampered: serde_json::Value =
+        serde_json::from_str(&witnessed.certificate_json).expect("witness certificate is JSON");
+    tampered["inference_provenance"] = serde_json::to_value(InferenceProvenance::Attested(
+        FinalCallAttestation::new(
+            AttestationClass::ProviderTeeFinalCall,
+            Some(MODEL.into()),
+            provider.public_hex.clone(),
+        )
+        .expect("tampered claim is syntactically valid"),
+    ))
+    .expect("tampered provenance serializes");
+    let tampered = serde_json::to_string(&tampered).expect("tampered certificate encodes");
+    assert!(matches!(
+        verify_witness_certificate(
+            certificate_from_wire(&tampered, &witnessed.certificate_signature),
+            &witnessed.certificate_signature,
+            Some(&pin),
+            &witnessed.envelope_bytes,
+        ),
+        Err(WitnessVerificationError::Signature(
+            CertificateError::SignerMismatch
+        ))
+    ));
     verify_admission_evidence(
         &evidence,
         &witnessed.evidence_signature,
@@ -529,7 +554,10 @@ async fn ingest_refuses_a_provider_its_own_policy_does_not_name() {
         serde_json::from_str(&witnessed.evidence_json).expect("evidence parses");
     let pin = WitnessPin::new(&witness_address, [MEASUREMENT.to_string()]).expect("pin");
     let verified = verify_witness_certificate(
-        certificate_from_wire(&witnessed.certificate_json),
+        certificate_from_wire(
+            &witnessed.certificate_json,
+            &witnessed.certificate_signature,
+        ),
         &witnessed.certificate_signature,
         Some(&pin),
         &witnessed.envelope_bytes,

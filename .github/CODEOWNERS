@@ -1,0 +1,4 @@
+# Every change to this repository needs an approving review from one of the
+# maintainers below before it can merge. Branch protection on `main` requires
+# a code-owner review, so an approval from anyone else does not count.
+*   @zmanian @poldsam

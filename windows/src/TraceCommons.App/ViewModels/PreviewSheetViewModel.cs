@@ -171,6 +171,9 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             if (!NativeWitnessReview.IsReady(response))
             {
                 _witnessRefusal = NativeWitnessReview.Refusal(response);
+                // A busy witness judged nothing: say when to try again.
+                if (_witnessRefusal is { } busy && NativeWitnessReview.RetryLine(response) is { } retry)
+                    _witnessRefusal = busy + Environment.NewLine + retry;
                 Fail();
                 return;
             }
@@ -449,6 +452,45 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// the markup.
     /// </remarks>
     public ObservableCollection<RedactionSummaryRow> RemovedCategories { get; } = new();
+
+    /// <summary>
+    /// K11, for this session: the size before redaction and after, where
+    /// each goes, and what the witness was checked against when it reviewed
+    /// it. Every row is <see cref="RouteDisclosureSurface"/>'s.
+    /// </summary>
+    public ObservableCollection<DisclosureRow> SessionDisclosureRows { get; } = new();
+
+    private async Task FillSessionDisclosureAsync(PreviewSummary summary)
+    {
+        DaemonResponse facts = await _host
+            .CallAsync(DaemonProtocol.Methods.RouteDisclosure)
+            .ConfigureAwait(true);
+        RouteDisclosure? disclosure = facts.IsError || facts.Result is null
+            ? null
+            : RouteDisclosureSurface.ForFacts(facts.Result.Value.GetRawText());
+        System.Text.Json.JsonElement? certificate = null;
+        if (disclosure is not null && Entry.HoldsCertificate)
+        {
+            string request = System.Text.Json.JsonSerializer.Serialize(
+                new Dictionary<string, string> { ["entry_id"] = Entry.EntryId });
+            DaemonResponse detail = await _host
+                .CallAsync(DaemonProtocol.Methods.CertificateDetail, request)
+                .ConfigureAwait(true);
+            certificate = detail.IsError ? null : detail.Result;
+        }
+
+        SessionDisclosureRows.Clear();
+        foreach (DisclosureRow row in RouteDisclosureSurface.SessionRows(
+            disclosure,
+            disclosure is null ? RouteDisclosureSurface.Unreadable() : null,
+            QueueEntryViewModel.FormatBytes(summary.RawSessionBytes),
+            QueueEntryViewModel.FormatBytes(summary.WouldSendBytes),
+            certificate,
+            certificate is null ? null : RouteDisclosureSurface.CertificateLabels()))
+        {
+            SessionDisclosureRows.Add(row);
+        }
+    }
 
     /// <summary>
     /// One row per category the scan FOUND AND DID NOT REMOVE.
@@ -802,6 +844,8 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         Gate.SetPinnedPreview(summary.Enrolled);
 
         RefillRecentSearches();
+
+        await FillSessionDisclosureAsync(summary).ConfigureAwait(true);
 
         IsLoading = false;
     }

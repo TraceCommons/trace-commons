@@ -164,6 +164,158 @@ deletes per-tenant via the `app` role under RLS, so it needs no extra
 grants. Run it **after** deploying the fix — otherwise the driver re-attempts
 the same submissions against the unfixed binary and the rows repopulate.
 
+## Backfilling per-author perplexity
+
+Migration V73 adds five nullable columns to `trace_gate_decisions`:
+`agent_prose_perplexity_micros`, `agent_prose_tokens`,
+`tool_result_perplexity_micros`, `tool_result_tokens`, and
+`attributed_token_fraction_micros`. They record the same logprobs the gate
+already computes, split by who authored each token. **They are shadow
+values: nothing reads them to decide anything.** New decisions get them
+automatically when the scorer reports token lengths (the NEAR AI scorer
+does; the deterministic, mock and local scorers do not, and their rows stay
+NULL). Rows written before V73 stay NULL until backfilled. See
+`docs/superpowers/specs/2026-09-18-per-author-perplexity-shadow-design.md`.
+
+Backfill through the existing admin re-score route, **always in author-only
+mode**:
+
+```sh
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  "$INGEST_BASE/v1/admin/rescore-perplexity?author_only=true&limit=5"
+```
+
+The route acknowledges immediately and works in the background. Check the
+acknowledgement before walking away:
+
+```json
+{"accepted": true, "limit": 5, "mode": "author_only"}
+```
+
+`"mode"` is the only confirmation of which columns the pass writes:
+`"full"`, `"author_only"`, or `"dry_run"` (which writes none). A mistyped parameter (`author-only`, `authorOnly`) is refused with a
+400 rather than read as the default, because the default is the dangerous
+one here.
+
+Why author-only matters: without it the route also rewrites
+`perplexity_micros`, `peak_perplexity_micros` and `perplexity_passed`. The
+scorer model behind the pilot has changed since older rows were gated, so a
+full re-score would re-derive `perplexity_passed` under a different model
+and silently rewrite gating history. Author-only writes the five V73 columns
+on the latest decision row for each submission and nothing else.
+
+Before a backfill:
+
+1. Confirm which scorer model and base URL the **running** ingest process
+   uses. Pilot configuration lives in the process, not in env files on the
+   host, and a recorded base URL can point at a host that no longer answers.
+   A pass against a dead endpoint fails every submission closed; nothing is
+   written, but nothing is backfilled either.
+2. Run with `limit=5` first and read the five rows back before a full pass.
+
+The pass is not resumable. It enumerates decisions oldest-first with
+`limit` and no "already backfilled" filter, so running `limit=500` twice
+re-scores the same 500 rows and pays for their inference again. Use a small
+`limit` as a smoke test, then one unlimited pass; do not try to page through
+the backlog with repeated limited calls.
+
+An author-only pass can only add. For a submission where the scorer
+attributes nothing -- it reports no token lengths, or lengths that never
+tile the chunk -- nothing is written and any value an earlier pass computed
+is left alone. The pass logs three counts when it finishes: `rescored`,
+`failed`, and `author_unattributed`. A pass that reports mostly
+`author_unattributed` has a scorer that supplies no usable token lengths;
+fix that before running it again, because rerunning will not help. A full
+(non-author-only) re-score is different: it has just rewritten the row's
+perplexity under the current scorer, so it clears per-author values it
+cannot recompute rather than leave them describing an older scoring.
+
+Reading the result:
+
+```sql
+SELECT count(*)                                            AS decisions,
+       count(attributed_token_fraction_micros)              AS attributed,
+       count(*) FILTER (WHERE agent_prose_tokens < 200)     AS thin_prose
+  FROM trace_gate_decisions;
+```
+
+Counts only, as above; the hash-only convention applies to these columns
+too. Backfilled values are self-consistent per row. Do not compare them
+against a `perplexity_micros` written under an older scorer model.
+
+What the backfill is for: deciding, from real pilot traces rather than from
+the 40 public sessions the design was measured on, whether agent-prose
+perplexity spreads well enough to gate on; what share of traces carry too
+few agent-prose tokens to trust; how much of a typical trace
+`attributed_token_fraction_micros` says was attributable; and whether the
+signal agrees with human labels. Until that is answered these columns gate
+nothing, and the floor does not move.
+
+## Calibrating the floor for a new scorer model
+
+The perplexity floor is a property of the scorer model. A floor calibrated
+under one model says nothing under another, so a model switch puts the gate
+back in the state described below: **floor 0 until calibrated.** Switch the
+model and set `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0` in the same
+restart; novelty keeps doing dedup in the meantime.
+
+The earlier procedure (`a27-perplexity-floor-calibration.md`) calibrated
+from the bake-off corpus. Do not reuse it for a production floor: that
+corpus's classes were separable by source format alone (#204, #205), and the
+bake-off scores a text-only rendering, while the gate scores rendered
+envelope events -- tool results included -- in a token-weighted aggregate. A
+floor has to be calibrated on what production scores.
+
+Get the new model's distribution over real traces with a **dry run**, which
+scores every decided submission through the production path
+(`evaluate_perplexity_only`: same packer, same aggregate) and writes
+nothing:
+
+```sh
+curl -sS -X POST \
+  -H "Authorization: Bearer $ADMIN_JWT" \
+  "$INGEST_BASE/v1/admin/rescore-perplexity?dry_run=true"
+```
+
+Check that the acknowledgement says `"mode": "dry_run"`. When the pass ends
+it logs one line, `Trace Commons perplexity re-score pass completed`, whose
+`dry_run_report` field is a JSON object of aggregates:
+
+- `whole_trace_perplexity`, `peak_chunk_perplexity`: count, min, p05, p10,
+  p25, p50, p75, p90, p95, max, in micros.
+- `share_below_floor_micros`: for each candidate floor from 1.5 to 8.0, the
+  share of scored traces a floor there would refuse.
+- `agent_prose_perplexity`, `agent_prose_tokens`, `tool_result_perplexity`,
+  `attributed_token_fraction`, `thin_agent_prose_rows` (attributed rows with
+  under 200 agent-prose tokens) and `author_unattributed`: the per-author
+  signal, in the same pass.
+
+```sh
+sudo grep 're-score pass completed' /var/log/tracecommons/ingest.log | tail -n 1
+```
+
+Below 20 scored submissions the report carries counts only -- no
+percentiles, no shares. A percentile of three rows is a per-submission
+score, and the hash-only convention applies here as everywhere. So
+`limit=5` is a smoke test of the mechanism, not a preview of the numbers.
+
+A dry run pays for inference on every submission it scores and, like the
+other modes, is not resumable.
+
+Choosing the floor. Whole-trace perplexity falls as traces get longer and
+is set largely by tool output, so its defensible job is to refuse junk, not
+to grade work. Place the floor just above junk, with headroom:
+
+1. Anchor the junk end by scoring a few known-junk envelopes through the
+   same path: empty-after-redaction, greeting-only, a bare login prompt.
+2. Read the real-trace low percentiles (p05, p10) from the dry run.
+3. Put the floor in the gap, and read `share_below_floor_micros` for what
+   it would refuse. Decide that rate on purpose. Under the previous model a
+   6.0 floor refused about 31% of pilot traces.
+4. Record the distribution, the junk anchors, the chosen floor and the
+   refusal rate in a report under `docs/superpowers/reports/`.
+
 ## Floor stays 0 until calibration
 
 Enabling this driver makes perplexity scoring **run and record decisions**.

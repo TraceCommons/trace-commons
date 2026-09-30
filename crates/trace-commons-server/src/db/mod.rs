@@ -15,11 +15,25 @@ use crate::trace_corpus_storage::{
 use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
+pub mod postgres_inference_connection;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
 
+pub(crate) use trace_corpus_pg::{
+    insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
+};
+
 pub use postgres::InviteRedemption;
+
+/// Result of redeeming a durable invite into an authenticated account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountInviteRedemption {
+    Invited { trust_version: i64 },
+    InvalidInvite,
+    AccountIneligible,
+    IdempotencyConflict,
+}
 
 /// Insert payload for an invite grant. Mirrors `InviteEntry` minus
 /// `revoked_at`, which is only ever set by `revoke_invite_grant`.
@@ -184,12 +198,141 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    async fn select_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _request: &trace_commons_protocol::inference_connection::SelectInferenceConnection,
+        _catalog: &crate::inference_connection::OperatorInferenceConnection,
+    ) -> Result<postgres_inference_connection::InferenceSelectionOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn current_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _catalog: &[crate::inference_connection::OperatorInferenceConnection],
+    ) -> Result<Option<postgres_inference_connection::InferenceConnectionStatus>, DatabaseError>
+    {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn disconnect_inference_connection(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _connection_id: uuid::Uuid,
+    ) -> Result<postgres_inference_connection::InferenceDisconnectOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "inference_connection_unavailable".into(),
+        ))
+    }
+
+    async fn redeem_account_invite(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _invite_hash: &str,
+        _idempotency_key: uuid::Uuid,
+    ) -> Result<AccountInviteRedemption, DatabaseError> {
+        Err(DatabaseError::Pool("account_invite_unavailable".into()))
+    }
+    /// Store a legacy-link challenge for the authenticated account. `false`
+    /// when the account already holds the maximum of open challenges.
+    async fn store_legacy_invite_link_challenge(
+        &self,
+        _challenge: &crate::legacy_invite_link::ChallengeWrite,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("legacy_invite_link_unavailable".into()))
+    }
+    /// Record a verified, countersigned legacy invite link (V81).
+    async fn link_legacy_invite(
+        &self,
+        _attempt: &crate::legacy_invite_link::LinkDbAttempt,
+    ) -> Result<crate::legacy_invite_link::LinkDbOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("legacy_invite_link_unavailable".into()))
+    }
+    async fn get_reward_offer(
+        &self,
+        _program: uuid::Uuid,
+    ) -> Result<crate::reward_participant::RewardOffer, crate::mission_rewards::RewardError> {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn get_mission_publication(
+        &self,
+        _mission: uuid::Uuid,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionPublication,
+        crate::mission_rewards::RewardError,
+    > {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn list_mission_catalog(
+        &self,
+        _query: &trace_commons_protocol::mission_catalog::MissionCatalogQuery,
+    ) -> Result<
+        trace_commons_protocol::mission_catalog::MissionCatalogPage,
+        crate::mission_rewards::RewardError,
+    > {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn reserve_reward_offer(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _program: uuid::Uuid,
+        _request: &crate::reward_participant::RewardReservationRequest,
+    ) -> Result<crate::reward_participant::RewardReservation, crate::mission_rewards::RewardError>
+    {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn get_reward_reservation(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _reservation: uuid::Uuid,
+    ) -> Result<crate::reward_participant::RewardReservation, crate::mission_rewards::RewardError>
+    {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
+    async fn get_reward_history(
+        &self,
+        _tenant: &str,
+        _account: uuid::Uuid,
+        _query: &crate::reward_participant::RewardHistoryQuery,
+    ) -> Result<
+        crate::reward_participant::RewardParticipantHistory,
+        crate::mission_rewards::RewardError,
+    > {
+        Err(crate::mission_rewards::RewardError::StoreUnavailable)
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         _tenant_id: &str,
         _principal_ref: &str,
     ) -> Result<Option<String>, DatabaseError> {
         Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+    async fn get_near_provisioned_account(
+        &self,
+        _tenant_id: &str,
+        _principal_ref: &str,
+    ) -> Result<Option<uuid::Uuid>, DatabaseError> {
+        Err(DatabaseError::Pool("near_provisioning_unconfigured".into()))
+    }
+    async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
     }
     async fn admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
@@ -201,6 +344,24 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _submission: uuid::Uuid,
         _body_hash: &str,
     ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn legacy_admission_record(
+        &self,
+        _tenant: &str,
+        _submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::LegacyAdmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn resume_legacy_admission(
+        &self,
+        _tenant: &str,
+        _anchor: &str,
+        _submission: uuid::Uuid,
+        _body_hash: &str,
+        _lease: uuid::Uuid,
+        _lease_seconds: i64,
+    ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
     }
     async fn acquire_admission_processing_lock(
@@ -234,6 +395,105 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _request: &crate::admission_ledger::AdmissionReservation,
     ) -> Result<crate::admission_ledger::AdmissionDecision, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+    async fn account_admission_record(
+        &self,
+        _tenant: &str,
+        _submission: uuid::Uuid,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
+    }
+    async fn reserve_account_admission(
+        &self,
+        _request: &crate::admission_ledger::AccountAdmissionReservation,
+    ) -> Result<crate::admission_ledger::AccountAdmissionResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
+    }
+    async fn record_account_trust_fact(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _source: crate::account_trust::TrustFactSource,
+    ) -> Result<Option<crate::account_trust::TrustFactOutcome>, DatabaseError> {
+        Err(DatabaseError::Pool("account_trust_fact_unavailable".into()))
+    }
+    /// Earned-trust worker enumeration: open accounts in anchored tenants,
+    /// keyed and paged. See `db/postgres_account_trust_growth.rs`.
+    async fn list_account_trust_worker_accounts(
+        &self,
+        _after: Option<&crate::account_trust::TrustAccount>,
+        _limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustAccount>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Sources naming this account that have no trust fact yet.
+    async fn list_account_trust_fact_candidates(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _limit: i64,
+    ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Every fact of one account with the gate fields the rule reads.
+    async fn account_trust_evaluation_inputs(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::account_trust_rule::EvaluationFact>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Stores one evaluation (shadow only); returns whether the tier changed.
+    async fn record_account_trust_evaluation(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _mode: &str,
+        _evaluation: &crate::account_trust_rule::Evaluation,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// The newest stored evaluation under one policy version and mode.
+    async fn latest_account_trust_evaluation(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _policy_version: &str,
+        _mode: &str,
+    ) -> Result<Option<crate::account_trust_rule::Evaluation>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    async fn account_admission_status(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _principal: &str,
+        _policy: &crate::account_trust::BoundedPolicy,
+    ) -> Result<Option<crate::admission_ledger::AccountAdmissionStatus>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
+    }
+    async fn transition_account_admission(
+        &self,
+        _tenant: &str,
+        _principal: &str,
+        _account: uuid::Uuid,
+        _submission: uuid::Uuid,
+        _lease: uuid::Uuid,
+        _next: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_admission_database_unavailable".into(),
+        ))
     }
     async fn transition_submission_admission(
         &self,
@@ -858,6 +1118,43 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Store a NEAR AI bind ceremony (Z2 S3) in the provisioning ceremony
+    /// table. Fail-closed by default.
+    async fn store_near_ai_bind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: &crate::account_onboarding::NearAiBindPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Consume a NEAR AI bind ceremony. Single use; a row that is not a bind
+    /// ceremony (a provisioning or wallet row) is consumed and refused.
+    async fn take_near_ai_bind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
+    /// Bind a verified NEAR AI login to the unbound passkey account
+    /// `(tenant_id, account_id)` (Z2 S3), or, when the login's anchor already
+    /// belongs to another account, provision that account exactly as
+    /// [`Self::provision_near_ai_login`] would and close the passkey account.
+    /// The default refuses.
+    async fn bind_near_ai_login(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    }
+
     async fn resolve_near_public_key_tenant(
         &self,
         _public_key: &str,
@@ -1133,7 +1430,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// for an unknown / already-revoked / other-account credential. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke a credential
     /// they do not own; the remaining-count lets the caller refuse to remove the
-    /// last passkey.
+    /// last passkey. When a credential is removed, every live session it
+    /// minted (`auth_credential_id` = that credential, browser or native) is
+    /// revoked in the same transaction. See
+    /// [`Database::revoke_account_credential_sparing_session`], which the
+    /// removal route calls to keep the caller's own session.
     async fn revoke_account_credential(
         &self,
         _tenant_id: &str,
@@ -1142,6 +1443,22 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<RevokeCredentialResult, DatabaseError> {
         Err(DatabaseError::Pool(
             "revoke_account_credential not implemented".to_string(),
+        ))
+    }
+
+    /// [`Database::revoke_account_credential`], sparing one session: the one
+    /// whose current or within-grace previous `token_hash` is
+    /// `caller_token_hash` (the session making the removal request). `None`
+    /// spares nothing. Sessions with no recorded credential are never touched.
+    async fn revoke_account_credential_sparing_session(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+        _caller_token_hash: Option<&str>,
+    ) -> Result<RevokeCredentialResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_credential_sparing_session not implemented".to_string(),
         ))
     }
 
@@ -1253,6 +1570,44 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Pool(
             "count_active_strong_authenticators not implemented".to_string(),
+        ))
+    }
+
+    /// Count passkey-origin accounts that are still `unbound`, in EVERY tenant
+    /// (Z2 S2, the unbound-account ceiling). A cross-tenant read, so the
+    /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
+    /// never through a runtime-pool query. The default refuses: a backend that
+    /// cannot count cannot enforce the ceiling, so creation stays closed.
+    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "unbound_passkey_account_count_unconfigured".to_string(),
+        ))
+    }
+
+    /// Create a passkey-origin account from a verified native `create/finish`
+    /// (Z2 S2): in ONE transaction under the freshly minted tenant, re-check
+    /// the unbound-account ceiling, then write the tenant, the account and its
+    /// `unbound` binding row, the credential, a native session and the audit
+    /// row. Either every row is written or none is. The default refuses.
+    async fn create_passkey_origin_account(
+        &self,
+        _account: NewPasskeyOriginAccount<'_>,
+    ) -> Result<PasskeyOriginAccountOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "create_passkey_origin_account not implemented".to_string(),
+        ))
+    }
+
+    /// The binding state of one account, read under its tenant's RLS. No
+    /// binding row is `Legacy`. Used by native passkey sign-in to report
+    /// `binding_state`; the unbound gate reads it inside `validate_session`.
+    async fn account_binding_state(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_binding_state not implemented".to_string(),
         ))
     }
 
@@ -1482,6 +1837,20 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Enumerate every decision row for the dedup re-derivation pass,
+    /// cross-tenant, ordered `decided_at ASC, decision_id ASC`, capped at
+    /// `limit`. Not filtered by stamp: the pass reuses rows already on its
+    /// target stamp and derives the rest, which is what makes it resumable.
+    /// Reads through the gate-driver reader pool with NO tenant GUC. Every
+    /// column is granted to `trace_gate_driver` by V45 and V57. Default:
+    /// empty (test doubles / backends without a gate-driver pool).
+    async fn list_dedup_rederive_rows(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupRederiveRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
     /// Enumerate correction-value signal rows (migration V48), cross-tenant,
     /// oldest-decided first, capped at `limit`. Reads through the gate-driver
     /// reader pool with NO tenant GUC (the trace_gate_driver role's permissive
@@ -1622,6 +1991,12 @@ pub struct ValidatedSession {
     /// matched the previous token within grace (multi-tab) does NOT re-rotate and
     /// leaves this `None`.
     pub rotated_secret: Option<String>,
+    /// The account's binding state (Z2 S1), read in the SAME query that
+    /// validated the session, so the unbound gate costs no second round trip
+    /// and cannot see a different account than the session did. No binding row
+    /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
+    /// which is never gated.
+    pub binding: crate::account_binding::AccountBindingState,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only
@@ -1654,6 +2029,38 @@ pub struct AccountCredentialSummary {
 pub struct RevokeCredentialResult {
     pub removed: bool,
     pub remaining: i64,
+}
+
+/// Everything native passkey `create/finish` writes for a new passkey-origin
+/// account (Z2 S2). Every value is server-minted or came out of a verified
+/// attestation: the tenant from the OS RNG, the account id from `start`, the
+/// credential from `finish_passkey_registration`. Nothing here is client
+/// supplied except the optional label, which the start handler bounded.
+#[derive(Debug)]
+pub struct NewPasskeyOriginAccount<'a> {
+    pub tenant_id: &'a str,
+    pub account_id: uuid::Uuid,
+    /// Canonical base64url credential id; globally UNIQUE (V32), so a replayed
+    /// attestation fails the insert and rolls the whole account back.
+    pub credential_id: &'a str,
+    /// The serialized webauthn-rs `Passkey`.
+    pub passkey: &'a serde_json::Value,
+    pub label: Option<&'a str>,
+    /// The weak native session minted with the account. Its `client_kind`
+    /// must be `native`; the backend refuses anything else.
+    pub session: NewSession<'a>,
+    /// The unbound-account ceiling, re-checked inside the transaction.
+    pub ceiling: i64,
+}
+
+/// What `create_passkey_origin_account` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyOriginAccountOutcome {
+    /// Every row was written and committed.
+    Created,
+    /// The ceiling was reached when re-checked inside the transaction; nothing
+    /// was written.
+    CeilingReached,
 }
 
 /// A registered NEAR identity resolved for the LOGIN (wallet-assertion) path.

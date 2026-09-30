@@ -161,6 +161,10 @@ pub struct App {
     health_banner: adw::Clamp,
     health_label: gtk::Label,
     health_button: gtk::Button,
+    /// Grants the daemon voided and no shell has shown yet (R6). Beside the
+    /// health banner rather than in it: the health slot carries one label,
+    /// and a void must neither hide an outage nor be hidden by one.
+    void_notices: gtk::Box,
     /// The count on the switcher's Queue item. Hidden at zero rather than
     /// drawn as a "0": an empty badge is a decoration, and the queue's own
     /// empty state already says the true thing.
@@ -364,11 +368,29 @@ impl App {
             .margin_end(style::space::XL)
             .build();
 
+        // Every void notice, in the same column as the health banner and for
+        // the same reason: a void changes what the contributor agreed to,
+        // and they learn it on whichever screen they are reading.
+        let void_notices = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::M)
+            .build();
+        let void_column = adw::Clamp::builder()
+            .maximum_size(COLUMN_MAX)
+            .tightening_threshold(COLUMN_TIGHTEN)
+            .child(&void_notices)
+            .visible(false)
+            .margin_top(style::space::L)
+            .margin_start(style::space::XL)
+            .margin_end(style::space::XL)
+            .build();
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.add_css_class("tc-root");
         content.append(&header);
         content.append(&update.root);
         content.append(&banner_column);
+        content.append(&void_column);
         content.append(&stack);
         stack.set_vexpand(true);
 
@@ -391,6 +413,7 @@ impl App {
             health_banner: banner_column,
             health_label,
             health_button,
+            void_notices,
             queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
@@ -614,9 +637,26 @@ impl App {
     }
 
     /// One daemon call, with its answer delivered back on the main loop.
+    ///
+    /// A failure is its fixed label. A caller that needs the payload a
+    /// daemon sent beside an error uses [`Self::call_with_failure`].
     pub fn call<F>(self: &Rc<Self>, method: &str, params: serde_json::Value, callback: F)
     where
         F: FnOnce(&Rc<App>, Result<serde_json::Value, String>) + 'static,
+    {
+        self.call_with_failure(method, params, move |app, result| {
+            callback(app, result.map_err(|failure| failure.label))
+        });
+    }
+
+    /// [`Self::call`], keeping the `result` a daemon sent beside an error.
+    pub fn call_with_failure<F>(
+        self: &Rc<Self>,
+        method: &str,
+        params: serde_json::Value,
+        callback: F,
+    ) where
+        F: FnOnce(&Rc<App>, Result<serde_json::Value, crate::backend::DaemonFailure>) + 'static,
     {
         let id = self.worker.call(method, params);
         self.callbacks.borrow_mut().insert(
@@ -667,6 +707,7 @@ impl App {
         self.call("status", serde_json::json!({}), |app, result| {
             if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
                 app.render_health(&status);
+                app.render_grant_voids(&status);
                 settings::render_status(app, &status);
                 // The witness lives in the contributor's config rather than
                 // in daemon settings, so nothing in the settings answer
@@ -966,27 +1007,331 @@ impl App {
         overlaps_viewport(bounds.y(), bounds.height(), viewport_height)
     }
 
-    fn render_health(self: &Rc<Self>, status: &Status) {
-        // Two independent conditions, and the banner shows both. The health
-        // slot carries one label at a time by design, and `daily-cap-reached`
-        // is last in its precedence order -- so a spent upload budget behind
-        // a full queue was reported by neither, and the window looked simply
-        // broken. The budget line is therefore drawn from
-        // `status.daily_budget` rather than waiting for the label.
-        let mut lines: Vec<String> = Vec::new();
-        if let Some(label) = status.health.last_error_label.as_deref() {
-            // The label's own sentence, except when it IS the cap: the
-            // budget line below says the same thing with real numbers.
-            if label != "daily-cap-reached" || !status.daily_budget.blocked {
-                lines.push(copy::health_sentence(label).to_string());
+    /// One card per void, in the core's words (`Status::grant_void_notices`).
+    ///
+    /// Rebuilt on every status read rather than diffed: there are at most a
+    /// handful, and a card left over from a notice another shell already
+    /// acknowledged would say something stopped that this window has no
+    /// record of anymore.
+    fn render_grant_voids(self: &Rc<Self>, status: &Status) {
+        while let Some(child) = self.void_notices.first_child() {
+            self.void_notices.remove(&child);
+        }
+        let notices = status.grant_void_notices();
+        // The switch-on notices share the column: a folder whose arming was
+        // reworded (K5), and armed folders the gate is holding. So does the
+        // legacy invite migration notice: it changes what the contributor's
+        // sessions go under, and they are told on whichever screen they are
+        // reading (the consent spec requires it in every shell).
+        let rewordings = status.arming_rewording_notices();
+        let held = status.gate_held_notice();
+        let migration = status.legacy_migration_notice();
+        if let Some(column) = self.void_notices.parent() {
+            column.set_visible(
+                !notices.is_empty()
+                    || !rewordings.is_empty()
+                    || held.is_some()
+                    || migration.is_some(),
+            );
+        }
+        for card in notices {
+            self.void_notices.append(&self.grant_void_card(&card));
+        }
+        for card in rewordings {
+            self.void_notices.append(&self.arming_rewording_card(&card));
+        }
+        if let Some(held) = held {
+            self.void_notices.append(&self.gate_held_card(&held));
+        }
+        if let Some(notice) = &migration {
+            self.void_notices
+                .append(&self.legacy_migration_card(notice));
+        }
+    }
+
+    /// A card in the notices column: the attention glyph, a column of text,
+    /// and a column of buttons.
+    fn notice_card() -> (gtk::Box, gtk::Box, gtk::Box) {
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        let glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        glyph.add_css_class("tc-attention");
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&glyph);
+        card.append(&column);
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        (card, column, buttons)
+    }
+
+    fn notice_text(value: &str, class: &str) -> gtk::Label {
+        let label = gtk::Label::builder()
+            .label(value)
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        label.add_css_class(class);
+        label
+    }
+
+    /// "Ask me first": Settings' call, unchanged -- `set_project_mode` with
+    /// this project's id and `notify_only`. It also answers a rewording
+    /// notice. A refusal changes nothing; the core's refusal line says so.
+    fn ask_first_button(
+        self: &Rc<Self>,
+        project_id: String,
+        action: &str,
+        failed: &'static str,
+    ) -> gtk::Button {
+        let button = gtk::Button::with_label(action);
+        button.add_css_class("tc-quiet");
+        let app = Rc::clone(self);
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            app.call(
+                "set_project_mode",
+                serde_json::json!({ "project_id": project_id, "mode": "notify_only" }),
+                move |app, result| {
+                    if result.is_err() {
+                        app.toast(failed);
+                    }
+                    app.refresh();
+                },
+            );
+        });
+        button
+    }
+
+    /// One rewording notice (K5), in the core's words.
+    fn arming_rewording_card(
+        self: &Rc<Self>,
+        card_data: &crate::model::ArmingRewordingCard,
+    ) -> gtk::Box {
+        let notice = &card_data.notice;
+        let (card, column, buttons) = Self::notice_card();
+        column.append(&Self::notice_text(&notice.title, "tc-card-title"));
+        column.append(&Self::notice_text(notice.body, "tc-body"));
+        column.append(&Self::notice_text(notice.now_heading, "tc-card-title"));
+        for line in [notice.scope, notice.limit, notice.no_review] {
+            column.append(&Self::notice_text(line, "tc-body"));
+        }
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.ask_first_project_id.clone(),
+            notice.ask_first_action,
+            notice.ask_first_failed,
+        ) {
+            buttons.append(&self.ask_first_button(project_id, action, failed));
+        }
+        // Records that this notice was shown, and nothing else. Only the id
+        // on this card, so a rewording raised after this window drew is never
+        // cleared unseen.
+        if let Some(id) = card_data.id {
+            let button = gtk::Button::with_label(notice.acknowledge);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "acknowledge_arming_rewordings",
+                    serde_json::json!({ "ids": [id] }),
+                    |app, _result| app.refresh(),
+                );
+            });
+            buttons.append(&button);
+        }
+        card
+    }
+
+    /// Armed folders the gate is holding, in the core's words. No dismiss:
+    /// it goes when the hold does.
+    fn gate_held_card(self: &Rc<Self>, notice: &crate::copy::GateHeldNoticeCopy) -> gtk::Box {
+        let (card, column, _buttons) = Self::notice_card();
+        column.append(&Self::notice_text(notice.title, "tc-card-title"));
+        column.append(&Self::notice_text(&notice.body, "tc-body"));
+        for reason in &notice.reasons {
+            column.append(&Self::notice_text(&format!("\u{2022} {reason}"), "tc-body"));
+        }
+        column.append(&Self::notice_text(notice.release, "tc-body"));
+        if !notice.projects.is_empty() {
+            column.append(&Self::notice_text(notice.ask_first, "tc-body"));
+        }
+        for project in &notice.projects {
+            let row = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(style::space::S)
+                .build();
+            row.append(&Self::notice_text(&project.line, "tc-body"));
+            if let (Some(project_id), Some(action), Some(failed)) = (
+                project.project_id.clone(),
+                project.ask_first_action,
+                project.ask_first_failed,
+            ) {
+                row.append(&self.ask_first_button(project_id, action, failed));
             }
+            column.append(&row);
         }
-        if status.daily_budget.blocked {
-            lines.push(copy::daily_cap_sentence(
-                status.daily_budget.blocked_entries,
-                status.daily_budget.resets_at,
-            ));
+        card
+    }
+
+    /// The notice after the move, in the core's words. Its one button
+    /// records that it was shown and does nothing else.
+    fn legacy_migration_card(
+        self: &Rc<Self>,
+        notice: &crate::copy::LegacyMigrationNoticeCopy,
+    ) -> gtk::Box {
+        let text = |value: &str, class: &str| {
+            let label = gtk::Label::builder()
+                .label(value)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class(class);
+            label
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        column.append(&text(notice.title, "tc-card-title"));
+        column.append(&text(notice.body, "tc-body"));
+        column.append(&text(notice.folders, "tc-body"));
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&column);
+        let button = gtk::Button::with_label(notice.acknowledge);
+        button.add_css_class("tc-quiet");
+        button.set_valign(gtk::Align::Center);
+        let app = Rc::clone(self);
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            app.call(
+                "acknowledge_legacy_invite_migration",
+                serde_json::json!({}),
+                |app, _result| app.refresh(),
+            );
+        });
+        card.append(&button);
+        card
+    }
+
+    fn grant_void_card(self: &Rc<Self>, card_data: &crate::model::GrantVoidCard) -> gtk::Box {
+        let id = card_data.id;
+        let notice = &card_data.notice;
+        let text = |value: &str, class: &str| {
+            let label = gtk::Label::builder()
+                .label(value)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            label.add_css_class(class);
+            label
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .hexpand(true)
+            .build();
+        column.append(&text(&notice.title, "tc-card-title"));
+        column.append(&text(notice.body, "tc-body"));
+        column.append(&text(notice.reasons_heading, "tc-card-title"));
+        for reason in &notice.reasons {
+            column.append(&text(&format!("\u{2022} {reason}"), "tc-body"));
         }
+        column.append(&text(notice.rearm, "tc-body"));
+
+        let glyph = gtk::Label::new(Some(style::Tone::Attention.glyph()));
+        glyph.add_css_class("tc-attention");
+        glyph.add_css_class("tc-card-title");
+        glyph.set_valign(gtk::Align::Start);
+
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(style::space::M)
+            .build();
+        card.add_css_class("tc-banner");
+        card.append(&glyph);
+        card.append(&column);
+        let buttons = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::XS)
+            .valign(gtk::Align::Center)
+            .build();
+        card.append(&buttons);
+        // "Turn back on", beside the sentence saying that doing so agrees to
+        // the new settings. It is Settings' arming call, unchanged:
+        // `set_project_mode` with this project's id and `auto_upload`, so the
+        // daemon applies the same refusals, writes the same
+        // `armed-auto-upload` row, and clears this notice. A refusal changes
+        // nothing; the core's refusal line says so.
+        if let (Some(project_id), Some(action), Some(failed)) = (
+            card_data.rearm_project_id.clone(),
+            notice.rearm_action,
+            notice.rearm_failed,
+        ) {
+            let button = gtk::Button::with_label(action);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "set_project_mode",
+                    serde_json::json!({ "project_id": project_id, "mode": "auto_upload" }),
+                    move |app, result| {
+                        if result.is_err() {
+                            app.toast(failed);
+                        }
+                        app.refresh();
+                    },
+                );
+            });
+            buttons.append(&button);
+        }
+        // This button records that this notice was shown, and nothing else.
+        // Only the id on this card is acknowledged, so a void raised after
+        // this window drew is never cleared unseen.
+        if let Some(id) = id {
+            let button = gtk::Button::with_label(notice.acknowledge);
+            button.add_css_class("tc-quiet");
+            let app = Rc::clone(self);
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                app.call(
+                    "acknowledge_grant_voids",
+                    serde_json::json!({ "ids": [id] }),
+                    |app, _result| app.refresh(),
+                );
+            });
+            buttons.append(&button);
+        }
+        card
+    }
+
+    fn render_health(self: &Rc<Self>, status: &Status) {
+        // Independent conditions, and the banner shows each. The health slot
+        // carries one label at a time by design, and `daily-cap-reached` is
+        // last in its precedence order -- so a spent upload budget behind a
+        // full queue was reported by neither, and the window looked simply
+        // broken. The budget and witness lines are therefore drawn from
+        // their own status objects rather than waiting for the label; see
+        // `Status::health_banner_lines`.
+        let lines = status.health_banner_lines();
         if lines.is_empty() {
             self.health_banner.set_visible(false);
             return;
@@ -1333,6 +1678,36 @@ fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
     }
 
     track
+}
+
+/// Replace `parent`'s children with K11 disclosure rows. Machine values --
+/// addresses, keys, measurements -- are selectable and monospace, shown
+/// verbatim; every word is `crate::disclosure`'s, which is the core's.
+///
+/// One widget per `crate::disclosure::drawn` item and nothing else, so the
+/// tests on `drawn` are tests of what this puts on screen.
+pub fn fill_disclosure_rows(parent: &gtk::Box, rows: &[crate::disclosure::Row]) {
+    use crate::disclosure::Drawn;
+    while let Some(child) = parent.first_child() {
+        parent.remove(&child);
+    }
+    for item in crate::disclosure::drawn(rows) {
+        match item {
+            Drawn::Eyebrow(text) => parent.append(&style::eyebrow(&text)),
+            Drawn::Body(text) => style::append_body(parent, text),
+            Drawn::Mono(value) => {
+                let value = gtk::Label::builder()
+                    .label(value)
+                    .wrap(true)
+                    .wrap_mode(gtk::pango::WrapMode::Char)
+                    .selectable(true)
+                    .xalign(0.0)
+                    .css_classes(["monospace"])
+                    .build();
+                parent.append(&value);
+            }
+        }
+    }
 }
 
 /// A heading and a paragraph, the shape most of this window is made of.

@@ -1,16 +1,23 @@
 pub mod admission;
 pub mod canonical_json;
 pub mod community_handle;
+pub mod device_invite_subject;
+pub mod inference_connection;
 pub mod insights;
 pub mod insights_cards;
 pub mod insights_pricing;
+pub mod legacy_invite_link;
 pub mod llm;
+pub mod mission_catalog;
 pub mod mission_draft;
+pub mod mission_evaluation;
 pub mod onboarding;
 pub mod privacy;
 pub mod public_run;
 mod redaction;
 pub mod trace_contribution;
+pub mod witness_pacing;
+pub mod witness_provenance;
 
 /// Response header carrying a rotated bearer for native account clients.
 pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str = "x-trace-commons-session-token";

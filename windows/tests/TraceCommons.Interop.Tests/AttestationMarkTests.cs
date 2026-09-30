@@ -14,9 +14,9 @@ namespace TraceCommons.Interop.Tests;
 /// The mark answers a different question from eligibility, and the difference
 /// is the whole reason it exists. Eligibility asks <i>may this contributor
 /// send this session</i>, and says nothing at all when nobody asked. The mark
-/// states whether the session carries proof of the model call that produced
-/// it, which is a fact about the trace and is owed to everybody, invited
-/// contributors included.
+/// states whether the session carries proof of its last model call, which is
+/// a fact about the trace and is owed to everybody, invited contributors
+/// included.
 ///
 /// <para>
 /// So the two rules are opposites, and the tests below pin both: an absent

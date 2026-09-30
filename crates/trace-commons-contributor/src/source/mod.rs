@@ -667,6 +667,44 @@ impl std::fmt::Debug for SourceRoots {
 }
 
 impl SourceRoots {
+    /// What each source these roots build reads from: its name and the root
+    /// `all_sources` would give it. For the daemon's automatic grant, which
+    /// records what is on disk per source, so a harness connected after the
+    /// grant, or pointed at another root, is recorded before it can arm
+    /// anything. Sources `all_sources` would not build are absent.
+    pub fn source_identities(&self) -> BTreeMap<&'static str, String> {
+        let mut out = BTreeMap::new();
+        for spec in NATIVE_SOURCES {
+            let root = match self.declared.get(spec.name) {
+                Some(SourceDeclaration::Off) => None,
+                Some(SourceDeclaration::Watch { path }) => Some(path.clone()),
+                None => match spec.undeclared {
+                    Undeclared::Conventional => spec.conventional_root.map(|root| root()),
+                    Undeclared::Nothing => None,
+                },
+            };
+            if let Some(root) = root {
+                out.insert(spec.name, root.to_string_lossy().to_string());
+            }
+        }
+        let trajectory = match &self.trajectory {
+            TrajectorySelection::None => None,
+            TrajectorySelection::Declared(path) => Some(path.to_string_lossy().to_string()),
+            TrajectorySelection::Auto {
+                working_dir,
+                staging_dir,
+            } => Some(format!(
+                "{:?} {:?}",
+                working_dir.as_deref(),
+                staging_dir.as_deref()
+            )),
+        };
+        if let Some(root) = trajectory {
+            out.insert(SOURCE_TRAJECTORY, root);
+        }
+        out
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

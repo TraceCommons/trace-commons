@@ -659,21 +659,35 @@ async fn sourced_publications_wait_for_the_provenance_graph_lock() {
         .get()
         .await
         .expect("get blocked publication probe connection");
-    let blocked_publications = probe_client
-        .query(
-            "SELECT pid
-             FROM pg_stat_activity
-             WHERE datname = current_database()
-               AND $1 = ANY(pg_blocking_pids(pid))
-               AND wait_event_type = 'Lock'",
-            &[&row_lock_backend_pid],
-        )
-        .await
-        .expect("identify publication blocked by submission row lock");
+    // The publication runs on a spawned task and reaches the row lock in its
+    // own time; probing `pg_stat_activity` once raced it (CI found 0 blocked
+    // backends on a docs-only PR). Poll with a bound instead: the assertion
+    // is still "exactly one", it is just made once the wait has begun.
+    let blocked_publications = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let rows = probe_client
+                .query(
+                    "SELECT pid
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND $1 = ANY(pg_blocking_pids(pid))
+                       AND wait_event_type = 'Lock'",
+                    &[&row_lock_backend_pid],
+                )
+                .await
+                .expect("identify publication blocked by submission row lock");
+            if !rows.is_empty() || std::time::Instant::now() >= deadline {
+                break rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
     assert_eq!(
         blocked_publications.len(),
         1,
-        "the submission row lock must block exactly the publication under test"
+        "the submission row lock must block exactly the publication under test \
+         (waited up to 10 s for it to reach the lock)"
     );
     let blocked_publication_pid: i32 = blocked_publications[0].get("pid");
     let lock_class = i64::from(lock_class);

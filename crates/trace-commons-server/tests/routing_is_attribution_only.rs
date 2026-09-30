@@ -126,6 +126,7 @@ fn envelope_with_events(events: Vec<TraceContributionEvent>) -> TraceContributio
         embedding_analysis: None,
         value: ValueMetadata::default(),
         conversation_id: None,
+        source_session: None,
         trace_card: TraceCard::default(),
         value_card: TraceValueCard::default(),
         hindsight: None,

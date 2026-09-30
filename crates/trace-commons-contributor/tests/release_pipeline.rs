@@ -1360,6 +1360,7 @@ fn a_scheduled_job_watches_for_unmerged_tap_bumps() {
         ".github/workflows/release-apps.yml",
         ".github/workflows/release-contributor.yml",
         ".github/workflows/ci.yml",
+        ".github/workflows/clients.yml",
     ] {
         // Checked against executable lines only: a comment pointing at the
         // backstop is useful documentation and cannot create a dependency.
@@ -2049,7 +2050,10 @@ fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
 
 #[test]
 fn ci_packages_and_validates_the_windows_app_feed_identity() {
-    let ci = read(".github/workflows/ci.yml");
+    // The windows-app job moved from ci.yml to clients.yml on 2026-09-22
+    // (client shells run on push to main and on client-path PRs, and are
+    // not required checks); the packaging flags it pins are the same.
+    let ci = read(".github/workflows/clients.yml");
     assert!(
         ci.contains("-p:TcPackaged=true"),
         "CI must opt into the packaged WinUI flavour; setting only \

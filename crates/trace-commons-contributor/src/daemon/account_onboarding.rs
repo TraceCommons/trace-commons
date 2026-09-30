@@ -915,8 +915,13 @@ fn persist(
         display_handle: None,
         public_bio: None,
         public_since: None,
+        witness_origin: Some(crate::config::WitnessOriginRecord::for_witness(
+            &witness,
+            crate::config::WitnessOrigin::PublishedAtJoin,
+        )),
         witness: Some(witness),
         inference_receipt_endpoint: receipt_endpoint,
+        consent_scopes_chosen: false,
         inference_receipt_check_attestation: true,
     };
     let session = crate::account_auth::AccountSession {
@@ -1429,6 +1434,13 @@ mod tests {
             assert!(config.inference_receipt_check_attestation);
             assert!(config.witness.as_ref().unwrap().admission_evidence);
             assert_eq!(config.witness, Some(witness.clone()));
+            // K11: the join says where the witness came from.
+            assert_eq!(
+                config.witness_origin_view(),
+                Some(crate::config::WitnessOriginView::Recorded(
+                    crate::config::WitnessOrigin::PublishedAtJoin
+                ))
+            );
             assert_eq!(
                 config.inference_receipt_endpoint.as_deref(),
                 receipt_endpoint.as_deref()

@@ -169,9 +169,11 @@ point, fanning out to every derived artifact (see
 
 ## How credit works
 
-Each local submission record stores append-only credit events. The first event
-records the accepted submission estimate as pending; it is not treated as
-settled final credit unless a later review or utility process finalizes it.
+Each local submission record stores append-only credit events. Pending credit
+is not treated as settled final credit unless a later review or utility process
+finalizes it. Submit no longer records an estimate: the accepted-submission
+ledger event is written only when a record carries a positive pending figure,
+which after a plain submit it does not (see below).
 
 Delayed credit can be appended only through privileged, audited paths:
 
@@ -201,7 +203,10 @@ cross-principal probes indistinguishable from genuinely unknown submissions.
 
 Status records keep estimates and settled credit separate:
 
-- `credit_points_pending` — the online estimate.
+- `credit_points_pending` — 0.0 until the gate has scored the trace, then the
+  gate's credit quality on a 0-10 points scale
+  (`round(10 * credit_quality, 2)`). A reviewer-approved trace carries the
+  reviewer-assigned figure until the gate's decision replaces it.
 - `credit_points_final` — present only when explicit final settlement exists.
 - `credit_points_ledger`, `credit_points_total`, `delayed_credit_explanations`
   — present once review or downstream jobs award later utility credit.
@@ -211,6 +216,30 @@ final credit **plus** the delayed ledger delta (not pending estimate plus
 ledger). If a trace is later revoked, expired, or purged, status sync reports a
 zero delayed ledger and a safe explanation that retained ledger events are
 excluded.
+
+The gate's credit quality is the number. The submit-time estimate
+`compute_value_scorecard` produces is no longer a contributor-facing figure:
+it docked 0.40 for a duplicate score computed from the header and the first
+twelve events against every prior record in the tenant, which read
+same-project sessions as near-duplicates of each other, so it was 0.0 for
+most traces the gate later credited. Submit and operator re-scrub store 0.0
+as `credit_points_pending`; the scorecard and `submission_score` are still
+computed and stored on the envelope for the review queue, ranker exports and
+process evaluation. Before a gate decision exists, status and receipt
+surfaces report 0.0 (the desktop apps render that as no figure) and the
+`explanation` carries one line: "Scoring in progress; credit is assigned when
+the gate's evaluation completes." Once the submission has a gate decision
+with a credit quality, they report that quality as points, with a line naming
+the calibration version and the chunk coverage it was scored over. A decision
+the perplexity driver recorded without scoring, because the content
+duplicated an earlier submission under the same tenant, reports 0.0 with a
+line saying so. A reviewer approving a quarantined trace stores the
+reviewer's explicit points, or `(0.5 + submission_score).clamp(0.5, 2.0)`
+when none are given; that figure is presented until the gate's decision
+replaces it. Only statuses that carry pending credit (`accepted`,
+`awaiting_pii_backstop`) present the gate figure; every other status reports
+0.0. The credit ledger's delayed-utility events, `credit_points_final`, and
+the signed score attestation are unchanged.
 
 Reviewers/admins append delayed credit once downstream utility is known:
 
@@ -345,8 +374,8 @@ span labels are mapped to `unknown` so a malformed sidecar cannot smuggle
 emails, paths, or tokens through label names.
 
 The sidecar runs as an untrusted local subprocess with a cleared environment
-except `PATH`, `LANG`, and `LC_ALL`. Sidecar failures are non-fatal: the client
-falls back to deterministic local redaction rather than uploading raw content.
+except `PATH`, `LANG`, and `LC_ALL`. Sidecar failures refuse redaction: no deterministic-only fallback is
+returned for contribution or witness certification.
 
 | Variable | Effect |
 |----------|--------|
@@ -443,6 +472,25 @@ Datasets, benchmarks, rankers (export and worker routes):
   `GET|POST /v1/workers/ranker/training-pairs`
 - read-only ranker exports: `GET /v1/ranker/training-candidates`,
   `GET /v1/ranker/training-pairs`
+
+**Witness provenance label (#1059).** Replay dataset items, benchmark
+conversion candidates, and ranker training candidates (and so both sides of a
+training pair) carry `witness_provenance_class`, one of:
+
+| Value | Meaning |
+|-------|---------|
+| `provider_tee_final_call` | A verified v2 certificate with a provider-TEE receipt for the last declared call covers the trace's current accepted artifact. |
+| `gateway_final_call` | The same, with a gateway receipt. |
+| `legacy_v1` | A v1 certificate, which makes no provenance statement. |
+| `unattested` | Everything else: no certificate, an explicit unattested v2 statement, an inactive or revoked submission, or a current artifact the certificate no longer covers (including every review-approved trace; see "Final-call inference provenance"). |
+
+The field is additive, and no schema string changed: not
+`trace_export_job_request.v1` (which governs request filters, none of which
+changed) and not `benchmark_conversion.v1`. **Readers must tolerate its
+absence.** Benchmark artifacts written before #1059 do not have it, and a
+reader must treat a missing field as "not recorded", never as a class. The
+label is a label only: in v1 it earns no account trust and weights no gate,
+score or credit amount (#1061, earned-trust decision 5).
 
 Credit, settlement, NEAR:
 
@@ -1148,6 +1196,21 @@ scoped standing policy and cannot widen capture beyond it.
 
 ## Production hardening roadmap
 
+Account-admission submissions require `source_session: {adapter, native_id}`.
+The server validates this identity, stores only an account-scoped digest, and
+rejects a resumed version after any mapped version is withdrawn. Authenticated
+clients can check `POST /v1/account/source-sessions/status` before witness or
+upload; it returns `active`, `withdrawn`, or `unsupported`. The submit
+transaction is the final gate, since the status read can race withdrawal.
+
+This account-admission mode is default-off. Older submissions without a
+source-session mapping retain submission-ID withdrawal only. Existing V43
+tombstones do not contain a native source ID, and neither a content hash nor
+`conversation_id` can reliably reconstruct it. Previously stored local
+sessions must be held and re-confirmed before a client enables automatic
+contribution; parser-bound IDs and offline hold/re-grant behavior require
+client-side verification before rollout.
+
 The current implementation is a usable MVP for local development and controlled
 internal pilots. A production deployment needs the following before broad tenant
 rollout.
@@ -1200,8 +1263,8 @@ unapproved/missing-replayability sources.
 **Privacy Filter sidecar operations.** Run sidecars as untrusted local
 subprocesses/containers with timeouts, output-size limits, and no access to
 Trace Commons credentials. Pass only the minimum text needed. Accept only the
-safe projection. Treat failures as non-fatal warnings with deterministic
-fallback. Add canary-secret tests.
+safe projection. Treat classifier failures as refusals, with no deterministic-only
+fallback. Run canary-secret tests.
 
 ## Implementation status
 
@@ -1213,7 +1276,7 @@ but with production hardening still open.
 | Local opt-in policy / opt-out | MVP | CLI + scoped web/runtime policy files; submit tokens and issuer workload creds stay in env; hosted tenants can use a guarded HTTPS upload-claim issuer. |
 | Local preview / queue / flush / credit | MVP | Local redacted envelopes, atomic queue writes, malformed-envelope quarantine, scoped `queue-status`, and acknowledgeable/snoozable periodic credit notices via a local retry outbox. |
 | Deterministic local redaction | MVP | Generic secret/path scrubbing, stable placeholders, tool-aware payload handling, Privacy Filter safe projection. |
-| Privacy Filter sidecar | MVP | Command/stdin/stdout path with safe projection, non-fatal fallback, minimal env, stderr hashing, IO limits, canary tests. Container sandboxing still open. |
+| Privacy Filter sidecar | MVP | Command/stdin/stdout path with safe projection, fail-closed classifier errors, minimal env, stderr hashing, IO limits, canary tests. Container sandboxing still open. |
 | Autonomous post-turn / periodic contribution | MVP | Runtime queues/flushes scoped envelopes only under an enabled policy with an endpoint and an eligible envelope; periodic agent-loop worker with typed retry backoff, in-memory EdDSA claim refresh, compaction, and credit-notice drain. |
 | Web settings + preview endpoints | MVP | Authenticated gateway endpoints and UI controls; server-side tenant/user checks are the trust boundary; queue/submit preflight scoped opt-in. |
 | Private ingestion service | MVP | Validates schema/consent, re-runs redaction, computes hashes/credit, optional hourly quotas, stores accepted/quarantined records, serves review/status/export routes; can dark-launch DB dual-write + encrypted artifacts. |
@@ -1229,7 +1292,7 @@ but with production hardening still open.
 | Vector duplicate/novelty index | Partial | DB schema + dedicated worker + metadata indexer + object-ref gating + per-source content-read audits; exact-hash + deterministic-similarity scoring with optional private embedder/search adapters; stale/cross-profile neighbor diagnostics. Deployed vector-store ops + canary evidence open. |
 | Ranking/model utility pipeline | Partial | Offline utility-credit worker; immutable model manifests, calibration runs, holdout registry, server-owned floors, backtest/risk/readiness reports, prediction-credit, worker-run ledger, credit-cycle automation. Deployed evaluator ops + gold/holdout stewardship open. |
 | Benchmark conversion pipeline | Partial | Tenant-scoped candidate artifacts with lifecycle metadata, source-hash revalidation, audits, provenance, idempotent utility credit, evaluator/registry worker routes + outbox, readiness drill. Deployed external evaluator/registry adapter ops open. |
-| Production sidecar operations | Partial | Timeout/IO limits, minimal env, stderr hashing, fallback, safe projection, canary coverage. Container sandboxing + deployment-specific isolation open. |
+| Production sidecar operations | Partial | Timeout/IO limits, minimal env, stderr hashing, fail-closed errors, safe projection, canary coverage. Container sandboxing + deployment-specific isolation open. |
 
 ## Research hooks
 
@@ -1249,3 +1312,70 @@ whole central pipeline:
   hard).
 - `canonical_summary_for_embedding` — redacted-only summaries for embedding and
   duplicate detection.
+
+### Full-pipeline certificate version contract (#991 Z1)
+
+The protocol crate publishes `FULL_REDACTION_PIPELINE_VERSIONS` and
+`is_full_redaction_pipeline_version` for exact membership checks by clients
+and servers. This is a pipeline capability list, not a replacement for
+certificate signature, artifact digest, signer/measurement pinning, consent,
+or the operator's configured witness bypass policy.
+
+Sidecar classifier errors now refuse the operation, just like NEAR AI and
+self-hosted classifier errors. The sidecar suffix is `privacy-filter-sidecar-v2`;
+v1 certificates cannot prove a completed classifier pass and are excluded.
+Deterministic-only, unknown, and extended version strings are also excluded.
+Operators using sidecar witnesses must update the witness and explicitly add
+its new exact version to their operator allowlist before accepting it; no
+operator allowlist is broadened automatically. Existing v1 signatures remain
+historically verifiable but do not satisfy this full-pipeline contract.
+
+### Final-call inference provenance (#991 Z2)
+
+A v2 witness certificate may carry one of three closed inference classes:
+`provider_tee_final_call`, `gateway_final_call`, or explicit `unattested`.
+An attested class means the witness verified a pinned receipt for the **last
+declared inference call** and bound the receipt to that call's original request
+and response body bytes. The model is recorded only when the verified receipt
+bound one. The certificate signs the provenance fields and the SHA-256 of the
+exact redacted request body the contributor submits to ingest (the
+`POST /v1/traces` body), not of any inference request or response. It does not prove
+whole-session authenticity, that earlier calls were included, receipt
+uniqueness or replay prevention, or the correctness of a model's output.
+
+Legacy v1 certificates have no inference claim. Reads label them `legacy_v1`
+and expose the conservative `unattested` policy class; v2 `unattested` is an
+explicit signed claim. The server records a verified certificate's original
+header bytes and the SHA-256 of the received request body in a forced-RLS
+PostgreSQL row. It never stores a transcript in that row or puts the evidence
+bytes in an exported envelope. The PII-backstop bypass is a separate operator
+decision: provenance capture can be enabled by a signing-address and
+measurement pin while that bypass remains off.
+
+The server rescrubs a submission after verification. A matching stored-object
+digest links the active rescrubbed artifact to the historical certificate; it
+does not mean the witness signed the rescrubbed bytes. Policy consumers use the
+tenant-scoped `get_current_verified_witness_evidence` read, which selects the
+current object reference and active submission state in the same database
+transaction without trusting a caller-supplied digest. The object loader must
+verify the selected object's bytes before use. Exact signed-source retries may
+rebind the derived object digest without changing original certificate or body
+evidence. Missing evidence, v1, inactive or revoked submissions, and
+object-digest mismatches do not expose an attested class. File-only ingestion
+reads the same claim from private submission metadata through
+`file_witness::current_claim`, under the same rules.
+
+The claim is surfaced, never weighted (#1059): exports, the reviewer trace
+list (`GET /v1/traces`), and credit events (`trace_credit_ledger`
+`witness_provenance_class`, V89) carry it as a label, and nothing that gates,
+scores or prices a trace reads it. The contributor's own credit-events view
+omits it.
+
+**Review-approved traces read `unattested`.** Approval stores a new reviewed
+artifact under a new object key. The original certificate covers the bytes
+the contributor submitted, not that reviewed artifact, so the current-object
+claim is an artifact mismatch and the label is `unattested`, even when the
+submission arrived with a verified provider-TEE or gateway certificate. This
+is deliberate (R4: claim provenance only where the certificate supports it).
+The certificate is kept as history, and is not re-bound to the reviewed
+artifact.

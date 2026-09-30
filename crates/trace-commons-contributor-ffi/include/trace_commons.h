@@ -966,8 +966,8 @@ char*       tc_contribution_eligibility_reason_line(const char* reason);
  * tc_contribution_eligibility_line, which must not be called when the wire
  * carried no eligibility field. That field answers whether this contributor
  * may send this session -- a question only an evidence-admitted contributor
- * has. This one answers whether the session carries a checkable copy of the
- * model call that produced it, which is a fact about the trace, and the field
+ * has. This one answers whether the session carries a checkable copy of its
+ * last model call, which is a fact about the trace, and the field
  * is always present.
  *
  * THE POSITIVE CASE IS THE INTERESTING ONE HERE. A session that IS attested
@@ -1466,12 +1466,16 @@ char*       tc_source_check_line(const char* tool, const char* source_mode);
 /* Every fixed sentence on the consent surface, as an owned JSON object; free
  * it with tc_string_free. NULL only on a caught panic.
  *
- * Keys: gate_statement, ready_help, not_pinned_help.
+ * Keys: gate_statement, ready_help, not_pinned_help, auto_scrub_scope,
+ * auto_scrub_limit, auto_no_review. The auto_* three are for the automatic
+ * grant screen and are shown together, only where the certified full
+ * pipeline runs on every automatic session (see consent_copy.rs).
  *
- * ONE CALL, NOT ONE PER SENTENCE. Three sentences is not three exports: a
- * per-sentence export would let a shell take two of them and hand-write the
- * third, and one of the three is the claim about what leaves this machine that
- * a contributor reads immediately above an irreversible button.
+ * ONE CALL, NOT ONE PER SENTENCE. Six sentences is not six exports: a
+ * per-sentence export would let a shell take some of them and hand-write the
+ * rest, and gate_statement and the auto_* three are claims about what leaves
+ * this machine that a contributor reads immediately above an irreversible
+ * button.
  *
  * Refuse the WHOLE payload if any field is empty rather than rendering a blank
  * label. A missing sentence here is a missing claim.
@@ -1497,6 +1501,116 @@ char*       tc_consent_copy(void);
  * panic.
  */
 char*       tc_consent_gate_help(int32_t pinned);
+
+/* The notice for one grant R6 voided (the connect-and-forget design): that
+ * automatic contributing stopped, for which project or for new projects, why,
+ * and that it can be turned back on.
+ *
+ * void_json is ONE element of status's grant_voids list, passed through as
+ * the JSON object the daemon sent. Returns an owned JSON object with title,
+ * body, reasons_heading, reasons (a list of sentences), rearm, acknowledge,
+ * rearm_action and rearm_failed; free it with tc_string_free.
+ *
+ * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read kind or reasons to
+ * choose words natively. Once shown, call acknowledge_grant_voids with the
+ * element's id; acknowledging is all that button does.
+ *
+ * rearm_action and rearm_failed are null except on a project void that
+ * carries a project_id. When rearm_action is present, draw a second button
+ * with it that calls set_project_mode with the element's project_id and
+ * mode auto_upload -- the same call as arming by hand -- and show
+ * rearm_failed if the daemon refuses it. No other notice gets that button.
+ *
+ * An unknown kind, or a project void without a label, gets a notice that
+ * says automatic contributing stopped without saying for what: do not write
+ * a fallback natively. NULL only for a NULL, non-UTF-8 or unparseable
+ * argument, one that is not a JSON object, and on a caught panic.
+ */
+char*       tc_grant_void_notice(const char* void_json);
+
+/* The notice after a legacy invite identity moved to the contributor's NEAR
+ * AI account: that their contributions now go under that account, and
+ * whether their automatic folders were kept.
+ *
+ * notice_json is status's legacy_invite_migration.notice object, passed
+ * through as the daemon sent it. Returns an owned JSON object with title,
+ * body, folders and acknowledge; free it with tc_string_free. The folders
+ * sentence is already chosen: do not read folders_kept to choose words
+ * natively. Once shown, call acknowledge_legacy_invite_migration; that is all
+ * the button does.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, JSON null (nothing to
+ * show), anything that is not an object, and on a caught panic.
+ */
+char*       tc_legacy_migration_notice(const char* notice_json);
+
+/* The notice for approved sessions held because the privacy witness is busy.
+ *
+ * capacity_json is status's witness_capacity object, passed through as the
+ * daemon sent it. Returns an owned JSON object with title, body (counted) and
+ * next_check, the label to show beside next_retry_at rendered in local time;
+ * free it with tc_string_free.
+ *
+ * NULL when nothing is waiting (waiting_sessions absent, not a non-negative
+ * integer, or zero), for a NULL, non-UTF-8 or unparseable argument, and on a
+ * caught panic. Show nothing then; do not write a sentence natively.
+ */
+char*       tc_witness_capacity_notice(const char* capacity_json);
+
+/* K11: what leaves this machine, to whom, and what this client checked.
+ *
+ * facts_json is the daemon's route_disclosure result, passed through as sent.
+ * Returns an owned JSON object {"facts": ..., "copy": ...}: the facts,
+ * canonicalised, and the words for exactly those facts -- title, route,
+ * witness (check, classifier, origin and labels, or null), local_filter,
+ * receipts, attested_bodies (each a sentence or null) and session (the
+ * per-session labels and lines). A block is present only when it is true of
+ * the route; render what is there and decide nothing. Free it with
+ * tc_string_free.
+ *
+ * NULL for a NULL, non-UTF-8 or unparseable argument, for a route or origin
+ * this build does not know, and on a caught panic. Say it could not be read
+ * then; do not write a sentence natively.
+ */
+char*       tc_route_disclosure_copy(const char* facts_json);
+
+/* The labels for the daemon's certificate_detail: heading, measurement_label,
+ * signer_label and verified_at_review. Owned JSON; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_certificate_detail_copy(void);
+
+/* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
+ * panel and session. Owned JSON; free it with tc_string_free. NULL only on a
+ * caught panic.
+ */
+char*       tc_route_disclosure_unreadable_copy(void);
+
+/* The notice for one armed folder whose arming wording no longer claims a
+ * model scrubs its sessions (K5), from one element of status's
+ * arming_rewordings list, passed through as the daemon sent it. Returns an
+ * owned JSON object with title, body, now_heading, scope, limit, no_review,
+ * acknowledge, and ask_first_action / ask_first_failed (null unless the
+ * element carries a project_id); free it with tc_string_free. Acknowledge it
+ * with acknowledge_arming_rewordings and the element's id.
+ *
+ * NULL only for a NULL, non-UTF-8 or unparseable argument, one that is not a
+ * JSON object, and on a caught panic.
+ */
+char*       tc_arming_reworded_notice(const char* rewording_json);
+
+/* The notice for armed folders the automatic-contribution gate is holding,
+ * from status's automatic_contribution_held object, passed through as the
+ * daemon sent it. Returns an owned JSON object with title, body (counted),
+ * reasons (a list of sentences), release, ask_first, and projects (each with
+ * project_id, line, ask_first_action, ask_first_failed); free it with
+ * tc_string_free. It is never acknowledged: it goes when the hold does.
+ *
+ * NULL when nothing is held (held_sessions absent, not a non-negative
+ * integer, or zero), for a NULL, non-UTF-8 or unparseable argument, and on a
+ * caught panic. Show nothing then; do not write a sentence natively.
+ */
+char*       tc_gate_held_notice(const char* held_json);
 
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for

@@ -15,7 +15,7 @@
 //! is not the contributor declining to upload, and letting a two-week clock
 //! run through one would silently discard traces nobody chose to discard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -270,6 +270,32 @@ pub struct QueueEntry {
     /// latter is deliberate -- see `Queue::approve`.
     #[serde(default)]
     pub approved_at: Option<DateTime<Utc>>,
+    /// Whether this entry reached `Approved` without the contributor
+    /// deciding, through a project's standing `auto_upload` opt-in.
+    ///
+    /// The distinction matters for retraction.
+    /// `refuse_pending_for_project` deliberately leaves `Approved` alone,
+    /// because "an approval is a decision the contributor already made" --
+    /// and that reasoning holds for an approval they made. It does not hold
+    /// for one the watcher made on their behalf: a contributor excluding a
+    /// project has not changed their mind about a decision, because they
+    /// never made one. `retract_unattended_for_project` uses this to
+    /// separate the two, so exclusion reaches an unattended backlog without
+    /// ever retracting a decision somebody actually took.
+    ///
+    /// Not derivable from `previewed_envelope_digest`, which is also `None`
+    /// when a contributor approves a queue row without opening the preview.
+    /// That conflates a decision with the absence of one, which is the exact
+    /// distinction this field exists to keep.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade. An older entry reads as
+    /// `false`, which is the safe direction: it will not be retracted, and
+    /// the worst case is that an unattended approval predating this field
+    /// survives an exclusion the way it does today.
+    #[serde(default)]
+    pub approved_unattended: bool,
     /// How many delegated subagent transcripts this entry's session hash
     /// covers, and how many were left out because the conversation exceeded
     /// the source's raw byte budget.
@@ -345,9 +371,9 @@ pub struct QueueEntry {
     pub eligibility: Option<String>,
     #[serde(default)]
     pub eligibility_reason: Option<String>,
-    /// Whether this session carries proof of the model call that produced
-    /// it, and why not when it does not: one of `attestation_mark`'s `MARK_*`
-    /// labels and one of its `REASON_*` labels.
+    /// Whether this session carries proof of its last model call, and why
+    /// not when it does not: one of `attestation_mark`'s `MARK_*` labels
+    /// and one of its `REASON_*` labels.
     ///
     /// **Recorded for every contributor, not only the evidence-admitted
     /// ones.** `eligibility` above answers a permission question, and an
@@ -380,6 +406,42 @@ pub struct QueueEntry {
 }
 
 impl QueueEntry {
+    /// Whether this entry is waiting on a person and must not be approved on
+    /// anyone's behalf. See [`REASONS_NEEDING_A_PERSON`].
+    pub fn held_for_review(&self) -> bool {
+        self.state == QueueState::Pending
+            && self
+                .reason_label
+                .as_deref()
+                .is_some_and(|reason| REASONS_NEEDING_A_PERSON.contains(&reason))
+    }
+
+    /// A paced retry -- a transient classifier outage, or a witness at
+    /// capacity -- stays approved, but cannot be claimed before its
+    /// persisted deadline. A missing deadline fails closed.
+    pub(crate) fn ready_for_upload(&self, now: DateTime<Utc>) -> bool {
+        self.state == QueueState::Approved
+            && (!self.waiting_on_a_retry() || self.retry_after.is_some_and(|due| due <= now))
+    }
+
+    /// Whether this entry is approved and paced behind a deadline rather
+    /// than free to go on the next pass.
+    fn waiting_on_a_retry(&self) -> bool {
+        matches!(
+            self.reason_label.as_deref(),
+            Some(
+                crate::submit::REASON_TRANSIENT_REDACTION | crate::submit::REASON_WITNESS_SATURATED
+            )
+        )
+    }
+
+    /// Whether this entry is approved and held because the witness is at
+    /// capacity. What `status.witness_capacity` counts.
+    pub(crate) fn waiting_on_witness_capacity(&self) -> bool {
+        self.state == QueueState::Approved
+            && self.reason_label.as_deref() == Some(crate::submit::REASON_WITNESS_SATURATED)
+    }
+
     /// Whether a witness certificate is held for the bytes this entry was
     /// pinned to.
     ///
@@ -491,6 +553,29 @@ pub const REASON_TOO_LARGE: &str = "envelope-too-large";
 /// make the recovery route a lie.
 pub const REASON_PROJECT_IGNORED: &str = "project-ignored";
 
+/// A pending entry revoked because its upload needs a per-session review by
+/// a person: token distributions are on, and they clear only through a
+/// witness review of that one session.
+pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-review-required";
+
+/// Revocation reasons that no unattended re-approval can satisfy.
+///
+/// An entry revoked for one of these is *held for review*: the watcher does
+/// not re-approve it under a standing `auto_upload` opt-in, and a group
+/// approve leaves it out. Before this the watcher re-approved it on the next
+/// poll without asking why it had been revoked, the uploader revoked it
+/// again, and the pair looped forever -- the session never uploaded, and
+/// flipped between Approved and Pending too quickly for the digest to count
+/// it.
+///
+/// Deliberately narrow. A reason belongs here only if re-approving without a
+/// person cannot succeed. `scopes-changed` does not: re-applying the standing
+/// opt-in under the new scopes is exactly what arming means.
+pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
+    REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
+    crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+];
+
 /// Strip an entry back to a fresh offer, keeping only provenance.
 ///
 /// Factored out so `supersede` and any future re-offer path cannot drift:
@@ -513,6 +598,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         approved_correction: None,
         approved_inputs: None,
         approved_at: None,
+        approved_unattended: false,
         previewed_envelope_digest: None,
         attested_inference: None,
         // The caller found content the watcher never observed (the
@@ -532,6 +618,23 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         attestation: None,
         attestation_reason: None,
         ..old
+    }
+}
+
+/// What `Queue::reoffer_refused_for_reason` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReofferOutcome {
+    /// Entries returned to a fresh `Pending` offer.
+    pub reoffered: usize,
+    /// Stale entries retired as `Superseded` because their file already had
+    /// a live entry.
+    pub superseded: usize,
+}
+
+impl ReofferOutcome {
+    /// Whether the queue changed, so the caller must save and announce it.
+    pub fn changed(&self) -> bool {
+        self.reoffered + self.superseded > 0
     }
 }
 
@@ -769,6 +872,11 @@ impl Queue {
 
     pub fn set_state(&mut self, entry_id: Uuid, state: QueueState, reason_label: Option<String>) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            if e.reason_label.as_deref() == Some(crate::submit::REASON_TRANSIENT_REDACTION)
+                && !matches!(state, QueueState::Approved | QueueState::Uploading)
+            {
+                e.retry_after = None;
+            }
             e.state = state;
             e.reason_label = reason_label;
         }
@@ -792,6 +900,205 @@ impl Queue {
             }
         }
         purged
+    }
+
+    /// Refuse every `Approved` entry for `project_key` that nobody decided.
+    ///
+    /// The companion to `refuse_pending_for_project`, and deliberately not a
+    /// widening of it. That method leaves `Approved` alone because an
+    /// approval is a decision the contributor already made, and a later
+    /// project-level preference must not silently retract a decision. This
+    /// method retracts only approvals made by the watcher under a standing
+    /// `auto_upload` opt-in, where no such decision exists: excluding the
+    /// project *is* the contributor's first and only decision about those
+    /// sessions.
+    ///
+    /// Without this, excluding a project stops nothing already approved, and
+    /// under an automatic default that is most of a contributor's backlog --
+    /// the whole settled history is approved within about two polls, and
+    /// `drain_approved` keeps sending it at the daily cap long after the
+    /// contributor said no.
+    ///
+    /// `Uploading` is still left alone, as it is by the sibling: those bytes
+    /// are already in flight and retraction is withdrawal's job, not the
+    /// queue's.
+    pub fn retract_unattended_for_project(&mut self, project_key: &str) -> usize {
+        let mut retracted = 0usize;
+        for e in self.entries.iter_mut() {
+            if e.project_key == project_key
+                && e.state == QueueState::Approved
+                && e.approved_unattended
+            {
+                e.state = QueueState::Refused;
+                e.reason_label = Some(REASON_PROJECT_IGNORED.to_string());
+                e.retry_after = None;
+                retracted += 1;
+            }
+        }
+        retracted
+    }
+
+    /// Release every hold for `reason_label`, returning how many moved.
+    ///
+    /// For a hold whose cause is gone. A hold is keyed on the label it was
+    /// revoked with, not on the setting that produced it, so turning token
+    /// distributions off would otherwise leave every held session held: an
+    /// armed project's finished sessions sat `Pending` until expiry took
+    /// them, and the standing opt-in quietly stopped applying.
+    ///
+    /// The entry stays `Pending` with the label cleared, so the watcher can
+    /// approve it again under a standing opt-in, and it is dated `now`, since
+    /// expiry counts from `discovered_at` and the hold may have lasted weeks.
+    pub fn release_holds_for_reason(&mut self, reason_label: &str, now: DateTime<Utc>) -> usize {
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Pending && e.reason_label.as_deref() == Some(reason_label) {
+                e.reason_label = None;
+                e.discovered_at = now;
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Re-offer every entry refused for `reason_label`, returning how many
+    /// moved.
+    ///
+    /// For a refusal that says nothing about the session itself -- a gate
+    /// that was closed at the moment of the send and has since been opened.
+    /// Such an entry is stuck otherwise: it is `Refused`, nothing moves a
+    /// refused entry, and the watcher does not re-offer a session whose file
+    /// has not changed. So the send is lost, although the only thing wrong
+    /// with it was timing.
+    ///
+    /// The entry goes back to `Pending`, not `Approved`, through
+    /// [`Self::return_to_waiting`]: every term of its old approval cleared,
+    /// no reason label, and dated `now`. The approval was given before the
+    /// gate it depended on had been satisfied, so it is asked for again
+    /// rather than carried over. In an `auto_upload` folder the watcher
+    /// re-approves it on its next pass; in any other folder the contributor
+    /// decides again.
+    ///
+    /// Two further conditions, both from review:
+    ///
+    /// - The re-offer is dated `now`. Expiry counts from `discovered_at`, and
+    ///   the gate's health label held expiry off the whole time these waited,
+    ///   so an entry refused on day 0 and re-offered on day 15 would otherwise
+    ///   be expired on the next tick, before anyone saw it -- losing the
+    ///   sessions that waited longest, which this exists to recover.
+    /// - An entry whose file already has a live entry is not revived; it is
+    ///   marked `Superseded` (`REASON_CHANGED`) instead. If the session grew
+    ///   while this one sat refused, the watcher has already offered the new
+    ///   content, and reviving the old entry would put a second card beside
+    ///   it describing bytes that no longer exist. Merely skipping it only
+    ///   postponed that: it kept the gate's refusal label, so the first pass
+    ///   after the newer entry stopped being live -- uploaded, or dismissed
+    ///   by the contributor -- revived it. Superseding retires it for good.
+    ///
+    /// Returns what moved, re-offers and supersedes separately, so a caller
+    /// saves and announces when either happened.
+    pub fn reoffer_refused_for_reason(
+        &mut self,
+        reason_label: &str,
+        now: DateTime<Utc>,
+    ) -> ReofferOutcome {
+        let live_paths: HashSet<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.state,
+                    QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                )
+            })
+            .map(|e| e.path.clone())
+            .collect();
+        let (stale, fresh): (Vec<(Uuid, bool)>, Vec<(Uuid, bool)>) = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.state == QueueState::Refused && e.reason_label.as_deref() == Some(reason_label)
+            })
+            .map(|e| (e.entry_id, live_paths.contains(&e.path)))
+            .partition(|(_, has_live)| *has_live);
+        for (id, _) in &stale {
+            self.set_state(
+                *id,
+                QueueState::Superseded,
+                Some(REASON_CHANGED.to_string()),
+            );
+        }
+        for (id, _) in &fresh {
+            self.return_to_waiting(*id, now);
+        }
+        ReofferOutcome {
+            reoffered: fresh.len(),
+            superseded: stale.len(),
+        }
+    }
+
+    /// Return every unattended approval for `project_key` to waiting,
+    /// returning how many moved.
+    ///
+    /// For turning automatic contributing off. The sibling
+    /// `retract_unattended_for_project` refuses them, which is right for
+    /// `Ignore` -- the contributor said not to offer this project at all.
+    /// Turning automatic off says something narrower: stop sending without
+    /// asking, and ask instead. So these become ordinary waiting cards, with
+    /// the old approval's terms cleared, for the contributor to decide.
+    ///
+    /// Without this, turning automatic off left every session it had already
+    /// approved uploading, which the confirmation that turned it on promised
+    /// it would not.
+    pub fn return_unattended_to_waiting_for_project(
+        &mut self,
+        project_key: &str,
+        now: DateTime<Utc>,
+    ) -> usize {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.project_key == project_key
+                    && e.state == QueueState::Approved
+                    && e.approved_unattended
+            })
+            .map(|e| e.entry_id)
+            .collect();
+        for id in &ids {
+            self.return_to_waiting(*id, now);
+        }
+        ids.len()
+    }
+
+    /// Put one entry back to a fresh offer: `Pending`, every term of its old
+    /// approval cleared, no reason label left naming a condition that no
+    /// longer holds, and dated `now`.
+    ///
+    /// Dated now because expiry counts from `discovered_at`. A session in an
+    /// armed project that stayed active for two weeks and was then approved
+    /// unattended would otherwise be expired on the next pass after the
+    /// project went to ask-first, instead of showing as waiting -- the
+    /// opposite of what the arming copy promises.
+    pub fn return_to_waiting(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> bool {
+        if !self.revoke_approval(entry_id, "") {
+            return false;
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.reason_label = None;
+            e.discovered_at = now;
+        }
+        true
+    }
+
+    /// Whether `entry_id` is still an approval made on the contributor's
+    /// behalf. For a caller that chose it earlier and let the lock go: in
+    /// between, the contributor may have dismissed it or approved it
+    /// themselves, and neither decision may be undone.
+    pub fn is_unattended_approval(&self, entry_id: Uuid) -> bool {
+        self.entries.iter().any(|e| {
+            e.entry_id == entry_id && e.state == QueueState::Approved && e.approved_unattended
+        })
     }
 
     /// Drop every `project-ignored` refusal belonging to `project_key`,
@@ -877,11 +1184,51 @@ impl Queue {
         }
         e.state = QueueState::Approved;
         e.reason_label = None;
+        e.retry_after = None;
+        // The latest approver wins. An entry can be auto-approved, revoked
+        // back to `Pending` by a scope change or an Undo, and then approved
+        // by hand; without this reset it would still be marked unattended
+        // and could be retracted as though nobody had decided it.
+        // `approve_unattended` sets it back to `true` after calling here.
+        e.approved_unattended = false;
         e.approved_scopes = Some(scopes.to_vec());
         e.approved_inputs = inputs.map(str::to_string);
         e.approved_verdict = verdict.map(str::to_string);
         e.approved_correction = correction.map(str::to_string);
         e.approved_at = approved_at;
+        true
+    }
+
+    /// Approve through a project's standing `auto_upload` opt-in.
+    ///
+    /// Identical to [`Queue::approve`] except that it records the approval as
+    /// unattended, so [`Queue::retract_unattended_for_project`] can tell it
+    /// apart from one the contributor made. A separate entry point rather
+    /// than a seventh parameter on `approve`: every existing caller of
+    /// `approve` is a contributor acting, and none of them should have to
+    /// pass a flag to say so.
+    pub fn approve_unattended(
+        &mut self,
+        entry_id: Uuid,
+        scopes: &[String],
+        inputs: Option<&str>,
+    ) -> bool {
+        // Checked here rather than at each caller: nobody may approve a held
+        // entry on a contributor's behalf, and a check at the call sites is
+        // one a future caller can leave out.
+        if self
+            .entries
+            .iter()
+            .any(|e| e.entry_id == entry_id && e.held_for_review())
+        {
+            return false;
+        }
+        if !self.approve(entry_id, scopes, inputs, None, None, None) {
+            return false;
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.approved_unattended = true;
+        }
         true
     }
 
@@ -980,11 +1327,11 @@ impl Queue {
     /// proceed from the snapshot and overwrite `Pending` with `Uploaded`.
     /// The contributor was told an upload was cancelled after it had been
     /// sent.
-    pub fn claim_for_upload(&mut self, entry_id: Uuid) -> bool {
+    pub fn claim_for_upload(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
-        if e.state != QueueState::Approved {
+        if !e.ready_for_upload(now) {
             return false;
         }
         e.state = QueueState::Uploading;
@@ -1011,6 +1358,24 @@ impl Queue {
         changed
     }
 
+    /// Revoke an unattended approval and pin the certified review the
+    /// witness has just produced for it, so a person opening the entry sees
+    /// those bytes instead of running the witness again (the spec's R5).
+    /// `reason_label` should be one of [`REASONS_NEEDING_A_PERSON`]: the pin
+    /// is kept, and nothing re-approves the entry without someone.
+    pub fn hold_with_witness_pin(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: &str,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+    ) -> bool {
+        if !self.revoke_approval(entry_id, reason_label) {
+            return false;
+        }
+        self.record_previewed_envelope(entry_id, pin, attested_inference)
+    }
+
     /// Revoke an approval and put the entry back in front of the
     /// contributor, because the terms it was approved under no longer hold.
     /// Returns whether anything changed.
@@ -1020,11 +1385,16 @@ impl Queue {
         };
         e.state = QueueState::Pending;
         e.reason_label = Some(reason_label.to_string());
+        e.retry_after = None;
         e.approved_scopes = None;
         e.approved_verdict = None;
         e.approved_correction = None;
         e.approved_inputs = None;
         e.approved_at = None;
+        // A term of approval like the rest, so it clears with them. A
+        // `Pending` entry carrying it would apply to whatever approval came
+        // next, which is the stale-term failure `reoffered_from` documents.
+        e.approved_unattended = false;
         // The artifact the contributor was shown is no longer the one that
         // would be sent, so the re-offer must be previewed afresh.
         e.previewed_envelope_digest = None;
@@ -1097,6 +1467,22 @@ impl Queue {
     pub fn set_submission_id(&mut self, entry_id: Uuid, submission_id: Uuid) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             e.submission_id = Some(submission_id);
+        }
+    }
+
+    /// Hold an approved entry until `until` because the witness is at
+    /// capacity, without counting an attempt: this entry was never sent, it
+    /// is held because another one just learned the witness is busy.
+    /// Returns whether it was held. Anything no longer `Approved` -- the
+    /// contributor cancelled or withdrew it meanwhile -- is left alone.
+    pub fn defer_for_witness_capacity(&mut self, entry_id: Uuid, until: DateTime<Utc>) -> bool {
+        match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            Some(e) if e.state == QueueState::Approved => {
+                e.reason_label = Some(crate::submit::REASON_WITNESS_SATURATED.to_string());
+                e.retry_after = Some(until);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1337,6 +1723,7 @@ impl Queue {
         }
         e.state = QueueState::Pending;
         e.reason_label = None;
+        e.retry_after = None;
         e.approved_scopes = None;
         e.approved_verdict = None;
         e.approved_correction = None;
@@ -1433,6 +1820,36 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R5, the queue half: an unattended approval held after the witness
+    /// goes back to waiting with its certified review pinned, and nothing
+    /// re-approves it on the contributor's behalf.
+    #[test]
+    fn a_witness_hold_keeps_its_pin_and_waits_for_a_person() {
+        let mut q = Queue::default();
+        let e = QueueEntry {
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        q.push_for_test(e);
+        let pin = format!("{WITNESS_PIN_PREFIX}{}", "ab".repeat(32));
+
+        assert!(q.hold_with_witness_pin(
+            id,
+            crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+            &pin,
+            None
+        ));
+        let e = q.get(id).unwrap().clone();
+        assert_eq!(e.state, QueueState::Pending);
+        assert!(!e.approved_unattended);
+        assert_eq!(e.previewed_envelope_digest.as_deref(), Some(pin.as_str()));
+        assert!(e.holds_witness_certificate());
+        assert!(e.held_for_review());
+        assert!(!q.approve_unattended(id, &[], None), "not on their behalf");
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+    }
     use crate::config::tests_support::temp_store;
 
     use crate::daemon::test_support::at;
@@ -1964,6 +2381,39 @@ mod tests {
         assert_eq!(
             q.get(id).unwrap().retry_after,
             Some(at("2026-08-08T12:15:00Z"))
+        );
+    }
+
+    #[test]
+    fn scheduled_transient_approval_cannot_upload_early_and_can_be_cancelled() {
+        let mut q = Queue::new();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.state = QueueState::Approved;
+        e.reason_label = Some("privacy-filter-transient".into());
+        e.retry_after = Some(at("2026-08-08T12:01:00Z"));
+        e.approved_scopes = Some(vec!["debugging_evaluation".into()]);
+        e.approved_inputs = Some("sha256:approved-inputs".into());
+        e.previewed_envelope_digest = Some("sha256:approved-envelope".into());
+        let id = e.entry_id;
+        q.upsert(e, 500).unwrap();
+
+        assert!(q.pinned_entry_ids().contains(&id));
+        assert!(
+            !q.claim_for_upload(id, at("2026-08-08T12:00:59Z")),
+            "retry cannot bypass its deadline"
+        );
+        q.cancel(id).unwrap();
+
+        let cancelled = q.get(id).unwrap();
+        assert_eq!(cancelled.state, QueueState::Pending);
+        assert!(cancelled.approved_scopes.is_none());
+        assert!(cancelled.approved_inputs.is_none());
+        assert!(cancelled.previewed_envelope_digest.is_none());
+        assert!(!q.pinned_entry_ids().contains(&id));
+        q.set_state(id, QueueState::Failed, Some("claim-mint-failed".into()));
+        assert!(
+            !q.claim_for_upload(id, at("2026-08-08T13:00:00Z")),
+            "other Failed outcomes remain terminal"
         );
     }
 
@@ -2593,6 +3043,300 @@ mod tests {
             QueueState::Pending,
             "another project is untouched"
         );
+    }
+
+    #[test]
+    fn excluding_a_project_retracts_approvals_nobody_made() {
+        // The backlog case. Under an automatic default the watcher approves a
+        // contributor's settled history within about two polls, so by the time
+        // they exclude the project most of it is already `Approved` and
+        // `refuse_pending_for_project` reaches none of it.
+        let mut q = Queue::default();
+        let pending = entry_in("/w/alpha", QueueState::Pending);
+        let unattended = entry_in("/w/alpha", QueueState::Approved);
+        let unattended_id = unattended.entry_id;
+        q.push_for_test(pending);
+        q.push_for_test(QueueEntry {
+            approved_unattended: true,
+            ..unattended
+        });
+
+        let retracted = q.retract_unattended_for_project("/w/alpha");
+
+        assert_eq!(retracted, 1);
+        let e = q
+            .all()
+            .iter()
+            .find(|e| e.entry_id == unattended_id)
+            .cloned();
+        let e = e.expect("entry present");
+        assert_eq!(e.state, QueueState::Refused);
+        assert_eq!(e.reason_label.as_deref(), Some(REASON_PROJECT_IGNORED));
+    }
+
+    /// Reviewed on #1011: a returned session kept its original date, so one
+    /// that had been active in an armed project for two weeks was expired on
+    /// the next pass after the project went to ask-first.
+    #[test]
+    fn a_returned_session_is_dated_now_and_survives_the_next_expiry() {
+        let now = Utc::now();
+        let mut q = Queue::default();
+        let long_running = QueueEntry {
+            approved_unattended: true,
+            discovered_at: now - Duration::days(20),
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        q.push_for_test(long_running);
+
+        assert_eq!(
+            q.return_unattended_to_waiting_for_project("/w/alpha", now),
+            1
+        );
+        assert_eq!(q.expire(now, 14, false), 0);
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+    }
+
+    /// The check the upload pass makes under the lock before acting on a
+    /// choice it made earlier. A contributor's own approval, and a dismissal,
+    /// both make it false, so neither is undone.
+    #[test]
+    fn an_entry_stops_being_an_unattended_approval_once_the_contributor_acts() {
+        let mut q = Queue::default();
+        let e = entry_in("/w/alpha", QueueState::Pending);
+        let id = e.entry_id;
+        q.push_for_test(e);
+        assert!(q.approve_unattended(id, &[], None));
+        assert!(q.is_unattended_approval(id));
+
+        assert!(q.revoke_approval(id, ""));
+        assert!(q.approve(id, &[], None, None, None, None));
+        assert!(!q.is_unattended_approval(id), "their approval now");
+
+        q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
+        assert!(!q.is_unattended_approval(id), "dismissed");
+    }
+
+    #[test]
+    fn a_held_entry_is_approved_by_a_person_and_never_on_their_behalf() {
+        let mut q = Queue::default();
+        let e = QueueEntry {
+            reason_label: Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string()),
+            ..entry_in("/w/alpha", QueueState::Pending)
+        };
+        let id = e.entry_id;
+        q.push_for_test(e);
+        assert!(q.all()[0].held_for_review());
+
+        assert!(!q.approve_unattended(id, &[], None), "not on their behalf");
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+
+        assert!(q.approve(id, &[], None, None, None, None), "a person may");
+        assert!(
+            !q.all()[0].held_for_review(),
+            "an approved entry is not held"
+        );
+    }
+
+    #[test]
+    fn a_refusal_for_a_since_opened_gate_is_re_offered_and_no_other_is() {
+        let mut q = Queue::default();
+        let gated = QueueEntry {
+            approved_unattended: true,
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        let gated_id = gated.entry_id;
+        q.push_for_test(gated);
+        q.push_for_test(QueueEntry {
+            reason_label: Some("secret-leak-detected".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        });
+        q.push_for_test(QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Uploaded)
+        });
+
+        assert_eq!(
+            q.reoffer_refused_for_reason("gate-closed", Utc::now())
+                .reoffered,
+            1
+        );
+
+        let e = q.all().iter().find(|e| e.entry_id == gated_id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(e.reason_label, None);
+        assert!(
+            !e.approved_unattended,
+            "the old approval's terms are cleared"
+        );
+        let states: Vec<_> = q.all().iter().map(|e| e.state).collect();
+        assert!(
+            states.contains(&QueueState::Refused),
+            "another reason is left alone"
+        );
+        assert!(
+            states.contains(&QueueState::Uploaded),
+            "only Refused entries move"
+        );
+    }
+
+    /// Reviewed as High on #1009. The gate's health label held expiry off
+    /// while these waited, so a re-offer that kept its original date would be
+    /// expired on the next tick -- losing the sessions that waited longest.
+    #[test]
+    fn a_re_offer_is_dated_now_and_survives_the_next_expiry() {
+        let now = Utc::now();
+        let mut q = Queue::default();
+        let long_ago = QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            discovered_at: now - Duration::days(20),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        q.push_for_test(long_ago);
+
+        assert_eq!(
+            q.reoffer_refused_for_reason("gate-closed", now).reoffered,
+            1
+        );
+        assert_eq!(q.expire(now, 14, false), 0, "a fresh offer is not expired");
+        assert_eq!(q.all()[0].state, QueueState::Pending);
+        assert_eq!(q.all()[0].discovered_at, now);
+    }
+
+    /// A refused entry is not revived beside a newer live one for the same
+    /// file: the watcher has already offered the grown session, and the old
+    /// entry describes bytes that no longer exist.
+    #[test]
+    fn a_re_offer_skips_a_file_that_already_has_a_live_entry() {
+        let mut q = Queue::default();
+        let stale = QueueEntry {
+            reason_label: Some("gate-closed".to_string()),
+            ..entry_in("/w/alpha", QueueState::Refused)
+        };
+        let path = stale.path.clone();
+        q.push_for_test(stale);
+        q.push_for_test(QueueEntry {
+            path,
+            ..entry_in("/w/alpha", QueueState::Pending)
+        });
+
+        let outcome = q.reoffer_refused_for_reason("gate-closed", Utc::now());
+        assert_eq!(outcome.reoffered, 0);
+        assert_eq!(
+            outcome.superseded, 1,
+            "the stale entry is retired, not left refused"
+        );
+    }
+
+    /// Reviewed as Medium on #1009. Skipping the stale entry only postponed
+    /// its revival: it kept the gate's refusal label, so the first pass after
+    /// the newer entry stopped being live revived it. Both ways the newer
+    /// entry stops being live are covered -- it is uploaded (the watcher then
+    /// sees the unchanged file as done and never supersedes the stale one),
+    /// or the contributor dismisses it (and a declined conversation must not
+    /// come back as a card).
+    #[test]
+    fn a_skipped_stale_entry_is_not_revived_once_the_newer_one_is_settled() {
+        for settled in [
+            (QueueState::Uploaded, None),
+            (QueueState::Refused, Some(REASON_DISMISSED.to_string())),
+        ] {
+            let mut q = Queue::default();
+            let stale = QueueEntry {
+                reason_label: Some("gate-closed".to_string()),
+                ..entry_in("/w/alpha", QueueState::Refused)
+            };
+            let stale_id = stale.entry_id;
+            let path = stale.path.clone();
+            q.push_for_test(stale);
+            let newer = QueueEntry {
+                path,
+                ..entry_in("/w/alpha", QueueState::Pending)
+            };
+            let newer_id = newer.entry_id;
+            q.push_for_test(newer);
+
+            assert_eq!(
+                q.reoffer_refused_for_reason("gate-closed", Utc::now())
+                    .reoffered,
+                0
+            );
+            q.set_state(newer_id, settled.0, settled.1.clone());
+            assert_eq!(
+                q.reoffer_refused_for_reason("gate-closed", Utc::now())
+                    .reoffered,
+                0,
+                "a later pass revived the stale entry after the newer one became {:?}",
+                settled.0
+            );
+
+            let e = q.all().iter().find(|e| e.entry_id == stale_id).unwrap();
+            assert_eq!(e.state, QueueState::Superseded);
+            assert_eq!(e.reason_label.as_deref(), Some(REASON_CHANGED));
+        }
+    }
+
+    #[test]
+    fn excluding_a_project_leaves_an_approval_the_contributor_made() {
+        // The line `refuse_pending_for_project` draws, preserved. A decision
+        // the contributor actually took is not retracted by a later
+        // project-level preference; only one taken on their behalf is.
+        let mut q = Queue::default();
+        q.push_for_test(entry_in("/w/alpha", QueueState::Approved));
+        q.push_for_test(QueueEntry {
+            approved_unattended: true,
+            ..entry_in("/w/alpha", QueueState::Uploading)
+        });
+
+        let retracted = q.retract_unattended_for_project("/w/alpha");
+
+        assert_eq!(retracted, 0, "neither a decision nor an in-flight upload");
+        let states: Vec<_> = q.all().iter().map(|e| e.state).collect();
+        assert!(states.contains(&QueueState::Approved));
+        assert!(states.contains(&QueueState::Uploading));
+    }
+
+    #[test]
+    fn approve_unattended_marks_the_approval_and_approve_does_not() {
+        // The distinction is not derivable from `previewed_envelope_digest`,
+        // which is `None` both here and when a contributor approves a queue
+        // row without opening the preview.
+        let mut q = Queue::default();
+        let by_hand = entry_in("/w/alpha", QueueState::Pending);
+        let by_hand_id = by_hand.entry_id;
+        q.push_for_test(by_hand);
+        assert!(q.approve(by_hand_id, &[], None, None, None, None));
+
+        let mut q2 = Queue::default();
+        let armed = entry_in("/w/beta", QueueState::Pending);
+        let armed_id = armed.entry_id;
+        q2.push_for_test(armed);
+        assert!(q2.approve_unattended(armed_id, &[], None));
+
+        let hand = q.all()[0].clone();
+        let auto = q2.all()[0].clone();
+        assert_eq!(hand.state, QueueState::Approved);
+        assert_eq!(auto.state, QueueState::Approved);
+        assert!(!hand.approved_unattended, "a contributor decided this one");
+        assert!(auto.approved_unattended, "the watcher decided this one");
+    }
+
+    #[test]
+    fn an_entry_written_before_the_field_existed_is_not_retracted() {
+        // `#[serde(default)]` reads an older queue line as `false`, which is
+        // the safe direction: such an entry keeps today's behaviour rather
+        // than being retracted on the strength of a field it never carried.
+        let line =
+            serde_json::to_value(entry_in("/w/alpha", QueueState::Approved)).expect("serialise");
+        let mut map = line.as_object().expect("object").clone();
+        map.remove("approved_unattended");
+        let restored: QueueEntry =
+            serde_json::from_value(serde_json::Value::Object(map)).expect("older line still loads");
+
+        assert!(!restored.approved_unattended);
+        let mut q = Queue::default();
+        q.push_for_test(restored);
+        assert_eq!(q.retract_unattended_for_project("/w/alpha"), 0);
     }
 
     #[test]

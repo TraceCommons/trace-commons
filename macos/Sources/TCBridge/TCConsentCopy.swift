@@ -29,4 +29,96 @@ public enum TCConsentCopy {
         defer { tc_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// The notice for one void, as a JSON object, from one element of
+    /// `status.grant_voids` passed through as the daemon sent it. Decoded by
+    /// `TCShellCore.GrantVoidNotice`.
+    ///
+    /// Nil when the ABI cannot read the element (an unknown kind, a project
+    /// void without a label) or on a caught panic. The choice between the
+    /// project and the grant wording is made by the ABI, not here.
+    public static func voidNoticeJSON(forVoid wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_grant_void_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The notice for one armed folder whose arming wording no longer claims
+    /// a model scrubs its sessions (K5), from one element of
+    /// `status.arming_rewordings` passed through (`ArmingRewordingWire.json`).
+    /// Decoded by `TCShellCore.ArmingRewordedNotice`. Nil only for an
+    /// argument that is not an element, or on a caught panic.
+    public static func armingRewordedNoticeJSON(forRewording wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_arming_reworded_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The notice for armed folders the automatic-contribution gate is
+    /// holding, from `status.automatic_contribution_held` passed through
+    /// (`GateHeld.json`). Decoded by `TCShellCore.GateHeldNotice`. Nil when
+    /// nothing is held, for an unreadable argument, or on a caught panic.
+    public static func gateHeldNoticeJSON(forHeld wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_gate_held_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// as a JSON object, from `status.legacy_invite_migration.notice`
+    /// (`LegacyMigrationWire.noticeJSON`). Decoded by
+    /// `TCShellCore.LegacyMigrationNotice`.
+    ///
+    /// Nil for `null` (nothing to show), an unreadable argument, or a caught
+    /// panic. Which folders sentence to show is the ABI's choice.
+    public static func legacyMigrationNoticeJSON(forNotice wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_legacy_migration_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The notice for approved sessions held on a busy privacy witness, as a
+    /// JSON object, from `status.witness_capacity` (`WitnessCapacity.wireJSON`).
+    /// Decoded by `TCShellCore.WitnessCapacityNotice`.
+    ///
+    /// Nil when nothing is waiting, for an unreadable argument, or on a
+    /// caught panic. The count and its wording are the ABI's.
+    public static func witnessCapacityNoticeJSON(forCapacity wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_witness_capacity_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// K11: the daemon's `route_disclosure` result in, `{facts, copy}` out,
+    /// from `tc_route_disclosure_copy`. Decoded by
+    /// `TCShellCore.RouteDisclosure`.
+    ///
+    /// Nil for anything the ABI cannot read, including a route or origin
+    /// newer than this build: the shell says it could not be read.
+    public static func routeDisclosureJSON(forFacts factsJSON: String) -> String? {
+        let raw = factsJSON.withCString { tc_route_disclosure_copy($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// What a disclosure surface says when `routeDisclosureJSON` is nil:
+    /// `panel` and `session`, from `tc_route_disclosure_unreadable_copy`.
+    public static func routeDisclosureUnreadableJSON() -> String? {
+        guard let raw = tc_route_disclosure_unreadable_copy() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The labels for `certificate_detail`, from `tc_certificate_detail_copy`.
+    public static func certificateDetailCopyJSON() -> String? {
+        guard let raw = tc_certificate_detail_copy() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
 }

@@ -31,8 +31,8 @@ namespace TraceCommons.Interop;
 /// <item>Never claim more erasure than the tier achieved -- which is why
 /// <see cref="Confirmation"/> shows an <c>accepted</c> trace BOTH commons
 /// bodies rather than picking the gentler one.</item>
-/// <item>Withdrawal does not reverse settled credit -- <see cref="CreditNote"/>,
-/// and nothing here implies otherwise.</item>
+/// <item>Withdrawal does not reverse settled credit and forfeits pending
+/// credit -- <see cref="CreditNote"/>, and nothing here implies otherwise.</item>
 /// <item><c>not_found</c> must not disclose which -- <see cref="NotFound"/>.</item>
 /// <item>Bulk withdrawal spans tiers -- <see cref="NoBulk"/> says why this
 /// shell does not offer it.</item>
@@ -85,10 +85,11 @@ public static class WithdrawCopy
         + "that have already been distributed cannot be recalled. Withdrawing does not undo that.";
 
     /// <summary>
-    /// Credit is not clawed back, and this says only that -- nothing about
-    /// how much, when it settles, or what it is worth.
+    /// Settled credit is not clawed back; credit still pending never settles
+    /// once the trace is withdrawn. This says only that -- nothing about how
+    /// much, when it would have settled, or what it is worth.
     /// </summary>
-    public const string CreditNote = "Credit already recorded stays.";
+    public const string CreditNote = "Credit that has already settled stays. Credit still pending is forfeited.";
 
     public const string Question = "Withdraw this trace?";
 

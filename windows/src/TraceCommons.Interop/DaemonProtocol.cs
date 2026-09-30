@@ -34,6 +34,19 @@ public static class DaemonProtocol
     {
         public const string Hello = "hello";
         public const string Status = "status";
+
+        /// <summary>
+        /// K11: what leaves this machine, to whom, and what this client
+        /// checked. Read-only, no network. Words come from
+        /// <see cref="RouteDisclosureSurface"/>, never from here.
+        /// </summary>
+        public const string RouteDisclosure = "route_disclosure";
+
+        /// <summary>
+        /// The held certificate's claims for one pending entry whose
+        /// <c>holds_certificate</c> is true.
+        /// </summary>
+        public const string CertificateDetail = "certificate_detail";
         public const string ListPending = "list_pending";
 
         /// <summary>
@@ -81,6 +94,26 @@ public static class DaemonProtocol
         public const string SetProjectMode = "set_project_mode";
         public const string ListAudit = "list_audit";
         public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
+
+        /// <summary>
+        /// Records that the void notices with these ids were shown. Takes
+        /// only the ids actually drawn: there is no "all", so a void raised
+        /// after the window drew is never cleared unseen. Re-arms nothing.
+        /// </summary>
+        public const string AcknowledgeGrantVoids = "acknowledge_grant_voids";
+
+        /// <summary>
+        /// Records that the notice after a legacy invite migration was
+        /// shown. Changes nothing else.
+        /// </summary>
+        public const string AcknowledgeLegacyInviteMigration = "acknowledge_legacy_invite_migration";
+
+        /// <summary>
+        /// Records that the rewording notices with these ids were shown (K5).
+        /// Only the ids actually drawn, with no "all". Changes nothing about
+        /// the folders.
+        /// </summary>
+        public const string AcknowledgeArmingRewordings = "acknowledge_arming_rewordings";
 
         /// <summary>
         /// Asks IronWire which tools on this machine are set to send through
@@ -550,7 +583,7 @@ public sealed class QueueEntry
     public string? EligibilityReason { get; set; }
 
     /// <summary>
-    /// Whether this session carries proof of the model call that produced it:
+    /// Whether this session carries proof of its last model call:
     /// <c>attested</c>, <c>unattested_permanent</c>,
     /// <c>unattested_configuration</c> or <c>unknown</c>.
     /// </summary>
@@ -609,7 +642,7 @@ public sealed class QueueEntry
     /// not because they share a mechanism.
     ///
     /// Not <see cref="Attestation"/>. That says whether the session carries a
-    /// copy of the model call that produced it; this says whether a
+    /// copy of its last model call; this says whether a
     /// certificate is held over the reviewed bytes.
     /// </remarks>
     [JsonPropertyName("holds_certificate")]
@@ -679,6 +712,57 @@ public sealed class DaemonStatus
     /// the daemon said nothing about it.
     /// </summary>
     public bool BudgetIsBlocking => DailyBudget?.Blocked == true;
+
+    /// <summary>
+    /// Grants the daemon voided that no shell has shown yet (R6 of the
+    /// connect-and-forget design), each kept as the daemon sent it so it can
+    /// go back to the ABI for its words. Null from a daemon older than the
+    /// field, which has voided nothing it can report.
+    /// </summary>
+    [JsonPropertyName("grant_voids")]
+    public List<JsonElement>? GrantVoids { get; set; }
+
+    /// <summary>
+    /// Whether moving a legacy invite identity to a NEAR AI account is
+    /// offered, and the notice after it moved, kept as the daemon sent it so
+    /// the notice can go back to the ABI for its words. Null from a daemon
+    /// older than the field.
+    /// </summary>
+    [JsonPropertyName("legacy_invite_migration")]
+    public JsonElement? LegacyInviteMigration { get; set; }
+
+    /// <summary>
+    /// Approved sessions held because the privacy witness is busy, and when
+    /// the first is tried again.
+    /// </summary>
+    /// <remarks>
+    /// Read independently of <see cref="Health"/> for the reason
+    /// <see cref="DailyBudget"/> is: the daemon sets a
+    /// <c>witness-saturated</c> label too, but a higher label can hold the
+    /// single slot while these sessions are still waiting. Null from a daemon
+    /// that predates the field, which holds nothing on the witness.
+    /// </remarks>
+    [JsonPropertyName("witness_capacity")]
+    public WitnessCapacity? WitnessCapacity { get; set; }
+
+    /// <summary>
+    /// Armed folders whose arming wording no longer claims a model scrubs
+    /// them, not yet shown by any shell (K5), each kept as the daemon sent it
+    /// so it can go back to the ABI for its words. Null from a daemon older
+    /// than the field.
+    /// </summary>
+    [JsonPropertyName("arming_rewordings")]
+    public List<JsonElement>? ArmingRewordings { get; set; }
+
+    /// <summary>
+    /// What the automatic-contribution gate held at the daemon's last full
+    /// pass, kept as the daemon sent it for the ABI to word. Read
+    /// independently of <see cref="Health"/>: a higher label can hold the
+    /// slot while armed folders are held. Null from a daemon older than the
+    /// field, which holds nothing.
+    /// </summary>
+    [JsonPropertyName("automatic_contribution_held")]
+    public JsonElement? AutomaticContributionHeld { get; set; }
 
     /// <summary>
     /// Whether there is nothing to report.
@@ -765,6 +849,44 @@ public sealed class DailyBudget
     public DateTimeOffset? ResetsAtUtc =>
         DateTimeOffset.TryParse(
             ResetsAt,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out var parsed)
+            ? parsed
+            : null;
+}
+
+/// <summary>
+/// <c>status.witness_capacity</c>: approved sessions held on a busy privacy
+/// witness. A count and one timestamp; nothing identifying can appear here.
+/// </summary>
+public sealed class WitnessCapacity
+{
+    [JsonPropertyName("waiting_sessions")]
+    public long WaitingSessions { get; set; }
+
+    /// <summary>When the first held session is tried again, as the daemon reported it.</summary>
+    [JsonPropertyName("next_retry_at")]
+    public string? NextRetryAt { get; set; }
+
+    /// <summary>Whether any approved session is waiting on the witness.</summary>
+    public bool Waiting => WaitingSessions > 0;
+
+    /// <summary>
+    /// The object handed to the Rust, which words the notice. The count is
+    /// all the words depend on, so it is all that crosses.
+    /// </summary>
+    public string WireJson =>
+        JsonSerializer.Serialize(new Dictionary<string, long>
+        {
+            ["waiting_sessions"] = Math.Max(0, WaitingSessions),
+        });
+
+    /// <summary><see cref="NextRetryAt"/> parsed, or null when absent or unreadable.</summary>
+    public DateTimeOffset? NextRetryAtUtc =>
+        DateTimeOffset.TryParse(
+            NextRetryAt,
             System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AdjustToUniversal
                 | System.Globalization.DateTimeStyles.AssumeUniversal,

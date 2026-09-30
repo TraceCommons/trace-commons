@@ -69,8 +69,9 @@ public static class WithdrawDialog
                 weighted: confirmation.Gravest == index));
         }
 
-        // Rule 3, on every tier: credit already recorded stays. Nothing in
-        // this dialog implies withdrawal reverses it.
+        // Rule 3, on every tier: settled credit stays, pending credit is
+        // forfeited. Nothing in this dialog implies withdrawal reverses
+        // settled credit.
         panel.Children.Add(new TextBlock
         {
             Text = confirmation.Credit,

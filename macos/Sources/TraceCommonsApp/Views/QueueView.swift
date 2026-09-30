@@ -84,6 +84,9 @@ struct QueueContent: View {
             if let budget = model.budgetHealth {
                 HealthBanner(health: budget)
             }
+            if let witness = model.witnessCapacityHealth {
+                HealthBanner(health: witness)
+            }
             if let undo = model.undo {
                 UndoBar(
                     undo: undo,
@@ -452,7 +455,7 @@ struct QueueRow: View {
             .map(PrivateInferenceIndicator.palette)
     }
 
-    // MARK: - Whether this session carries proof of the call it came from
+    // MARK: - Whether this session carries proof of its last model call
 
     /// The mark on the row, or none.
     ///

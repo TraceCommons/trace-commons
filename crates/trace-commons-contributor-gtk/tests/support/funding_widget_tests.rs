@@ -141,7 +141,10 @@ impl Fixture {
                 | "near_ai_balance"
                 | "get_public_profile"
                 | "list_audit"
-                | "discover_routing" => {
+                | "discover_routing"
+                // Settings' K11 disclosure; refused, it draws its unreadable
+                // line.
+                | "route_disclosure" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),
@@ -151,7 +154,11 @@ impl Fixture {
 
     fn reply(&self, id: u64, result: Result<Value, String>) {
         self.held.borrow_mut().remove(&id);
-        assert!(self.results.try_send((id, Outcome::Call(result))).is_ok());
+        assert!(
+            self.results
+                .try_send((id, Outcome::Call(result.map_err(Into::into))))
+                .is_ok()
+        );
     }
 
     fn answer(&self, index: usize, result: Result<Value, String>) {

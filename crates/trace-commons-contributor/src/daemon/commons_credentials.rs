@@ -10,7 +10,9 @@ use std::sync::Arc;
 use super::cloud_credential_lifecycle::{Journal, sync_directory};
 use super::credential_store::{CredentialReference, CredentialStore, SecretBackend};
 use super::nearai_credential::session::coordination;
-use crate::config::{ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, write_atomic_0600};
+use crate::config::{
+    ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, STAGED_DEVICE_KEY_FILE, write_atomic_0600,
+};
 
 const JOURNAL: &str = "commons-credential-cleanup.json";
 const EPOCH: &str = "commons-credential-generation.json";
@@ -20,18 +22,30 @@ const EPOCH: &str = "commons-credential-generation.json";
 pub(crate) enum Kind {
     Device,
     Account,
+    /// A device key generated for an identity this daemon is moving to and
+    /// has not switched to yet: the legacy invite migration's second key.
+    /// Never used to sign an upload claim. Its own domain, so an entry
+    /// staged here can never be read back as the live device key; promotion
+    /// re-publishes the payload as a `Device` entry instead.
+    StagedDevice,
 }
 impl Kind {
+    /// Every kind, for the passes that must see all of them: cleanup's
+    /// live-reference scan and logout.
+    pub(crate) const ALL: [Kind; 3] = [Kind::Device, Kind::Account, Kind::StagedDevice];
+
     fn file(self, store: &ConfigStore) -> std::path::PathBuf {
         match self {
             Self::Device => store.device_key_path(),
             Self::Account => store.daemon_path(ACCOUNT_SESSION_FILE),
+            Self::StagedDevice => store.daemon_path(STAGED_DEVICE_KEY_FILE),
         }
     }
     fn domain(self) -> &'static str {
         match self {
             Self::Device => "trace-commons/device-key/v1",
             Self::Account => "trace-commons/account-session/v1",
+            Self::StagedDevice => "trace-commons/staged-device-key/v1",
         }
     }
 }
@@ -124,7 +138,13 @@ fn binding(store: &ConfigStore, record: &Record) -> Result<String> {
 fn native(_store: &ConfigStore) -> Result<CredentialStore<Arc<dyn SecretBackend>>> {
     #[cfg(test)]
     let backend = test_backend(_store);
-    #[cfg(not(test))]
+    // Integration tests and the binaries they spawn: a file store in the
+    // test's own config dir, never the user's keychain.
+    #[cfg(all(not(test), feature = "test-credential-store"))]
+    let backend: Arc<dyn SecretBackend> = Arc::new(
+        super::test_credential_store::TestFileBackend::for_store(_store),
+    );
+    #[cfg(all(not(test), not(feature = "test-credential-store")))]
     let backend: Arc<dyn SecretBackend> =
         Arc::new(super::os_secret_store::OsSecretBackend::commons().map_err(|_| unavailable())?);
     Ok(CredentialStore::new(backend))
@@ -132,7 +152,13 @@ fn native(_store: &ConfigStore) -> Result<CredentialStore<Arc<dyn SecretBackend>
 
 /// Capture before a browser/network operation. Both sign-out and wipe advance
 /// this durable generation, so even an absent -> absent change invalidates it.
-#[derive(Clone)]
+///
+/// Equality is the whole of that: two snapshots taken either side of a
+/// sign-out, a wipe, a configuration change or a token rotation differ, so a
+/// caller holding a credential it loaded under one can tell from a fresh
+/// snapshot, which reads only local files, whether the credential still
+/// stands.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     generation: Option<Vec<u8>>,
     config: Option<Vec<u8>>,
@@ -384,7 +410,7 @@ fn cleanup_locked<B: SecretBackend>(
     let active = {
         let _commit = locks.commit.lock()?;
         let mut active = Vec::new();
-        for kind in [Kind::Device, Kind::Account] {
+        for kind in Kind::ALL {
             if let Some(bytes) = read(&kind.file(store))? {
                 if let Some(record) = record(&bytes)? {
                     active.push(record.reference);
@@ -422,6 +448,15 @@ pub(crate) fn cleanup(store: &ConfigStore) -> Result<()> {
     let _storage = locks.storage.lock()?;
     cleanup_locked(store, &native(store)?)
 }
+
+#[path = "commons_credentials_switch.rs"]
+mod switch;
+pub(crate) use switch::{
+    SwitchPhase, discard_staged_device_key, mark_switch_committed, pending_switch, retire_legacy,
+    roll_back_switch, stage_device_key, switch_identity,
+};
+#[cfg(test)]
+pub(crate) use switch::{fail_switch_after_for_test, load_staged_device_key};
 
 #[cfg(test)]
 fn test_registry()

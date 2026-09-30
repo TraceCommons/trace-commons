@@ -281,6 +281,86 @@ internal static class NativeMethods
     internal static extern IntPtr tc_consent_gate_help(int pinned);
 
     /// <summary>
+    /// The notice for one element of <c>status.grant_voids</c>, passed
+    /// through as the daemon sent it, as an owned JSON object. The choice
+    /// between the project and the automatic-grant wording is made on the
+    /// Rust side. NULL for an argument that is not a JSON object, and on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_grant_void_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? voidJson);
+
+    /// <summary>
+    /// The notice after a legacy invite identity moved to a NEAR AI account,
+    /// from <c>status.legacy_invite_migration.notice</c> passed through as
+    /// the daemon sent it, as an owned JSON object (title, body, folders,
+    /// acknowledge). The folders sentence is chosen on the Rust side. NULL
+    /// for JSON null, an argument that is not a JSON object, and on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_legacy_migration_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
+
+    /// <summary>
+    /// The notice for approved sessions held on a busy privacy witness, from
+    /// <c>status.witness_capacity</c>, as an owned JSON object (title, body,
+    /// next_check). Free it the way <see cref="TakeOwnedString"/> does. NULL
+    /// when nothing is waiting, for an unreadable argument, and on a caught
+    /// panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_witness_capacity_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string capacityJson);
+
+    /// <summary>
+    /// K11: the daemon's <c>route_disclosure</c> result in, as sent;
+    /// <c>{"facts", "copy"}</c> out -- the facts canonicalised and the words
+    /// for exactly those facts. Owned; release with
+    /// <see cref="tc_string_free"/>, which <see cref="TakeOwnedString"/>
+    /// does. NULL for anything unreadable, including a route or origin newer
+    /// than this build, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_route_disclosure_copy(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string factsJson);
+
+    /// <summary>
+    /// What a disclosure surface says when <see cref="tc_route_disclosure_copy"/>
+    /// answers NULL: <c>panel</c> and <c>session</c>. Owned. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_route_disclosure_unreadable_copy();
+
+    /// <summary>
+    /// The labels for the daemon's <c>certificate_detail</c>. Owned. NULL
+    /// only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_certificate_detail_copy();
+
+    /// <summary>
+    /// The notice for one element of <c>status.arming_rewordings</c> (K5),
+    /// passed through as the daemon sent it, as an owned JSON object. NULL
+    /// for an argument that is not a JSON object, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_arming_reworded_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string rewordingJson);
+
+    /// <summary>
+    /// The notice for armed folders the automatic-contribution gate holds,
+    /// from <c>status.automatic_contribution_held</c>, as an owned JSON
+    /// object. NULL when nothing is held, for an unreadable argument, and on
+    /// a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_gate_held_notice(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string heldJson);
+
+    /// <summary>
     /// Every fixed word on the private-inference offer and settings card, as
     /// an owned JSON object.
     ///
@@ -565,7 +645,7 @@ internal static class NativeMethods
 
     /// <summary>
     /// The sentence for one queue entry's <c>attestation</c> mark: whether
-    /// that session carries proof of the model call that produced it.
+    /// that session carries proof of its last model call.
     ///
     /// EVERY ROW REACHES HERE, INCLUDING AN INVITED CONTRIBUTOR'S. That is
     /// the opposite of the eligibility line's rule, and deliberately so: the

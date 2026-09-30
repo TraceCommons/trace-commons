@@ -953,7 +953,9 @@ impl Sheet {
             sheet.search_summary.set_text(copy.working);
             sheet.transcript.show_sentence(copy.working);
             let result_sheet = Rc::clone(&sheet);
-            sheet.app.call(
+            // `call_with_failure`: a busy witness sends the time to try again
+            // in the `result` beside its error label.
+            sheet.app.call_with_failure(
                 "witness_preview_request",
                 serde_json::json!({
                     "entry_id": entry.entry_id, "raw_session_confirmed": true
@@ -968,7 +970,10 @@ impl Sheet {
                             result_sheet.load()
                         }
                         Ok(_) => result_sheet.fill_failure("witness-review-incomplete"),
-                        Err(label) => result_sheet.fill_failure(&label),
+                        Err(failure) => result_sheet.fill_failure_with(
+                            &failure.label,
+                            crate::copy::witness_busy_retry_line(failure.result.as_ref()),
+                        ),
                     }
                     result_sheet.sync_witness();
                 },
@@ -1219,6 +1224,48 @@ impl Sheet {
         }
         self.whats_in_it.append(&detail);
 
+        // K11: what leaves this computer for this session, before and
+        // after redaction, and what its witness was checked against. Filled
+        // when the daemon answers; dropped if the sheet has moved on.
+        let disclosure = style::card(gtk::Orientation::Vertical, space::S);
+        self.whats_in_it.append(&disclosure);
+        if let Some(entry) = self.current() {
+            let entry_id = entry.entry_id.clone();
+            let held = entry.holds_certificate;
+            let raw = human_bytes(summary.raw_session_bytes);
+            let would_send = human_bytes(summary.would_send_bytes);
+            let sheet = Rc::clone(self);
+            let asked = entry_id.clone();
+            self.app.call(
+                "route_disclosure",
+                serde_json::json!({}),
+                move |app, facts| {
+                    let facts = facts.ok();
+                    let draw = move |certificate: Option<serde_json::Value>| {
+                        if sheet.current().is_none_or(|e| e.entry_id != entry_id) {
+                            return;
+                        }
+                        let rows = crate::disclosure::session(
+                            facts.as_ref(),
+                            &raw,
+                            &would_send,
+                            certificate.as_ref(),
+                        );
+                        super::fill_disclosure_rows(&disclosure, &rows);
+                    };
+                    if held {
+                        app.call(
+                            "certificate_detail",
+                            serde_json::json!({ "entry_id": asked }),
+                            move |_, detail| draw(detail.ok()),
+                        );
+                    } else {
+                        draw(None);
+                    }
+                },
+            );
+        }
+
         if !summary.enrolled {
             let unenrolled = style::card(gtk::Orientation::Vertical, space::S);
             let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -1265,6 +1312,13 @@ impl Sheet {
     }
 
     fn fill_failure(self: &Rc<Self>, label: &str) {
+        self.fill_failure_with(label, None);
+    }
+
+    /// [`Self::fill_failure`], with a second line under the sentence: when a
+    /// busy witness asked to be tried again. Shown only for a review the
+    /// person asked for, the one path that line can describe.
+    fn fill_failure_with(self: &Rc<Self>, label: &str, retry_line: Option<String>) {
         self.pinned.set(false);
         self.sync_contribute();
         self.sync_witness();
@@ -1293,9 +1347,13 @@ impl Sheet {
                 _ => "Something went wrong working out what would be sent. Nothing has been sent.",
             }
         };
+        let text = match retry_line {
+            Some(retry) if self.witness_requested.get() => format!("{sentence}\n{retry}"),
+            _ => sentence.to_string(),
+        };
         self.copy_all.set_sensitive(false);
-        self.transcript.show_sentence(sentence);
-        self.search_summary.set_text(sentence);
+        self.transcript.show_sentence(&text);
+        self.search_summary.set_text(&text);
     }
 
     fn set_summary_tone(&self, tone: Tone) {

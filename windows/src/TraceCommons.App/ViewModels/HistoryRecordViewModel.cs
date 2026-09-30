@@ -216,8 +216,9 @@ public sealed class HistoryRecordViewModel
 
     /// <summary>
     /// Shown only beside a successful withdrawal, and only ever says that
-    /// credit already recorded stays. Rule 3: withdrawal does not reverse
-    /// settled credit, and nothing here may imply it does.
+    /// settled credit stays and pending credit is forfeited. Rule 3:
+    /// withdrawal does not reverse settled credit, and nothing here may imply
+    /// it does.
     /// </summary>
     public bool ShowsWithdrawCreditNote => _attempt?.State == WithdrawalState.Done;
 

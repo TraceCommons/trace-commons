@@ -256,7 +256,6 @@ fn configure_git(mut command: Command, repo: &Path) -> Command {
         .args([
             "--no-pager",
             "--no-replace-objects",
-            "--no-lazy-fetch",
             "-c",
             "core.fsmonitor=false",
             "-c",

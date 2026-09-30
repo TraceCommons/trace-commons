@@ -73,6 +73,9 @@ manual prerequisites must be in place or the feature fail-closes:
 - **Passkey RP config (REQUIRED for passkeys).** Set `TRACE_COMMONS_WEBAUTHN_RP_ID`
   / `_RP_ORIGIN` / `_RP_NAME` (all three together) to the browser origin that serves
   the account login UI. Partial config disables passkeys with a startup warning.
+  The template takes the RP ID and origin from `TC_WEBAUTHN_RP_ID` (the apex,
+  `tracecommons.ai`), independent of `TC_PUBLIC_HOST`. Changing the RP ID
+  invalidates every registered passkey, so do not change it after launch.
 
 Optional / posture:
 - **NEAR login** (`TRACE_COMMONS_NEAR_RPC_URL` / `_NEAR_NETWORK` /
@@ -118,6 +121,7 @@ export TC_GCP_PROJECT=tracecommons-pilot-2026
 export TC_GCP_REGION=us-central1
 export TC_CLOUD_SQL_INSTANCE=tc-pilot
 export TC_PUBLIC_HOST=tracecommons.ai
+export TC_WEBAUTHN_RP_ID=tracecommons.ai   # apex; changing it invalidates every registered passkey
 export TC_LE_EMAIL=ops@example.com
 export TC_KMS_KEY_NAME=projects/$TC_GCP_PROJECT/locations/$TC_GCP_REGION/keyRings/tc-pilot/cryptoKeys/kek-v1
 export TC_GCS_BUCKET=tc-pilot-artifacts-<DATE>
@@ -245,7 +249,7 @@ can still mint the temporary workload JWT fallback. Then call
 The accepted-corpus response looks like:
 
 ```
-{"status":"accepted","credit_points_pending":5.2,"explanation":["Accepted into the private redacted corpus.","Attributed to tenant tenant_sha256:<hash>"]}
+{"status":"accepted","credit_points_pending":0.0,"explanation":["Accepted into the private redacted corpus.","Attributed to tenant tenant_sha256:<hash>","Scoring in progress; credit is assigned when the gate's evaluation completes."]}
 ```
 
 Confirm the GCS object lands:

@@ -118,12 +118,7 @@ async fn gate_driver_backend() -> Option<PgBackend> {
         .run_migrations()
         .await
         .expect("run migrations before provisioning the gate-driver role");
-    admin
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("get a connection to provision the gate-driver role")
-        .batch_execute(&format!("ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"))
+    grant_gate_driver_login(&admin)
         .await
         .unwrap_or_else(|e| panic!("grant LOGIN to {GATE_DRIVER_ROLE}: {e}"));
 
@@ -143,6 +138,75 @@ async fn gate_driver_backend() -> Option<PgBackend> {
     .await
     .expect("build a backend with the gate-driver pool configured");
     Some(backend)
+}
+
+/// Grant LOGIN to the gate-driver role.
+///
+/// Every test that needs the narrow pool calls this, and libtest runs them in
+/// parallel against one database. `ALTER ROLE` rewrites the role's
+/// `pg_authid` row even when LOGIN is already set, so two in flight update the
+/// same catalog tuple and PostgreSQL raises `XX000 tuple concurrently
+/// updated` -- surfacing as a bare `db error` in whichever test lost, on PRs
+/// that touch nothing here.
+///
+/// The fix is the one `trace_corpus_pg_rls` uses for its role grants:
+/// serialise the DDL on a transaction-scoped advisory lock taken as the first
+/// statement of the same `batch_execute`, which runs as one implicit
+/// transaction, so the lock is released when the batch commits. Same key as
+/// that suite's `RLS_TEST_ROLE_DDL_LOCK_*`, so role DDL from either suite
+/// cannot interleave if they ever share a database concurrently.
+async fn grant_gate_driver_login(admin: &PgBackend) -> Result<(), String> {
+    admin
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .map_err(|e| format!("get a connection: {e}"))?
+        .batch_execute(&format!(
+            "SELECT pg_advisory_xact_lock({TEST_ROLE_DDL_LOCK_CLASSID}, \
+                {TEST_ROLE_DDL_LOCK_OBJID});
+             ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"
+        ))
+        .await
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// Advisory-lock key for test role DDL. Must equal `trace_corpus_pg_rls`'s
+/// `RLS_TEST_ROLE_DDL_LOCK_CLASSID` / `_OBJID`; the two-int form with its own
+/// classid cannot alias the one-arg `pg_advisory_xact_lock(hashtext(tenant))`
+/// the audit-chain append takes.
+const TEST_ROLE_DDL_LOCK_CLASSID: i32 = 0x726f_6c65u32 as i32; // "role"
+const TEST_ROLE_DDL_LOCK_OBJID: i32 = 0x7273_6c73u32 as i32; // "rsls"
+
+/// Concurrent callers of `grant_gate_driver_login` must all succeed.
+///
+/// Reproduces the race directly rather than waiting for the suite's natural
+/// parallelism to hit it: sixteen grants against the same role at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gate_driver_login_grant_survives_concurrent_callers() {
+    let Some(config) = postgres_test_config() else {
+        return;
+    };
+    let admin = PgBackend::new(&config)
+        .await
+        .expect("connect to the test database");
+    admin
+        .run_migrations()
+        .await
+        .expect("run migrations before provisioning the gate-driver role");
+    let admin = std::sync::Arc::new(admin);
+    for round in 0..8 {
+        let calls: Vec<_> = (0..16)
+            .map(|_| {
+                let admin = std::sync::Arc::clone(&admin);
+                tokio::spawn(async move { grant_gate_driver_login(&admin).await })
+            })
+            .collect();
+        for (i, call) in calls.into_iter().enumerate() {
+            call.await
+                .expect("grant task panicked")
+                .unwrap_or_else(|e| panic!("round {round}, caller {i}: {e}"));
+        }
+    }
 }
 
 /// Refuse a gate-driver pool that is not the narrow role.
@@ -2131,6 +2195,7 @@ async fn pg_store_round_trips_tenant_scoped_credit_settlement_control_plane() {
                 actor_principal_ref: "principal:ranker-worker".to_string(),
                 actor_role: "utility_worker".to_string(),
                 settlement_state: TraceCreditSettlementState::Pending,
+                witness_provenance_class: None,
             })
             .await
             .expect("insert tenant settlement source credit event");
@@ -3490,6 +3555,12 @@ fn sample_gate_decision(submission_id: Uuid) -> TraceGateDecisionRow {
         chunk_count: None,
         total_chunk_count: None,
         qualifying_token_fraction_micros: None,
+        // Per-author perplexity (V73): absent here, never a real zero.
+        agent_prose_perplexity_micros: None,
+        agent_prose_tokens: None,
+        tool_result_perplexity_micros: None,
+        tool_result_tokens: None,
+        attributed_token_fraction_micros: None,
         chunks_capped: None,
         composite_score_micros: None,
         vector_index_snapshot_id: None,
@@ -3566,6 +3637,245 @@ async fn pg_store_round_trips_prospective_gate_instrumentation() {
         read_uninstrumented.index_cardinality_at_scoring, None,
         "an unrecorded cardinality must not read as an empty index"
     );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// V73: the five per-author perplexity columns round-trip, and the difference
+/// between "measured zero tokens" and "never measured" survives storage.
+#[tokio::test]
+async fn pg_store_round_trips_author_perplexity_including_null() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let mut measured = sample_gate_decision(submission_id);
+    measured.agent_prose_perplexity_micros = Some(4_540_000);
+    measured.agent_prose_tokens = Some(397);
+    measured.tool_result_perplexity_micros = None; // no tool-result tokens
+    measured.tool_result_tokens = Some(0);
+    measured.attributed_token_fraction_micros = Some(850_000);
+    let measured_id = measured.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, measured)
+        .await
+        .expect("insert measured gate decision");
+
+    let mut unmeasured = sample_gate_decision(submission_id);
+    let unmeasured_id = unmeasured.decision_id;
+    unmeasured.decided_at = Utc::now() + chrono::Duration::seconds(1);
+    backend
+        .insert_trace_gate_decision(&tenant_id, unmeasured)
+        .await
+        .expect("insert unmeasured gate decision");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == measured_id)
+        .expect("measured row");
+    assert_eq!(got.agent_prose_perplexity_micros, Some(4_540_000));
+    assert_eq!(got.agent_prose_tokens, Some(397));
+    assert_eq!(got.tool_result_perplexity_micros, None);
+    assert_eq!(
+        got.tool_result_tokens,
+        Some(0),
+        "a real zero must not read as NULL"
+    );
+    assert_eq!(got.attributed_token_fraction_micros, Some(850_000));
+
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == unmeasured_id)
+        .expect("unmeasured row");
+    assert_eq!(
+        got.agent_prose_tokens, None,
+        "unmeasured must stay NULL, not 0"
+    );
+    assert_eq!(got.tool_result_tokens, None);
+    assert_eq!(got.attributed_token_fraction_micros, None);
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// `insert_trace_gate_decision_with_chunk_entries` is the INSERT ingest
+/// actually calls, and it has its own positional `$26..$30` binding. All five
+/// columns are BIGINT, so a swapped pair there is no type error -- only five
+/// distinct values read back in order can see it.
+#[tokio::test]
+async fn pg_store_chunk_entries_insert_binds_author_perplexity_in_order() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-chunks-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let mut decision = sample_gate_decision(submission_id);
+    decision.agent_prose_perplexity_micros = Some(222);
+    decision.agent_prose_tokens = Some(333);
+    decision.tool_result_perplexity_micros = Some(444);
+    decision.tool_result_tokens = Some(555);
+    decision.attributed_token_fraction_micros = Some(666);
+    let decision_id = decision.decision_id;
+    let entries = vec![TraceGateChunkVectorEntryRow {
+        decision_id,
+        submission_id,
+        chunk_index: 0,
+        vector_entry_id: Uuid::new_v4(),
+    }];
+    backend
+        .insert_trace_gate_decision_with_chunk_entries(&tenant_id, decision, entries)
+        .await
+        .expect("atomic insert of decision + chunk entries");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == decision_id)
+        .expect("decision row");
+    assert_eq!(got.agent_prose_perplexity_micros, Some(222));
+    assert_eq!(got.agent_prose_tokens, Some(333));
+    assert_eq!(got.tool_result_perplexity_micros, Some(444));
+    assert_eq!(got.tool_result_tokens, Some(555));
+    assert_eq!(got.attributed_token_fraction_micros, Some(666));
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// `find_gate_decision_by_canonical_hash` reads its row POSITIONALLY, so the
+/// by-name roundtrip above does not reach it: a wrong index there is a
+/// runtime type error or a silently swapped value, not a compile error.
+#[tokio::test]
+async fn pg_store_canonical_hash_lookup_reads_author_perplexity_by_position() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-pos-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    // Five distinct values, so a swapped index cannot pass.
+    let mut decision = sample_gate_decision(submission_id);
+    decision.qualifying_token_fraction_micros = Some(111);
+    decision.agent_prose_perplexity_micros = Some(222);
+    decision.agent_prose_tokens = Some(333);
+    decision.tool_result_perplexity_micros = Some(444);
+    decision.tool_result_tokens = Some(555);
+    decision.attributed_token_fraction_micros = Some(666);
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision)
+        .await
+        .expect("insert gate decision");
+
+    let found = backend
+        .find_gate_decision_by_canonical_hash(&tenant_id, "sha256:canonical", Uuid::new_v4())
+        .await
+        .expect("lookup succeeds")
+        .expect("a decision for the fixture's canonical hash");
+    assert_eq!(found.qualifying_token_fraction_micros, Some(111));
+    assert_eq!(found.agent_prose_perplexity_micros, Some(222));
+    assert_eq!(found.agent_prose_tokens, Some(333));
+    assert_eq!(found.tool_result_perplexity_micros, Some(444));
+    assert_eq!(found.tool_result_tokens, Some(555));
+    assert_eq!(found.attributed_token_fraction_micros, Some(666));
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// The author-only backfill writes the five V73 columns on the LATEST decision
+/// row and nothing else: not whole-trace perplexity, not the pass flag, and
+/// not an older row for the same submission.
+#[tokio::test]
+async fn pg_store_author_perplexity_update_touches_only_its_columns_on_the_latest_row() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-author-ppl-upd-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert submission");
+
+    let older = sample_gate_decision(submission_id);
+    let older_id = older.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, older)
+        .await
+        .expect("insert older decision");
+    let mut latest = sample_gate_decision(submission_id);
+    latest.decided_at = Utc::now() + chrono::Duration::seconds(5);
+    let latest_id = latest.decision_id;
+    let (ppl_before, passed_before) = (latest.perplexity_micros, latest.perplexity_passed);
+    backend
+        .insert_trace_gate_decision(&tenant_id, latest)
+        .await
+        .expect("insert latest decision");
+
+    backend
+        .update_trace_gate_decision_author_perplexity(
+            &tenant_id,
+            submission_id,
+            [Some(222), Some(333), None, Some(0), Some(666)],
+        )
+        .await
+        .expect("author-only update succeeds");
+
+    let rows = backend
+        .stream_trace_gate_decisions_for_replay(&tenant_id, 50, None)
+        .await
+        .expect("read back gate decisions");
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == latest_id)
+        .expect("latest row");
+    assert_eq!(got.agent_prose_perplexity_micros, Some(222));
+    assert_eq!(got.agent_prose_tokens, Some(333));
+    assert_eq!(got.tool_result_perplexity_micros, None);
+    assert_eq!(got.tool_result_tokens, Some(0));
+    assert_eq!(got.attributed_token_fraction_micros, Some(666));
+    assert_eq!(
+        got.perplexity_micros, ppl_before,
+        "whole-trace perplexity untouched"
+    );
+    assert_eq!(got.perplexity_passed, passed_before, "pass flag untouched");
+
+    let got = rows
+        .iter()
+        .find(|r| r.decision_id == older_id)
+        .expect("older row");
+    assert_eq!(
+        got.agent_prose_tokens, None,
+        "only the latest row is written"
+    );
+    assert_eq!(got.attributed_token_fraction_micros, None);
 
     cleanup_tenant(&backend, &tenant_id).await;
 }
@@ -4398,6 +4708,228 @@ async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// The re-derivation pass enumerates through the NARROW trace_gate_driver
+/// pool: every column it selects (`tenant_id, submission_id, decision_id,
+/// decided_at, dedup_cluster_id, dedup_simhash, dedup_cluster_size` from V45
+/// and `dedup_signal_version` from V57) must already be granted, which is why
+/// the spec says no migration -- and why this runs as the role, so the claim
+/// is tested rather than asserted. Rows come back across tenants in
+/// `decided_at ASC, decision_id ASC` order, un-stamped rows included, and a
+/// four-column write followed by a re-read shows the stamp, the value, the
+/// cluster and the size while the must-not-touch assertion still holds.
+#[tokio::test]
+async fn pg_store_list_dedup_rederive_rows_enumerates_cross_tenant_in_decided_order() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_a = format!("pg-rederive-a-{}", Uuid::new_v4());
+    let tenant_b = format!("pg-rederive-b-{}", Uuid::new_v4());
+    let base = Utc::now() - chrono::Duration::days(30);
+
+    // Three decisions, interleaved across two tenants and inserted OUT of
+    // decided order so the ORDER BY is what sorts them, not insertion.
+    let mut seeded = Vec::new();
+    for (i, (tenant, offset_secs)) in [(&tenant_b, 20), (&tenant_a, 10), (&tenant_a, 30)]
+        .into_iter()
+        .enumerate()
+    {
+        let submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission(tenant, submission_id))
+            .await
+            .expect("insert scoped submission");
+        let mut decision = sample_gate_decision(submission_id);
+        decision.decided_at = base + chrono::Duration::seconds(offset_secs);
+        backend
+            .insert_trace_gate_decision(tenant, decision.clone())
+            .await
+            .expect("insert gate decision");
+        seeded.push((tenant.clone(), submission_id, decision.decision_id, i));
+    }
+    // The middle one (tenant_a, +10) is stamped and clustered already; the
+    // other two have never been through a dedup pass.
+    let (stamped_tenant, stamped_submission, stamped_decision, _) = seeded[1].clone();
+    let cluster_id = Uuid::new_v4();
+    backend
+        .update_trace_gate_decision_dedup(
+            &stamped_tenant,
+            stamped_decision,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: -77,
+                dedup_cluster_id: cluster_id,
+                dedup_cluster_size: 4,
+                dedup_signal_version: "events.v1+fnv1a-3shingle-set.v2".to_string(),
+            },
+        )
+        .await
+        .expect("dedup update succeeds");
+
+    let rows = backend
+        .list_dedup_rederive_rows(i64::MAX)
+        .await
+        .expect("list_dedup_rederive_rows runs on the gate-driver pool");
+    let ours: Vec<_> = rows
+        .iter()
+        .filter(|r| r.tenant_id == tenant_a || r.tenant_id == tenant_b)
+        .collect();
+    assert_eq!(
+        ours.len(),
+        3,
+        "every decision is enumerated, stamped or not"
+    );
+    // decided_at order: tenant_a +10, tenant_b +20, tenant_a +30.
+    assert_eq!(ours[0].tenant_id, tenant_a);
+    assert_eq!(ours[1].tenant_id, tenant_b);
+    assert_eq!(ours[2].tenant_id, tenant_a);
+    assert!(ours.windows(2).all(|w| w[0].decided_at <= w[1].decided_at));
+    for (tenant, submission_id, decision_id, _) in &seeded {
+        let row = ours
+            .iter()
+            .find(|r| r.decision_id == *decision_id)
+            .expect("seeded decision enumerated");
+        assert_eq!(&row.tenant_id, tenant);
+        assert_eq!(row.submission_id, *submission_id);
+    }
+
+    let stamped = ours
+        .iter()
+        .find(|r| r.decision_id == stamped_decision)
+        .expect("stamped row enumerated");
+    assert_eq!(stamped.submission_id, stamped_submission);
+    assert_eq!(stamped.dedup_simhash, Some(-77));
+    assert_eq!(stamped.dedup_cluster_id, Some(cluster_id));
+    assert_eq!(stamped.dedup_cluster_size, Some(4));
+    assert_eq!(
+        stamped.dedup_signal_version.as_deref(),
+        Some("events.v1+fnv1a-3shingle-set.v2")
+    );
+    assert_eq!(
+        stamped.effective_signal_version(),
+        "events.v1+fnv1a-3shingle-set.v2"
+    );
+    for r in ours.iter().filter(|r| r.decision_id != stamped_decision) {
+        assert_eq!(r.dedup_simhash, None);
+        assert_eq!(r.dedup_cluster_id, None);
+        assert_eq!(r.dedup_cluster_size, None);
+        assert_eq!(r.dedup_signal_version, None);
+        assert_eq!(
+            r.effective_signal_version(),
+            trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION,
+            "NULL reads as the legacy stamp here as everywhere"
+        );
+    }
+
+    // A `limit` bounds the enumeration from the oldest end.
+    let limited = backend
+        .list_dedup_rederive_rows(1)
+        .await
+        .expect("limited enumeration");
+    assert_eq!(limited.len(), 1);
+
+    cleanup_tenant(&backend, &tenant_a).await;
+    cleanup_tenant(&backend, &tenant_b).await;
+}
+
+/// The credit-quality batch pass picks its calibration from each row's
+/// `decided_at`, read through the NARROW trace_gate_driver pool. A column the
+/// narrow role cannot select is a runtime permission error, not a compile
+/// error, and an in-memory store cannot see it.
+#[tokio::test]
+async fn pg_store_credit_scoring_inputs_carry_decided_at_through_the_narrow_pool() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_id = format!("pg-credit-inputs-{}", Uuid::new_v4());
+    let submission_id = Uuid::new_v4();
+    backend
+        .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+        .await
+        .expect("insert scoped submission");
+
+    // One second before the Qwen3.8 switch: the instant the schedule turns on.
+    let decided_at = chrono::DateTime::<Utc>::from_timestamp(
+        trace_commons_server::credit_quality::QWEN3_8_EFFECTIVE_FROM_UNIX - 1,
+        0,
+    )
+    .expect("valid timestamp");
+    let mut decision = sample_gate_decision(submission_id);
+    decision.decided_at = decided_at;
+    let decision_id = decision.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant_id, decision)
+        .await
+        .expect("insert gate decision");
+
+    let inputs = backend
+        .list_gate_decisions_for_credit_scoring(i64::MAX)
+        .await
+        .expect("enumeration runs on the gate-driver pool");
+    let seen = inputs
+        .iter()
+        .find(|row| row.tenant_id == tenant_id && row.decision_id == decision_id)
+        .expect("the decision is enumerated");
+    assert_eq!(seen.decided_at, decided_at);
+    assert_eq!(
+        trace_commons_server::credit_quality::constants_at(seen.decided_at.timestamp()).version,
+        2,
+        "a row decided before the switch resolves to the Qwen3.6 calibration"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
+/// The real enumeration query, through the narrow pool: a decision the gate
+/// never scored (perplexity 0, the skip-duplicate branch) is not a
+/// credit-scoring input, and a scored one decided at the same time is.
+#[tokio::test]
+async fn pg_store_credit_scoring_inputs_exclude_never_scored_decisions() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_id = format!("pg-credit-unscored-{}", Uuid::new_v4());
+    let scored_submission = Uuid::new_v4();
+    let skipped_submission = Uuid::new_v4();
+    for submission_id in [scored_submission, skipped_submission] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant_id, submission_id))
+            .await
+            .expect("insert scoped submission");
+    }
+
+    let scored = sample_gate_decision(scored_submission);
+    assert!(scored.perplexity_micros > 0, "the fixture is a scored row");
+    let scored_id = scored.decision_id;
+    let mut skipped = sample_gate_decision(skipped_submission);
+    skipped.perplexity_micros = 0;
+    let skipped_id = skipped.decision_id;
+    for decision in [scored, skipped] {
+        backend
+            .insert_trace_gate_decision(&tenant_id, decision)
+            .await
+            .expect("insert gate decision");
+    }
+
+    let inputs = backend
+        .list_gate_decisions_for_credit_scoring(i64::MAX)
+        .await
+        .expect("enumeration runs on the gate-driver pool");
+    let ours: Vec<_> = inputs
+        .iter()
+        .filter(|row| row.tenant_id == tenant_id)
+        .map(|row| row.decision_id)
+        .collect();
+    assert!(ours.contains(&scored_id), "a scored decision is an input");
+    assert!(
+        !ours.contains(&skipped_id),
+        "a never-scored decision must not be an input"
+    );
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
 #[tokio::test]
 async fn revocation_propagation_failure_audit_metadata_round_trips() {
     // Phase A6: the typed RevocationPropagationFailure audit-metadata variant
@@ -4966,6 +5498,139 @@ async fn pg_store_scoped_scores_distinguish_unscored_from_unowned() {
         !by_id.contains_key(&never_existed_id),
         "an id that does not exist must be absent, exactly like one we do not own"
     );
+}
+
+/// The contributor status surface's credit read, against a real database.
+///
+/// Four claims about SQL that an in-memory double cannot pin: the latest of
+/// two decisions wins, not the first written; a skipped-duplicate cost-control
+/// row comes back with its `credit_withheld_reason` and a NULL credit quality,
+/// so the handler can tell "duplicate" from "not scored yet"; a submission
+/// with no decision is absent rather than a row of NULLs; and forced RLS keeps
+/// another tenant's decision out even when its id is asked about by name.
+#[tokio::test]
+async fn pg_store_latest_gate_credit_decisions_are_tenant_scoped_and_latest_wins() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant = format!("pg-gate-credit-{}", Uuid::new_v4());
+    let other_tenant = format!("pg-gate-credit-other-{}", Uuid::new_v4());
+
+    let scored_id = Uuid::new_v4();
+    let duplicate_id = Uuid::new_v4();
+    let unscored_id = Uuid::new_v4();
+    let foreign_id = Uuid::new_v4();
+
+    for id in [scored_id, duplicate_id, unscored_id] {
+        backend
+            .upsert_trace_submission(sample_submission(&tenant, id))
+            .await
+            .expect("insert own submission");
+    }
+    backend
+        .upsert_trace_submission(sample_submission(&other_tenant, foreign_id))
+        .await
+        .expect("insert the other tenant's submission");
+
+    // Two decisions on the scored submission, an hour apart. Only the newer
+    // one gets a credit quality, so a reader that picked the older row would
+    // surface a NULL where the contributor has a real figure.
+    let mut older = sample_gate_decision(scored_id);
+    older.decided_at = Utc::now() - chrono::Duration::hours(1);
+    backend
+        .insert_trace_gate_decision(&tenant, older)
+        .await
+        .expect("insert the older decision");
+    let newer = sample_gate_decision(scored_id);
+    let newer_decision_id = newer.decision_id;
+    backend
+        .insert_trace_gate_decision(&tenant, newer)
+        .await
+        .expect("insert the newer decision");
+    backend
+        .update_trace_gate_decision_credit_quality(
+            &tenant,
+            newer_decision_id,
+            300_000,
+            1_000_000,
+            3,
+        )
+        .await
+        .expect("score the newer decision");
+
+    // The skip-duplicate branch of the perplexity driver writes exactly this
+    // shape: perplexity 0, no chunks, a withheld reason, and no credit quality
+    // ever follows because no scoring ran.
+    let mut duplicate = sample_gate_decision(duplicate_id);
+    duplicate.gate_policy_version = "skip_duplicate".to_string();
+    duplicate.perplexity_micros = 0;
+    duplicate.credit_withheld_reason = Some("skipped_duplicate".to_string());
+    backend
+        .insert_trace_gate_decision(&tenant, duplicate)
+        .await
+        .expect("insert the skipped-duplicate decision");
+
+    let mut foreign = sample_gate_decision(foreign_id);
+    foreign.decided_at = Utc::now();
+    let foreign_decision_id = foreign.decision_id;
+    backend
+        .insert_trace_gate_decision(&other_tenant, foreign)
+        .await
+        .expect("insert the other tenant's decision");
+    backend
+        .update_trace_gate_decision_credit_quality(
+            &other_tenant,
+            foreign_decision_id,
+            900_000,
+            1_000_000,
+            3,
+        )
+        .await
+        .expect("score the other tenant's decision");
+
+    let rows = backend
+        .list_latest_gate_credit_decisions(
+            &tenant,
+            &[scored_id, duplicate_id, unscored_id, foreign_id],
+        )
+        .await
+        .expect("tenant-scoped gate credit read");
+    let by_id: BTreeMap<Uuid, _> = rows.into_iter().map(|r| (r.submission_id, r)).collect();
+
+    let scored = by_id
+        .get(&scored_id)
+        .expect("the scored submission must come back");
+    assert_eq!(
+        scored.credit_quality_micros,
+        Some(300_000),
+        "the LATEST decision's credit quality must win, not the older NULL"
+    );
+    assert_eq!(scored.credit_quality_calibration_version, Some(3));
+    assert_eq!(scored.credit_withheld_reason, None);
+
+    let duplicate = by_id
+        .get(&duplicate_id)
+        .expect("the skipped-duplicate submission must come back");
+    assert_eq!(duplicate.credit_quality_micros, None);
+    assert_eq!(
+        duplicate.credit_withheld_reason.as_deref(),
+        Some("skipped_duplicate"),
+        "the withheld reason is what tells a duplicate from an unscored trace"
+    );
+
+    assert!(
+        !by_id.contains_key(&unscored_id),
+        "a submission with no decision must be absent, not a row of NULLs"
+    );
+    assert!(
+        !by_id.contains_key(&foreign_id),
+        "another tenant's decision must not be returned under this tenant's context"
+    );
+
+    cleanup_tenant(&backend, &tenant).await;
+    cleanup_tenant(&backend, &other_tenant).await;
 }
 
 /// An invite's use limit must bind across derived tenants.

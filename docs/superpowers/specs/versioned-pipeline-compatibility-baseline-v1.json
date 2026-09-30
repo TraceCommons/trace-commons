@@ -1,0 +1,77 @@
+{
+  "schema": "trace_commons.compatibility_baseline.v1",
+  "scope": "local_versioned_pipeline_compatibility_bundle",
+  "mapping": "docs/superpowers/specs/2026-09-14-versioned-pipeline-compatibility-mapping.md",
+  "corpus": {
+    "path": "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json",
+    "order": "file_sequence",
+    "initial_index": "empty"
+  },
+  "configuration_identities": {
+    "scorer_model_id": "reference_perplexity.v1",
+    "embedder_model_id": "reference_embedder.v1",
+    "projection_id": "pipeline-test-projection-v1",
+    "index_id": "pipeline-test-index-v1",
+    "gate_path_credit": "novelty_utility_flat_delta_default_zero",
+    "credit_quality": "shadow_only_decision_era_constants",
+    "gate_floors": "local_zero_uncalibrated_reference",
+    "external_payout": false
+  },
+  "legacy_to_new": {
+    "perplexity_passed": "score_evidence.quality_passed",
+    "novelty_passed": "score_evidence.novelty_passed",
+    "inserted_chunk_entries_nonempty": "settle_include",
+    "inserted_chunk_entries_empty": "settle_exclude",
+    "evaluate_insert": "forbidden_in_score",
+    "novelty_utility_delta": "score_decision.awards[trace_credit].atomic_units",
+    "novelty_utility_ledger_event": "not_settlement_eligible",
+    "q_micros": "score_evidence.credit_quality_micros",
+    "dedup_penalty": "shadow_on_main_not_in_score_contract",
+    "contributor_cap": "shadow_on_main_not_in_score_contract",
+    "anomaly_withheld": "shadow_on_main_not_in_score_contract"
+  },
+  "required_behavior_changes": [
+    "score_does_not_write_index",
+    "deterministic_index_keys",
+    "membership_from_committed_score_evidence",
+    "review_unchanged_after_score_failure"
+  ],
+  "expected_fixture_classes": {
+    "clean_tool_plan": {
+      "admission": "admit",
+      "review": "approved",
+      "score": "completed",
+      "settle": "completed"
+    },
+    "locally_redacted_secret": {
+      "admission": "admit",
+      "review": "approved",
+      "score": "completed",
+      "settle": "completed"
+    },
+    "privacy_quarantine_approved": {
+      "admission": "quarantine",
+      "review": "approved",
+      "score": "completed",
+      "settle": "completed"
+    },
+    "privacy_quarantine_rejected": {
+      "admission": "quarantine",
+      "review": "rejected",
+      "score": "skipped",
+      "settle": "skipped"
+    },
+    "privacy_risk_rejected": {
+      "admission": "reject",
+      "review": "skipped",
+      "score": "skipped",
+      "settle": "skipped"
+    }
+  },
+  "limitations": [
+    "Local compatibility uses the reference scorer and embedder.",
+    "Gate floors are zero because that scorer is not a production model.",
+    "Historical production behavior does not need deterministic replay.",
+    "Stored evidence must still explain each Score and Settle decision."
+  ]
+}

@@ -159,17 +159,13 @@ pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this p
 /// Sits beside [`SUBMIT_ALL`] on the same group header but must never carry
 /// its primary-action styling -- the two buttons take a contributor's queue
 /// in opposite directions.
-pub const IGNORE_PROJECT: &str = "Ignore project";
-///
+pub use trace_commons_contributor::project_copy::IGNORE_PROJECT;
+
 /// Word for word what macOS and Windows put on the same button. Three
 /// shells drift, and a tooltip nobody tests drifts first: this one is
 /// `ProjectIgnoreCopy.tooltip` there.
-pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
-     Anything already submitted is unaffected, and you can undo this in Settings.";
-
-pub fn ignore_project_title(project: &str) -> String {
-    format!("Ignore {project}?")
-}
+pub use trace_commons_contributor::project_copy::IGNORE_PROJECT_TOOLTIP;
+pub use trace_commons_contributor::project_copy::ignore_project_title;
 
 /// The removal clause is dropped when nothing is waiting.
 ///
@@ -179,14 +175,7 @@ pub fn ignore_project_title(project: &str) -> String {
 /// handed a number and must be right about whatever number it is handed --
 /// "removes 0 waiting traces" would be both wrong and alarming -- not
 /// because a caller is known to produce zero.
-pub fn ignore_project_body(pending: usize) -> String {
-    let tail = "Nothing already submitted is affected. You can undo this in Settings.";
-    if pending == 0 {
-        return format!("Stops this project being offered. {tail}");
-    }
-    let noun = if pending == 1 { "trace" } else { "traces" };
-    format!("This removes {pending} waiting {noun} and stops this project being offered. {tail}")
-}
+pub use trace_commons_contributor::project_copy::ignore_project_body;
 
 /// What is said afterwards when the daemon removed a different number than
 /// the confirmation named.
@@ -200,19 +189,7 @@ pub fn ignore_project_body(pending: usize) -> String {
 /// `None` when the two agree, which is the ordinary case -- a line that
 /// appears every time to say nothing happened is noise, and noise is how a
 /// line that matters gets skipped.
-pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) -> Option<String> {
-    if purged == promised as u64 {
-        return None;
-    }
-    let clause = if purged == 1 {
-        "1 waiting trace was removed".to_string()
-    } else {
-        format!("{purged} waiting traces were removed")
-    };
-    Some(format!(
-        "Ignored {project}. The queue changed while you were deciding: {clause}, not {promised}."
-    ))
-}
+pub use trace_commons_contributor::project_copy::ignore_project_reconciled;
 
 /// The four things a search can find, in the words the sheet says them.
 ///
@@ -253,23 +230,11 @@ pub fn search_unknown() -> String {
 ///
 /// Deliberately not exhaustive. The vocabulary is generated and open, which
 /// is why `redaction_summary::describe` falls back rather than panicking.
-pub const REDACTION_CATEGORY_LOCAL_PATH: &str = "File paths from this machine.";
-pub const REDACTION_CATEGORY_SECRET: &str =
-    "API keys, tokens, private keys, and high-entropy strings found next to credential words.";
-pub const REDACTION_CATEGORY_PRIVACY_FILTER: &str =
-    "Names, emails, and other personal details found in prose.";
-pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
-    "Fields whose name marks them sensitive, like password or authorization.";
-pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
-    "Tool-call arguments whose name marks them sensitive.";
-pub const REDACTION_CATEGORY_RESIDUAL: &str = "Found, and still in what would be sent. Either a credential inside a correction \
-     you wrote, which is kept on purpose, or a field scrubbing does not reach.";
-
-/// The neutral description for a family this build has no words for. It must
-/// still appear: dropping an unrecognised category would understate what
-/// happened.
-pub const REDACTION_CATEGORY_UNKNOWN: &str =
-    "Removed by a pattern this version has no description for.";
+pub use trace_commons_contributor::preview_copy::{
+    REDACTION_CATEGORY_LOCAL_PATH, REDACTION_CATEGORY_PRIVACY_FILTER, REDACTION_CATEGORY_RESIDUAL,
+    REDACTION_CATEGORY_SECRET, REDACTION_CATEGORY_SENSITIVE_FIELD,
+    REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD, REDACTION_CATEGORY_UNKNOWN,
+};
 
 /// The two headings over the summary panel. The second is a sentence rather
 /// than a noun because it is the one a contributor must not skim past.
@@ -279,13 +244,7 @@ pub const REDACTION_PANEL_STILL_PRESENT: &str = "Found, and still in what would 
 /// One panel row's figures: how many times a family fired, and over how many
 /// distinct values. The distinct half is omitted when it repeats the first,
 /// for the same reason [`crate::redaction_labels::line`] omits it.
-pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
-    if distinct > 0 && distinct < occurrences {
-        format!("{occurrences} ({distinct} distinct)")
-    } else {
-        format!("{occurrences}")
-    }
-}
+pub use trace_commons_contributor::preview_copy::redaction_row_counts;
 
 /// What a redaction mark in the transcript is, named on hover.
 ///
@@ -395,7 +354,7 @@ pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
 /// scrubbing removed nothing, and a search that found nothing. Neither is a
 /// reassurance, which is why they share a wording that concedes rather than
 /// one that congratulates.
-pub const NOTHING_MATCHED: &str = "nothing matched";
+pub use trace_commons_contributor::preview_copy::NOTHING_MATCHED;
 
 /// What the chip does now that it is a control.
 pub const NOTHING_MATCHED_TOOLTIP: &str = "Search this session for a value you are worried about";
@@ -416,17 +375,7 @@ pub const NOTHING_MATCHED_TOOLTIP: &str = "Search this session for a value you a
 /// one site can hold more than one value, so "3 secrets" would understate
 /// what survived. The plural says "found in N places" instead, which is
 /// what the number actually counts; the singular drops it entirely.
-pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
-    let head = if count == 1 {
-        "A secret found here is still in what would be sent".to_string()
-    } else {
-        format!("Secrets found in {count} places are still in what would be sent")
-    };
-    if sites.is_empty() {
-        return head;
-    }
-    format!("{head} ({})", sites.join(", "))
-}
+pub use trace_commons_contributor::preview_copy::residual_secret_line;
 
 /// The eyebrow over the count of things that did go out this week.
 pub const CONTRIBUTED: &str = "Contributed";
@@ -541,6 +490,10 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // about what leaves this machine kept in three places is three claims that
 // have not diverged yet.
 //
+// The `AUTO_*` sentences are the Flow 1 grant screen's, re-exported ahead
+// of that screen for the same reason: when it is built here it reaches for
+// these rather than writing its own.
+//
 // `GATE_READY_HELP`, `GATE_NOT_PINNED_HELP` and `gate_help` are re-exported
 // and not rendered: this shell puts no tooltip on `Contribute`. That is
 // deliberate rather than an oversight -- they are here so that a screen
@@ -555,74 +508,23 @@ pub const TRANSCRIPT_CAPTION: &str = "These are the exact bytes an approval cove
 // beside a re-export is the word this shell would render while the other
 // two render the shared one.
 pub use trace_commons_contributor::consent_copy::{
-    GATE_NOT_PINNED_HELP, GATE_READY_HELP, GATE_STATEMENT, gate_help,
+    AUTO_NO_REVIEW, AUTO_SCRUB_LIMIT, AUTO_SCRUB_SCOPE, ArmingRewordedNoticeCopy,
+    GATE_NOT_PINNED_HELP, GATE_READY_HELP, GATE_STATEMENT, GateHeldNoticeCopy,
+    LegacyMigrationNoticeCopy, VoidNoticeCopy, arming_reworded_notice_for_wire,
+    gate_held_notice_for_wire, gate_help, legacy_migration_notice_for_wire, void_notice_for_wire,
+    witness_capacity_notice,
 };
+pub use trace_commons_contributor::daemon::health::LABEL_AUTOMATIC_CONTRIBUTION_HELD as GATE_HELD_LABEL;
+pub use trace_commons_contributor::daemon::health::LABEL_WITNESS_SATURATED as WITNESS_SATURATED_LABEL;
 // COPY-MIGRATED-END
 
-/// The verdict control's question. Answering it is optional and never
-/// gates `Contribute` -- see [`VERDICT_CAPTION`] for the disclosure that
-/// makes the exemption explicit.
-pub const VERDICT_QUESTION: &str = "Did this session do what you asked?";
-pub const VERDICT_WORKED: &str = "Worked";
-pub const VERDICT_PARTLY: &str = "Partly";
-pub const VERDICT_FAILED: &str = "Failed";
-
-/// Load-bearing, not decoration: the spec exempts the outcome fields from
-/// the "the preview above is exactly what would be sent" guarantee, and
-/// this sentence is where that exemption is disclosed to the contributor.
-/// Do not drop or soften it.
-pub const VERDICT_CAPTION: &str =
-    "Optional. This is recorded as the trace outcome; the preview above does not show it.";
-
-/// The correction field's prompt. Shown only under `Partly` and `Failed`:
-/// a run the contributor has just called successful has nothing to correct,
-/// and the field appearing there would invite text written for no reason.
-pub const CORRECTION_QUESTION: &str = "What did it get wrong?";
-
-/// The placeholder inside the box. It says the field is optional in the one
-/// place a contributor is already looking, so the caption below can spend
-/// all of its words on the thing that actually matters.
-pub const CORRECTION_PLACEHOLDER: &str = "Optional";
-
-/// **The disclosure, and the most load-bearing sentence in this file.**
-///
-/// Everything else a contributor writes or captures is scrubbed on this
-/// machine and scrubbed again on the server. A correction is the one
-/// exception: redaction would destroy the thing it exists to carry -- "it
-/// edited /Users/x/proj/config.toml instead of the staging one" is useless
-/// once the path is a placeholder -- so it is stored exactly as typed, with
-/// only credential detection standing between it and the corpus.
-///
-/// The published policy page at <https://tracecommons.ai/legal/> promises
-/// local redaction and a server-side re-application of it, and does not yet
-/// carve this out. Until that clause is published, this sentence is the
-/// ONLY disclosure a contributor gets that their own words are stored
-/// verbatim. Do not shorten it for layout; change the layout.
-///
-/// One line, one escaped literal, for the same reason `GATE_STATEMENT` is:
-/// the macOS and Windows shells are pinned against this exact text, and a
-/// line break in any of the three would defeat the pin.
-pub const CORRECTION_CAPTION: &str = "Stored exactly as you write it. Unlike the rest of the trace, a correction is not scrubbed here or on the server -- so leave out anything you would not want in the corpus: someone else's personal information, employer-confidential material, or anything you are not free to share.";
-
-/// The credential refusal, headline and body.
-///
-/// Its own message rather than a line in the generic failure toast, because
-/// it is the only submit failure the contributor caused and the only one
-/// they can fix -- and because the second half is advice they will not get
-/// anywhere else. A credential that has been typed into a box has been
-/// typed; removing it from the text does not un-type it, so the sentence
-/// says to rotate it.
-///
-/// Neither string quotes the correction, and neither names what matched.
-pub const CORRECTION_CREDENTIAL_HEADLINE: &str =
-    "Nothing was sent. Your correction looks like it contains a credential.";
-pub const CORRECTION_CREDENTIAL_BODY: &str = "A correction is stored as you write it, so this one was refused rather than masked. Take the credential out and submit again -- and rotate it, because it has already been typed here.";
-
-/// The bulk verdict menu beside `Submit all`. The plain button stays a
-/// one-click unanswered submit; this is the opt-in path for answering
-/// once for the whole group.
-pub const SUBMIT_ALL_AS: &str = "Submit all as...";
-pub const SUBMIT_ALL_AS_TOOLTIP: &str = "Record the same outcome for every session in this group.";
+// Outcome and correction copy now lives in the contributor core so every
+// shell, including Tauri, can render the same disclosure.
+pub use trace_commons_contributor::outcome_copy::{
+    CORRECTION_CAPTION, CORRECTION_CREDENTIAL_BODY, CORRECTION_CREDENTIAL_HEADLINE,
+    CORRECTION_PLACEHOLDER, CORRECTION_QUESTION, SUBMIT_ALL_AS, SUBMIT_ALL_AS_TOOLTIP,
+    VERDICT_CAPTION, VERDICT_FAILED, VERDICT_PARTLY, VERDICT_QUESTION, VERDICT_WORKED,
+};
 
 pub const CLOSE: &str = "Close";
 
@@ -673,9 +575,7 @@ pub const WITHDRAWN_BY_YOU: &str = "Withdrawn by you";
 /// sent no explanation of its own. It says the same three things
 /// [`QUARANTINE_BODY`] says -- automated, not rejected, not shared -- at row
 /// length rather than at section length.
-pub const HELD_ROW_BODY: &str = "Automated checks saw something that might be personal and \
-     couldn't decide on their own. It has not been rejected, and it has not been shared with \
-     anyone but the agent that inspects it.";
+pub use trace_commons_contributor::history_copy::HELD_ROW_BODY;
 pub const QUARANTINE_HEADING: &str = "Held for privacy review";
 pub const QUARANTINE_BODY: &str = "An agent inspects these before they enter the commons. It \
      happens when automated checks see something that might be personal or sensitive and can't \
@@ -699,8 +599,8 @@ pub const QUARANTINE_BODY: &str = "An agent inspects these before they enter the
 // 2. Never claim more erasure than the tier achieved -- which is why
 //    [`withdraw_confirmation`] shows an `accepted` trace BOTH commons
 //    bodies rather than picking the gentler one.
-// 3. Withdrawal does not reverse settled credit -- [`WITHDRAW_CREDIT_NOTE`],
-//    and nothing here implies otherwise.
+// 3. Withdrawal does not reverse settled credit and forfeits pending credit
+//    -- [`WITHDRAW_CREDIT_NOTE`], and nothing here implies otherwise.
 // 4. `not_found` must not disclose which -- [`WITHDRAW_NOT_FOUND`].
 // 5. Bulk withdrawal spans tiers -- [`WITHDRAW_NO_BULK`] says why this
 //    shell does not offer it.
@@ -736,9 +636,11 @@ pub const WITHDRAW_BODY_COMMONS_DISTRIBUTED: &str = "This trace has already been
      deletes our copy and excludes it from everything published from here on, but copies that \
      have already been distributed cannot be recalled. Withdrawing does not undo that.";
 
-/// Credit is not clawed back, and this says only that -- nothing about how
-/// much, when it settles, or what it is worth.
-pub const WITHDRAW_CREDIT_NOTE: &str = "Credit already recorded stays.";
+/// Settled credit is not clawed back; credit still pending never settles once
+/// the trace is withdrawn. This says only that -- nothing about how much, when
+/// it would have settled, or what it is worth.
+pub const WITHDRAW_CREDIT_NOTE: &str =
+    "Credit that has already settled stays. Credit still pending is forfeited.";
 
 /// The canonical body for a tier, or `None` for a tier this build has never
 /// heard of.
@@ -1180,54 +1082,35 @@ pub const NOT_NOW: &str = "Not now";
 
 /// The evidence, stated before the question, so a contributor who reads only
 /// the first line still learns why they are being asked.
-pub fn arming_offer_evidence(project_label: &str, count: u32) -> String {
-    let times = if count == 1 {
-        "once".to_string()
-    } else {
-        format!("{count} times")
-    };
-    format!("You've contributed from {project_label} {times}.")
-}
-
-pub fn arming_offer_question(project_label: &str) -> String {
-    format!("Contribute from {project_label} automatically?")
-}
-
-pub const ARMING_OFFER_CONFIRM: &str = "Turn on automatic contributing";
-/// "Not now" rather than "No": the daemon silences the offer for thirty days
-/// rather than forever, and the button must not promise otherwise.
-pub const ARMING_OFFER_DECLINE: &str = "Not now";
+pub use trace_commons_contributor::project_copy::{
+    ARMING_BODY, ARMING_OFFER_CONFIRM, ARMING_OFFER_DECLINE, arming_offer_evidence,
+    arming_offer_question,
+};
 
 // --- Arming ------------------------------------------------------------
 
 pub fn arming_heading(project_label: &str) -> String {
-    format!("Contribute from {project_label} automatically?")
+    arming_offer_question(project_label)
 }
-pub const ARMING_BODY: &str = "Every future session in this project will be scrubbed and \
-     contributed without asking you. You won't review them first.\n\nA session is sent a day \
-     after you last work on it, so there is time to change your mind.\n\nYou can turn this off \
-     at any time.";
-pub const ARMING_CONFIRM: &str = "Turn on automatic contributing";
+pub const ARMING_CONFIRM: &str = ARMING_OFFER_CONFIRM;
 
 // --- Quitting ----------------------------------------------------------
 
-/// The Linux wording, and it is the *second* of the two the shared spec
-/// gives. It is true only where a separate daemon keeps running after the
-/// window closes; where this application is itself the watcher, the first
-/// wording applies. Which one is shown is decided at runtime by which of
-/// those two this process actually is -- getting it wrong is a lie about
-/// whether the machine is still watching. See `QUIT_HOSTING_BODY`.
-pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running and will keep queuing \
-     sessions. Nothing will be sent while nobody's approving.";
+// Which body is shown is decided at runtime by whether this process hosts
+// the watcher or is attached to one -- getting it wrong is a lie about
+// whether the machine is still watching. Both sentences are shared with the
+// other shells through `trace_commons_contributor::quit_copy`.
+//
+// COPY-MIGRATED-BEGIN
+pub use trace_commons_contributor::quit_copy::{QUIT_ATTACHED_BODY, QUIT_HOSTING_BODY};
+// COPY-MIGRATED-END
+
 pub const QUIT_ATTACHED_CONFIRM: &str = "Quit";
+/// GTK talks to an attached watcher over the raw control socket, which
+/// carries `shutdown`, so this shell can offer to stop it. A shell attached
+/// through `AttachedDaemon` cannot.
 pub const QUIT_ATTACHED_ALSO_STOP: &str = "Quit and stop watching";
 
-pub const QUIT_HOSTING_BODY: &str = concat!(
-    "Quitting stops ",
-    app_name!(),
-    " watching for finished sessions. Nothing is queued or sent until you open it again. \
-     Anything already waiting stays waiting."
-);
 pub const QUIT_HOSTING_CANCEL: &str = "Cancel";
 pub const QUIT_HOSTING_CONFIRM: &str = "Quit";
 
@@ -1408,6 +1291,80 @@ pub fn health_sentence(label: &str) -> &'static str {
         // thing that holds for every blocking label rather than inventing a
         // mechanism name for it.
         _ => "Something is holding contributions up. Your queue is safe; nothing has been lost.",
+    }
+}
+
+/// "<label>: <local time>" for a witness review a person asked for that met
+/// a busy witness, read from the `result` the daemon sent beside the error.
+///
+/// `None` for any other outcome, and for a time this shell cannot read:
+/// never a guessed time. The label is the core review copy's
+/// `busy_retry_at`, the same words Tauri, macOS and Windows show; the time is
+/// the daemon's `view.retry_at`, rendered in local time as the daily-cap
+/// banner renders its reset.
+pub fn witness_busy_retry_line(result: Option<&serde_json::Value>) -> Option<String> {
+    let view = result?.get("view")?;
+    if view.get("state")?.as_str()? != "Busy" {
+        return None;
+    }
+    let at = chrono::DateTime::parse_from_rfc3339(view.get("retry_at")?.as_str()?).ok()?;
+    let label = trace_commons_contributor::witness_copy::witness_copy()
+        .review
+        .busy_retry_at;
+    Some(format!(
+        "{label}: {}",
+        at.with_timezone(&chrono::Local).format("%H:%M")
+    ))
+}
+
+#[cfg(test)]
+mod witness_busy_retry_tests {
+    use super::*;
+
+    fn local_hhmm(s: &str) -> String {
+        s.parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string()
+    }
+
+    fn busy(retry_at: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"view": {
+            "state": "Busy",
+            "message": "ignored here",
+            "retry_at": retry_at,
+            "retry_label": "ignored here too",
+        }})
+    }
+
+    #[test]
+    fn a_busy_witness_says_when_to_try_again_in_local_time() {
+        let label = trace_commons_contributor::witness_copy::witness_copy()
+            .review
+            .busy_retry_at;
+        assert_eq!(
+            witness_busy_retry_line(Some(&busy("2026-09-27T12:34:00Z".into()))),
+            Some(format!("{label}: {}", local_hhmm("2026-09-27T12:34:00Z")))
+        );
+    }
+
+    #[test]
+    fn no_time_is_guessed() {
+        for result in [
+            None,
+            Some(serde_json::json!({})),
+            Some(busy(serde_json::Value::Null)),
+            Some(busy("not a time".into())),
+            Some(busy(serde_json::json!(1_790_000_000))),
+            Some(serde_json::json!({"view": {
+                "state": "Refused",
+                "message": "no",
+                "retry_at": "2026-09-27T12:34:00Z",
+            }})),
+        ] {
+            assert_eq!(witness_busy_retry_line(result.as_ref()), None, "{result:?}");
+        }
     }
 }
 
@@ -1616,24 +1573,15 @@ pub const ONBOARD_CONSENT_OPTIONAL: &str = "Optional — each one lets your trac
 pub const ONBOARD_CONSENT_CREDIT: &str = "Credit";
 pub const ONBOARD_ALWAYS_ON_TAG: &str = "always on";
 
-pub const ONBOARD_SCAN_TITLE: &str = "Extra scrub before sending? (optional)";
-pub const ONBOARD_SCAN_LOCAL_ALWAYS: &str = "Local scrubbing removes secrets, keys, tokens and credentials by pattern before anything \
-     leaves this machine. It runs either way.";
-pub const ONBOARD_SCAN_OFFER: &str = "You can additionally send the message text of each trace — not tool output, not file \
-     contents — through a second scanner run by NEAR AI, a third party, to catch personal \
-     information the patterns miss: names, addresses, that kind of thing.";
-/// Both halves of the disclosure. The cost (text really does leave the
-/// machine to a third party) and the reassurance (an unreachable scanner
-/// holds traces rather than sending them unscanned). Cutting either half
-/// makes the screen dishonest in one direction, so they live in one string.
-pub const ONBOARD_SCAN_DISCLOSURE: &str = concat!(
-    "This means your message text is transmitted to NEAR AI before it reaches ",
-    app_name!(),
-    ". If that scanner is unreachable, nothing is sent at all — traces wait rather than \
-     going out unscanned."
-);
-pub const ONBOARD_SCAN_LOCAL_ONLY: &str = "Local scrubbing only";
-pub const ONBOARD_SCAN_WITH_NEAR: &str = "Local scrubbing + NEAR AI scan";
+// The scan screen's words live in `trace_commons_contributor::privacy_scan_copy`,
+// where the Tauri shell's recovery prompt reads the same disclosure.
+// COPY-MIGRATED-BEGIN
+pub use trace_commons_contributor::privacy_scan_copy::{
+    DISCLOSURE as ONBOARD_SCAN_DISCLOSURE, LOCAL_ALWAYS as ONBOARD_SCAN_LOCAL_ALWAYS,
+    LOCAL_ONLY as ONBOARD_SCAN_LOCAL_ONLY, OFFER as ONBOARD_SCAN_OFFER,
+    TITLE as ONBOARD_SCAN_TITLE, WITH_NEAR as ONBOARD_SCAN_WITH_NEAR,
+};
+// COPY-MIGRATED-END
 
 pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
 
@@ -2224,7 +2172,7 @@ pub use trace_commons_contributor::private_inference_copy::{
 // The block above answers "may I send this?", and says nothing at all when
 // nobody is asking. This one answers a different question that every
 // contributor has all of the time: does this session carry a checkable copy
-// of the model call that produced it? That is a fact about the trace, not a
+// of its last model call? That is a fact about the trace, not a
 // permission, so it is stated on EVERY row -- an invited contributor's
 // included.
 //
@@ -3012,8 +2960,8 @@ mod tests {
 
     #[test]
     fn every_tier_states_the_same_verified_thing_about_credit() {
-        // Rule 3. Credit already awarded stays awarded, and no tier says
-        // anything else about it.
+        // Rule 3. Settled credit stays, pending credit is forfeited, and no
+        // tier says anything else about it.
         for stage in [
             WithdrawStage::NotInTheCommons,
             WithdrawStage::InTheCommons,
@@ -3021,6 +2969,10 @@ mod tests {
         ] {
             assert_eq!(withdraw_confirmation(stage).credit, WITHDRAW_CREDIT_NOTE);
         }
+        assert_eq!(
+            WITHDRAW_CREDIT_NOTE,
+            "Credit that has already settled stays. Credit still pending is forfeited."
+        );
     }
 
     #[test]

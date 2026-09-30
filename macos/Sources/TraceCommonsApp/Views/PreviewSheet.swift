@@ -67,6 +67,8 @@ struct PreviewSheet: View {
     /// classified lands here, so the notice below can prefer it without
     /// risking an internal string reaching a screen.
     @State private var witnessRefusal: String?
+    /// Set when a review met a busy witness: the time it may be tried again.
+    @State private var witnessBusyRetry: String?
     @State private var loading: Bool
 
     /// The contributor's answer to `VerdictCopy.question`, or `nil` for the
@@ -270,6 +272,14 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
+            // K11: what leaves this computer for this session, before and
+            // after redaction, and what its witness was checked against.
+            if let summary {
+                SessionSendDisclosureView(
+                    entry: entry,
+                    rawSessionBytes: summary.rawSessionBytes,
+                    wouldSendBytes: summary.wouldSendBytes)
+            }
             if let summary, let copy = model.publicRunCopy {
                 VStack(alignment: .leading, spacing: TC.Space.xxs) {
                     TCFieldLabel(copy.task)
@@ -324,12 +334,21 @@ struct PreviewSheet: View {
                 // fixed sentence, which is also what a failure that is not a
                 // refusal gets -- `failure` can hold raw local error text and
                 // must not reach a screen on this path.
-                CenteredNotice(
-                    title: "This one can't be shown.",
-                    detail: witnessRequested
-                        ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? failure)
-                        : failure
-                )
+                if witnessRequested, let retry = witnessBusyRetry {
+                    // A busy witness judged nothing: not a refusal. The
+                    // daemon's busy sentence, and when to try again.
+                    CenteredNotice(
+                        title: model.witnessCopy?.review?.heading ?? "",
+                        detail: [witnessRefusal ?? failure, retry].joined(separator: "\n")
+                    )
+                } else {
+                    CenteredNotice(
+                        title: "This one can't be shown.",
+                        detail: witnessRequested
+                            ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? failure)
+                            : failure
+                    )
+                }
                 if witnessSupported, model.witnessStateCode == 1, let copy = model.witnessCopy?.review {
                     Text(copy.disclosure).font(TC.Font_.caption)
                     Button(copy.action) { confirmingWitness = true }
@@ -821,6 +840,7 @@ struct PreviewSheet: View {
             // carrying no sentence -- a transport failure, or a daemon older
             // than this shell.
             witnessRefusal = outcome.sentence
+            witnessBusyRetry = outcome.retryLine
             failure = outcome.sentence ?? model.witnessCopy?.review?.failed
             loading = false
         }

@@ -176,6 +176,7 @@ mod tests {
             tokens,
             tail_tokens,
             logprobs,
+            token_char_lens: Vec::new(),
         }
     }
 

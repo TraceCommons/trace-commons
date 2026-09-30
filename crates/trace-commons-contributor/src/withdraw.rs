@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
+use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 
 use crate::config::allowlist_for;
 
@@ -118,28 +119,59 @@ pub enum WithdrawError {
 /// makes no attempt at its own retry-suppression; a caller may call it again
 /// on failure without needing to check whether the first attempt actually
 /// landed.
+///
+/// The route sits behind the server's account middleware, which rotates a
+/// native session once it is old enough and hands the new token back in
+/// [`ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER`] -- on a refusal as well as a
+/// success. The old token outlives that by only a short grace, so the caller
+/// must persist [`WithdrawCall::rotated_token`] whatever the result, or the
+/// contributor is signed out a few minutes later.
 pub async fn call_withdraw(
     ingest_url: &str,
     allowed_hosts: Option<&str>,
     account_session_token: &str,
     submission_id: Uuid,
-) -> Result<WithdrawOutcome, WithdrawError> {
-    let client = Client::builder(ingest_url, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
+) -> WithdrawCall {
+    let client = match Client::builder(ingest_url, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
         .bearer_token(account_session_token)
         .host_allowlist(allowlist_for(allowed_hosts))
         .build()
-        .map_err(|_| WithdrawError::Unavailable)?;
-    let path = format!("/v1/account/traces/{submission_id}/withdraw");
-    match client
-        .call_json::<(), WithdrawResponseBody>(Method::POST, &path, &[], None)
-        .await
     {
-        Ok(body) => Ok(WithdrawOutcome {
-            token_deletion_state: body.token_deletion_state,
-            distribution_reach: body.distribution_reach,
-        }),
-        Err(e) => Err(classify(&e)),
+        Ok(client) => client,
+        Err(_) => {
+            return WithdrawCall {
+                result: Err(WithdrawError::Unavailable),
+                rotated_token: None,
+            };
+        }
+    };
+    let path = format!("/v1/account/traces/{submission_id}/withdraw");
+    let response = client
+        .call_json_with_response_header::<(), WithdrawResponseBody>(
+            Method::POST,
+            &path,
+            &[],
+            None,
+            ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+        )
+        .await;
+    WithdrawCall {
+        result: response
+            .result
+            .map(|body| WithdrawOutcome {
+                token_deletion_state: body.token_deletion_state,
+                distribution_reach: body.distribution_reach,
+            })
+            .map_err(|e| classify(&e)),
+        rotated_token: response.response_header,
     }
+}
+
+/// One withdrawal call: its result, and the rotated account session the
+/// server handed back with it, if it rotated one.
+pub struct WithdrawCall {
+    pub result: Result<WithdrawOutcome, WithdrawError>,
+    pub rotated_token: Option<String>,
 }
 
 /// Tier-aware confirmation copy, verbatim where the design doc gives it.
@@ -174,12 +206,12 @@ pub fn confirmation_prompt(reach: DistributionReach, export_published_on: Option
         DistributionReach::NotDistributed => "Withdraw this trace?\n\n\
 It is waiting for privacy review and has not entered the commons. Its \
 content will be deleted. No one but a reviewer has seen it.\n\n\
-Credit already recorded stays."
+Credit that has already settled stays. Credit still pending is forfeited."
             .to_string(),
         DistributionReach::InCommons => "Withdraw this trace?\n\n\
 Its content will be deleted and it will be excluded from future exports and \
 training sets.\n\n\
-Credit already recorded stays."
+Credit that has already settled stays. Credit still pending is forfeited."
             .to_string(),
         DistributionReach::Distributed => {
             let published = export_published_on.unwrap_or("an earlier date");
@@ -190,10 +222,16 @@ training sets.\n\n\
 It was included in an export published on {published}. Copies already \
 distributed cannot be recalled. We cannot undo that and will not pretend \
 otherwise.\n\n\
-Credit already recorded stays."
+Credit that has already settled stays. Credit still pending is forfeited."
             )
         }
     }
+}
+
+/// Confirmation before the server reports distribution reach.
+/// History rows do not carry a verified reach tier, so do not claim one.
+pub fn confirmation_prompt_unknown() -> &'static str {
+    "Withdraw this trace?\n\nIts content will be deleted from managed stores and excluded from future exports. If copies were already distributed, they cannot be recalled.\n\nCredit that has already settled stays. Credit still pending is forfeited."
 }
 
 fn classify(e: &OcError) -> WithdrawError {
@@ -277,6 +315,7 @@ mod tests {
         let base = spawn(stub_withdraw(received.clone(), "not_distributed")).await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap();
         assert_eq!(
             outcome.distribution_reach,
@@ -294,6 +333,7 @@ mod tests {
         .await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap();
         assert_eq!(outcome.distribution_reach, DistributionReach::InCommons);
     }
@@ -307,6 +347,7 @@ mod tests {
         .await;
         let outcome = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap();
         assert_eq!(outcome.distribution_reach, DistributionReach::Distributed);
     }
@@ -320,6 +361,7 @@ mod tests {
         .await;
         let err = call_withdraw(&base, None, "stale-token", Uuid::nil())
             .await
+            .result
             .unwrap_err();
         assert_eq!(err, WithdrawError::SessionInvalid);
     }
@@ -337,6 +379,7 @@ mod tests {
         .await;
         let err = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap_err();
         assert_eq!(err, WithdrawError::NotFound);
     }
@@ -350,6 +393,7 @@ mod tests {
         .await;
         let err = call_withdraw(&base, None, "acct-session-token", Uuid::nil())
             .await
+            .result
             .unwrap_err();
         assert_eq!(err, WithdrawError::Unavailable);
     }
@@ -362,7 +406,11 @@ mod tests {
             "It is waiting for privacy review and has not entered the commons. Its \
              content will be deleted. No one but a reviewer has seen it."
         ));
-        assert!(copy.contains("Credit already recorded stays."));
+        assert!(
+            copy.contains(
+                "Credit that has already settled stays. Credit still pending is forfeited."
+            )
+        );
         // Must never claim exclusion from exports for a trace that was
         // never in the commons in the first place.
         assert!(!copy.contains("excluded from future exports"));
@@ -376,7 +424,11 @@ mod tests {
             "Copies already distributed cannot be recalled. We cannot undo that and \
              will not pretend otherwise."
         ));
-        assert!(copy.contains("Credit already recorded stays."));
+        assert!(
+            copy.contains(
+                "Credit that has already settled stays. Credit still pending is forfeited."
+            )
+        );
     }
 
     #[test]

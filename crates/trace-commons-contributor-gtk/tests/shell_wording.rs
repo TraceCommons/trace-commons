@@ -76,6 +76,30 @@ fn a_migrated_region_of_copy_rs_holds_no_words_of_its_own() {
     }
 }
 
+/// The automatic-contribution sentences reach this shell by re-export.
+///
+/// Before this, a GTK grant screen would have had no shared sentence to
+/// reach for, and the obvious thing to do would have been to write one --
+/// a claim about what leaves the machine that the other two shells do not
+/// make. Asserted against the migrated region, which the sweep above already
+/// holds to `pub use` and nothing else, so a name present here is a
+/// re-export and cannot be a literal copy.
+#[test]
+fn the_automatic_contribution_sentences_are_re_exported_not_written() {
+    let source = std::fs::read_to_string(src_root().join("copy.rs")).expect("copy.rs is readable");
+    let region = source
+        .split("// COPY-MIGRATED-BEGIN")
+        .nth(1)
+        .and_then(|rest| rest.split("// COPY-MIGRATED-END").next())
+        .expect("copy.rs has a migrated region");
+    for name in ["AUTO_SCRUB_SCOPE", "AUTO_SCRUB_LIMIT", "AUTO_NO_REVIEW"] {
+        assert!(
+            region.contains(name),
+            "{name} must be re-exported from consent_copy in the migrated region"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wording authored in this shell, over the whole shell.
 //
@@ -104,7 +128,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("autostart.rs", 2),
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
-    ("copy.rs", 267),
+    ("copy.rs", 226),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 7),
@@ -123,7 +147,14 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
 ///
 /// `ui/style.rs` and `ui/css_contract.rs` are not here: they hold CSS, which
 /// is not wording, and the scanner does not count it.
-const RUST_OWNED_SURFACES: &[&str] = &[];
+///
+/// `disclosure.rs` is K11's: the raw send, both enclaves and where the
+/// witness came from, every row from `consent_copy::route_disclosure_for_wire`.
+///
+/// What the two K11 surfaces draw is tested in `disclosure.rs`, on
+/// `disclosure::drawn`: `ui::fill_disclosure_rows` makes one widget per item
+/// it returns and decides nothing else.
+const RUST_OWNED_SURFACES: &[&str] = &["disclosure.rs"];
 
 /// Words a sentence has and an identifier, a wire key, a CSS class or a
 /// format pattern does not.
