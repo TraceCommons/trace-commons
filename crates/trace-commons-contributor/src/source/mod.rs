@@ -1099,6 +1099,7 @@ mod tests {
                     output_tokens: Some(200),
                     cost_usd: Some(0.02),
                     status: 200,
+                    ..Default::default()
                 },
             ]));
         let wrapped_sources = all_sources(

@@ -1416,6 +1416,7 @@ mod tests {
             output_tokens: None,
             cost_usd: None,
             status: 200,
+            ..Default::default()
         }
     }
 

@@ -588,6 +588,7 @@ mod tests {
             output_tokens: Some(4),
             cost_usd: Some(0.01),
             status: 200,
+            ..Default::default()
         }
     }
 
