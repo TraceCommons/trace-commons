@@ -22,7 +22,7 @@ use super::*;
 #[path = "../../../tests/support/pilot_runtime_grants.rs"]
 mod pilot_runtime_grants;
 #[path = "../../../tests/support/pilot_runtime_login.rs"]
-mod pilot_runtime_login;
+pub(super) mod pilot_runtime_login;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ use trace_commons_server::witness_service;
 /// (`tests/versioned_pipeline_runtime_pg.rs`). Like that one, its only
 /// privilege sources are membership in `trace_ingest_runtime`, the ingest
 /// runtime group V90 names, and in `trace_account_admission_runtime` (V77).
-const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
+pub(super) const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
 static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
 
 /// The database this suite runs in, created once per process: a sibling of
@@ -150,7 +150,15 @@ async fn pipeline_http_database_url() -> Option<String> {
 /// `trace_ingest_runtime` is granted.
 pub(super) async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
-    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    Some(runtime_backend_at(&url, pool_size).await)
+}
+
+/// `runtime_backend` for a database the caller names: connects to `url` as
+/// this suite's runtime login and checks that the login is neither
+/// `SUPERUSER` nor `BYPASSRLS`. The restore drill's resume
+/// (`pipeline_restore_pg_tests`) connects to the restored database this way.
+pub(super) async fn runtime_backend_at(url: &str, pool_size: usize) -> Arc<PgBackend> {
+    let mut runtime_url = reqwest::Url::parse(url).expect("parse test URL");
     runtime_url
         .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
         .expect("set runtime user");
@@ -175,7 +183,7 @@ pub(super) async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> 
         !row.get::<_, bool>(0) && !row.get::<_, bool>(1),
         "runtime role must not bypass RLS"
     );
-    Some(Arc::new(backend))
+    Arc::new(backend)
 }
 
 /// Pinned per amendments-971 ruling A4: an off-chain credit account, whole
@@ -344,7 +352,7 @@ pub(super) fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider>
 /// reflects that reality rather than hiding it, and `allow_test_dependencies
 /// = true` is the test-only opt-in that lets the unqualified runtime start
 /// anyway.
-fn assemble_test_pipeline_service(
+pub(super) fn assemble_test_pipeline_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
     index: Arc<IsolatedPipelineIndex>,
@@ -382,7 +390,7 @@ fn assemble_test_pipeline_service(
 /// Opens a tenant-scoped transaction the way every raw-SQL helper below
 /// needs one: `set_config('trace_commons.trace_tenant_id', ...)` first, so
 /// RLS admits only `tenant_id`'s own rows.
-async fn tenant_tx<'a>(
+pub(super) async fn tenant_tx<'a>(
     client: &'a mut deadpool_postgres::Client,
     tenant_id: &str,
 ) -> deadpool_postgres::Transaction<'a> {
@@ -401,7 +409,7 @@ async fn tenant_tx<'a>(
 /// test learns app 1's worker reached and durably committed the Settle
 /// selection -- immediately before the injected `AfterSettleSelection`
 /// crash -- without calling the processor directly.
-async fn wait_for_settle_selection(
+pub(super) async fn wait_for_settle_selection(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -442,7 +450,7 @@ async fn wait_for_settle_selection(
 /// 60 s, then panics with a clear message. This is how the test learns app
 /// 2's worker reclaimed the expired lease and drove the run to completion on
 /// its own -- no manual `process_run` call.
-async fn wait_for_run_complete(
+pub(super) async fn wait_for_run_complete(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -507,7 +515,11 @@ pub(super) async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str
 /// lease directly, in a tenant-scoped transaction, only when it is still
 /// `leased` -- exactly what a real lease does on its own once its duration
 /// elapses, done immediately instead of waiting it out.
-async fn expire_run_lease(backend: &Arc<PgBackend>, tenant_id: &str, submission_id: uuid::Uuid) {
+pub(super) async fn expire_run_lease(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+) {
     let mut client = backend
         .trace_pool_for_test()
         .get()

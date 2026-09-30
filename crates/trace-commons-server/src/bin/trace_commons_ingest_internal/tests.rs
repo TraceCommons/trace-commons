@@ -96275,6 +96275,14 @@ mod pipeline_http_pg_tests;
 #[path = "pipeline_corpus_pg_tests.rs"]
 mod pipeline_corpus_pg_tests;
 
+/// `pipeline.py restore-drill`: the ignored `pipeline_restore_seed` leaves
+/// one completed run and one run stopped after a durable Settle selection,
+/// and the ignored `pipeline_restore_resume` proves the restored copy
+/// completes that run once. Nested here beside the two modules above, whose
+/// `pub(super)` helpers it reuses.
+#[path = "pipeline_restore_pg_tests.rs"]
+mod pipeline_restore_pg_tests;
+
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
 /// message templates are pinned here once rather than at each wrapper.

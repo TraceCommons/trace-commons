@@ -1547,5 +1547,343 @@ class PackageCommandTests(_CorpusRunCase):
                 self.assertEqual(self._cargo_calls(), [])
 
 
+# ---------------------------------------------------------------------------
+# Task 10: `pipeline.py restore-drill`.
+# ---------------------------------------------------------------------------
+
+_RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+_RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+_RESTORE_CHECK = "pipeline_restore_drill"
+
+
+class _RestoreDrillCase(_CorpusRunCase):
+    """Fakes for `restore-drill`: the seed writes a tree of artifact files
+    and its fingerprint file; the resume writes one passing result carrying
+    the safe blocker. Docker and psql go through `_environment_invoke`,
+    which also records the dump file's mode when `pg_dump` runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.dump_modes = []
+
+    def _invoke(self, command, *, env, capture=False, input_text=None, log_path=None):
+        self.calls.append(("invoke", list(command), input_text))
+        if command[0] == "pg_dump":
+            dump_path = Path(command[command.index("-f") + 1])
+            self.dump_modes.append(dump_path.stat().st_mode & 0o777)
+        return (0, "42") if capture else (0, None)
+
+    def _fake_cargo(self, **overrides):
+        def fake_cargo_test(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            if test_filter == _RESTORE_SEED:
+                root = Path(env["TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT"])
+                (root / "objects" / "aa").mkdir(parents=True)
+                (root / "objects" / "aa" / "first.bin").write_bytes(b"\x00first-ciphertext")
+                (root / "second.bin").write_bytes(b"second-ciphertext")
+                fingerprint = {
+                    "schema": "trace_commons.pipeline_restore_fingerprint.v1",
+                    "database_fingerprint": _fake_hash("database"),
+                    "artifact_fingerprint": pipeline.artifact_fingerprint(root),
+                    "index_entry_set_hash": _fake_hash("index"),
+                    "pending_run_id_hash": _fake_hash("pending-run"),
+                    "adapter_request_count": 1,
+                }
+                fingerprint.update(overrides.get("fingerprint", {}))
+                Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_bytes(
+                    results.canonical(fingerprint) + b"\n"
+                )
+            elif test_filter == _RESTORE_RESUME:
+                seed = json.loads(Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).read_bytes())
+                evidence = {
+                    "database_fingerprint": seed["database_fingerprint"],
+                    "artifact_fingerprint": seed["artifact_fingerprint"],
+                    "index_entry_set_hash": seed["index_entry_set_hash"],
+                    "pending_runs_resumed": 1,
+                    "duplicate_effects": 0,
+                }
+                evidence.update(overrides.get("evidence", {}))
+                raw = {
+                    "schema": results.SCHEMA,
+                    "run_id": env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"],
+                    "check_id": _RESTORE_CHECK,
+                    "status": "pass",
+                    "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
+                    "package_hash": _fake_hash("package"),
+                    "configuration_digest": _fake_hash("configuration"),
+                    "dependency_digest": _fake_hash("dependency"),
+                    "observed_at": _iso(datetime.now(timezone.utc)),
+                    "evidence_hash": _digest(results.canonical(evidence)),
+                    "safe_blockers": overrides.get("safe_blockers", ["filesystem_restore_local_only"]),
+                }
+                result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+                (result_dir / f"{_RESTORE_CHECK}.result.json").write_text(json.dumps(raw))
+                (result_dir / f"{_RESTORE_CHECK}.evidence.json").write_text(json.dumps(evidence))
+
+        return fake_cargo_test
+
+    def _drill(self, copy=None, **overrides):
+        real_copy = pipeline.copy_artifacts
+
+        def recording_copy(source, destination):
+            self.calls.append(("copy", Path(source), Path(destination)))
+            (copy or real_copy)(source, destination)
+
+        with mock.patch.object(pipeline, "copy_artifacts", recording_copy), mock.patch.object(
+            environment, "_invoke", self._invoke
+        ):
+            return self._main(
+                ["restore-drill", "--postgres-admin-url", _ADMIN_URL], cargo=self._fake_cargo(**overrides)
+            )
+
+    def _main(self, argv, cargo=None, export=None):
+        # Unlike `_CorpusRunCase._main`, leaves `_invoke` alone: `_drill`
+        # patches it with this case's recording fake.
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(pipeline, "LOCAL_DIR", self.tmp / "local"))
+            stack.enter_context(mock.patch.object(pipeline, "cargo_test", cargo))
+            run_class = stack.enter_context(mock.patch.object(pipeline, "Run"))
+            run_class.create.return_value = self.run
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            return pipeline.main(argv)
+
+    def _events(self):
+        """The drill's steps in the order they ran, as labels."""
+        events = []
+        for call in self.calls:
+            if call[0] == "cargo":
+                events.append(("cargo", call[3]))
+            elif call[0] == "copy":
+                events.append(("copy",))
+            elif call[1][0] in ("pg_dump", "pg_restore"):
+                events.append((call[1][0],))
+            elif call[2] and "_restored;" in call[2] and "CREATE DATABASE" in call[2]:
+                events.append(("createdb",))
+        return events
+
+
+class RestoreDrillTests(_RestoreDrillCase):
+    def test_restore_drill_order(self):
+        code = self._drill()
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        self.assertEqual(
+            self._events(),
+            [
+                ("cargo", _RESTORE_SEED),
+                ("pg_dump",),
+                ("createdb",),
+                ("pg_restore",),
+                ("copy",),
+                ("cargo", _RESTORE_RESUME),
+            ],
+        )
+
+        cargo_calls = self._cargo_calls()
+        seed_env, resume_env = cargo_calls[0][4], cargo_calls[1][4]
+        for call in cargo_calls:
+            self.assertEqual(call[2], _INGEST_ARGS)
+            self.assertTrue(call[5] and call[6], "both tests run --exact --ignored")
+        # The seed gets the scenario's database (it creates `<db>_pilot`);
+        # the resume gets the restored database itself.
+        seed_database = seed_env["TRACE_COMMONS_PG_TEST_DATABASE_URL"].rsplit("/", 1)[1]
+        resume_database = resume_env["TRACE_COMMONS_PG_TEST_DATABASE_URL"].rsplit("/", 1)[1]
+        self.assertRegex(seed_database, r"^admission_test_[0-9a-f]{8}_01$")
+        self.assertEqual(resume_database, f"{seed_database}_restored")
+        dump = next(call[1] for call in self.calls if call[0] == "invoke" and call[1][0] == "pg_dump")
+        restore = next(call[1] for call in self.calls if call[0] == "invoke" and call[1][0] == "pg_restore")
+        self.assertEqual(dump[-1], f"{seed_database}_pilot")
+        self.assertEqual(restore[restore.index("-d") + 1], resume_database)
+        self.assertEqual(self.dump_modes, [0o600])
+
+        # One random key for both processes, never printed.
+        key = seed_env["TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX"]
+        self.assertRegex(key, r"^[0-9a-f]{64}$")
+        self.assertEqual(resume_env["TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX"], key)
+        self.assertEqual(
+            seed_env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"],
+            resume_env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"],
+        )
+        source_root = Path(seed_env["TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT"])
+        restored_root = Path(resume_env["TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT"])
+        self.assertNotEqual(source_root, restored_root)
+        self.assertEqual(pipeline.artifact_fingerprint(source_root), pipeline.artifact_fingerprint(restored_root))
+        # Only the resume emits a check result.
+        self.assertNotIn("TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR", seed_env)
+        self.assertEqual(resume_env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"], self.run.run_id)
+
+        output = self.stdout.getvalue() + self.stderr.getvalue()
+        self.assertNotIn(key, output)
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(len(lines), 2, self.stdout.getvalue())
+        self.assertTrue(lines[0].startswith("PipelineRestoreOK: "))
+        self.assertIn(f"database={_fake_hash('database')}", lines[0])
+        self.assertIn("pending_runs_resumed=1", lines[0])
+        self.assertIn("duplicate_effects=0", lines[0])
+        self.assertIn("filesystem_restore_local_only", lines[1])
+        self.assertIn("local evidence", lines[1])
+        # The dump does not outlive the restore.
+        self.assertEqual(list(self.run.run_dir.glob("*.dump")), [])
+
+    def test_a_changed_artifact_byte_fails_before_the_resume(self):
+        def flipping_copy(source, destination):
+            shutil.copytree(source, destination)
+            target = Path(destination) / "second.bin"
+            data = bytearray(target.read_bytes())
+            data[0] ^= 0x01
+            target.write_bytes(bytes(data))
+
+        code = self._drill(copy=flipping_copy)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: restore_artifact_bytes_mismatch")
+        self.assertEqual(
+            [event for event in self._events() if event[0] == "cargo"],
+            [("cargo", _RESTORE_SEED)],
+            "the resume never runs",
+        )
+        self.assertNotIn("PipelineRestoreOK", self.stdout.getvalue())
+
+        for label, mutate in (
+            ("missing_file", lambda root: (root / "second.bin").unlink()),
+            ("extra_file", lambda root: (root / "extra.bin").write_bytes(b"")),
+        ):
+            with self.subTest(label=label):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("restore")
+                self.calls.clear()
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+
+                def mutating_copy(source, destination, mutate=mutate):
+                    shutil.copytree(source, destination)
+                    mutate(Path(destination))
+
+                self.assertEqual(self._drill(copy=mutating_copy), 1)
+                self.assertEqual(
+                    self.stderr.getvalue().strip(), "PipelineFailure: restore_artifact_bytes_mismatch"
+                )
+
+    def test_restore_refuses_evidence_that_does_not_match_the_seed(self):
+        cases = (
+            ({"evidence": {"database_fingerprint": _fake_hash("other")}}, "restore_evidence_mismatch"),
+            ({"evidence": {"duplicate_effects": 1}}, "restore_evidence_mismatch"),
+            ({"evidence": {"pending_runs_resumed": 0}}, "restore_evidence_mismatch"),
+            ({"safe_blockers": []}, "restore_safe_blocker_missing"),
+            ({"fingerprint": {"tenant_id": "tenant-a"}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"artifact_fingerprint": _fake_hash("not-the-tree")}},
+             "restore_artifact_fingerprint_mismatch"),
+        )
+        for overrides, label in cases:
+            with self.subTest(label=label, overrides=overrides):
+                shutil.rmtree(self.run.run_dir)
+                self.run = _scratch_run("restore")
+                self.calls.clear()
+                self.stdout, self.stderr = io.StringIO(), io.StringIO()
+                self.assertEqual(self._drill(**overrides), 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+
+    def test_artifact_fingerprint_matches_the_rust_seed(self):
+        # The same tree and value as `artifact_fingerprint_hashes_sorted_
+        # relative_paths_and_bytes` in `pipeline_restore_pg_tests.rs`.
+        root = self.tmp / "tree"
+        (root / "a").mkdir(parents=True)
+        (root / "z.bin").write_bytes(b"")
+        (root / "a" / "b.bin").write_bytes(b"one")
+        (root / "a-c.bin").write_bytes(b"two")
+        self.assertEqual(
+            pipeline.artifact_fingerprint(root),
+            "sha256:9be20bc7d0122e748a727bf0433d393ba50edb9e2be45a3e106ab10e52be2716",
+        )
+
+
+class RestorePrivilegeTests(unittest.TestCase):
+    def _commands(self, postgres_admin_url):
+        calls = []
+
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            calls.append(list(command))
+            if command[:2] == ["docker", "port"]:
+                return 0, "127.0.0.1:54321\n"
+            return (0, "") if capture else (0, None)
+
+        run = _scratch_run("restore")
+        try:
+            with mock.patch.object(environment, "_invoke", fake_invoke):
+                with environment.Environment(run, postgres_admin_url=postgres_admin_url) as env:
+                    dump_path = run.run_dir / f"{run.run_id}.dump"
+                    env.dump("admission_test_cafebabe_01_pilot", dump_path)
+                    mode = dump_path.stat().st_mode & 0o777 if dump_path.exists() else None
+                    env.create_database("admission_test_cafebabe_01_restored")
+                    env.restore(dump_path, "admission_test_cafebabe_01_restored")
+            container = f"tc-pipeline-{run.run_id}"
+            return calls, dump_path, mode, container
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+    def test_restore_uses_privileges_and_the_same_cluster(self):
+        refused_flags = ("--no-privileges", "--no-acl", "-x", "--no-owner", "-O")
+
+        calls, dump_path, _, container = self._commands(None)
+        [dump] = [call for call in calls if "pg_dump" in call]
+        [restore] = [call for call in calls if "pg_restore" in call]
+        inner = f"/tmp/{dump_path.name}"
+        self.assertEqual(
+            dump,
+            ["docker", "exec", container, "pg_dump", "-U", "trace", "-Fc", "-f", inner,
+             "admission_test_cafebabe_01_pilot"],
+        )
+        self.assertEqual(
+            restore,
+            ["docker", "exec", container, "pg_restore", "-U", "trace", "-d",
+             "admission_test_cafebabe_01_restored", inner],
+        )
+        for flag in refused_flags:
+            self.assertNotIn(flag, restore)
+        self.assertTrue(
+            any(
+                "psql" in call and container in call
+                for call in calls
+            ),
+            "the restored database is created in the same container",
+        )
+
+        calls, dump_path, mode, _ = self._commands(_ADMIN_URL)
+        [dump] = [call for call in calls if call[0] == "pg_dump"]
+        [restore] = [call for call in calls if call[0] == "pg_restore"]
+        cluster = ["-h", "127.0.0.1", "-p", "55431", "-U", "trace"]
+        self.assertEqual(
+            dump, ["pg_dump", *cluster, "-Fc", "-f", str(dump_path), "admission_test_cafebabe_01_pilot"]
+        )
+        self.assertEqual(
+            restore, ["pg_restore", *cluster, "-d", "admission_test_cafebabe_01_restored", str(dump_path)]
+        )
+        for flag in refused_flags:
+            self.assertNotIn(flag, restore)
+        self.assertEqual(mode, 0o600, "the host dump file is private to its owner")
+
+    def test_a_failed_restore_is_a_step_failure_with_a_log(self):
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            if command[0] == "pg_restore":
+                Path(log_path).write_text("pg_restore: error: could not execute query\n")
+                return 1, None
+            return (0, "") if capture else (0, None)
+
+        run = _scratch_run("restore")
+        try:
+            with mock.patch.object(environment, "_invoke", fake_invoke):
+                with environment.Environment(run, postgres_admin_url=_ADMIN_URL) as env:
+                    with self.assertRaises(errors.StepFailed) as ctx:
+                        env.restore(run.run_dir / "x.dump", "admission_test_cafebabe_01_restored")
+            self.assertEqual(ctx.exception.step, "database_restore")
+            self.assertEqual(ctx.exception.exit_code, 1)
+            self.assertTrue(ctx.exception.log_path.is_file())
+            with self.assertRaises(errors.ToolingError) as ctx:
+                with mock.patch.object(environment, "_invoke", fake_invoke):
+                    with environment.Environment(run, postgres_admin_url=_ADMIN_URL) as env:
+                        env.create_database("Robert'); DROP TABLE")
+            self.assertEqual(str(ctx.exception), "pipeline_tooling_database_name_invalid")
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

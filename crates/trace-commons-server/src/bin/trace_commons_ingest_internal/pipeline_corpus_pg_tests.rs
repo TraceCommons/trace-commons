@@ -91,8 +91,8 @@ const CORPUS_BUNDLE_VAR: &str = "TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE";
 const CORPUS_PACKAGE_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CORPUS_PACKAGE_PATH";
 const CORPUS_TRUSTED_KEY_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CORPUS_TRUSTED_KEY_PATH";
 const CORPUS_REPORT_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH";
-const ARTIFACT_ROOT_VAR: &str = "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT";
-const TEST_MASTER_KEY_VAR: &str = "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX";
+pub(super) const ARTIFACT_ROOT_VAR: &str = "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT";
+pub(super) const TEST_MASTER_KEY_VAR: &str = "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX";
 const PACKAGE_BUNDLE_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE";
 const PACKAGE_OUTPUT_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT";
 const TRUSTED_KEY_OUTPUT_VAR: &str = "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT";
@@ -144,9 +144,9 @@ const EPHEMERAL_KEY_ID: &str = "local_pipeline_ephemeral";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CorpusFile {
+pub(super) struct CorpusFile {
     schema: String,
-    fixtures: Vec<CorpusFixture>,
+    pub(super) fixtures: Vec<CorpusFixture>,
 }
 
 /// One fixture. The port's defaults stand for the decision fields; the
@@ -156,7 +156,7 @@ struct CorpusFile {
 /// fall back to a default silently.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CorpusFixture {
+pub(super) struct CorpusFixture {
     label: String,
     trace_id: Uuid,
     submission_id: Uuid,
@@ -247,7 +247,7 @@ impl CorpusFile {
 
 /// Reads and validates a corpus file, returning it with the `sha256:` digest
 /// of its bytes.
-fn load_corpus(path: &Path) -> Result<(CorpusFile, String), &'static str> {
+pub(super) fn load_corpus(path: &Path) -> Result<(CorpusFile, String), &'static str> {
     let bytes = std::fs::read(path).map_err(|_| "corpus_unreadable")?;
     let corpus: CorpusFile = serde_json::from_slice(&bytes).map_err(|_| "corpus_invalid")?;
     corpus.validate()?;
@@ -605,7 +605,7 @@ fn assemble_corpus_service(
 /// Every envelope consents to model training, as `model_training_envelope`
 /// does: the allowed use a compatibility award needs to be credited rather
 /// than withheld (ruling T9-6).
-async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributionEnvelope {
+pub(super) async fn fixture_envelope(fixture: &CorpusFixture) -> TraceContributionEnvelope {
     let turn = RawTraceCaptureTurn {
         user_input: fixture.input.clone(),
         response: Some("Completed the local fixture safely.".to_string()),
@@ -947,13 +947,13 @@ async fn drive_fixture(http: &mut CorpusHttp, fixture: &CorpusFixture) -> Fixtur
 // The report (port lines 418-470 and `fixture_report`, lines 1794-1927).
 // ---------------------------------------------------------------------------
 
-fn sha256_bytes(bytes: &[u8]) -> String {
+pub(super) fn sha256_bytes(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
 }
 
 /// A run or outcome id as it may appear in the report: its hash only.
-fn id_hash(id: Uuid) -> String {
+pub(super) fn id_hash(id: Uuid) -> String {
     sha256_bytes(id.to_string().as_bytes())
 }
 
@@ -1252,7 +1252,7 @@ fn contains_probe(haystack: &[u8], probes: &[&str]) -> bool {
 
 /// Writes `bytes` to a fresh name beside `path`, then renames it onto
 /// `path`: the report, the signed package, and the trusted key.
-fn write_atomically(path: &Path, bytes: &[u8]) {
+pub(super) fn write_atomically(path: &Path, bytes: &[u8]) {
     let parent = path.parent().expect("pipeline_output_path_has_no_parent");
     std::fs::create_dir_all(parent).expect("pipeline_output_directory_unwritable");
     let temporary = parent.join(format!(".pipeline-output-{}.tmp", Uuid::new_v4()));
@@ -1517,7 +1517,7 @@ async fn pipeline_package_write() {
 // Unit tests (no database).
 // ---------------------------------------------------------------------------
 
-fn main_corpus_path() -> PathBuf {
+pub(super) fn main_corpus_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json")
 }

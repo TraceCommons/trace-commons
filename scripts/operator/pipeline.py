@@ -10,9 +10,11 @@ convention: hash-only, label-only operational surfaces).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import secrets
+import shutil
 import sys
 from pathlib import Path
 
@@ -43,6 +45,20 @@ INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest
 CORPUS_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
 PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
 BUNDLES = ("minimal", "compatibility")
+
+# `restore-drill`: the two ignored tests around the dump, the restore, and
+# the artifact copy, and the one check the resume emits.
+RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+RESTORE_CHECK_ID = "pipeline_restore_drill"
+RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
+RESTORE_SAFE_BLOCKER = "filesystem_restore_local_only"
+_RESTORE_FINGERPRINT_HASHES = (
+    "database_fingerprint",
+    "artifact_fingerprint",
+    "index_entry_set_hash",
+    "pending_run_id_hash",
+)
 
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -122,6 +138,18 @@ def build_parser():
     )
     package_parser.add_argument("--key-id", dest="key_id", default=None, help="The signing key's id.")
     package_parser.set_defaults(handler=run_package)
+
+    restore_parser = subparsers.add_parser(
+        "restore-drill",
+        help="Dump and restore a seeded pipeline database and resume its pending run (local evidence)",
+    )
+    restore_parser.add_argument(
+        "--postgres-admin-url",
+        dest="postgres_admin_url",
+        default=None,
+        help="Use this existing PostgreSQL server instead of starting a container.",
+    )
+    restore_parser.set_defaults(handler=restore_drill)
 
     return parser
 
@@ -367,6 +395,159 @@ def run_package(args, run):
     )
     require(key_output.is_file(), "package_trusted_key_missing")
     print(f"PipelinePackageOK: bundle={bundle_id} package={package_hash}")
+
+
+def _artifact_files(root):
+    """Every file under `root`, keyed by its `/`-separated relative path."""
+    root = Path(root)
+    return {path.relative_to(root).as_posix(): path for path in root.rglob("*") if path.is_file()}
+
+
+def artifact_fingerprint(root):
+    """The port's artifact fingerprint (`ef97a459:scripts/operator/pipeline-
+    backup-restore-smoke.sh` lines 191-205): SHA-256 over each file's
+    relative path and the SHA-256 of its bytes, in relative-path string
+    order. `artifact_fingerprint` in `pipeline_restore_pg_tests.rs` computes
+    the same value (both pin one tree's)."""
+    digest = hashlib.sha256()
+    files = _artifact_files(root)
+    for relative in sorted(files):
+        digest.update(relative.encode())
+        digest.update(hashlib.sha256(files[relative].read_bytes()).digest())
+    return "sha256:" + digest.hexdigest()
+
+
+def copy_artifacts(source, destination):
+    """The filesystem restore: a copy of the seed's artifact root to a new
+    directory beside it."""
+    shutil.copytree(source, destination)
+
+
+def require_same_artifact_bytes(source, destination):
+    """The copy holds exactly the source's files, byte for byte."""
+    source_files, copied_files = _artifact_files(source), _artifact_files(destination)
+    require(set(source_files) == set(copied_files), "restore_artifact_bytes_mismatch")
+    for relative, path in source_files.items():
+        require(path.read_bytes() == copied_files[relative].read_bytes(), "restore_artifact_bytes_mismatch")
+
+
+def _read_restore_fingerprint(path):
+    """The seed's fingerprint file: exactly its schema, four hashes, and a
+    request count."""
+    value = _read_json(path, "restore_fingerprint_invalid")
+    require(
+        isinstance(value, dict)
+        and set(value) == {"schema", "adapter_request_count", *_RESTORE_FINGERPRINT_HASHES}
+        and value["schema"] == RESTORE_FINGERPRINT_SCHEMA
+        and all(
+            isinstance(value[key], str) and _HASH.fullmatch(value[key]) is not None
+            for key in _RESTORE_FINGERPRINT_HASHES
+        )
+        and type(value["adapter_request_count"]) is int
+        and value["adapter_request_count"] > 0,
+        "restore_fingerprint_invalid",
+    )
+    return value
+
+
+def run_restore_drill(run, environment):
+    """One restore drill in its own scenario of `environment`, in this order:
+    the seed (on `<db>_pilot`), the dump of `<db>_pilot`, `<db>_restored`
+    created in the same cluster, the restore, the artifact copy and its
+    byte comparison, then the resume against `<db>_restored`. Checks the
+    resume's `pipeline_restore_drill` result against the seed and returns
+    the seed's fingerprint. Takes the environment as an argument so that
+    `qualify` can run it beside its other checks."""
+    scenario = environment.scenario("restore_drill")
+    source_root = scenario.artifact_root
+    restored_root = source_root.with_name(f"{source_root.name}_restored")
+    fingerprint_path = run.run_dir / "restore-fingerprint.json"
+    dump_path = run.run_dir / f"{run.run_id}.dump"
+    shared = {
+        # One random key for both processes (P4-D18): the resume must read
+        # the objects the seed wrote. Only the children see it.
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
+        "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+    }
+
+    seed_env = {
+        **shared,
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
+        "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(source_root),
+    }
+    cargo_test(
+        run, "restore_seed", INGEST_TEST_ARGS, RESTORE_SEED, child_environment(seed_env), exact=True, ignored=True
+    )
+    require(
+        scenario.committed_transactions(scenario.pilot_database) >= 5,
+        "database_check_executed_nothing:restore_seed",
+    )
+    seed = _read_restore_fingerprint(fingerprint_path)
+
+    try:
+        environment.dump(scenario.pilot_database, dump_path)
+        environment.create_database(scenario.restored_database)
+        environment.restore(dump_path, scenario.restored_database)
+    finally:
+        # Admin-url mode leaves the dump in the run directory; it is not kept.
+        dump_path.unlink(missing_ok=True)
+    copy_artifacts(source_root, restored_root)
+    require_same_artifact_bytes(source_root, restored_root)
+    require(
+        artifact_fingerprint(restored_root) == seed["artifact_fingerprint"], "restore_artifact_fingerprint_mismatch"
+    )
+
+    resume_env = {
+        **shared,
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.restored_url,
+        "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(restored_root),
+        "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
+        "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+    }
+    cargo_test(
+        run, "restore_resume", INGEST_TEST_ARGS, RESTORE_RESUME, child_environment(resume_env), exact=True, ignored=True
+    )
+    require(
+        scenario.committed_transactions(scenario.restored_database) >= 5,
+        "database_check_executed_nothing:restore_resume",
+    )
+
+    results = load_results(run)
+    require(RESTORE_CHECK_ID in results, f"check_result_missing:{RESTORE_CHECK_ID}")
+    require_current_pass_results(
+        run, results, {RESTORE_CHECK_ID: CheckSpec(RESTORE_CHECK_ID, digests_required=True)}
+    )
+    require(RESTORE_SAFE_BLOCKER in results[RESTORE_CHECK_ID].safe_blockers, "restore_safe_blocker_missing")
+    evidence = _read_json(run.results_dir / f"{RESTORE_CHECK_ID}.evidence.json", "restore_evidence_malformed")
+    validate_evidence(evidence)
+    require(
+        evidence
+        == {
+            "database_fingerprint": seed["database_fingerprint"],
+            "artifact_fingerprint": seed["artifact_fingerprint"],
+            "index_entry_set_hash": seed["index_entry_set_hash"],
+            "pending_runs_resumed": 1,
+            "duplicate_effects": 0,
+        },
+        "restore_evidence_mismatch",
+    )
+    return seed
+
+
+def restore_drill(args, run):
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+        seed = run_restore_drill(run, environment)
+    require(set(load_results(run)) == {RESTORE_CHECK_ID}, "restore_check_results_unexpected")
+    print(
+        f"PipelineRestoreOK: database={seed['database_fingerprint']} "
+        f"artifacts={seed['artifact_fingerprint']} index={seed['index_entry_set_hash']} "
+        "pending_runs_resumed=1 duplicate_effects=0"
+    )
+    print(
+        f"PipelineRestoreScope: {RESTORE_SAFE_BLOCKER} -- the artifact restore is a local "
+        "filesystem copy, local evidence only, not a remote object-store restore"
+    )
 
 
 def main(argv=None):

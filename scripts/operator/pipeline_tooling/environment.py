@@ -55,6 +55,8 @@ CHILD_ENV_ALLOWLIST = (
 )
 
 _STEP_LABEL = re.compile(r"[a-z0-9_]{1,64}\Z")
+_DATABASE_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
+_DUMP_NAME = re.compile(r"[a-z0-9_]{1,64}\.dump\Z")
 _EXCLUDED_TREE_DIRS = {".local", ".vscode", "target"}
 
 
@@ -219,6 +221,16 @@ class Scenario:
             f"postgres://tc_login_resolver_login@{self.host}:{self.port}"
             f"/{self.runtime_database}"
         )
+
+    @property
+    def restored_database(self):
+        """Where `restore-drill` restores `pilot_database`'s dump: a sibling
+        in the same cluster, dropped with the scenario."""
+        return f"{self.runtime_database}_restored"
+
+    @property
+    def restored_url(self):
+        return f"postgres://trace@{self.host}:{self.port}/{self.restored_database}"
 
     def committed_transactions(self, *databases):
         in_list = ", ".join(f"'{name}'" for name in databases)
@@ -470,11 +482,48 @@ class Environment:
         self._scenarios.append(scenario)
         return scenario
 
+    # -- dump and restore ---------------------------------------------------
+    #
+    # Both stay in this environment's own cluster: the roles the dump's
+    # grants name exist there, so the restore keeps ownership and privileges
+    # (no `--no-owner`, no `--no-privileges`). Container mode keeps the dump
+    # inside the container (`/tmp/<name>`); admin-url mode writes it to
+    # `path`, created with mode 0600 before `pg_dump` opens it.
+
+    def _cluster_tool(self, tool):
+        if self._container is not None:
+            return ["docker", "exec", self._container, tool, "-U", "trace"]
+        return [tool, "-h", "127.0.0.1", "-p", str(self._port), "-U", "trace"]
+
+    def _dump_location(self, path):
+        path = Path(path)
+        require(_DUMP_NAME.fullmatch(path.name) is not None, "pipeline_tooling_dump_name_invalid")
+        return f"/tmp/{path.name}" if self._container is not None else str(path)
+
+    def dump(self, database, path):
+        require(_DATABASE_NAME.fullmatch(database) is not None, "pipeline_tooling_database_name_invalid")
+        location = self._dump_location(path)
+        if self._container is None:
+            descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            os.close(descriptor)
+            Path(path).chmod(0o600)
+        command = [*self._cluster_tool("pg_dump"), "-Fc", "-f", location, database]
+        run_child(self._run, "database_dump", command, child_environment({}))
+
+    def create_database(self, database):
+        require(_DATABASE_NAME.fullmatch(database) is not None, "pipeline_tooling_database_name_invalid")
+        self._psql(f"CREATE DATABASE {database};", step="database_create")
+
+    def restore(self, path, database):
+        require(_DATABASE_NAME.fullmatch(database) is not None, "pipeline_tooling_database_name_invalid")
+        command = [*self._cluster_tool("pg_restore"), "-d", database, self._dump_location(path)]
+        run_child(self._run, "database_restore", command, child_environment({}))
+
     def _drop_scenario_databases(self, scenario):
         names = (
             scenario.runtime_database,
             scenario.pilot_database,
-            f"{scenario.runtime_database}_restored",
+            scenario.restored_database,
             scenario.upgrade_database,
         )
         statements = "".join(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE);\n' for name in names)
