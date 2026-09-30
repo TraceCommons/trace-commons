@@ -1,31 +1,28 @@
 type PageHeaderProps = {
-  eyebrow: string;
   title: string;
   description: string;
+  /** Accepted for the views the Monitor does not host; not rendered. */
+  eyebrow?: string;
+  /** Accepted for the views the Monitor does not host; not rendered. */
   phase?: string;
+  /** Hide the title where a tab or breadcrumb already names the view. */
+  titleHidden?: boolean;
 };
 
+/** Heading for a view inside a pane: title 17/600, one secondary line. */
 export function PageHeader({
-  eyebrow,
   title,
   description,
-  phase,
+  titleHidden = false,
 }: PageHeaderProps) {
   return (
-    <header className="mb-8 flex items-start justify-between gap-6 max-[767px]:flex-col">
-      <div>
-        <span className="mb-3 block font-mono text-xs font-semibold leading-none tracking-[.16em] text-primary">
-          {eyebrow}
-        </span>
-        <h1 className="font-heading text-4xl font-medium tracking-tight sm:text-5xl">
-          {title}
-        </h1>
-        <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
+    <header className="flex flex-col gap-1">
+      <h1 className={titleHidden ? "sr-only" : "tc-heading"}>{title}</h1>
+      {description ? (
+        <p className="m-0 tc-label font-normal leading-[17px] tc-text-secondary">
           {description}
         </p>
-      </div>
-      {phase && <Badge variant="secondary">{phase}</Badge>}
+      ) : null}
     </header>
   );
 }
-import { Badge } from "./ui/badge";

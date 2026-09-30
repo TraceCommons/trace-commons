@@ -19,7 +19,7 @@ export function HistoryRefreshControl() {
   return (
     <div className="grid justify-items-end gap-1">
       <Button
-        className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        className="tc-link"
         type="button"
         onClick={() => refresh.mutate()}
         disabled={refresh.isPending || !core.isSuccess}

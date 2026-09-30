@@ -12,20 +12,20 @@ export function OnboardingConnectStep({
   "onboarding" | "alreadyEnrolled" | "initialInvite" | "busy"
 >) {
   return (
-    <section className="mb-4 grid gap-5 rounded-2xl border border-border bg-card/80 p-[26px]">
+    <section className="mb-4 grid gap-5 tc-card">
       <div>
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           CONNECT
         </span>
         <h2>Connect a commons</h2>
-        <p className="m-0 text-[12px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-label font-normal leading-[17px] tc-text-secondary">
           Choose an invite, existing NEAR AI sign-in, or NEAR wallet. Enrollment
           happens only after you confirm one path.
         </p>
       </div>
       {alreadyEnrolled ? (
         <div className="grid gap-3">
-          <p className="m-0 text-[12px] text-muted-foreground">
+          <p className="m-0 tc-label font-normal tc-text-secondary">
             This device is already connected.
           </p>
           <Button type="button" onClick={() => void onboarding.markEnrolled()}>

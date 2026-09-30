@@ -85,15 +85,15 @@ export function InsightsWorkflowsPanel({
 
   return (
     <>
-      <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-        <div className="flex items-start justify-between gap-[18px]">
+      <section className="tc-card mb-2.5">
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+            <span className="mb-1.5 block tc-eyebrow">
               EPISODES
             </span>
             <h2>Group saved snapshots</h2>
           </div>
-          <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+          <span className="tc-chip tc-chip--glass self-start">
             {workflow.episodes.length}
           </span>
         </div>
@@ -101,15 +101,15 @@ export function InsightsWorkflowsPanel({
           Select whole saved snapshots. Groups can overlap; they do not
           establish task boundaries or verify outcomes.
         </p>
-        <div className="my-[18px] grid gap-px border-t border-border">
+        <div className="my-3 grid gap-px">
           {snapshots.length === 0 ? (
-            <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+            <p className="mt-3 mb-1 tc-body tc-text-tertiary">
               Save at least one snapshot before creating an episode.
             </p>
           ) : (
             snapshots.map((snapshot) => (
               <label
-                className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground"
+                className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal"
                 key={snapshot.id}
               >
                 <Checkbox
@@ -126,7 +126,7 @@ export function InsightsWorkflowsPanel({
           )}
         </div>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={() =>
             void form.handleSubmit(async (values) => {
@@ -140,33 +140,33 @@ export function InsightsWorkflowsPanel({
         </Button>
         {workflow.detail ? (
           <div className="mt-4 p-[26px]">
-            <div className="flex items-start justify-between gap-[18px]">
+            <div className="flex items-start justify-between gap-3">
               <div>
-                <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+                <span className="mb-1.5 block tc-eyebrow">
                   EPISODE DETAIL
                 </span>
                 <h3>{workflow.detail.episode.id}</h3>
               </div>
               <Button
-                className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+                className="tc-link"
                 type="button"
                 onClick={workflow.close}
               >
                 Back to episodes
               </Button>
             </div>
-            <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+            <p className="m-0 tc-caption tc-text-tertiary">
               Resolved {new Date(workflow.detail.resolved_at).toLocaleString()}.
               Membership revision {workflow.detail.episode.membership_revision}.
               Overlap is informational.
             </p>
-            <div className="mt-[22px] grid gap-px border-t border-border">
+            <div className="mt-3 grid gap-px">
               {workflow.detail.members.map((member) => (
                 <div
                   className="grid grid-cols-[38px_minmax(0,1fr)_auto_auto] items-center gap-3.5 border-b border-border py-3.5 max-[860px]:grid-cols-[38px_minmax(0,1fr)_auto]"
                   key={member.id}
                 >
-                  <span className="grid h-[34px] w-[34px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground">
+                  <span className="tc-tool-tile tc-tool-tile--lg">
                     {member.source_format.slice(0, 1).toUpperCase()}
                   </span>
                   <span className="grid min-w-0 gap-1">
@@ -205,7 +205,7 @@ export function InsightsWorkflowsPanel({
               </label>
             </div>
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+              className="tc-btn tc-btn--glass"
               type="button"
               onClick={() =>
                 void form.handleSubmit(async (values) => {
@@ -217,27 +217,27 @@ export function InsightsWorkflowsPanel({
             >
               Save episode assessment
             </Button>
-            <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+            <p className="m-0 tc-caption tc-text-tertiary">
               Assessment is user-reported. It does not turn member evidence into
               a verified result.
             </p>
           </div>
         ) : (
-          <div className="mt-[22px] grid gap-px border-t border-border">
+          <div className="mt-3 grid gap-px">
             {workflow.episodes.length === 0 ? (
-              <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+              <p className="mt-3 mb-1 tc-body tc-text-tertiary">
                 No saved episodes.
               </p>
             ) : (
               workflow.episodes.map((entry) => (
                 <Button
-                  className="grid w-full grid-cols-[38px_minmax(0,1fr)_auto] items-center gap-3.5 border-0 border-b border-border bg-transparent py-3.5 text-left hover:bg-muted"
+                  className="grid w-full grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg border-0 bg-transparent px-1.5 py-2 text-left text-inherit hover:bg-white/5 tc-hairline-bottom"
                   type="button"
                   key={entry.episode.id}
                   onClick={() => workflow.open(entry.episode.id)}
                   disabled={busy}
                 >
-                  <span className="grid h-[34px] w-[34px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground bg-blue">
+                  <span className="tc-tool-tile tc-tool-tile--lg tc-tool-tile--folder">
                     E
                   </span>
                   <span className="grid min-w-0 gap-1">
@@ -262,15 +262,15 @@ export function InsightsWorkflowsPanel({
           </div>
         )}
       </section>
-      <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-        <div className="flex items-start justify-between gap-[18px]">
+      <section className="tc-card mb-2.5">
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+            <span className="mb-1.5 block tc-eyebrow">
               QUESTION CARDS
             </span>
             <h2>Ask deterministic local questions</h2>
           </div>
-          <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+          <span className="tc-chip tc-chip--glass self-start">
             LOCAL
           </span>
         </div>
@@ -278,10 +278,10 @@ export function InsightsWorkflowsPanel({
           Cards summarize selected saved evidence. They do not infer active
           time, independence, quality, or model advantage.
         </p>
-        <div className="my-[18px] grid gap-px border-t border-border">
+        <div className="my-3 grid gap-px">
           {workflow.episodes.map((entry) => (
             <label
-              className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground"
+              className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal"
               key={entry.episode.id}
             >
               <Checkbox
@@ -301,7 +301,7 @@ export function InsightsWorkflowsPanel({
           ))}
         </div>
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={() =>
             void form.handleSubmit((values) =>
@@ -323,12 +323,12 @@ export function InsightsWorkflowsPanel({
           <div className="mt-[18px] grid grid-cols-2 gap-2.5 max-[860px]:grid-cols-1">
             {workflow.cards.cards.map((card) => (
               <article
-                className="grid gap-[6px] rounded-[10px] border border-border bg-muted p-3.5 min-h-[150px] gap-2.5"
+                className="tc-card tc-card--quiet grid gap-[6px] min-h-[150px] gap-2.5"
                 key={card.question}
               >
-                <div className="flex items-start justify-between gap-[18px]">
+                <div className="flex items-start justify-between gap-3">
                   <strong>{card.question.replaceAll("_", " ")}</strong>
-                  <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start bg-muted text-muted-foreground">
+                  <span className="tc-chip self-start">
                     {card.state}
                   </span>
                 </div>
@@ -341,7 +341,7 @@ export function InsightsWorkflowsPanel({
                     <b>{valueLabel(row.value, row.missing_reason)}</b>
                   </div>
                 ))}
-                <small className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+                <small className="m-0 tc-caption tc-text-tertiary">
                   Coverage:{" "}
                   {card.coverage
                     .map(
@@ -355,7 +355,7 @@ export function InsightsWorkflowsPanel({
           </div>
         )}
         {workflow.cards && (
-          <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+          <p className="m-0 tc-caption tc-text-tertiary">
             Input digest {workflow.cards.input_digest}. Provider{" "}
             {workflow.cards.provider.id}, rubric{" "}
             {workflow.cards.provider.rubric_version}.

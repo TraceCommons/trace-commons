@@ -99,7 +99,7 @@ export function WithdrawalControl({
     );
   if (record.status === "withdrawn")
     return (
-      <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start bg-muted text-muted-foreground">
+      <span className="tc-chip self-start">
         Withdrawn by you
       </span>
     );
@@ -108,7 +108,7 @@ export function WithdrawalControl({
       <div className="col-span-full flex flex-wrap items-center gap-2 border-t border-border py-2.5 text-[11px] leading-[1.45] text-muted-foreground text-destructive">
         <span>{error}</span>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={onRequest}
         >
@@ -118,7 +118,7 @@ export function WithdrawalControl({
     );
   return (
     <Button
-      className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary text-destructive"
+      className="tc-btn tc-btn--glass tc-text-outside"
       type="button"
       onClick={onRequest}
     >

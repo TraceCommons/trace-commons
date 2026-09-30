@@ -27,18 +27,18 @@ export function AutomaticGrantPanel({
   const granted = grant?.granted === true;
   return (
     <section
-      className="rounded-2xl border border-border bg-card/80 p-[26px]"
+      className="tc-card"
       aria-labelledby="automatic-grant-heading"
     >
-      <div className="flex items-start justify-between gap-[18px]">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             AUTOMATIC CONTRIBUTING
           </span>
           <h2 id="automatic-grant-heading">Automatic contributing</h2>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
@@ -48,7 +48,7 @@ export function AutomaticGrantPanel({
       </div>
       {error && (
         <p
-          className="mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive"
+          className="tc-card tc-card--quiet mb-[18px] border-destructive/30 text-[12px] text-destructive"
           role="alert"
         >
           {error}
@@ -85,7 +85,7 @@ export function AutomaticGrantPanel({
         Projects.
       </p>
       {grant && !granted && onTurnOn && (
-        <div className="mt-6 flex gap-2.5">
+        <div className="mt-3 flex flex-wrap gap-2">
           {/* Opens the grant screens (scope, path, both disclosures); it
               turns nothing on by itself. */}
           <Button
@@ -99,7 +99,7 @@ export function AutomaticGrantPanel({
         </div>
       )}
       {granted && (
-        <div className="mt-6 flex gap-2.5">
+        <div className="mt-3 flex flex-wrap gap-2">
           <Button
             type="button"
             variant="outline"

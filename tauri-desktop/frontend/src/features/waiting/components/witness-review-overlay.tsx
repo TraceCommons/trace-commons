@@ -81,7 +81,7 @@ export function WitnessReviewOverlay({
           </p>
         )}
         {copy.data && (
-          <label className="flex items-start gap-2.5 rounded-[9px] border border-border p-3.5 text-foreground">
+          <label className="tc-card tc-card--quiet flex items-start gap-2.5 text-foreground">
             <Checkbox
               checked={confirmed}
               onCheckedChange={(value) => setConfirmed(value === true)}
@@ -97,14 +97,14 @@ export function WitnessReviewOverlay({
         {busy && (
           <div
             role="status"
-            className="grid gap-1 rounded-[9px] border border-border px-3.5 py-3 text-foreground"
+            className="tc-card tc-card--quiet grid gap-1 text-foreground"
           >
             <p className="m-0">{busy.message ?? copy.data?.failed_busy}</p>
             {busy.retryLine && <p className="m-0">{busy.retryLine}</p>}
           </div>
         )}
         {error && (
-          <p className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-destructive">
+          <p className="tc-card tc-card--quiet m-0 border-destructive/30 text-destructive">
             {error}
           </p>
         )}

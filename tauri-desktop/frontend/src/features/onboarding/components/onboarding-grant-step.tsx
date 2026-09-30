@@ -17,8 +17,8 @@ export function OnboardingGrantStep({
   const copy = grantCopy.data;
   const blocked = onboarding.grantBlockers.length > 0;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         AUTOMATIC CONTRIBUTING
       </span>
       <h2>Turn on automatic contributing?</h2>
@@ -39,7 +39,7 @@ export function OnboardingGrantStep({
       )}
       <div className="mt-6 flex flex-wrap gap-2.5">
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onboarding.back}
           disabled={busy}

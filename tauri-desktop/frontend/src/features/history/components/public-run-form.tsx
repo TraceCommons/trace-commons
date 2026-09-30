@@ -89,13 +89,13 @@ export function PublicRunForm({
       className="grid gap-4"
       onSubmit={form.handleSubmit((values) => onReview(values))}
     >
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Choose exact fields that become public. Publication is separate from
         Commons contribution and profile attribution.
       </p>
       <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
         Page title
-        <span className="font-mono text-[10px] font-normal text-muted-foreground">
+        <span className="tc-mono tc-text-tertiary">
           {title.length}/100
         </span>
         <Input
@@ -112,7 +112,7 @@ export function PublicRunForm({
       </label>
       <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
         Public outcome summary
-        <span className="font-mono text-[10px] font-normal text-muted-foreground">
+        <span className="tc-mono tc-text-tertiary">
           {outcomeSummary.length}/600
         </span>
         <Textarea
@@ -132,7 +132,7 @@ export function PublicRunForm({
       </label>
       <label className="grid grid-cols-[1fr_auto] gap-2 text-[11px] font-bold text-muted-foreground">
         Reusable instructions
-        <span className="font-mono text-[10px] font-normal text-muted-foreground">
+        <span className="tc-mono tc-text-tertiary">
           {workflow.length}/4000
         </span>
         <Textarea
@@ -151,7 +151,7 @@ export function PublicRunForm({
         />
       </label>
       {correctionAvailable && (
-        <label className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground">
+        <label className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal">
           <Checkbox
             checked={correction.field.value !== null}
             onCheckedChange={(checked) =>
@@ -177,7 +177,7 @@ export function PublicRunForm({
       />
       <fieldset className="grid gap-px border-0 p-0">
         <legend>Supporting evidence</legend>
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Select one to four exact excerpts from redacted contribution.
         </p>
         {detail.evidence.map((item) => {
@@ -186,7 +186,7 @@ export function PublicRunForm({
           );
           return (
             <label
-              className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground"
+              className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal"
               key={item.event_id}
             >
               <Checkbox
@@ -221,7 +221,7 @@ export function PublicRunForm({
         >
         {permissions.map((permission) => (
           <label
-            className="flex items-start gap-2.5 border-b border-border py-2.5 text-[12px] font-normal text-foreground"
+            className="flex items-start gap-2.5 tc-hairline-bottom py-2 tc-label font-normal"
             key={permission.value}
           >
             <RadioGroupItem
@@ -260,13 +260,13 @@ export function PublicRunForm({
         />
       </label>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive m-0">
+        <p className="tc-alert m-0">
           {error}
         </p>
       )}
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onCancel}
           disabled={working}
@@ -274,7 +274,7 @@ export function PublicRunForm({
           Cancel
         </Button>
         <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          className="tc-btn tc-btn--primary tc-btn--sm"
           type="submit"
           disabled={working || !form.formState.isValid}
         >

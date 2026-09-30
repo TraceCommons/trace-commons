@@ -95,7 +95,7 @@ export function InviteConnectForm({
         </p>
       )}
       {resolved && (
-        <p className="m-0 text-[12px] text-muted-foreground">
+        <p className="m-0 tc-label font-normal tc-text-secondary">
           This invite is for <strong>{resolved.issuerHost}</strong>.
         </p>
       )}

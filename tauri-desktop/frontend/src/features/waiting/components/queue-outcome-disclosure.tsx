@@ -20,8 +20,8 @@ export function QueueOutcomeDisclosure({
   const total = entries.reduce((sum, [, count]) => sum + count, 0);
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="mb-4">
-      <div className="rounded-xl border border-border bg-card/80 p-[18px_22px]">
-        <CollapsibleTrigger className="flex w-full items-center gap-2 text-left text-[12px] font-bold text-foreground">
+      <div className="tc-card tc-card--quiet">
+        <CollapsibleTrigger className="flex w-full items-center gap-2 text-left text-[12px] font-bold text-[var(--tc-text-primary)]">
           <span aria-hidden="true" className="text-primary">
             {open ? "⌄" : "›"}
           </span>

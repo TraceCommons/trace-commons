@@ -22,11 +22,11 @@ export function OnboardingNearAiJoin({
   return (
     <section className="grid gap-4 border-t border-border pt-5">
       <div>
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           NEAR AI
         </span>
         <h3>{disclosure?.title ?? "Join with NEAR AI"}</h3>
-        <p className="m-0 text-[12px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-label font-normal leading-[17px] tc-text-secondary">
           {disclosure?.what ?? "Loading NEAR AI enrollment disclosure…"}
         </p>
       </div>
@@ -44,7 +44,7 @@ export function OnboardingNearAiJoin({
         </Field>
       </FieldGroup>
       {nearAi.credential.isPending && (
-        <p className="m-0 text-[12px] text-muted-foreground">
+        <p className="m-0 tc-label font-normal tc-text-secondary">
           Checking NEAR AI sign-in status…
         </p>
       )}
@@ -62,11 +62,11 @@ export function OnboardingNearAiJoin({
         </Button>
       ) : (
         <div className="grid gap-3">
-          <p className="m-0 text-[12px] text-muted-foreground">
+          <p className="m-0 tc-label font-normal tc-text-secondary">
             {disclosure?.needs_login ?? "Sign in disclosure unavailable."}
           </p>
           {disclosures.data ? (
-            <div className="grid gap-2 rounded-md border border-border p-3 text-[11px] leading-[1.55] text-muted-foreground">
+            <div className="tc-card tc-card--quiet grid gap-2 text-[11px] leading-[1.55] text-muted-foreground">
               <p className="m-0 whitespace-pre-line">
                 {disclosures.data.credential_cost}
               </p>
@@ -114,7 +114,7 @@ export function OnboardingNearAiJoin({
             </Button>
           </div>
           {nearAi.browserUrl && (
-            <p className="m-0 text-[12px] text-muted-foreground">
+            <p className="m-0 tc-label font-normal tc-text-secondary">
               Open sign-in:{" "}
               <Button
                 type="button"
@@ -131,7 +131,7 @@ export function OnboardingNearAiJoin({
         </div>
       )}
       {nearAi.error && (
-        <p className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert m-0">
           {nearAi.error}
         </p>
       )}

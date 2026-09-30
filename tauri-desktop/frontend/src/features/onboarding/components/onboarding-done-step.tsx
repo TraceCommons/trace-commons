@@ -24,8 +24,8 @@ export function OnboardingDoneStep({
           ? copy.onboarding_shell.notification_not_asked
           : copy.onboarding_shell.notification_unknown;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         DONE
       </span>
       <h2>{copy?.onboarding.heading ?? "Your first contribution"}</h2>
@@ -101,7 +101,7 @@ export function OnboardingDoneStep({
         </Button>
       )}
       <Button
-        className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+        className="tc-btn tc-btn--primary tc-btn--sm"
         type="button"
         onClick={onComplete}
         disabled={!copy}

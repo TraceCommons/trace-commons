@@ -48,15 +48,15 @@ export function OnboardingRootsStep({
       )}
       {!starting && startError && (
         <p
-          className="mt-4 mb-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive"
+          className="tc-card tc-card--quiet mt-4 mb-0 border-destructive/30 text-[12px] text-destructive"
           role="alert"
         >
           {startError}
         </p>
       )}
-      <div className="mt-6 flex gap-2.5">
+      <div className="mt-3 flex flex-wrap gap-2">
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="button"
           onClick={onboarding.back}
           disabled={busy || roots.busy || starting}
@@ -64,7 +64,7 @@ export function OnboardingRootsStep({
           Back
         </Button>
         <Button
-          className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          className="tc-btn tc-btn--primary tc-btn--sm"
           type="button"
           onClick={() => void onboarding.continueRoots(snapshot)}
           disabled={

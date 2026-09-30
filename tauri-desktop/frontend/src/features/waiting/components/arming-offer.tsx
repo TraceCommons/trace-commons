@@ -24,15 +24,15 @@ export function ArmingOffer({
   );
   if (!offer && !error) return null;
   return (
-    <section className="mb-4 rounded-2xl border border-border bg-card/80 p-[22px_26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-4">
+      <span className="mb-1.5 block tc-eyebrow">
         OPTIONAL AUTOMATION
       </span>
       {offer && (
         <>
           {copy.data ? (
             <>
-              <p className="m-0 text-[12px] text-muted-foreground">
+              <p className="m-0 tc-label font-normal tc-text-secondary">
                 {copy.data.evidence}
               </p>
               <h2>{copy.data.question}</h2>
@@ -47,9 +47,9 @@ export function ArmingOffer({
                 : "Loading automatic contribution disclosure…"}
             </p>
           )}
-          <div className="mt-6 flex gap-2.5">
+          <div className="mt-3 flex flex-wrap gap-2">
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+              className="tc-btn tc-btn--glass"
               type="button"
               onClick={onDecline}
               disabled={busy || !copy.data}
@@ -57,7 +57,7 @@ export function ArmingOffer({
               {copy.data?.decline ?? "Loading…"}
             </Button>
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+              className="tc-btn tc-btn--glass"
               type="button"
               onClick={() => setConfirming(true)}
               disabled={busy || !copy.data}
@@ -68,7 +68,7 @@ export function ArmingOffer({
         </>
       )}
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
@@ -102,7 +102,7 @@ export function ArmingOffer({
             </div>
           }
         >
-          <p className="m-0 text-[12px] text-muted-foreground">
+          <p className="m-0 tc-label font-normal tc-text-secondary">
             {copy.data.evidence}
           </p>
         </ResponsiveOverlay>

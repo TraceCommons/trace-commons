@@ -1,0 +1,233 @@
+/* Bridge: the shadcn primitives the feature panels still compose, dressed in
+   the glass tiers. Unlayered on purpose, so these win over the utility
+   classes the primitives carry. New UI should use the design-system
+   components directly. */
+
+/* Fields: dark inset, 8px radius, no border */
+[data-slot="input"],
+[data-slot="textarea"],
+[data-slot="native-select"],
+[data-slot="input-group"] {
+  border: 0;
+  border-radius: var(--tc-radius-control);
+  background: var(--tc-field-fill);
+  box-shadow: var(--tc-well-edge);
+  color: var(--tc-text-primary);
+  font: var(--tc-text-label);
+  font-weight: 400;
+}
+[data-slot="input"],
+[data-slot="native-select"] {
+  height: var(--tc-size-control-lg);
+}
+[data-slot="input-group"] [data-slot="input-group-control"] {
+  background: transparent;
+  box-shadow: none;
+}
+[data-slot="input"]::placeholder,
+[data-slot="textarea"]::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+[data-slot="input"]:focus-visible,
+[data-slot="textarea"]:focus-visible,
+[data-slot="native-select"]:focus-visible {
+  outline: 2px solid var(--tc-purple-text);
+  outline-offset: 1px;
+}
+/* A native select reads as a glass picker pill */
+[data-slot="native-select"] {
+  padding-left: 10px;
+  border-radius: var(--tc-radius-pill);
+  background: var(--tc-control-fill);
+  box-shadow: var(--tc-control-edge);
+  font-weight: 600;
+}
+[data-slot="native-select-icon"] {
+  width: 10px;
+  height: 10px;
+  color: var(--tc-text-tertiary);
+}
+[data-slot="native-select-option"] {
+  background: #22242a;
+  color: var(--tc-text-primary);
+}
+[data-slot="label"],
+[data-slot="field-label"] {
+  font: var(--tc-text-label);
+  color: var(--tc-text-primary);
+}
+[data-slot="field-description"] {
+  font: var(--tc-text-caption);
+  color: var(--tc-text-tertiary);
+}
+
+/* Checkbox: 15px, r5, purple gradient on, well off */
+[data-slot="checkbox"] {
+  width: var(--tc-size-checkbox);
+  height: var(--tc-size-checkbox);
+  border: 0;
+  border-radius: 5px;
+  background: var(--tc-well-fill);
+  box-shadow: var(--tc-checkbox-edge);
+}
+[data-slot="checkbox"][data-checked] {
+  background: var(--tc-checkbox-on-fill);
+  color: #fff;
+}
+[data-slot="checkbox-indicator"] svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* Radio: round checkbox */
+[data-slot="radio-group-item"] {
+  border: 0;
+  background: var(--tc-well-fill);
+  box-shadow: var(--tc-checkbox-edge);
+}
+[data-slot="radio-group-item"][data-checked] {
+  background: var(--tc-checkbox-on-fill);
+}
+[data-slot="radio-group-indicator"] > * {
+  background: #fff;
+}
+
+/* Switch: 40×24 settings toggle, purple on */
+[data-slot="switch"] {
+  width: 40px;
+  height: 24px;
+  border: 0;
+  padding: 0 3px;
+  background: var(--tc-toggle-off);
+  box-shadow: none;
+}
+[data-slot="switch"][data-checked] {
+  background: var(--tc-toggle-on-settings);
+}
+[data-slot="switch-thumb"] {
+  width: 18px;
+  height: 18px;
+  background: #fff;
+}
+[data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
+  transform: translateX(16px);
+}
+
+/* Toggle buttons (verdict: worked / partly / failed) */
+[data-slot="toggle"] {
+  border-radius: var(--tc-radius-pill);
+  background: var(--tc-control-fill);
+  box-shadow: var(--tc-control-edge);
+  color: var(--tc-text-secondary);
+  font: var(--tc-text-label);
+  font-weight: 600;
+}
+[data-slot="toggle"][data-pressed],
+[data-slot="toggle"][aria-pressed="true"] {
+  background: var(--tc-control-selected);
+  box-shadow: var(--tc-control-selected-edge);
+  color: var(--tc-text-primary);
+}
+
+/* Cards and alerts */
+[data-slot="card"] {
+  border-radius: var(--tc-radius-card);
+  background: var(--tc-card-fill);
+  box-shadow: var(--tc-card-edge);
+  color: var(--tc-text-primary);
+}
+[data-slot="alert"] {
+  border: 0;
+  border-radius: var(--tc-radius-card-sm);
+  background: var(--tc-card-fill-quiet);
+  box-shadow: var(--tc-card-edge-quiet);
+  color: var(--tc-text-primary);
+  font: var(--tc-text-label);
+  font-weight: 400;
+}
+[data-slot="alert-title"] {
+  font-weight: 600;
+}
+[data-slot="alert-description"] {
+  color: var(--tc-text-secondary);
+  font: var(--tc-text-label);
+  font-weight: 400;
+  line-height: 17px;
+}
+[data-slot="badge"] {
+  border: 0;
+  border-radius: var(--tc-radius-pill);
+  background: var(--tc-tint-neutral);
+  color: var(--tc-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+}
+[data-slot="separator"] {
+  background: var(--tc-hairline);
+}
+[data-slot="skeleton"] {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Overlays: modal tier with the gradient rim; scrim with blur */
+[data-slot="dialog-overlay"],
+[data-slot="drawer-overlay"],
+[data-slot="sheet-overlay"] {
+  background: var(--tc-modal-scrim);
+  -webkit-backdrop-filter: var(--tc-modal-scrim-blur);
+  backdrop-filter: var(--tc-modal-scrim-blur);
+}
+[data-slot="dialog-content"],
+[data-slot="drawer-popup"],
+[data-slot="sheet-content"] {
+  border: var(--tc-rim-width) solid transparent;
+  border-radius: var(--tc-radius-window);
+  background:
+    var(--tc-modal-fill) padding-box,
+    var(--tc-rim-window) border-box;
+  -webkit-backdrop-filter: var(--tc-blur-window);
+  backdrop-filter: var(--tc-blur-window);
+  box-shadow: var(--tc-modal-shadow);
+  color: var(--tc-text-primary);
+  font: var(--tc-text-body);
+  outline: none;
+}
+[data-slot="dialog-title"],
+[data-slot="drawer-title"],
+[data-slot="sheet-title"] {
+  font: var(--tc-text-title);
+  font-weight: 700;
+}
+[data-slot="dialog-description"],
+[data-slot="drawer-description"],
+[data-slot="sheet-description"] {
+  font: var(--tc-text-caption);
+  color: var(--tc-text-tertiary);
+}
+
+/* Menus and tooltips: popover tier */
+[data-slot="dropdown-menu-content"],
+[data-slot="dropdown-menu-sub-content"] {
+  border: 0;
+  border-radius: var(--tc-radius-card-sm);
+  background: var(--tc-menu-fill);
+  -webkit-backdrop-filter: var(--tc-blur-window);
+  backdrop-filter: var(--tc-blur-window);
+  box-shadow: var(--tc-menu-edge);
+  color: var(--tc-text-primary);
+}
+[data-slot="dropdown-menu-item"][data-highlighted],
+[data-slot="dropdown-menu-checkbox-item"][data-highlighted],
+[data-slot="dropdown-menu-radio-item"][data-highlighted] {
+  background: var(--tc-menu-hover);
+  color: #fff;
+}
+[data-slot="tooltip-content"] {
+  border-radius: var(--tc-radius-control);
+  background: var(--tc-node-card-fill);
+  -webkit-backdrop-filter: var(--tc-blur-popover);
+  backdrop-filter: var(--tc-blur-popover);
+  box-shadow: var(--tc-node-card-edge);
+  color: var(--tc-text-primary);
+  font: var(--tc-text-caption);
+}

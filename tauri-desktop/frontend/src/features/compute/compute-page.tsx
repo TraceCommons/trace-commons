@@ -29,14 +29,14 @@ export function ComputePage() {
   }, [allowance, form]);
   const allowanceError = form.formState.errors.allowance?.message;
   return (
-    <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
+    <div className="tc-page">
       <PageHeader
         eyebrow="LOCAL / CAPACITY"
         title="Compute"
         description="Use local capacity for private model work when it is available and explicitly enabled."
         phase="PHASE 4"
       />
-      <div className="mb-4 grid grid-cols-3 gap-3 max-[860px]:grid-cols-1">
+      <div className="mb-2.5 grid grid-cols-3 gap-1.5">
         <StatCard
           label="State"
           value={snapshot?.state ?? "Unknown"}
@@ -56,18 +56,18 @@ export function ComputePage() {
         />
       </div>
       {compute.state === "error" && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {compute.error}
         </p>
       )}
       {snapshot && (
-        <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <section className="tc-card mb-2.5">
+          <span className="mb-1.5 block tc-eyebrow">
             COMPUTE RESOURCE
           </span>
           <h2>{snapshot.title}</h2>
           <p>{snapshot.copy.introduction}</p>
-          <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+          <p className="m-0 tc-caption tc-text-tertiary">
             {snapshot.detail}
           </p>
           <form
@@ -95,9 +95,9 @@ export function ComputePage() {
               <span>{snapshot.copy.allowance_detail}</span>
               <FormFieldError id="allowance-error" message={allowanceError} />
             </label>
-            <div className="mt-6 flex gap-2.5">
+            <div className="mt-3 flex flex-wrap gap-2">
               <Button
-                className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+                className="tc-btn tc-btn--primary tc-btn--sm"
                 type="submit"
                 disabled={
                   compute.state === "busy" ||
@@ -109,7 +109,7 @@ export function ComputePage() {
                 {snapshot.copy.enable}
               </Button>
               <Button
-                className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+                className="tc-btn tc-btn--glass"
                 type="button"
                 onClick={() => void compute.command("resume_compute")}
                 disabled={compute.state === "busy" || !snapshot.consent_granted}
@@ -117,7 +117,7 @@ export function ComputePage() {
                 {snapshot.copy.resume}
               </Button>
               <Button
-                className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+                className="tc-btn tc-btn--glass"
                 type="button"
                 onClick={() => void compute.command("pause_compute")}
                 disabled={compute.state === "busy" || !snapshot.consent_granted}
@@ -125,7 +125,7 @@ export function ComputePage() {
                 {snapshot.copy.pause}
               </Button>
               <Button
-                className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:bg-primary/80 text-destructive"
+                className="tc-card text-[11px] font-bold text-foreground hover:bg-primary/80 text-destructive"
                 type="button"
                 onClick={() => void compute.command("disable_compute")}
                 disabled={compute.state === "busy" || !snapshot.consent_granted}

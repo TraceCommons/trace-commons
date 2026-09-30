@@ -38,35 +38,35 @@ export function SourceRootsPanel({
   const disclosure = useContributorDisclosureCopy();
   const copy = disclosure.data?.source_settings;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px] block">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card block">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             {copy?.heading ?? "Source settings"}
           </span>
           <h2>Session folders</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start bg-muted text-muted-foreground">
+        <span className="tc-chip self-start">
           Explicit
         </span>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         {copy?.explanation ?? "Loading source settings disclosure…"}
       </p>
       {!copy && (
         <p
-          className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive"
+          className="tc-alert"
           role="alert"
         >
           Source settings copy unavailable. Saving is disabled until it loads.
         </p>
       )}
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
-      <div className="mt-5 grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         {sources.map((source) => (
           <SourceRootRow
             key={source.name}
@@ -91,7 +91,7 @@ export function SourceRootsPanel({
           />
         ))}
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Daemon does not return saved paths. Re-enter path when replacing a
         watched root. Rust validates selected directories before saving.
       </p>
@@ -205,7 +205,7 @@ function SourceRootRow({
               <FormFieldError id={`${source}-path-error`} message={pathError} />
             </label>
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+              className="tc-btn tc-btn--glass"
               type="button"
               onClick={() => void chooseRoot()}
               disabled={busy || choosing}
@@ -217,7 +217,7 @@ function SourceRootRow({
           </>
         )}
         <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+          className="tc-btn tc-btn--glass"
           type="submit"
           disabled={busy || !form.formState.isValid}
         >

@@ -6,7 +6,7 @@ import { useOnboardingInference } from "../hooks/use-onboarding-inference";
 import type { OnboardingStepProps } from "./onboarding-step-types";
 
 const backClass =
-  "rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary";
+  "tc-btn tc-btn--glass";
 
 // Connecting inference (K12): optional, and one route to a witness. Every
 // sentence is the core's (`consent_copy::inference_connection_copy`, and an
@@ -36,8 +36,8 @@ export function OnboardingInferenceStep({
     </Button>
   );
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         CONNECT INFERENCE (OPTIONAL)
       </span>
       <h2 id="onboarding-inference-heading">Connect inference?</h2>
@@ -87,7 +87,7 @@ export function OnboardingInferenceStep({
                 {view.offers.map((offer) => (
                   <label
                     key={offer.offer_id}
-                    className="flex items-start gap-2.5 border-b border-border py-2.5 font-normal text-foreground"
+                    className="flex items-start gap-2.5 border-b border-border py-2.5 font-normal text-[var(--tc-text-primary)]"
                   >
                     <RadioGroupItem value={offer.offer_id} disabled={working} />
                     <span>

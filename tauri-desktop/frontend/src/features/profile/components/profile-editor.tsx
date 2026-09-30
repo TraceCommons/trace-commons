@@ -28,17 +28,17 @@ export function ProfileEditor({
   const errors = form.formState.errors;
   return (
     <form
-      className="mt-4 p-7 rounded-2xl border border-border bg-card/80"
+      className="tc-card mt-4"
       onSubmit={form.handleSubmit(onSave)}
     >
-      <div className="flex items-start justify-between gap-[18px]">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             LOCAL DRAFT
           </span>
           <h2>Shape your profile</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary">
+        <span className="tc-card whitespace-nowrap font-mono text-[10px] font-extrabold tracking-[.08em] text-primary">
           {published ? "Published" : saved ? "Saved in memory" : "Not published"}
         </span>
       </div>
@@ -91,7 +91,7 @@ export function ProfileEditor({
         </div>
         <div className="flex flex-wrap justify-end gap-[9px]">
           <Button
-            className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            className="tc-btn tc-btn--glass"
             type="submit"
             disabled={
               actionState === "publishing" || actionState === "withdrawing"
@@ -100,7 +100,7 @@ export function ProfileEditor({
             Save draft
           </Button>
           <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+            className="tc-btn tc-btn--primary tc-btn--sm"
             type="button"
             onClick={() => void form.handleSubmit(onPublish)()}
             disabled={
@@ -115,7 +115,7 @@ export function ProfileEditor({
           </Button>
           {published && (
             <Button
-              className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary text-destructive"
+              className="tc-link text-destructive"
               type="button"
               onClick={onWithdraw}
               disabled={actionState !== "idle"}

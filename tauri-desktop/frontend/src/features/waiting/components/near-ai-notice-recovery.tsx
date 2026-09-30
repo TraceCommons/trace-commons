@@ -81,13 +81,13 @@ export function NearAiNoticeRecovery({
           </div>
         }
       >
-        <div className="grid gap-3 text-[12px] leading-[1.55] text-foreground">
+        <div className="grid gap-3 text-[12px] leading-[1.55] text-[var(--tc-text-primary)]">
           <p className="m-0">{copy.local_always}</p>
           <p className="m-0">{copy.offer}</p>
           <p className="m-0 font-semibold">{copy.disclosure}</p>
           {mutation.isError && (
             <p
-              className="m-0 rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-destructive"
+              className="tc-card tc-card--quiet m-0 border-destructive/30 text-destructive"
               role="alert"
             >
               {copy.recovery_failed}

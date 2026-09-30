@@ -26,7 +26,7 @@ export function WaitingOutcomeFields({
   ];
   return (
     <fieldset className="my-4 grid gap-2 border-0 p-0">
-      <legend className="mb-2 text-[12px] font-semibold text-foreground">
+      <legend className="mb-2 text-[12px] font-semibold text-[var(--tc-text-primary)]">
         {copy.verdict_question}
       </legend>
       <div className="flex flex-wrap gap-2" role="group" aria-label={copy.verdict_question}>
@@ -43,13 +43,13 @@ export function WaitingOutcomeFields({
           </Button>
         ))}
       </div>
-      <p className="m-0 text-[11px] leading-[1.5] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         {copy.verdict_caption}
       </p>
       {correctionAllowed && (
         <div className="mt-2 grid gap-2">
           <label
-            className="text-[12px] font-semibold text-foreground"
+            className="text-[12px] font-semibold text-[var(--tc-text-primary)]"
             htmlFor="waiting-correction"
           >
             {copy.correction_question}
@@ -65,7 +65,7 @@ export function WaitingOutcomeFields({
           />
           <p
             id="waiting-correction-caption"
-            className="m-0 text-[11px] leading-[1.5] text-muted-foreground"
+            className="m-0 tc-caption tc-text-tertiary"
           >
             {copy.correction_caption}
           </p>

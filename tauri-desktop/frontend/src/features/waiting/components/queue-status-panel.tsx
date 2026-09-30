@@ -102,9 +102,9 @@ export function QueueStatusPanel({
   )
     return null;
   return (
-    <section className="mb-4 grid gap-4 rounded-[14px] border border-border bg-white/[.68] p-[22px]">
+    <section className="tc-card mb-4 grid gap-4">
       <div>
-        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <span className="mb-1.5 block tc-eyebrow">
           RUNTIME
         </span>
         <h2>Contribution safeguards</h2>

@@ -30,7 +30,7 @@ export function GrantVoidNotices({ grantVoids }: { grantVoids: unknown }) {
   } catch {
     return (
       <p
-        className="mx-6 mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+        className="tc-alert"
         role="alert"
       >
         Automatic contributing may have stopped, but the notice that says
@@ -76,7 +76,7 @@ function GrantVoidNoticeCard({ grantVoid }: { grantVoid: GrantVoid }) {
   const busy = acknowledge.isPending || rearm.isPending;
 
   return (
-    <Alert className="mx-6 mt-4 w-auto border-amber-500/40 bg-amber-500/10">
+    <Alert className="tc-alert tc-alert--ask">
       {copy.data ? (
         <>
           <AlertTitle>{copy.data.title}</AlertTitle>

@@ -1,12 +1,21 @@
+/**
+ * Paths the app answers. The native side sends some of them (the tray's
+ * Settings and Private AI items, a notification's `/waiting`), so they stay
+ * stable; the Monitor maps each onto a tab, a Home sub-view or the Settings
+ * modal (see `monitorViewFromPath`).
+ */
 export const routePaths = {
-  insights: "/insights",
+  home: "/home",
   waiting: "/waiting",
   history: "/history",
-  compute: "/compute",
   "private-ai": "/private-ai",
   "mission-drafts": "/mission-drafts",
   profile: "/profile",
   settings: "/settings",
+  // Kept so a deep link or tray path to them still lands somewhere: the
+  // Monitor design has no place for these views, so they open Home.
+  insights: "/insights",
+  compute: "/compute",
 } as const;
 
 export type RouteId = keyof typeof routePaths;
@@ -24,49 +33,49 @@ export const flowPaths = {
 const routeIds = Object.keys(routePaths) as RouteId[];
 
 export function routeIdFromPath(pathname: string): RouteId | null {
-  if (pathname === "/") return "insights";
+  if (pathname === "/") return "home";
   return routeIds.find((routeId) => routePaths[routeId] === pathname) ?? null;
 }
 
-export type NavItem = {
-  id: RouteId;
-  label: string;
-  group: "workspace" | "account";
-  icon:
-    | "insights"
-    | "waiting"
-    | "history"
-    | "compute"
-    | "private-ai"
-    | "mission-drafts"
-    | "profile"
-    | "settings";
-  count?: number;
+/** The Monitor's tabs: Home · Inference · Traces. */
+export type MonitorTab = "home" | "inference" | "traces";
+
+/** What the left pane shows. Missions and History are Home sub-views. */
+export type MonitorView = "home" | "missions" | "history" | "inference" | "traces";
+
+export function monitorViewFromPath(pathname: string): MonitorView {
+  switch (routeIdFromPath(pathname)) {
+    case "waiting":
+      return "traces";
+    case "private-ai":
+      return "inference";
+    case "mission-drafts":
+      return "missions";
+    case "history":
+      return "history";
+    default:
+      return "home";
+  }
+}
+
+export function monitorTabFromView(view: MonitorView): MonitorTab {
+  if (view === "traces") return "traces";
+  if (view === "inference") return "inference";
+  return "home";
+}
+
+export const viewPaths: Record<MonitorView, string> = {
+  home: routePaths.home,
+  missions: routePaths["mission-drafts"],
+  history: routePaths.history,
+  inference: routePaths["private-ai"],
+  traces: routePaths.waiting,
 };
 
-export const navItems: NavItem[] = [
-  {
-    id: "waiting",
-    label: "Waiting",
-    group: "workspace",
-    icon: "waiting",
-    count: 0,
-  },
-  { id: "history", label: "History", group: "workspace", icon: "history" },
-  { id: "compute", label: "Compute", group: "workspace", icon: "compute" },
-  {
-    id: "private-ai",
-    label: "Private AI",
-    group: "workspace",
-    icon: "private-ai",
-  },
-  { id: "insights", label: "Insights", group: "workspace", icon: "insights" },
-  {
-    id: "mission-drafts",
-    label: "Mission drafts",
-    group: "workspace",
-    icon: "mission-drafts",
-  },
-  { id: "profile", label: "Profile", group: "account", icon: "profile" },
-  { id: "settings", label: "Settings", group: "account", icon: "settings" },
-];
+/** Paths that open the Settings modal, and the section each lands on. */
+export function settingsSectionFromPath(pathname: string): string | null {
+  const route = routeIdFromPath(pathname);
+  if (route === "settings") return "connection";
+  if (route === "profile") return "profile";
+  return null;
+}

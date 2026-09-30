@@ -1,0 +1,62 @@
+/* Trace Commons · WYSIWYG glass · component tokens
+   Literals the Monitor mock and the Design System page use for individual
+   controls, named here so components never restate them. Everything else
+   composes the tier tokens in materials.css. */
+:root {
+  /* Primary / secondary CTA edges */
+  --tc-cta-edge: inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -2px 0 rgba(0, 0, 0, 0.2), 0 4px 12px rgba(109, 20, 243, 0.3);
+  --tc-cta-edge-flat: inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -2px 0 rgba(0, 0, 0, 0.2);
+  --tc-cta-secondary-edge: inset 0 1px 0 rgba(255, 255, 255, 0.28), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  --tc-cta-disabled-opacity: 0.45;
+
+  /* Checkbox */
+  --tc-checkbox-on-fill: linear-gradient(180deg, rgba(138, 61, 255, 0.8), rgba(109, 20, 243, 0.7));
+  --tc-checkbox-edge: inset 0 1px 0 rgba(255, 255, 255, 0.35), inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+
+  /* Toggles: 40×24 toggle (blue; purple in settings), 38×22 watch switch (green) */
+  --tc-toggle-on-settings: var(--tc-purple-soft);
+  --tc-watch-on: var(--tc-status-on);
+
+  /* Selection (tree row) and menus */
+  --tc-selection: var(--tc-blue);
+  --tc-menu-fill: rgba(34, 36, 42, 0.72);
+  --tc-menu-edge: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 16px 40px rgba(0, 0, 0, 0.45);
+  --tc-menu-hover: rgba(58, 123, 213, 0.85);
+  --tc-menu-separator: rgba(255, 255, 255, 0.14);
+
+  /* Node card (map hover/pin) — popover tier */
+  --tc-node-card-fill: rgba(20, 22, 28, 0.72);
+  --tc-node-card-edge: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 16px 40px rgba(0, 0, 0, 0.45);
+
+  /* Modal (settings, passkey) and its scrim */
+  --tc-modal-fill: linear-gradient(160deg, rgba(70, 80, 96, 0.78) 0%, rgba(34, 38, 48, 0.82) 50%, rgba(22, 24, 31, 0.88) 100%);
+  --tc-modal-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  --tc-modal-scrim: rgba(0, 0, 0, 0.4);
+  --tc-modal-scrim-blur: blur(8px);
+  --tc-modal-width: 780px;
+
+  /* Map pane (the flow map is not glass: a dark field inside the window) */
+  --tc-map-fill: radial-gradient(80% 60% at 50% 55%, #1e2a3a 0%, #131a24 100%);
+  --tc-map-edge: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 10px 30px rgba(0, 0, 0, 0.28);
+  --tc-map-idle: rgba(255, 255, 255, 0.35);
+  --tc-map-node-off: #5d5d63;
+
+  /* Consent block */
+  --tc-consent-fill: rgba(0, 0, 0, 0.25);
+  --tc-consent-edge: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+
+  /* Tint chips (verdict pills on history rows) */
+  --tc-tint-on: rgba(61, 220, 132, 0.18);
+  --tc-tint-ask: rgba(245, 193, 66, 0.18);
+  --tc-tint-neutral: rgba(255, 255, 255, 0.1);
+
+  /* Input field (settings: port, address, signing key) */
+  --tc-field-fill: rgba(0, 0, 0, 0.25);
+
+  /* Tool tints (logos are tinted inline SVG) */
+  --tc-tint-claude: #e08a6a;
+  --tc-tint-codex: #e6e6ec;
+  --tc-tint-anti: #6d9cff;
+  --tc-tint-opencode: #4fd39a;
+  --tc-tint-theia: #9d93ff;
+}

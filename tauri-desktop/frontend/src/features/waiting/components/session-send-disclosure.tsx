@@ -36,7 +36,7 @@ export function SessionSendDisclosure({
   const { facts, copy } = disclosure.data;
   return (
     <section className="grid gap-2 border border-border px-3.5 py-3 text-[11px] leading-[1.55]">
-      <span className="font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+      <span className="tc-eyebrow">
         {copy.session.heading}
       </span>
       <dl className="m-0 grid gap-1">
@@ -52,7 +52,7 @@ export function SessionSendDisclosure({
       </dl>
       {facts.route === "witness" && <p className="m-0">{copy.route}</p>}
       {certificate.data && (
-        <div className="grid gap-1 rounded-md border border-border p-3">
+        <div className="tc-card tc-card--quiet grid gap-1">
           <strong>{certificate.data.copy.heading}</strong>
           <dl className="m-0 grid gap-1 font-mono text-[11px]">
             <dt className="text-muted-foreground">

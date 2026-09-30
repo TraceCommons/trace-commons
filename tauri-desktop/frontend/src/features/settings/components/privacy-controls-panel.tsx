@@ -41,16 +41,16 @@ export function PrivacyControlsPanel({
     void run();
   };
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             PRIVACY EVIDENCE
           </span>
           <h2>Optional local evidence</h2>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
@@ -58,16 +58,16 @@ export function PrivacyControlsPanel({
           Refresh
         </Button>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Each option is separate from contribution consent. Enabling requires
         reading its disclosure; Rust confirms the setting.
       </p>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
-      <div className="mt-5 grid gap-px border-t border-border">
+      <div className="mt-3 grid gap-px">
         <PrivacyToggle
           label="Model-call evidence"
           detail="Keep attestation evidence with locally reviewed model calls."
@@ -126,9 +126,9 @@ export function PrivacyControlsPanel({
           <strong>Local token-review storage</strong>
           <span>{storage.state_line}</span>
           <span>{storage.scope_note}</span>
-          <div className="mt-6 flex gap-2.5">
+          <div className="mt-3 flex flex-wrap gap-2">
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+              className="tc-btn tc-btn--glass"
               type="button"
               onClick={() => void onCleanup(false, false)}
               disabled={busy}
@@ -136,7 +136,7 @@ export function PrivacyControlsPanel({
               {storage.cleanup_label}
             </Button>
             <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary text-destructive"
+              className="tc-btn tc-btn--glass tc-text-outside"
               type="button"
               onClick={() => setConfirming("discard")}
               disabled={busy}

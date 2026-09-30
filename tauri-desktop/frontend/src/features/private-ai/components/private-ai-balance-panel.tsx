@@ -10,16 +10,16 @@ export function PrivateAiBalancePanel({
 }) {
   const balance = privateAi.balance?.view;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             ACCOUNT BALANCE
           </span>
           <h2>NEAR AI usage</h2>
         </div>
         <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+          className="tc-link"
           type="button"
           onClick={() => void privateAi.refreshBalance()}
           disabled={privateAi.busy}
@@ -35,11 +35,11 @@ export function PrivateAiBalancePanel({
           {balance.spent_line && <span>{balance.spent_line}</span>}
         </div>
       ) : (
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Balance not read. Refresh only when you need the account figure.
         </p>
       )}
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Account balance requires retained session authority. It is separate from
         inference-key presence.
       </p>
