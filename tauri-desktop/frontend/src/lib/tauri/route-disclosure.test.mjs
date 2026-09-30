@@ -3,6 +3,8 @@ import { test } from "node:test";
 import {
   parseCertificateDetail,
   parseRouteDisclosure,
+  parseRouteDisclosureUnreadable,
+  routeDisclosureView,
 } from "./route-disclosure.ts";
 
 // Stand-ins, not the core's sentences: the shell renders whichever blocks
@@ -160,4 +162,37 @@ test("a certificate detail keeps the claims and the core's labels", () => {
       },
     }),
   );
+});
+
+test("the unreadable lines carry the section title and refuse an empty line", () => {
+  const whole = { title: "TITLE", panel: "PANEL", session: "SESSION" };
+  assert.deepEqual(parseRouteDisclosureUnreadable(whole), whole);
+  for (const key of Object.keys(whole)) {
+    assert.throws(() => parseRouteDisclosureUnreadable({ ...whole, [key]: "" }));
+    const rest = { ...whole };
+    delete rest[key];
+    assert.throws(() => parseRouteDisclosureUnreadable(rest));
+  }
+  assert.throws(() => parseRouteDisclosureUnreadable(null));
+});
+
+// As macOS's `routeDisclosureState`: a disclosure still being read is
+// loading (a spinner, never a blank section), and a failed read is
+// unreadable whether or not the core's line for it arrived.
+test("a disclosure surface is shown, loading or unreadable, as on macOS", () => {
+  assert.equal(routeDisclosureView({ data: {}, isError: false }), "shown");
+  assert.equal(
+    routeDisclosureView({ data: undefined, isError: false }),
+    "loading",
+  );
+  assert.equal(
+    routeDisclosureView({ data: undefined, isError: true }),
+    "unreadable",
+  );
+  // The disclosure is read only once the core's status is: if that read
+  // failed, the disclosure never will be, so it is unreadable, not a
+  // spinner that never stops.
+  const neverRead = { data: undefined, isError: false };
+  assert.equal(routeDisclosureView(neverRead, { isError: true }), "unreadable");
+  assert.equal(routeDisclosureView(neverRead, { isError: false }), "loading");
 });
