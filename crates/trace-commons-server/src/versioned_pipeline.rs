@@ -5068,6 +5068,11 @@ pub struct PipelineDependencyQualification {
     pub authority: bool,
     pub privacy: bool,
     pub payout: bool,
+    /// Whether the default bundle may run for real tenants: a compatibility
+    /// bundle's configuration is qualifiable
+    /// (`CompatibilityBundleConfig::is_qualifiable`; Zaki review 1, round 2,
+    /// finding 11). Any other bundle carries no such configuration.
+    pub bundle: bool,
 }
 
 /// The per-tenant and per-principal hourly receipt limits. A limit of `0` is
@@ -5456,6 +5461,10 @@ impl PipelineService {
                 .payout
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified()),
+            bundle: crate::versioned_pipeline_bundle::package_compatibility_config(
+                &self.default_package,
+            )
+            .is_none_or(|config| config.is_qualifiable()),
         }
     }
 

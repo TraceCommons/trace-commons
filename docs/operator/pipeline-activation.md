@@ -583,7 +583,15 @@ appends one hash-only `export` audit event; a refused request appends none.
 
 ## Compatibility credit
 
-The compatibility bundle reproduces `main`'s gate-path credit. When both gate
+The compatibility bundle reproduces `main`'s gate-path credit. Its
+configuration is validated as `main` validates its gate at startup: a
+production-compatible configuration with every floor zero is refused
+(`compatibility_zero_floor`), and a zero tail-fraction floor with the other
+floors positive, `main`'s pilot value, is accepted. A runtime that routes or
+drains a tenant must bind a qualifiable configuration: the local reference
+configuration (all floors zero) fails the qualification gate
+(`pipeline_runtime_dependencies_not_production_qualified`) unless
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set. When both gate
 floors pass, Score awards the `NoveltyUtility` delta to `trace_credit`, and
 Settle records it as one `NoveltyUtility` ledger event, written as `main`
 writes that event: settlement state `final`, actor role `vector_worker`, and

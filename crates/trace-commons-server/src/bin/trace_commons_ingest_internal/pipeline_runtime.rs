@@ -202,7 +202,10 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
 /// fails closed the same way an unqualified scorer or index does, whenever
 /// tenants are routed. The NEAR payout adapter counts only when payout is
 /// enabled (`PipelineService::payout_enabled`): a service that pays nothing
-/// out holds no payout dependency to qualify.
+/// out holds no payout dependency to qualify. A compatibility bundle's
+/// configuration must be qualifiable (`bundle`, Zaki review 1, round 2,
+/// finding 11), so the all-zero local reference never binds for real
+/// tenants.
 pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService) -> bool {
     let qualification = service.dependency_qualification();
     qualification.scorer
@@ -216,6 +219,7 @@ pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService
             .all(|ready| *ready)
         && qualification.authority
         && qualification.privacy
+        && qualification.bundle
         && (!service.payout_enabled() || qualification.payout)
 }
 

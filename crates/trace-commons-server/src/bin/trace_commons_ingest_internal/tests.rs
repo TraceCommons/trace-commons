@@ -11207,6 +11207,93 @@ fn qualified_pipeline_service(
     Ok(Arc::new(builder.build()?))
 }
 
+/// `qualified_pipeline_service`'s qualified dependencies (authority and
+/// privacy included), bound to the compatibility bundle under `config`,
+/// with a qualified `trace_credit` adapter.
+fn qualified_compatibility_pipeline_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_bundle::MinimalPolicyBundle;
+    use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
+
+    let scorer = Arc::new(QualifiedTestScorer(
+        trace_commons_gate_api::ReferencePerplexityScorer::new(),
+    ));
+    let embedder = Arc::new(QualifiedTestEmbedder(
+        trace_commons_gate_api::ReferenceEmbedder::new(),
+    ));
+    let package =
+        MinimalPolicyBundle::compatibility_package(config, scorer.as_ref(), embedder.as_ref())?;
+    let index = Arc::new(QualifiedTestIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedTestSettlementAdapter {
+        instrument_id: InstrumentId::trace_credit(),
+    });
+    let registry = SettlementAdapterRegistry::new(vec![adapter])?;
+    let builder = PipelineServiceBuilder::new(
+        backend,
+        artifact_store,
+        package,
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(Arc::new(QualifiedTestAuthority))
+    .with_privacy(Arc::new(QualifiedTestPrivacy));
+    Ok(Arc::new(builder.build()?))
+}
+
+/// Zaki review 1, round 2, finding 11: the qualification gate calls the
+/// compatibility configuration's `is_qualifiable`, so a runtime otherwise
+/// qualified in every dependency is not production-qualified while its
+/// compatibility bundle binds the local reference configuration (all-zero
+/// floors, not qualifiable), and is with a production-compatible one --
+/// including `main`'s pilot shape, a zero tail-fraction floor.
+#[tokio::test]
+async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_gate() {
+    use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let service = |config: &CompatibilityBundleConfig| {
+        qualified_compatibility_pipeline_service(
+            backend.clone(),
+            test_artifact_store(dir.path()),
+            config,
+        )
+        .expect("build a qualified compatibility service")
+    };
+
+    let local = service(&CompatibilityBundleConfig::local_reference());
+    assert!(!local.dependency_qualification().bundle);
+    assert!(!pipeline_runtime_is_production_qualified(&local));
+
+    let reference = CompatibilityBundleConfig::local_reference();
+    let pilot = CompatibilityBundleConfig::production_compatible(
+        reference.scorer_model_id.clone(),
+        reference.projection_id.clone(),
+        reference.index_id.clone(),
+        2_000_000,
+        0,
+        500_000,
+    )
+    .expect("main's pilot floors validate");
+    let production = service(&pilot);
+    assert!(production.dependency_qualification().bundle);
+    assert!(pipeline_runtime_is_production_qualified(&production));
+}
+
 /// Builds an unqualified pipeline service (`minimal_pipeline_service`)
 /// through the `IngestPipelineRuntimeAssembler` seam, passing the configured
 /// object store name through so the M11 store-name check in

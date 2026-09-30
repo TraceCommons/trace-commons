@@ -755,6 +755,32 @@ impl MinimalPolicyBundle {
     }
 }
 
+/// The compatibility configuration `package` binds, when its four policies
+/// are the compatibility bundle's; `None` for any other bundle, or when the
+/// configuration does not decode (construction refuses that package).
+pub fn package_compatibility_config(package: &BundlePackage) -> Option<CompatibilityBundleConfig> {
+    let implementation_ids = [
+        package.manifest.admission.implementation_id.as_str(),
+        package.manifest.review.implementation_id.as_str(),
+        package.manifest.score.implementation_id.as_str(),
+        package.manifest.settle.implementation_id.as_str(),
+    ];
+    if implementation_ids
+        != [
+            COMPATIBILITY_ADMISSION_IMPLEMENTATION,
+            COMPATIBILITY_REVIEW_IMPLEMENTATION,
+            COMPATIBILITY_SCORE_IMPLEMENTATION,
+            COMPATIBILITY_SETTLE_IMPLEMENTATION,
+        ]
+    {
+        return None;
+    }
+    let config_bytes = package
+        .artifacts
+        .get(&package.manifest.score.configuration_hash)?;
+    serde_json::from_slice(config_bytes).ok()
+}
+
 /// Requires that `package`'s Score policy ref names `descriptor` by content
 /// hash and stores exactly those bytes as an artifact.
 fn require_named_dependency(package: &BundlePackage, descriptor: &[u8]) -> anyhow::Result<()> {

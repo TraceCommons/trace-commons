@@ -181,11 +181,15 @@ impl CompatibilityBundleConfig {
                 && self.chunk_min_tokens > 0,
             "compatibility scoring bounds are invalid"
         );
+        // Zaki review 1, round 2, finding 11: `main`'s gate refuses to start
+        // only when every floor is zero (every trace would pass), and runs
+        // with a zero tail-fraction floor, its documented pilot value; a
+        // production-compatible configuration is validated the same way.
         if self.qualification == CompatibilityQualification::ProductionCompatible {
             anyhow::ensure!(
                 self.perplexity_floor_micros > 0
-                    && self.tail_fraction_floor_micros > 0
-                    && self.novelty_floor_micros > 0,
+                    || self.tail_fraction_floor_micros > 0
+                    || self.novelty_floor_micros > 0,
                 COMPATIBILITY_ZERO_FLOOR_LABEL
             );
         }
@@ -196,8 +200,14 @@ impl CompatibilityBundleConfig {
         Ok(())
     }
 
+    /// Whether a runtime that routes or drains tenants may bind this
+    /// configuration: it is production-compatible and valid. The runtime's
+    /// qualification gate reads it (`PipelineDependencyQualification::bundle`),
+    /// so the local reference configuration, whose floors are all zero, never
+    /// binds there.
     pub fn is_qualifiable(&self) -> bool {
         self.qualification == CompatibilityQualification::ProductionCompatible
+            && self.validate().is_ok()
     }
 }
 
@@ -1342,6 +1352,33 @@ mod tests {
             .unwrap_err();
         assert!(error.is_transient());
         assert_eq!(error.label(), "index_unavailable");
+    }
+
+    /// Finding 11: a production-compatible configuration is validated as
+    /// `main` validates its gate configuration at startup. All-zero floors
+    /// are refused; a zero tail-fraction floor with the other floors
+    /// positive -- `main`'s documented pilot value -- is accepted, and so is
+    /// any single positive floor.
+    #[test]
+    fn production_compatibility_is_validated_as_mains_gate_configuration() {
+        let config = |perplexity, tail, novelty| {
+            CompatibilityBundleConfig::production_compatible(
+                "scorer.v1".to_string(),
+                MINIMAL_PROJECTION_ID.to_string(),
+                MINIMAL_INDEX_ID.to_string(),
+                perplexity,
+                tail,
+                novelty,
+            )
+        };
+        assert_eq!(
+            config(0, 0, 0).unwrap_err().to_string(),
+            COMPATIBILITY_ZERO_FLOOR_LABEL,
+            "all-zero floors are refused, as main refuses them"
+        );
+        config(2_000_000, 0, 500_000).expect("the pilot's zero tail floor is accepted");
+        config(1, 0, 0).expect("one positive floor is enough, as on main");
+        config(0, 0, 1).expect("one positive floor is enough, as on main");
     }
 
     #[test]
