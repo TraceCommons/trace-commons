@@ -17507,6 +17507,66 @@ fn item_runs(snapshot: &PipelineExportSnapshot) -> Vec<uuid::Uuid> {
     runs
 }
 
+/// Zaki review 1, round 2, item 3: creating and delivering a snapshot
+/// return exactly what a fresh read of it returns, for a snapshot of several
+/// items and for one of none. A replayed create (same key) and a repeated
+/// delivery read the snapshot back from the tables, so each is compared with
+/// the first answer.
+#[tokio::test]
+async fn export_snapshots_return_what_a_fresh_read_returns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = format!("export-fresh-read-{}", uuid::Uuid::new_v4());
+    for _ in 0..3 {
+        submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    }
+    let empty_tenant = format!("export-fresh-read-empty-{}", uuid::Uuid::new_v4());
+    service
+        .register_default_bundle(&empty_tenant)
+        .await
+        .unwrap();
+
+    for (tenant, items) in [(&tenant, 3), (&empty_tenant, 0)] {
+        let created = create_snapshot(&product, tenant, "fresh", TraceAllowedUse::Evaluation).await;
+        assert_eq!(created.items.len(), items);
+        assert_eq!(
+            created
+                .items
+                .iter()
+                .map(|item| item.ordinal)
+                .collect::<Vec<_>>(),
+            (0..items as u32).collect::<Vec<_>>(),
+            "items in ordinal order"
+        );
+        let replayed =
+            create_snapshot(&product, tenant, "fresh", TraceAllowedUse::Evaluation).await;
+        assert_eq!(created, replayed, "{items} items: create");
+
+        let completed = product
+            .complete_export_snapshot(tenant, EXPORTER, created.snapshot_id)
+            .await
+            .expect("deliver the snapshot");
+        assert_eq!(completed.state, "complete");
+        assert_eq!(completed.export_manifest_id, Some(created.snapshot_id));
+        let again = product
+            .complete_export_snapshot(tenant, EXPORTER, created.snapshot_id)
+            .await
+            .expect("a delivered snapshot comes back unchanged");
+        assert_eq!(completed, again, "{items} items: complete");
+        assert_eq!(completed.items, created.items);
+    }
+}
+
 /// An export carries the approved revision, the bytes the privacy boundary
 /// transformed at receipt, and never the raw request. The run goes through
 /// `MarkerRedactingBoundary`, which replaces `MARKER_SECRET` with

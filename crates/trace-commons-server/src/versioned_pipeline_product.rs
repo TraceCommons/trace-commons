@@ -956,62 +956,97 @@ impl PipelineProductStore {
         let source_list_hash = source_list_hash(&rows);
         let item_count = i32::try_from(rows.len())
             .map_err(|_| DatabaseError::Constraint("export item count overflow".to_string()))?;
-        tx.execute(
-            "INSERT INTO pipeline_export_snapshots (
-                tenant_id, snapshot_id, request_idempotency_key,
-                requester_principal_ref, allowed_use, purpose_hash,
-                selection_policy_id, source_list_hash, item_count
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-            &[
-                &tenant_id,
-                &snapshot_id,
-                &request_idempotency_key,
-                &requester_principal_ref,
-                &allowed_use_label,
-                &purpose_hash,
-                &PIPELINE_EXPORT_SELECTION_POLICY_ID,
-                &source_list_hash,
-                &item_count,
-            ],
-        )
-        .await?;
-        for (ordinal, row) in rows.iter().enumerate() {
-            let ordinal = i32::try_from(ordinal).map_err(|_| {
-                DatabaseError::Constraint("export item ordinal overflow".to_string())
-            })?;
-            tx.execute(
+        let snapshot_row = tx
+            .query_one(
+                "INSERT INTO pipeline_export_snapshots (
+                    tenant_id, snapshot_id, request_idempotency_key,
+                    requester_principal_ref, allowed_use, purpose_hash,
+                    selection_policy_id, source_list_hash, item_count
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 RETURNING *",
+                &[
+                    &tenant_id,
+                    &snapshot_id,
+                    &request_idempotency_key,
+                    &requester_principal_ref,
+                    &allowed_use_label,
+                    &purpose_hash,
+                    &PIPELINE_EXPORT_SELECTION_POLICY_ID,
+                    &source_list_hash,
+                    &item_count,
+                ],
+            )
+            .await?;
+        // Zaki review 1, round 2, item 3: every item in one statement, from
+        // column arrays in selection order (`WITH ORDINALITY` numbers them
+        // from 1; the item ordinal is 0-based), and the snapshot built from
+        // the rows written rather than read back.
+        let column = |name: &str| {
+            rows.iter()
+                .map(|row| row.get::<_, Uuid>(name))
+                .collect::<Vec<_>>()
+        };
+        let text = |name: &str| {
+            rows.iter()
+                .map(|row| row.get::<_, String>(name))
+                .collect::<Vec<_>>()
+        };
+        let json = |name: &str| {
+            rows.iter()
+                .map(|row| row.get::<_, serde_json::Value>(name))
+                .collect::<Vec<_>>()
+        };
+        let schema_versions = rows
+            .iter()
+            .map(|row| row.get::<_, i32>("outcome_schema_version"))
+            .collect::<Vec<_>>();
+        let mut item_rows = tx
+            .query(
                 "INSERT INTO pipeline_export_snapshot_items (
                     tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
                     registry_revision_id, source_object_ref_id, source_content_hash,
                     bundle_id, outcome_schema_id, outcome_schema_version,
                     authorized_view_schema_id, consent_scopes, allowed_uses
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                 )
+                 SELECT $1, $2, (item.position - 1)::INTEGER, item.run_id,
+                        item.submission_id, item.trace_id, item.revision_id,
+                        item.object_ref_id, item.content_hash, item.bundle_id,
+                        item.schema_id, item.schema_version, $3, item.consent_scopes,
+                        item.allowed_uses
+                   FROM unnest(
+                        $4::UUID[], $5::UUID[], $6::UUID[], $7::UUID[], $8::UUID[],
+                        $9::TEXT[], $10::TEXT[], $11::TEXT[], $12::INTEGER[],
+                        $13::JSONB[], $14::JSONB[]
+                   ) WITH ORDINALITY AS item(
+                        run_id, submission_id, trace_id, revision_id, object_ref_id,
+                        content_hash, bundle_id, schema_id, schema_version,
+                        consent_scopes, allowed_uses, position
+                   )
+                 RETURNING *",
                 &[
                     &tenant_id,
                     &snapshot_id,
-                    &ordinal,
-                    &row.get::<_, Uuid>("run_id"),
-                    &row.get::<_, Uuid>("submission_id"),
-                    &row.get::<_, Uuid>("trace_id"),
-                    &row.get::<_, Uuid>("approved_revision_id"),
-                    &row.get::<_, Uuid>("approved_object_ref_id"),
-                    &row.get::<_, String>("approved_content_hash"),
-                    &row.get::<_, String>("bundle_id"),
-                    &row.get::<_, String>("outcome_schema_id"),
-                    &row.get::<_, i32>("outcome_schema_version"),
                     &PIPELINE_AUTHORIZED_VIEW_SCHEMA_ID,
-                    &row.get::<_, serde_json::Value>("consent_scopes"),
-                    &row.get::<_, serde_json::Value>("allowed_uses"),
+                    &column("run_id"),
+                    &column("submission_id"),
+                    &column("trace_id"),
+                    &column("approved_revision_id"),
+                    &column("approved_object_ref_id"),
+                    &text("approved_content_hash"),
+                    &text("bundle_id"),
+                    &text("outcome_schema_id"),
+                    &schema_versions,
+                    &json("consent_scopes"),
+                    &json("allowed_uses"),
                 ],
             )
             .await?;
-        }
-        let snapshot = load_snapshot(&tx, tenant_id, snapshot_id, requester_principal_ref)
-            .await?
-            .ok_or_else(|| DatabaseError::NotFound {
-                entity: "pipeline_export_snapshot".to_string(),
-                id: snapshot_id.to_string(),
-            })?;
+        item_rows.sort_by_key(|row| row.get::<_, i32>("ordinal"));
+        let items = item_rows
+            .iter()
+            .map(snapshot_item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let snapshot = snapshot_from_row(&snapshot_row, items)?;
         tx.commit().await?;
         Ok(snapshot)
     }
@@ -1112,40 +1147,65 @@ impl PipelineProductStore {
             ],
         )
         .await?;
-        for item in &snapshot.items {
-            tx.execute(
-                "INSERT INTO trace_export_manifest_items (
-                    tenant_id, export_manifest_id, submission_id, trace_id,
-                    derived_id, object_ref_id, source_status_at_export,
-                    source_hash_at_export
-                 ) VALUES ($1,$2,$3,$4,$5,$6,'accepted',$7)
-                 ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO NOTHING",
-                &[
-                    &tenant_id,
-                    &snapshot_id,
-                    &item.submission_id,
-                    &item.trace_id,
-                    &item.registry_revision_id,
-                    &item.source_object_ref_id,
-                    &item.source_content_hash,
-                ],
-            )
-            .await?;
-        }
+        // Zaki review 1, round 2, item 3: every manifest item in one
+        // statement, from column arrays.
+        let items = &snapshot.items;
         tx.execute(
-            "UPDATE pipeline_export_snapshots
-                SET state = 'complete', export_manifest_id = $3,
-                    completed_at = COALESCE(completed_at, NOW())
-              WHERE tenant_id = $1 AND snapshot_id = $2 AND state = 'ready'",
-            &[&tenant_id, &snapshot_id, &snapshot_id],
+            "INSERT INTO trace_export_manifest_items (
+                tenant_id, export_manifest_id, submission_id, trace_id,
+                derived_id, object_ref_id, source_status_at_export,
+                source_hash_at_export
+             )
+             SELECT $1, $2, item.submission_id, item.trace_id, item.derived_id,
+                    item.object_ref_id, 'accepted', item.content_hash
+               FROM unnest($3::UUID[], $4::UUID[], $5::UUID[], $6::UUID[], $7::TEXT[])
+                    AS item(submission_id, trace_id, derived_id, object_ref_id, content_hash)
+             ON CONFLICT (tenant_id, export_manifest_id, submission_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &snapshot_id,
+                &items
+                    .iter()
+                    .map(|item| item.submission_id)
+                    .collect::<Vec<_>>(),
+                &items.iter().map(|item| item.trace_id).collect::<Vec<_>>(),
+                &items
+                    .iter()
+                    .map(|item| item.registry_revision_id)
+                    .collect::<Vec<_>>(),
+                &items
+                    .iter()
+                    .map(|item| item.source_object_ref_id)
+                    .collect::<Vec<_>>(),
+                &items
+                    .iter()
+                    .map(|item| item.source_content_hash.clone())
+                    .collect::<Vec<_>>(),
+            ],
         )
         .await?;
-        let completed = load_snapshot(&tx, tenant_id, snapshot_id, requester_principal_ref)
-            .await?
-            .ok_or_else(|| DatabaseError::NotFound {
-                entity: "pipeline_export_snapshot".to_string(),
-                id: snapshot_id.to_string(),
-            })?;
+        let updated = tx
+            .query_opt(
+                "UPDATE pipeline_export_snapshots
+                    SET state = 'complete', export_manifest_id = $3,
+                        completed_at = COALESCE(completed_at, NOW())
+                  WHERE tenant_id = $1 AND snapshot_id = $2 AND state = 'ready'
+                  RETURNING *",
+                &[&tenant_id, &snapshot_id, &snapshot_id],
+            )
+            .await?;
+        // The items did not change: the submissions are locked, and the
+        // check above found none invalidated. Another delivery that won the
+        // race leaves no `ready` row to update; read that one back.
+        let completed = match updated {
+            Some(row) => snapshot_from_row(&row, snapshot.items)?,
+            None => load_snapshot(&tx, tenant_id, snapshot_id, requester_principal_ref)
+                .await?
+                .ok_or_else(|| DatabaseError::NotFound {
+                    entity: "pipeline_export_snapshot".to_string(),
+                    id: snapshot_id.to_string(),
+                })?,
+        };
         tx.commit().await?;
         Ok(completed)
     }
@@ -1885,7 +1945,16 @@ async fn load_snapshot(
         .iter()
         .map(snapshot_item_from_row)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(PipelineExportSnapshot {
+    Ok(Some(snapshot_from_row(&row, items)?))
+}
+
+/// A snapshot from its `pipeline_export_snapshots` row and its items, in
+/// ordinal order.
+fn snapshot_from_row(
+    row: &Row,
+    items: Vec<PipelineExportSnapshotItem>,
+) -> Result<PipelineExportSnapshot, DatabaseError> {
+    Ok(PipelineExportSnapshot {
         tenant_id: row.get("tenant_id"),
         snapshot_id: row.get("snapshot_id"),
         request_idempotency_key: row.get("request_idempotency_key"),
@@ -1900,7 +1969,7 @@ async fn load_snapshot(
         completed_at: row.get("completed_at"),
         invalidated_at: row.get("invalidated_at"),
         items,
-    }))
+    })
 }
 
 fn snapshot_item_from_row(row: &Row) -> Result<PipelineExportSnapshotItem, DatabaseError> {
