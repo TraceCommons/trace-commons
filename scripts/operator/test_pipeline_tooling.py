@@ -1588,6 +1588,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "index_entry_set_hash": _fake_hash("index"),
                     "pending_run_id_hash": _fake_hash("pending-run"),
                     "adapter_request_count": 1,
+                    "completed_settlement_count": 1,
+                    "completed_credit_event_count": 1,
                 }
                 fingerprint.update(overrides.get("fingerprint", {}))
                 Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_bytes(
@@ -1719,6 +1721,7 @@ class RestoreDrillTests(_RestoreDrillCase):
         self.assertTrue(lines[0].startswith("PipelineRestoreOK: "))
         self.assertIn(f"database={_fake_hash('database')}", lines[0])
         self.assertIn("pending_runs_resumed=1", lines[0])
+        self.assertIn("legs_per_run=1 credit_events_per_run=1", lines[0])
         self.assertIn("duplicate_effects=0", lines[0])
         self.assertIn("filesystem_restore_local_only", lines[1])
         self.assertIn("local evidence", lines[1])
@@ -1769,6 +1772,8 @@ class RestoreDrillTests(_RestoreDrillCase):
             ({"evidence": {"pending_runs_resumed": 0}}, "restore_evidence_mismatch"),
             ({"safe_blockers": []}, "restore_safe_blocker_missing"),
             ({"fingerprint": {"tenant_id": "tenant-a"}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"completed_credit_event_count": 0}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"completed_settlement_count": True}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"artifact_fingerprint": _fake_hash("not-the-tree")}},
              "restore_artifact_fingerprint_mismatch"),
         )

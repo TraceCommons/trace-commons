@@ -352,7 +352,7 @@ pub(super) fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider>
 /// reflects that reality rather than hiding it, and `allow_test_dependencies
 /// = true` is the test-only opt-in that lets the unqualified runtime start
 /// anyway.
-pub(super) fn assemble_test_pipeline_service(
+fn assemble_test_pipeline_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
     index: Arc<IsolatedPipelineIndex>,
@@ -4838,12 +4838,16 @@ async fn db_reconciliation_leaves_pipeline_rows_out_of_the_file_comparison() {
 /// P5: `TestAssembler` with the compatibility bundle instead of the minimal
 /// one: `CompatibilityBundleConfig::local_reference()` with the given
 /// `NoveltyUtility` delta, the reference scorer and embedder, the isolated
-/// index, one `trace_credit` recording adapter on payout rail `none`, and
-/// the given privacy boundary. Payout stays disabled (the default).
+/// index, the given settlement adapters (one `trace_credit` recording
+/// adapter on payout rail `none` unless a caller shares its own), the given
+/// privacy boundary, and an optional crash point. Payout stays disabled
+/// (the default).
 struct CompatibilityTestAssembler {
     index: Arc<IsolatedPipelineIndex>,
     novelty_utility_microcredits: u64,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
 }
 
 impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
@@ -4858,19 +4862,14 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
             scorer.as_ref(),
             embedder.as_ref(),
         )?;
-        let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
-            InstrumentId::trace_credit(),
-            "recording_trace_credit_compatibility_http_test_only",
-            "none",
-        );
-        let registry = SettlementAdapterRegistry::new(vec![trace_credit])?;
+        let registry = SettlementAdapterRegistry::new(self.adapters.clone())?;
         let caps = PipelineCaps {
             per_instrument_atomic_units: BTreeMap::from([(
                 InstrumentId::trace_credit().as_str().to_string(),
                 AtomicUnits::from_raw(u128::MAX),
             )]),
         };
-        let service = PipelineServiceBuilder::new(
+        let mut builder = PipelineServiceBuilder::new(
             context.backend,
             context.artifact_store,
             package,
@@ -4884,9 +4883,11 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
         .with_object_store_name(context.object_store_name)
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
-        .with_privacy(self.privacy.clone())
-        .build()?;
-        Ok(Arc::new(service))
+        .with_privacy(self.privacy.clone());
+        if let Some(crash_point) = self.crash_point {
+            builder = builder.with_crash_point(crash_point);
+        }
+        Ok(Arc::new(builder.build()?))
     }
 }
 
@@ -4897,7 +4898,8 @@ const TEST_PIPELINE_CREDIT_ISSUER: &str =
 
 /// `assemble_test_pipeline_service` for `CompatibilityTestAssembler`: the
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
-/// real boot uses, over `configured_store`.
+/// real boot uses, over `configured_store`, with its own `trace_credit`
+/// recording adapter and no crash point.
 fn assemble_compatibility_pipeline_service(
     backend: Arc<PgBackend>,
     configured_store: &ConfiguredTraceArtifactStore,
@@ -4905,10 +4907,42 @@ fn assemble_compatibility_pipeline_service(
     novelty_utility_microcredits: u64,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
 ) -> Arc<PipelineService> {
+    let trace_credit: Arc<dyn SettlementAdapter> = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_compatibility_http_test_only",
+        "none",
+    );
+    assemble_compatibility_pipeline_service_with(
+        backend,
+        configured_store,
+        index,
+        novelty_utility_microcredits,
+        privacy,
+        vec![trace_credit],
+        None,
+    )
+}
+
+/// `assemble_compatibility_pipeline_service` with the caller's settlement
+/// adapters and crash point: the restore drill's seed shares one recording
+/// adapter across two app lifetimes and crashes the second one
+/// (`pipeline_restore_pg_tests`), as `TestAssembler` does for the minimal
+/// bundle.
+pub(super) fn assemble_compatibility_pipeline_service_with(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    index: Arc<IsolatedPipelineIndex>,
+    novelty_utility_microcredits: u64,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
     let assembler = CompatibilityTestAssembler {
         index,
         novelty_utility_microcredits,
         privacy,
+        adapters,
+        crash_point,
     };
     let connections = TraceCorpusDbConnections {
         database: backend.clone() as Arc<dyn Database>,

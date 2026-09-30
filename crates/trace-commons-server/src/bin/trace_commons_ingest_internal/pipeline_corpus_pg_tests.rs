@@ -126,7 +126,7 @@ const RECEIPT_CONTENT_CONFLICT_LABEL: &str = "receipt id reused with different c
 
 /// The `compatibility` bundle's `NoveltyUtility` delta, as the PR 3
 /// compatibility HTTP test configures it.
-const COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS: u64 = 2_500_000;
+pub(super) const COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS: u64 = 2_500_000;
 
 /// How long one fixture's run may take to become terminal.
 const FIXTURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);

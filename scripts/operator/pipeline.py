@@ -59,6 +59,14 @@ _RESTORE_FINGERPRINT_HASHES = (
     "index_entry_set_hash",
     "pending_run_id_hash",
 )
+# The seed's counts: its adapter requests, and the completed run's
+# settlement legs and Trace Credit ledger events (the resume requires the
+# pending run to reach the same two).
+_RESTORE_FINGERPRINT_COUNTS = (
+    "adapter_request_count",
+    "completed_settlement_count",
+    "completed_credit_event_count",
+)
 
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -432,19 +440,18 @@ def require_same_artifact_bytes(source, destination):
 
 
 def _read_restore_fingerprint(path):
-    """The seed's fingerprint file: exactly its schema, four hashes, and a
-    request count."""
+    """The seed's fingerprint file: exactly its schema, four hashes, and
+    three positive counts."""
     value = _read_json(path, "restore_fingerprint_invalid")
     require(
         isinstance(value, dict)
-        and set(value) == {"schema", "adapter_request_count", *_RESTORE_FINGERPRINT_HASHES}
+        and set(value) == {"schema", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
         and value["schema"] == RESTORE_FINGERPRINT_SCHEMA
         and all(
             isinstance(value[key], str) and _HASH.fullmatch(value[key]) is not None
             for key in _RESTORE_FINGERPRINT_HASHES
         )
-        and type(value["adapter_request_count"]) is int
-        and value["adapter_request_count"] > 0,
+        and all(type(value[key]) is int and value[key] > 0 for key in _RESTORE_FINGERPRINT_COUNTS),
         "restore_fingerprint_invalid",
     )
     return value
@@ -542,6 +549,8 @@ def restore_drill(args, run):
     print(
         f"PipelineRestoreOK: database={seed['database_fingerprint']} "
         f"artifacts={seed['artifact_fingerprint']} index={seed['index_entry_set_hash']} "
+        f"legs_per_run={seed['completed_settlement_count']} "
+        f"credit_events_per_run={seed['completed_credit_event_count']} "
         "pending_runs_resumed=1 duplicate_effects=0"
     )
     print(

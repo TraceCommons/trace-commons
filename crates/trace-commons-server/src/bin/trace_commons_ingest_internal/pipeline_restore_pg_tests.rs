@@ -7,21 +7,27 @@
 //! restore, and the artifact copy in between:
 //!
 //! - `pipeline_restore_seed` serves the shared ingest app on
-//!   `<db>_pilot` (`pipeline_http_database_url`) twice, with one index and
-//!   one set of recording adapters across both lifetimes (controller ruling
-//!   PF-2, as `real_http_receipt_completes_and_resumes_after_restart` does).
-//!   The first lifetime has no crash point and completes the first fixture
-//!   of `main`'s minimal corpus. The second has the crash point
-//!   `AfterSettleSelection` and is stopped once a second receipt's Settle
-//!   selection is durable. It then writes the seed fingerprint: the
-//!   authoritative rows, the artifact tree, the index entry set, the pending
-//!   run, and the adapter request count, all as hashes or counts.
+//!   `<db>_pilot` (`pipeline_http_database_url`) twice, with the
+//!   compatibility bundle and one index and one `trace_credit` recording
+//!   adapter across both lifetimes (controller ruling PF-2, as
+//!   `real_http_receipt_completes_and_resumes_after_restart` does; ruling
+//!   T10-4: the bundle whose Trace Credit leg calls its adapter and then
+//!   writes a ledger event). The first lifetime has no crash point and
+//!   completes, and credits, the first fixture of `main`'s minimal corpus.
+//!   The second has the crash point `AfterSettleSelection` and is stopped
+//!   once a second receipt's Settle selection is durable. It then writes the
+//!   seed fingerprint: the authoritative rows (the Trace Credit ledger
+//!   included), the artifact tree, the index entry set, the pending run, the
+//!   adapter request count, and the completed run's leg and credit event
+//!   counts, all as hashes or counts.
 //! - `pipeline_restore_resume` runs against the restored database, named
 //!   directly by `TRACE_COMMONS_PG_TEST_DATABASE_URL` (no `_pilot`, no drop,
 //!   no migration), and the copied artifact root. It proves the restore kept
 //!   what the seed recorded, rebuilds the index from sealed commands, starts
-//!   the app, and proves the pending run completes once with no duplicate
-//!   effect, as a `NOBYPASSRLS` runtime login on tables that force RLS. Then
+//!   the app, and proves the pending run completes once, with its durable
+//!   selection honored, one adapter request and one ledger event per leg,
+//!   and no duplicate effect, as a `NOBYPASSRLS` runtime login on tables
+//!   that force RLS. Then
 //!   it emits `pipeline_restore_drill`, with the safe blocker
 //!   `filesystem_restore_local_only`: a local filesystem copy is not a
 //!   remote restore.
@@ -38,11 +44,12 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 use super::pipeline_corpus_pg_tests::{
-    ARTIFACT_ROOT_VAR, TEST_MASTER_KEY_VAR, fixture_envelope, id_hash, load_corpus,
-    main_corpus_path, sha256_bytes, write_atomically,
+    ARTIFACT_ROOT_VAR, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS, TEST_MASTER_KEY_VAR,
+    fixture_envelope, id_hash, load_corpus, main_corpus_path, sha256_bytes, write_atomically,
 };
 use super::pipeline_http_pg_tests::{
-    PIPELINE_HTTP_RUNTIME_ROLE, assemble_test_pipeline_service, expire_run_lease, join_within,
+    PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
+    assemble_compatibility_pipeline_service_with, expire_run_lease, join_within,
     pilot_runtime_login, post_trace, runtime_backend, runtime_backend_at, serve_pipeline_app,
     tenant_tx, wait_for_pipeline_ready, wait_for_run_complete, wait_for_settle_selection,
 };
@@ -70,9 +77,31 @@ const RESTORE_SAFE_BLOCKERS: [&str; 1] = ["filesystem_restore_local_only"];
 const RESTORE_TENANT: &str = "tenant-a";
 const RESTORE_TOKEN: &str = "token-a";
 
+/// Every table the pipeline migrations create (V92 to V104), sorted: the
+/// set the resume requires to enable and force RLS in the restored
+/// database. A new pipeline table must be added here, or the drill fails.
+const PIPELINE_TABLES: [&str; 15] = [
+    "phase_outcomes",
+    "pipeline_active_bundles",
+    "pipeline_admission_usage",
+    "pipeline_attempt_artifacts",
+    "pipeline_bundle_packages",
+    "pipeline_bundle_policy_status",
+    "pipeline_bundle_qualifications",
+    "pipeline_export_snapshot_items",
+    "pipeline_export_snapshots",
+    "pipeline_index_invalidations",
+    "pipeline_receipt_artifacts",
+    "pipeline_review_assessments",
+    "pipeline_review_claims",
+    "pipeline_run_settlements",
+    "pipeline_runs",
+];
+
 /// The four authoritative tables, as the port's `fingerprint` reads them
-/// (lines 134-173), in one statement. Run in a tenant transaction as the
-/// runtime login, so RLS admits only that tenant's rows.
+/// (lines 134-173), then the tenant's Trace Credit ledger rows (ruling
+/// T10-4), in one statement. Run in a tenant transaction as the runtime
+/// login, so RLS admits only that tenant's rows.
 const AUTHORITATIVE_FINGERPRINT_SQL: &str = r"
     SELECT COALESCE((
           SELECT string_agg(
@@ -108,6 +137,18 @@ const AUTHORITATIVE_FINGERPRINT_SQL: &str = r"
             E'\n' ORDER BY tenant_id, bundle_id
           )
           FROM pipeline_bundle_packages
+        ), '') || E'\n--ledger--\n' || COALESCE((
+          SELECT string_agg(
+            concat_ws('|', tenant_id, credit_event_id, submission_id, trace_id,
+                      credit_account_ref, event_type, points_delta, reason,
+                      COALESCE(external_ref, ''), actor_principal_ref, actor_role,
+                      settlement_state, (occurred_at AT TIME ZONE 'UTC')::text,
+                      COALESCE(pipeline_run_id::text, ''),
+                      COALESCE(score_outcome_id::text, ''),
+                      COALESCE(instrument_id, '')),
+            E'\n' ORDER BY tenant_id, credit_event_id
+          )
+          FROM trace_credit_ledger
         ), '')";
 
 // ---------------------------------------------------------------------------
@@ -147,7 +188,10 @@ impl RestoreConfig {
 }
 
 /// What the seed recorded and the resume must find again. Hash-only: no run
-/// id, tenant id, path, or key.
+/// id, tenant id, path, or key. The two `completed_*` counts are the
+/// completed run's settlement legs and Trace Credit ledger events: the
+/// pending run must reach the same after the resume (same bundle, same
+/// award).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestoreFingerprint {
@@ -157,6 +201,8 @@ struct RestoreFingerprint {
     index_entry_set_hash: String,
     pending_run_id_hash: String,
     adapter_request_count: usize,
+    completed_settlement_count: usize,
+    completed_credit_event_count: usize,
 }
 
 impl RestoreFingerprint {
@@ -171,6 +217,8 @@ impl RestoreFingerprint {
         ];
         if fingerprint.schema != RESTORE_FINGERPRINT_SCHEMA
             || !hashes.into_iter().all(|hash| is_sha256_label(hash))
+            || fingerprint.completed_settlement_count == 0
+            || fingerprint.completed_credit_event_count == 0
         {
             return Err("restore_fingerprint_invalid");
         }
@@ -260,7 +308,9 @@ async fn database_fingerprint(backend: &Arc<PgBackend>) -> String {
 }
 
 /// One run of `RESTORE_TENANT`, with the phases it has an outcome for (one
-/// entry per outcome row) and its settlement leg count.
+/// entry per outcome row), its settlement leg count, its Trace Credit legs,
+/// its ledger events, and the legs whose `credit_event_id` names one of
+/// those events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunRow {
     run_id: Uuid,
@@ -270,6 +320,19 @@ struct RunRow {
     settle_selected: bool,
     phases: Vec<String>,
     settlement_count: usize,
+    trace_credit_legs: usize,
+    credit_events: usize,
+    linked_credit_legs: usize,
+}
+
+impl RunRow {
+    /// Exactly one ledger event for each Trace Credit leg, each named by its
+    /// leg, and at least one such leg.
+    fn credited_once(&self) -> bool {
+        self.trace_credit_legs > 0
+            && self.credit_events == self.trace_credit_legs
+            && self.linked_credit_legs == self.trace_credit_legs
+    }
 }
 
 async fn tenant_runs(backend: &Arc<PgBackend>) -> Vec<RunRow> {
@@ -288,6 +351,17 @@ async fn tenant_runs(backend: &Arc<PgBackend>) -> Vec<RunRow> {
                                WHERE o.tenant_id = r.tenant_id AND o.run_id = r.run_id),
                              '{}'::TEXT[]),
                     (SELECT COUNT(*) FROM pipeline_run_settlements s
+                      WHERE s.tenant_id = r.tenant_id AND s.run_id = r.run_id),
+                    (SELECT COUNT(*) FROM pipeline_run_settlements s
+                      WHERE s.tenant_id = r.tenant_id AND s.run_id = r.run_id
+                        AND s.instrument_id = 'trace_credit'),
+                    (SELECT COUNT(*) FROM trace_credit_ledger l
+                      WHERE l.tenant_id = r.tenant_id AND l.pipeline_run_id = r.run_id),
+                    (SELECT COUNT(*) FROM pipeline_run_settlements s
+                       JOIN trace_credit_ledger l
+                         ON l.tenant_id = s.tenant_id
+                        AND l.credit_event_id = s.credit_event_id
+                        AND l.pipeline_run_id = s.run_id
                       WHERE s.tenant_id = r.tenant_id AND s.run_id = r.run_id)
                FROM pipeline_runs r
               WHERE r.tenant_id = $1
@@ -297,6 +371,9 @@ async fn tenant_runs(backend: &Arc<PgBackend>) -> Vec<RunRow> {
         .await
         .expect("restore_runs_query_failed");
     tx.commit().await.expect("restore_runs_query_failed");
+    let count = |row: &tokio_postgres::Row, index: usize| {
+        usize::try_from(row.get::<_, i64>(index)).expect("a count is not negative")
+    };
     rows.iter()
         .map(|row| RunRow {
             run_id: row.get(0),
@@ -305,14 +382,17 @@ async fn tenant_runs(backend: &Arc<PgBackend>) -> Vec<RunRow> {
             next_phase: row.get(3),
             settle_selected: row.get(4),
             phases: row.get(5),
-            settlement_count: usize::try_from(row.get::<_, i64>(6))
-                .expect("a count is not negative"),
+            settlement_count: count(row, 6),
+            trace_credit_legs: count(row, 7),
+            credit_events: count(row, 8),
+            linked_credit_legs: count(row, 9),
         })
         .collect()
 }
 
-/// Every column of `run_id`'s outcomes and settlement legs, in a stable
-/// order: equal before and after the resume only if neither changed.
+/// Every column of `run_id`'s outcomes, settlement legs, and Trace Credit
+/// ledger rows, in a stable order: equal before and after the resume only if
+/// none of them changed.
 async fn run_effect_rows(backend: &Arc<PgBackend>, run_id: Uuid) -> String {
     let mut client = backend
         .trace_pool_for_test()
@@ -329,13 +409,50 @@ async fn run_effect_rows(backend: &Arc<PgBackend>, run_id: Uuid) -> String {
                   || COALESCE((SELECT string_agg(row_to_json(s)::text, E'\n'
                                                  ORDER BY s.instrument_id)
                                  FROM pipeline_run_settlements s
-                                WHERE s.tenant_id = $1 AND s.run_id = $2), '')",
+                                WHERE s.tenant_id = $1 AND s.run_id = $2), '')
+                  || E'\n--ledger--\n'
+                  || COALESCE((SELECT string_agg(row_to_json(l)::text, E'\n'
+                                                 ORDER BY l.credit_event_id)
+                                 FROM trace_credit_ledger l
+                                WHERE l.tenant_id = $1 AND l.pipeline_run_id = $2), '')",
             &[&RESTORE_TENANT, &run_id],
         )
         .await
         .expect("restore_run_rows_query_failed")
         .get(0);
     tx.commit().await.expect("restore_run_rows_query_failed");
+    text
+}
+
+/// Every column of `run_id`'s committed Admission, Review, and Score
+/// outcomes, and its durable Settle selection and hash: what
+/// `AfterSettleSelection` left behind, which the resume must honor
+/// unchanged (ruling T10-6).
+async fn committed_selection_rows(backend: &Arc<PgBackend>, run_id: Uuid) -> String {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("restore_selection_rows_connection_failed");
+    let tx = tenant_tx(&mut client, RESTORE_TENANT).await;
+    let text: String = tx
+        .query_one(
+            r"SELECT COALESCE((SELECT string_agg(row_to_json(o)::text, E'\n' ORDER BY o.phase)
+                                FROM phase_outcomes o
+                               WHERE o.tenant_id = $1 AND o.run_id = $2
+                                 AND o.phase IN ('admission', 'review', 'score')), '')
+                  || E'\n--selection--\n'
+                  || COALESCE((SELECT settle_selection_hash || '|' || settle_selection::text
+                                 FROM pipeline_runs
+                                WHERE tenant_id = $1 AND run_id = $2), '')",
+            &[&RESTORE_TENANT, &run_id],
+        )
+        .await
+        .expect("restore_selection_rows_query_failed")
+        .get(0);
+    tx.commit()
+        .await
+        .expect("restore_selection_rows_query_failed");
     text
 }
 
@@ -371,21 +488,15 @@ async fn duplicated_rows(backend: &Arc<PgBackend>) -> i64 {
     duplicates
 }
 
-/// The recording adapters one app lifetime settles through: one per
-/// instrument the minimal package or `TestAssembler`'s caps name.
+/// The one recording adapter an app lifetime settles through: the
+/// compatibility bundle pins only `trace_credit`.
 struct RecordingAdapters {
-    storage_rebate: Arc<RecordingSettlementAdapter>,
     trace_credit: Arc<RecordingSettlementAdapter>,
 }
 
 impl RecordingAdapters {
     fn new() -> Self {
         Self {
-            storage_rebate: RecordingSettlementAdapter::new(
-                InstrumentId::new("storage_rebate").expect("a valid instrument id"),
-                "recording_storage_rebate_restore_test_only",
-                "none",
-            ),
             trace_credit: RecordingSettlementAdapter::new(
                 InstrumentId::trace_credit(),
                 "recording_trace_credit_restore_test_only",
@@ -395,38 +506,55 @@ impl RecordingAdapters {
     }
 
     fn registry(&self) -> Vec<Arc<dyn SettlementAdapter>> {
-        vec![
-            self.storage_rebate.clone() as Arc<dyn SettlementAdapter>,
-            self.trace_credit.clone() as Arc<dyn SettlementAdapter>,
-        ]
+        vec![self.trace_credit.clone() as Arc<dyn SettlementAdapter>]
     }
 
-    /// The run of every request either adapter received.
+    /// The run of every request the adapter received.
     fn request_runs(&self) -> Vec<Uuid> {
-        self.storage_rebate
+        self.trace_credit
             .requests()
             .iter()
-            .chain(self.trace_credit.requests().iter())
             .map(|request| request.run_id())
             .collect()
     }
 }
 
-/// An `AppState` serving `service` for `RESTORE_TENANT`, as
-/// `real_http_receipt_completes_and_resumes_after_restart` builds one: the
-/// runtime login is the database for both the receipt route and the
-/// pipeline.
+/// The compatibility bundle's service (the `compatibility` bundle of
+/// `pipeline.py run`: a 2_500_000 microcredit `NoveltyUtility` delta, the
+/// pass-through privacy boundary), on the runtime login, over `artifacts`,
+/// with the caller's index, adapters, and crash point.
+fn compatibility_service(
+    runtime: &Arc<PgBackend>,
+    artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
+    index: &Arc<IsolatedPipelineIndex>,
+    adapters: &RecordingAdapters,
+    crash_point: Option<PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    assemble_compatibility_pipeline_service_with(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        index.clone(),
+        COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+        adapters.registry(),
+        crash_point,
+    )
+}
+
+/// An `AppState` serving `service` for `RESTORE_TENANT`, as the corpus
+/// harness builds one: the receipt route's database is the migration owner,
+/// and the pipeline service (built by the caller) runs on the runtime login.
 fn restore_app_state(
     state_dir: &Path,
-    backend: &Arc<PgBackend>,
+    owner: &Arc<PgBackend>,
     artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
     service: Arc<PipelineService>,
 ) -> Arc<AppState> {
     let mut state = test_state_with_options(
         state_dir.to_path_buf(),
-        Some(backend.clone() as Arc<dyn Database>),
+        Some(owner.clone() as Arc<dyn Database>),
         Some(artifacts.clone()),
-        true,
+        false,
         false,
         false,
         false,
@@ -480,29 +608,42 @@ async fn restored_database_url() -> Option<String> {
     Some(url)
 }
 
+/// The migration owner on the restored database, for the receipt route's
+/// state: a plain connection that applies no migration.
+async fn restored_owner_backend(url: &str) -> Arc<PgBackend> {
+    Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(url, 4))
+            .await
+            .expect("connect to the restored database as its owner"),
+    )
+}
+
 /// Every `pipeline_*` table (and `phase_outcomes`) in the database `backend`
-/// reaches: `(tables, tables that enable and force RLS, tables the current
+/// reaches, sorted by name: `(name, enables and forces RLS, the current
 /// login may SELECT)`.
-async fn pipeline_table_security(backend: &Arc<PgBackend>) -> (i64, i64, i64) {
-    let row = backend
+async fn pipeline_table_security(backend: &Arc<PgBackend>) -> Vec<(String, bool, bool)> {
+    backend
         .trace_pool_for_test()
         .get()
         .await
         .expect("restore_rls_connection_failed")
-        .query_one(
-            r"SELECT COUNT(*),
-                     COUNT(*) FILTER (WHERE c.relrowsecurity AND c.relforcerowsecurity),
-                     COUNT(*) FILTER (WHERE has_table_privilege(c.oid, 'SELECT'))
+        .query(
+            r"SELECT c.relname::TEXT,
+                     c.relrowsecurity AND c.relforcerowsecurity,
+                     has_table_privilege(c.oid, 'SELECT')
                 FROM pg_class c
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE n.nspname = 'public'
                  AND c.relkind IN ('r', 'p')
-                 AND (c.relname LIKE 'pipeline\_%' OR c.relname = 'phase_outcomes')",
+                 AND (c.relname LIKE 'pipeline\_%' OR c.relname = 'phase_outcomes')
+               ORDER BY c.relname",
             &[],
         )
         .await
-        .expect("restore_rls_query_failed");
-    (row.get(0), row.get(1), row.get(2))
+        .expect("restore_rls_query_failed")
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -528,22 +669,19 @@ async fn pipeline_restore_seed() {
     let runtime = runtime_backend(8)
         .await
         .expect("restore_database_url_missing");
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
     let state_dir = tempfile::tempdir().expect("temp dir");
     let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
     // Shared by both lifetimes (PF-2): the in-memory index and the recording
-    // adapters see each other's writes only when the same instances back
-    // both apps.
+    // adapter see each other's writes only when the same instances back both
+    // apps.
     let index = IsolatedPipelineIndex::new();
     let adapters = RecordingAdapters::new();
     let start = |crash_point: Option<PipelineCrashPoint>| {
-        let service = assemble_test_pipeline_service(
-            runtime.clone(),
-            artifacts.clone(),
-            index.clone(),
-            adapters.registry(),
-            crash_point,
-        );
-        restore_app_state(state_dir.path(), &runtime, &artifacts, service)
+        let service = compatibility_service(&runtime, &artifacts, &index, &adapters, crash_point);
+        restore_app_state(state_dir.path(), &owner, &artifacts, service)
     };
     let client = reqwest::Client::new();
 
@@ -583,8 +721,9 @@ async fn pipeline_restore_seed() {
     expire_run_lease(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
 
     // The seed is the shape the drill needs: one complete run with four
-    // outcomes, and one leased run with a durable Settle selection, three
-    // outcomes, and no settlement request yet.
+    // outcomes and a credited Trace Credit leg, and one leased run with a
+    // durable Settle selection, three outcomes, and no settlement request or
+    // ledger event yet.
     let runs = tenant_runs(&runtime).await;
     let [completed, pending] = runs.as_slice() else {
         panic!("restore_seed_run_count");
@@ -618,6 +757,14 @@ async fn pipeline_restore_seed() {
         ["admission", "review", "score"],
         "restore_seed_outcomes_unexpected"
     );
+    assert!(
+        completed.credited_once() && completed.trace_credit_legs == completed.settlement_count,
+        "restore_seed_run_not_credited"
+    );
+    assert_eq!(
+        pending.credit_events, 0,
+        "restore_seed_pending_run_credited"
+    );
     let request_runs = adapters.request_runs();
     assert!(
         request_runs.iter().all(|run| *run == completed.run_id)
@@ -641,6 +788,8 @@ async fn pipeline_restore_seed() {
         index_entry_set_hash: entry_set_hash,
         pending_run_id_hash: id_hash(pending.run_id),
         adapter_request_count: request_runs.len(),
+        completed_settlement_count: completed.settlement_count,
+        completed_credit_event_count: completed.credit_events,
     };
     write_atomically(&config.fingerprint_path, &fingerprint.to_bytes());
 }
@@ -664,10 +813,24 @@ async fn pipeline_restore_resume() {
     // `runtime_backend_at` checks the login is neither SUPERUSER nor
     // BYPASSRLS before anything else connects.
     let runtime = runtime_backend_at(&url, 8).await;
-    let (tables, forced, readable) = pipeline_table_security(&runtime).await;
-    assert!(tables > 0, "restore_pipeline_tables_missing");
-    assert_eq!(forced, tables, "restore_rls_not_forced");
-    assert_eq!(readable, tables, "restore_privileges_lost");
+    let owner = restored_owner_backend(&url).await;
+    let tables = pipeline_table_security(&runtime).await;
+    assert_eq!(
+        tables
+            .iter()
+            .map(|(name, ..)| name.as_str())
+            .collect::<Vec<_>>(),
+        PIPELINE_TABLES,
+        "restore_pipeline_tables_unexpected"
+    );
+    assert!(
+        tables.iter().all(|(_, forced, _)| *forced),
+        "restore_rls_not_forced"
+    );
+    assert!(
+        tables.iter().all(|(_, _, readable)| *readable),
+        "restore_privileges_lost"
+    );
 
     // What the restore kept.
     let database_fingerprint = database_fingerprint(&runtime).await;
@@ -694,6 +857,11 @@ async fn pipeline_restore_resume() {
         seed.pending_run_id_hash,
         "restore_pending_run_missing"
     );
+    assert_eq!(
+        pending.credit_events, 0,
+        "restore_pending_run_already_credited"
+    );
+    let pending_selection = committed_selection_rows(&runtime, pending.run_id).await;
     let completed: Vec<RunRow> = before
         .iter()
         .filter(|run| run.state == "complete")
@@ -710,13 +878,7 @@ async fn pipeline_restore_resume() {
     let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
     let index = IsolatedPipelineIndex::new();
     let adapters = RecordingAdapters::new();
-    let service = assemble_test_pipeline_service(
-        runtime.clone(),
-        artifacts.clone(),
-        index.clone(),
-        adapters.registry(),
-        None,
-    );
+    let service = compatibility_service(&runtime, &artifacts, &index, &adapters, None);
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
     let rebuild = service
         .rebuild_index_from_authoritative_commands(RESTORE_TENANT, index.clone())
@@ -735,7 +897,7 @@ async fn pipeline_restore_resume() {
 
     // The app on the restored state resumes the pending run by itself.
     let package = service.default_package().clone();
-    let state = restore_app_state(state_dir.path(), &runtime, &artifacts, service.clone());
+    let state = restore_app_state(state_dir.path(), &owner, &artifacts, service.clone());
     let (base, stop, server) = serve_pipeline_app(state).await;
     let client = reqwest::Client::new();
     wait_for_pipeline_ready(&client, &base).await;
@@ -762,6 +924,29 @@ async fn pipeline_restore_resume() {
         .iter()
         .find(|run| run.run_id == pending.run_id)
         .expect("restore_pending_run_missing");
+    // The durable selection is what the resume settled: the committed
+    // outcomes and the selection itself are unchanged.
+    assert!(
+        committed_selection_rows(&runtime, pending.run_id).await == pending_selection,
+        "restore_settle_selection_changed"
+    );
+    // Ruling T10-5: the resumed run settled the same legs as the completed
+    // run (same bundle, same award), and at least one, as the seed recorded.
+    assert!(
+        resumed.settlement_count > 0
+            && !completed.is_empty()
+            && completed
+                .iter()
+                .all(|run| run.settlement_count == resumed.settlement_count)
+            && resumed.settlement_count == seed.completed_settlement_count,
+        "restore_pending_run_settlement_count"
+    );
+    // One ledger event for each credited leg, none of which existed before
+    // the resume, as many as the completed run has.
+    assert!(
+        resumed.credited_once() && resumed.credit_events == seed.completed_credit_event_count,
+        "restore_pending_run_credit_events"
+    );
     let request_runs = adapters.request_runs();
     assert!(
         request_runs.iter().all(|run| *run == pending.run_id)
@@ -769,14 +954,12 @@ async fn pipeline_restore_resume() {
         "restore_adapter_requests_unexpected"
     );
     let legs: usize = after.iter().map(|run| run.settlement_count).sum();
-    let duplicate_requests = (seed.adapter_request_count + request_runs.len()).saturating_sub(legs);
     assert_eq!(
         seed.adapter_request_count + request_runs.len(),
         legs,
         "restore_adapter_request_count_mismatch"
     );
-    let duplicate_effects =
-        duplicated_rows(&runtime).await + i64::try_from(duplicate_requests).expect("a small count");
+    let duplicate_effects = duplicated_rows(&runtime).await;
     assert_eq!(duplicate_effects, 0, "restore_duplicate_effect");
     let pending_runs_resumed = before
         .iter()
@@ -902,6 +1085,8 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         index_entry_set_hash: hash("index"),
         pending_run_id_hash: hash("run"),
         adapter_request_count: 1,
+        completed_settlement_count: 1,
+        completed_credit_event_count: 1,
     };
     assert_eq!(
         RestoreFingerprint::parse(&fingerprint.to_bytes()),
@@ -922,6 +1107,14 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
     );
     assert_eq!(
         edited(&|value| value["pending_run_id_hash"] = Uuid::nil().to_string().into()),
+        Err("restore_fingerprint_invalid")
+    );
+    assert_eq!(
+        edited(&|value| value["completed_credit_event_count"] = 0.into()),
+        Err("restore_fingerprint_invalid")
+    );
+    assert_eq!(
+        edited(&|value| value["completed_settlement_count"] = 0.into()),
         Err("restore_fingerprint_invalid")
     );
     assert_eq!(
