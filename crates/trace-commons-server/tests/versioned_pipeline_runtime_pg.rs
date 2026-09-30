@@ -22136,12 +22136,14 @@ async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() 
     );
 }
 
-/// Finding 13 (owner ruling 2026-09-30): a `NoveltyUtility` leg ignores
+/// Finding 13 (owner rulings 2026-09-30): a `NoveltyUtility` leg ignores
 /// credit holds, as `main` writes `NoveltyUtility` credit regardless of
 /// them -- its hold filter covers only settlement-eligible events, and
 /// holds gate settlement batches and payouts, which a `NoveltyUtility`
-/// event never reaches. A held principal's compatibility run completes, and
-/// its leg writes its ledger row.
+/// event never reaches. A held principal's compatibility run with a
+/// positive delta completes, writes exactly one `NoveltyUtility` ledger
+/// row, and is export-eligible; a paid (`PipelineScore`) leg of a principal
+/// held the same way stays held.
 #[tokio::test]
 async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
     let Some(backend) = runtime_backend(4).await else {
@@ -22187,5 +22189,63 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
         count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
         1,
         "the NoveltyUtility ledger row is written despite the hold"
+    );
+    let snapshot = create_snapshot(
+        &PipelineProductStore::new(backend.clone()),
+        &tenant,
+        "held-compat",
+        TraceAllowedUse::ModelTraining,
+    )
+    .await;
+    assert_eq!(
+        item_runs(&snapshot),
+        vec![run.run_id],
+        "the completed run is export-eligible"
+    );
+
+    // A paid leg of a principal held the same way stays held.
+    let paid_tenant = format!("paid-held-{}", uuid::Uuid::new_v4());
+    let paid_service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        Arc::new(RecordingNearAdapter::new()),
+        None,
+    )
+    .await;
+    paid_service
+        .register_default_bundle(&paid_tenant)
+        .await
+        .unwrap();
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: paid_tenant.clone(),
+            hold_id: uuid::Uuid::new_v4(),
+            credit_account_ref: principal.to_string(),
+            credit_account_hash: credit_account_hash(principal),
+            reason: TraceCreditHoldReason::PolicyMigration,
+            reason_hash: credit_account_hash("pipeline-hold"),
+            actor_principal_ref: principal.to_string(),
+            released_at: None,
+        })
+        .await
+        .expect("hold the principal's credit");
+    let paid = submit_envelope_and_complete(
+        &paid_service,
+        &paid_tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(paid.state, PipelineRunState::Retry, "{paid:?}");
+    assert_eq!(
+        paid.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &paid_tenant, paid.run_id).await,
+        0,
+        "the paid leg stays held"
     );
 }
