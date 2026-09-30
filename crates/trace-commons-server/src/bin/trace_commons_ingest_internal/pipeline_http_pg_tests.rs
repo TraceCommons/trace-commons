@@ -469,7 +469,7 @@ async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
             .expect("readiness request");
         if response.status() == reqwest::StatusCode::OK {
             let body: serde_json::Value = response.json().await.expect("readiness body");
-            if body == serde_json::json!({"status": "ready"}) {
+            if body == serde_json::json!({"status": "ready", "drain_tenant_count": 0}) {
                 return;
             }
         }
@@ -2856,6 +2856,57 @@ async fn the_revocation_worker_deletes_the_score_objects_of_a_withdrawn_run() {
         .expect("the run is claimed");
     assert_eq!(settled.state, PipelineRunState::Complete);
     assert_eq!(settled.index_membership, "excluded");
+}
+
+/// Zaki review 1, item 7: a tenant taken off
+/// `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and put on
+/// `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` still has its follow-up work
+/// processed. Here no receipt of the tenant is routed; its withdrawal queued
+/// an index invalidation; the real worker (`run_pipeline_app`) processes it
+/// within a few passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drains_a_tenant_on_the_drain_list() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    fixture
+        .service
+        .withdraw_submission(&tenant, run.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    assert_eq!(
+        queued_index_invalidation(&fixture.runtime, &tenant, run.run_id).await,
+        (1, "pending".to_string())
+    );
+    let mut state = fixture.state.clone();
+    assert_eq!(
+        state
+            .tenant_rollout_gates
+            .tenant_count(TraceTenantRolloutFeature::PipelineReceipts),
+        0,
+        "no receipt of the tenant is routed"
+    );
+    Arc::make_mut(&mut state).pipeline_drain_tenant_ids =
+        Arc::new(BTreeSet::from([tenant.clone()]));
+
+    let (_base, stop, server) = serve_pipeline_app(state).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (_, state) = queued_index_invalidation(&fixture.runtime, &tenant, run.run_id).await;
+        if state == "complete" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never drained the tenant on the drain list (invalidation {state})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "the drain app").await;
 }
 
 // ---------------------------------------------------------------------------

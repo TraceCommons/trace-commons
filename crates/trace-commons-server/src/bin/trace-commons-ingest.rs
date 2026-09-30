@@ -675,6 +675,12 @@ const TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS: &str =
     "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS_TENANT_IDS";
 const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
     "TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS";
+/// Tenants whose pipeline follow-up work the worker still processes -- their
+/// runs in flight, index invalidations, payouts and confirmations, staged
+/// receipt sweeps -- while no receipt of theirs is routed to the pipeline: a
+/// tenant being rolled back off `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`
+/// (Zaki review 1, item 7). The worker drains the union of the two lists.
+const TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS: &str = "TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS";
 /// Fails ingest startup closed when no pipeline runtime was injected (or an
 /// injected one is not production-qualified) rather than booting without one.
 /// See `assemble_ingest_pipeline_runtime`.
@@ -1641,6 +1647,11 @@ struct AppState {
     /// unconditionally when no worker is running at all (no runtime
     /// injected).
     pipeline_worker_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`: tenants the pipeline worker
+    /// drains although no receipt of theirs is routed. Empty by default;
+    /// refused at startup without a pipeline runtime
+    /// (`validate_pipeline_drain_tenants`).
+    pipeline_drain_tenant_ids: Arc<BTreeSet<String>>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -3868,6 +3879,9 @@ impl AppState {
             &pipeline_novelty_utility_checks,
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
+        let pipeline_drain_tenant_ids =
+            parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
+        validate_pipeline_drain_tenants(&pipeline_drain_tenant_ids, pipeline_service.is_some())?;
         let pipeline_product = pipeline_service
             .as_ref()
             .and(db_connections.as_ref())
@@ -4349,6 +4363,7 @@ impl AppState {
             pipeline_product,
             pipeline_runtime_required,
             pipeline_worker_ready,
+            pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -4667,6 +4682,20 @@ fn validate_pipeline_receipt_rollout(
     anyhow::ensure!(
         runtime_present || gates.tenant_count(TraceTenantRolloutFeature::PipelineReceipts) == 0,
         "pipeline_receipts_configured_without_runtime"
+    );
+    Ok(())
+}
+
+/// Refuses startup when `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` names
+/// tenants but no pipeline runtime is injected: nothing would drain them
+/// (Zaki review 1, item 7).
+fn validate_pipeline_drain_tenants(
+    drain_tenant_ids: &BTreeSet<String>,
+    runtime_present: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        runtime_present || drain_tenant_ids.is_empty(),
+        "pipeline_drain_tenants_configured_without_runtime"
     );
     Ok(())
 }

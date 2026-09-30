@@ -35,9 +35,27 @@ injects a pipeline runtime. The repository binary injects none.
 - Tenants listed with a runtime: those tenants' receipts go to the pipeline.
 - Tenants listed without a runtime: ingest refuses to start with
   `pipeline_receipts_configured_without_runtime`.
-- Removing a tenant from the list also stops the worker for that tenant.
-  Its in-flight pipeline runs stay unprocessed until the tenant is listed
-  again.
+
+`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` lists tenants whose pipeline work
+the worker still processes while none of their receipts is routed to the
+pipeline: runs in flight, withdrawal follow-ups, index invalidations, NEAR
+payouts and confirmations, and the staged-receipt sweep. The worker drains
+the union of the two lists. The drain list also needs a runtime: without
+one, ingest refuses to start with
+`pipeline_drain_tenants_configured_without_runtime`.
+`GET /v1/pipeline/readiness` reports the drain list's size as
+`drain_tenant_count` (a count, no tenant ids).
+
+To roll a tenant back from the pipeline, move it from
+`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` to
+`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` and restart ingest. Its new
+receipts take the legacy path at once, and its existing pipeline work is
+finished. Keep it on the drain list until the operational summary shows no
+pending runs, invalidations, or payouts for it. A tenant on neither list is
+not processed at all: its in-flight runs stop, a later withdrawal still
+queues an invalidation (the withdrawal needs only a runtime), and queued
+invalidations and payouts wait, unprocessed, until the tenant is listed
+again.
 
 Activation replaces this list with qualified routing.
 
@@ -615,10 +633,11 @@ fails, the row stays for the next pass and the worker logs
 `pipeline_receipt_sweep_delete_failed`. A failed receipt stays counted against
 the quota. A retry with the same submission id is not counted again.
 
-A tenant removed from `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` stops
-being swept the same pass it stops being worked: the sweep runs only over
-listed tenants. Its staged objects (and their rows) stay exactly as they
-were until the tenant is listed again or an operator removes them by hand.
+The sweep runs over the tenants the worker drains: those on
+`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` or
+`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`. A tenant on neither list is not
+swept: its staged objects (and their rows) stay exactly as they were until
+the tenant is listed again or an operator removes them by hand.
 
 After a failed receipt attempt leaves a staged row, a later receipt with the
 same idempotency key and different content is refused with the

@@ -6188,6 +6188,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_product: None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -10604,6 +10605,96 @@ fn ingest_and_pipeline_derive_the_same_tenant_storage_ref() {
     }
 }
 
+/// Zaki review 1, item 7: the worker drains the union of the tenants whose
+/// receipts are routed to the pipeline and the drain list
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`), each once.
+#[test]
+fn the_pipeline_worker_drains_the_routed_and_the_drain_tenants() {
+    use super::pipeline_runtime::pipeline_worker_tenant_ids;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-routed", "tenant-both"],
+    );
+    state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([
+        "tenant-both".to_string(),
+        "tenant-draining".to_string(),
+    ]));
+    assert_eq!(
+        pipeline_worker_tenant_ids(&state),
+        vec![
+            "tenant-both".to_string(),
+            "tenant-draining".to_string(),
+            "tenant-routed".to_string(),
+        ]
+    );
+}
+
+/// Zaki review 1, item 7: a drain list with no pipeline runtime to drain it
+/// refuses startup; an empty one, or one with a runtime, does not.
+#[test]
+fn a_drain_list_without_a_pipeline_runtime_refuses_startup() {
+    let drain = BTreeSet::from(["tenant-draining".to_string()]);
+    assert_eq!(
+        validate_pipeline_drain_tenants(&drain, false)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_drain_tenants_configured_without_runtime"
+    );
+    validate_pipeline_drain_tenants(&BTreeSet::new(), false).unwrap();
+    validate_pipeline_drain_tenants(&drain, true).unwrap();
+}
+
+/// Zaki review 1, item 7: the readiness route reports how many tenants the
+/// worker drains without routing their receipts (a count, no tenant ids).
+#[tokio::test]
+async fn pipeline_readiness_reports_the_drain_list_size() {
+    use super::pipeline_runtime::build_pipeline_app;
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([
+        "tenant-one".to_string(),
+        "tenant-two".to_string(),
+    ]));
+    let response = build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["drain_tenant_count"], 2, "{body}");
+    assert!(!body.to_string().contains("tenant-one"), "{body}");
+}
+
 #[tokio::test]
 async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
     use super::pipeline_runtime::build_pipeline_app;
@@ -10636,7 +10727,11 @@ async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
     .unwrap();
     assert_eq!(
         body,
-        serde_json::json!({"status": "not_ready", "reason": "pipeline_runtime_absent"})
+        serde_json::json!({
+            "status": "not_ready",
+            "reason": "pipeline_runtime_absent",
+            "drain_tenant_count": 0,
+        })
     );
 }
 
@@ -11773,7 +11868,11 @@ async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
     .unwrap();
     assert_eq!(
         body,
-        serde_json::json!({"status": "not_ready", "reason": "pipeline_worker_not_ready"})
+        serde_json::json!({
+            "status": "not_ready",
+            "reason": "pipeline_worker_not_ready",
+            "drain_tenant_count": 0,
+        })
     );
 }
 
@@ -29131,6 +29230,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_product: None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,

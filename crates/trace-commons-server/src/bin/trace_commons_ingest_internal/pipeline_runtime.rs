@@ -202,13 +202,16 @@ pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService
 }
 
 /// Label-only readiness body. `reason` is present only when `status` is
-/// `"not_ready"`, so a ready response serialises to exactly `{"status":
-/// "ready"}` with no dangling null field.
+/// `"not_ready"`, so a ready response has no dangling null field.
+/// `drain_tenant_count` is the size of `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`,
+/// the tenants the worker drains without routing their receipts (Zaki
+/// review 1, item 7): a count, never a tenant id.
 #[derive(Debug, Serialize)]
 pub(crate) struct PipelineReadinessResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
+    drain_tenant_count: usize,
 }
 
 /// Answers `GET /v1/pipeline/readiness`. Unauthenticated and registered in
@@ -219,12 +222,14 @@ pub(crate) struct PipelineReadinessResponse {
 pub(crate) async fn pipeline_readiness_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<PipelineReadinessResponse>) {
+    let drain_tenant_count = state.pipeline_drain_tenant_ids.len();
     if state.pipeline_service.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(PipelineReadinessResponse {
                 status: "not_ready",
                 reason: Some("pipeline_runtime_absent"),
+                drain_tenant_count,
             }),
         );
     }
@@ -237,6 +242,7 @@ pub(crate) async fn pipeline_readiness_handler(
             Json(PipelineReadinessResponse {
                 status: "not_ready",
                 reason: Some("pipeline_worker_not_ready"),
+                drain_tenant_count,
             }),
         );
     }
@@ -245,6 +251,7 @@ pub(crate) async fn pipeline_readiness_handler(
         Json(PipelineReadinessResponse {
             status: "ready",
             reason: None,
+            drain_tenant_count,
         }),
     )
 }
@@ -443,9 +450,24 @@ pub(crate) async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_
 /// Each iteration runs one `run_pipeline_worker_pass` over the
 /// `PipelineReceipts` rollout tenants, then sleeps
 /// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
+/// The tenants the pipeline worker drains on each pass, each once, in order:
+/// the tenants whose receipts are routed to the pipeline
+/// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`) and the drain list
+/// (`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`). A tenant rolled back off the
+/// first list onto the second keeps its runs in flight, index
+/// invalidations, payouts and confirmations, and staged receipt sweeps
+/// processed, while no receipt of its is routed (Zaki review 1, item 7).
+pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
+    let mut tenant_ids = state
+        .tenant_rollout_gates
+        .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
+    tenant_ids.extend(state.pipeline_drain_tenant_ids.iter().cloned());
+    tenant_ids.into_iter().collect()
+}
+
 fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
-    let gates = state.tenant_rollout_gates.clone();
+    let tenant_ids = pipeline_worker_tenant_ids(&state);
     let ready = state.pipeline_worker_ready.clone();
     let worker_ready = ready.clone();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
@@ -455,7 +477,7 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
             let drain_service = service.clone();
             run_pipeline_worker_pass(
                 async move { probe_service.readiness().await },
-                gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts),
+                tenant_ids.clone(),
                 |tenant_id| drain_pipeline_tenant(drain_service.clone(), tenant_id),
                 &worker_ready,
                 &stop_rx,
