@@ -1071,20 +1071,24 @@ async fn drain_approved(
             uploader::UploadDecision::HeldForSecondLook {
                 reason_label,
                 reasons,
+                pin,
             } => {
                 // The Scrub check (K4 of #1118). Under Automatic the reason
                 // is one of `REASONS_NEEDING_A_PERSON`, so nothing
-                // re-approves it. No count is recorded: the envelope the hold
-                // was decided on is not pinned, and counts are only kept
-                // beside the digest of the bytes they describe
-                // (`QueueEntry::scrub`), so the person's review pins and
-                // counts it. Labels only.
+                // re-approves it. The envelope the hold was decided on is
+                // pinned with its counts beside the digest
+                // (`QueueEntry::scrub`), like a preview's. Labels only.
                 tracing::info!(
                     reason = reason_label.as_str(),
                     second_look = ?reasons,
                     "held a session approved on the contributor's behalf for a person"
                 );
-                q.revoke_approval(entry.entry_id, &reason_label);
+                q.hold_with_scrub_pin(
+                    entry.entry_id,
+                    &reason_label,
+                    pin.as_ref()
+                        .map(|(digest, counts)| (digest.as_str(), *counts)),
+                );
             }
             uploader::UploadDecision::Failed { reason_label } => {
                 // Same rule on the failure side: `submit_one` can report an
@@ -2676,10 +2680,13 @@ mod tests {
             Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
         );
         assert!(held.held_for_review());
+        assert!(
+            matches!(held.scrub(), second_look::Scrub::Scrubbed(_)),
+            "the held envelope is pinned with its counts: {held:?}"
+        );
         assert_eq!(
-            held.scrub(),
-            second_look::Scrub::NotYetScrubbed,
-            "no count is kept without a pin; the person's review counts it"
+            held.second_look_reasons(),
+            vec![second_look::REASON_NOTHING_MATCHED]
         );
         assert_eq!(
             h.shared.queue.lock().unwrap().get(marked).unwrap().state,

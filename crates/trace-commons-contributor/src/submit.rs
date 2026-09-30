@@ -202,12 +202,18 @@ pub enum SubmitOutcome {
     /// The Automatic Scrub check held this session for a person (K4 of
     /// #1118): the envelope was built and scrubbed, and the scrub is worth a
     /// second look. Nothing was uploaded. Only returned when the caller asked
-    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`]. `reasons`
-    /// are the `second_look` labels of the built envelope, for the caller's
-    /// log; no count is kept, because the envelope is not pinned.
+    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`].
+    ///
+    /// `counts` and `reasons` describe the built envelope. `envelope` is that
+    /// envelope, so the caller can pin it and keep the counts beside its
+    /// digest (`QueueEntry::scrub`), exactly as a preview does. `None` on
+    /// the witness path, whose certified bytes are pinned only through the
+    /// witnessed-review artifact; there the entry keeps no counts.
     HeldForSecondLook {
         reason_label: String,
         reasons: Vec<&'static str>,
+        counts: crate::daemon::second_look::ScrubCounts,
+        envelope: Option<Box<TraceContributionEnvelope>>,
     },
 }
 
@@ -243,20 +249,20 @@ fn held_for_review(
 /// be sent, so the scrub is always a real count, never "not yet scrubbed".
 /// A body that cannot be serialized for the unsure-span detector is held as
 /// `looks-unsure`: an unreadable body counts as unsure.
+///
+/// `pinnable` is whether the caller may pin these bytes as a local preview:
+/// true on the local-redaction path, false for a witnessed envelope.
 fn held_for_second_look(
     hold: Option<u32>,
     envelope: &TraceContributionEnvelope,
+    pinnable: bool,
 ) -> Option<SubmitOutcome> {
-    use crate::daemon::second_look::{self, Scrub, ScrubCounts};
+    use crate::daemon::second_look::{self, Scrub};
     let subagents_dropped = hold?;
-    let redactions = &envelope.privacy.redaction_counts;
-    let counts = match crate::daemon::preview::body_of(envelope) {
-        Ok(body) => ScrubCounts::of(redactions, &body),
-        Err(_) => ScrubCounts {
-            unsure_unreadable: true,
-            ..ScrubCounts::of(redactions, "")
-        },
-    };
+    let counts = built_scrub_counts(
+        &envelope.privacy.redaction_counts,
+        crate::daemon::preview::body_of(envelope),
+    );
     let scrub = Scrub::Scrubbed(counts);
     let reason_label = second_look::unattended_hold(
         crate::daemon::settings::ScrubCheck::Automatic,
@@ -266,7 +272,27 @@ fn held_for_second_look(
     Some(SubmitOutcome::HeldForSecondLook {
         reason_label: reason_label.to_string(),
         reasons: second_look::second_look_reasons(scrub, subagents_dropped),
+        counts,
+        envelope: pinnable.then(|| Box::new(envelope.clone())),
     })
+}
+
+/// The Flow 2 counts of a built envelope, given its redaction map and the
+/// result of serializing its body. A body that could not be serialized is
+/// unreadable to the unsure-span detector, and unreadable counts as unsure:
+/// it holds, it is never skipped.
+fn built_scrub_counts(
+    redactions: &BTreeMap<String, u32>,
+    body: Result<String>,
+) -> crate::daemon::second_look::ScrubCounts {
+    use crate::daemon::second_look::ScrubCounts;
+    match body {
+        Ok(body) => ScrubCounts::of(redactions, &body),
+        Err(_) => ScrubCounts {
+            unsure_unreadable: true,
+            ..ScrubCounts::of(redactions, "")
+        },
+    }
 }
 
 /// Whether a certificate's verdict lets an unattended session go without a
@@ -1603,7 +1629,9 @@ impl<'a> SubmitContext<'a> {
                 return Ok(outcome);
             }
             // A dry run reports what the real send would do, hold included.
-            if let Some(held) = held_for_second_look(hold_unless_scrub_clear, &envelope) {
+            if let Some(held) =
+                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+            {
                 return Ok(held);
             }
             if !opts.machine_readable {
@@ -1682,7 +1710,9 @@ impl<'a> SubmitContext<'a> {
         // the same reason: after every refusal, before anything reaches the
         // commons. The scrub is read off the envelope that would be sent, so
         // it is always a real count, never "not yet scrubbed".
-        if let Some(held) = held_for_second_look(hold_unless_scrub_clear, &envelope) {
+        if let Some(held) =
+            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+        {
             return Ok(held);
         }
         // Every check above has passed, so this is the certificate the send
@@ -5879,6 +5909,92 @@ mod tests {
     /// witness rates `medium` must come back held with its certified review
     /// saved and nothing sent; and a person's approve of that entry must send
     /// exactly those certified bytes, without running the witness again.
+    /// Reviewed on #1139: the Scrub check's hold on the real send path, not
+    /// a dry run. A claim is minted from the stub issuer and the envelope
+    /// stamped, and the hold still stops it before anything reaches ingest.
+    /// The entry is trimmed to fit, so the hold does not depend on what the
+    /// fixture happens to contain.
+    #[tokio::test]
+    async fn the_scrub_check_holds_on_the_real_send_path_and_nothing_reaches_ingest() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        store.save_config(&cfg).unwrap();
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = crate::daemon::queue::QueueEntry {
+            subagents_dropped: 1,
+            ..r5_unattended_entry(&cfg, &reference)
+        };
+        let settings = crate::daemon::settings::DaemonSettings {
+            scrub_check: Some(crate::daemon::settings::ScrubCheck::Automatic),
+            ..Default::default()
+        };
+        let opts = review_options();
+        assert!(!opts.dry_run);
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            }
+            .upload_entry(source.as_ref(), &reference, &entry, Utc::now()),
+        )
+        .await
+        .expect("the upload decides within a minute")
+        .unwrap();
+        let UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin,
+        } = &decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(
+            reason_label,
+            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        );
+        assert!(
+            reasons.contains(&crate::daemon::second_look::REASON_TRIMMED_TO_FIT),
+            "{reasons:?}"
+        );
+        assert!(pin.is_some(), "the held envelope is pinned");
+        assert!(
+            capture.lock().unwrap().bodies.is_empty(),
+            "nothing reached the commons"
+        );
+        assert_eq!(state.uploads_today, 0);
+    }
+
+    /// A body that cannot be serialized for the unsure-span detector counts
+    /// as unreadable, and unreadable holds: the check is never skipped.
+    #[test]
+    fn a_body_that_cannot_be_read_holds_rather_than_skipping_the_check() {
+        let mut redactions = BTreeMap::new();
+        redactions.insert("private_email".to_string(), 3);
+        let counts = built_scrub_counts(&redactions, Err(anyhow::anyhow!("body-serialize-failed")));
+        assert!(counts.unsure_unreadable);
+        assert_eq!(counts.content_marks, 3, "the marks are still counted");
+        assert_eq!(
+            crate::daemon::second_look::unattended_hold(
+                crate::daemon::settings::ScrubCheck::Automatic,
+                crate::daemon::second_look::Scrub::Scrubbed(counts),
+                0
+            ),
+            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+    }
+
     #[tokio::test]
     async fn an_unattended_medium_verdict_is_held_and_a_persons_approve_sends_the_pinned_bytes() {
         use crate::daemon::uploader::{UploadDecision, Uploader};

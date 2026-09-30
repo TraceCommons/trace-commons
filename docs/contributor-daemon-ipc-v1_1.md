@@ -947,9 +947,9 @@ Recording the counts publishes no event: the next `list_pending` or
 `snapshot` carries them.
 
 The Automatic Scrub check's hold (see `scrub_check` under `set_settings`)
-counts the envelope it is about to send in exactly this way, but records
-nothing: that envelope is not pinned, so an entry it holds reads
-`not-yet-scrubbed` until a person's review pins and counts it.
+counts the envelope it is about to send in exactly this way, and pins that
+envelope with its counts when it holds the session, so a held entry reads
+`scrubbed` with the reasons that held it.
 
 Neither state is a colour: a shell renders the reason.
 
@@ -3179,14 +3179,20 @@ seen the session (as with `witness-risk-review-required`): the hold stops the
 upload to the commons, not the send to the enclave.
 
 **What a hold leaves on the entry.** The entry goes back to `Pending` with
-`reason_label` `second-look-review-required`. No count is recorded: a count is
-only ever stored beside the digest of the bytes it describes, and the envelope
-the hold was decided on is not pinned. So the held entry reads
-`scrub: "not-yet-scrubbed"`, with `second_look` holding at most
-`trimmed-to-fit`, until the person's review pins and counts it; the reason the
-session waits is its `reason_label`. The daemon logs the second-look labels
-the hold was decided on (labels only). Opening the session builds its preview
-as for any pending entry.
+`reason_label` `second-look-review-required`, and the envelope the hold was
+decided on is **pinned** to it: saved through the same
+`approved_envelope::save` a preview pins with, with its digest as the entry's
+pin and the counts recorded beside that digest. So `list_pending` and
+`snapshot` show `scrub: "scrubbed"`, `marks`, `content_marks`,
+`unsure_spans` and the `second_look` reasons that held it, and the person's
+review is of exactly those bytes; their `approve` sends them. The pin is kept
+and released like any pinned `Pending` preview: swept when the entry
+resolves, released after the preview age limit (the entry then reads
+`not-yet-scrubbed` and the next review builds again). Two cases pin nothing
+and leave the entry reading `not-yet-scrubbed` while still holding it: a
+witnessed envelope, whose certified bytes are pinned only through a witnessed
+review, and a save that fails. The daemon logs the second-look labels the
+hold was decided on (labels only).
 `second-look-review-required` is one of the reasons a session is held for a
 person (see the group `approve` section): the watcher does not approve it
 again, and a group `approve` leaves it out and counts it in `excluded_held`.
@@ -3196,6 +3202,16 @@ A person's `approve` of that one entry sends it.
 set the watcher approves nothing anyway, and once Automatic is set again, an
 armed folder's waiting sessions going through the Automatic check -- its hold
 included -- is what the contributor asked for.
+
+**Switching to Manual.** A `set_settings` call that changes `scrub_check` to
+`"manual"` returns every unsent approval made on the contributor's behalf
+(`Approved`, approved unattended) to `Pending` under `scrub-check-manual` at
+once, instead of leaving it reading approved until the uploader reaches it.
+A person's own approvals, and anything already uploading, are untouched. The
+reply then carries `scrub_check_returned_to_waiting`, the count moved
+(possibly `0`), and a `queue_changed` event follows when it is non-zero. The
+key is **absent** on any call that did not switch to Manual, including one
+that sets Manual when it was already Manual.
 
 **The default is `null`: today's behaviour, no hold.** A settings file written
 before this key existed loads that way, and every existing armed folder keeps

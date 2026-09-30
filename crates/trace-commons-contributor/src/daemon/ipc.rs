@@ -3490,6 +3490,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     // Routing separately retains its warm reader when its endpoint is unchanged.
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
+    let scrub_check_before = settings.scrub_check;
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
     // settings override) uses, so there is one definition of "a
@@ -3535,8 +3536,29 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // the save so a declaration that takes effect is always
             // one that survives a restart too.
             shared.rebuild_effective_routing(&settings);
+            let manual = Some(super::settings::ScrubCheck::Manual);
+            let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             drop(settings);
+            // The switch to the Manual Scrub check (K4 of #1118) returns
+            // every unsent approval made on the contributor's behalf to
+            // waiting at once, rather than leaving it reading approved until
+            // the uploader reaches and holds it. Mirrors turning a project's
+            // automatic contributing off. The count rides on the reply.
+            if switched_to_manual {
+                let returned = {
+                    let mut queue = shared.queue.lock().expect("queue lock");
+                    let returned = queue.return_unattended_to_waiting();
+                    if returned > 0 {
+                        let _ = queue.save(&shared.store);
+                    }
+                    returned
+                };
+                if returned > 0 {
+                    shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                }
+                value["scrub_check_returned_to_waiting"] = serde_json::Value::from(returned);
+            }
             add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
         }
@@ -11516,6 +11538,58 @@ mod tests {
             "a restart must not put the question back"
         );
         assert!(!reloaded.private_inference);
+    }
+
+    /// Reviewed on #1139: switching to the Manual Scrub check returns every
+    /// unsent approval made on the contributor's behalf to waiting at once,
+    /// rather than leaving it reading approved until the uploader holds it.
+    /// A person's own approval stands. Mirrors
+    /// `turning_automatic_off_returns_its_unsent_approvals_to_waiting`.
+    #[test]
+    fn switching_to_manual_returns_unsent_unattended_approvals_to_waiting() {
+        let s = shared();
+        let key = "/tmp/manualproj";
+        let unattended = seed_entry_with_eligibility(&s, key, None);
+        let theirs = seed_entry_with_eligibility(&s, key, None);
+        {
+            let mut q = s.queue.lock().unwrap();
+            assert!(q.approve_unattended(unattended, &[], None));
+            assert!(q.approve(theirs, &[], None, None, None, None));
+        }
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        );
+        let result = r.result.expect("set_settings answers");
+        assert_eq!(result["scrub_check_returned_to_waiting"], 1, "{result}");
+
+        let q = s.queue.lock().unwrap();
+        let back = q.get(unattended).unwrap();
+        assert_eq!(back.state, super::super::queue::QueueState::Pending);
+        assert!(!back.approved_unattended);
+        assert_eq!(
+            back.reason_label.as_deref(),
+            Some(super::super::second_look::REASON_SCRUB_CHECK_MANUAL)
+        );
+        assert_eq!(
+            q.get(theirs).unwrap().state,
+            super::super::queue::QueueState::Approved,
+            "the contributor's own approval stands"
+        );
+        drop(q);
+
+        // Setting Manual again moves nothing and reports nothing.
+        let again = handle_request(
+            &s,
+            &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+        )
+        .result
+        .expect("set_settings answers");
+        assert!(
+            again.get("scrub_check_returned_to_waiting").is_none(),
+            "{again}"
+        );
     }
 
     /// The Scrub check (K4 of #1118) is readable, settable, persisted, and
