@@ -86,19 +86,12 @@ pub const ERR_LIMIT_INVALID: &str = "limit-invalid";
 pub const ERR_CURSOR_INVALID: &str = "cursor-invalid";
 
 /// One tool the map draws.
-///
-/// `vendor` is where the tool answers when nothing here routes it: its
-/// default provider, a fixed label. **K2 adds an "answers at" label to tool
-/// discovery (#1130, `source::vendor_label`); this table is the local
-/// stand-in until that merges, and must then read K2's value rather than
-/// keep its own.** A tool that talks to many providers reads `unknown`.
 struct ToolSpec {
     source: &'static str,
     harness: Option<&'static str>,
     /// The protocol family the ledger records this tool's calls under.
     family: Option<&'static str>,
     name: &'static str,
-    vendor: &'static str,
 }
 
 const TOOLS: &[ToolSpec] = &[
@@ -107,37 +100,54 @@ const TOOLS: &[ToolSpec] = &[
         harness: Some("claude"),
         family: Some("anthropic"),
         name: "Claude Code",
-        vendor: "anthropic",
     },
     ToolSpec {
         source: crate::source::SOURCE_CODEX,
         harness: Some("codex"),
         family: Some("openai"),
         name: "Codex",
-        vendor: "openai",
     },
     ToolSpec {
         source: crate::source::SOURCE_GEMINI_CLI,
         harness: None,
         family: None,
         name: "Gemini CLI",
-        vendor: "google",
     },
     ToolSpec {
         source: crate::source::SOURCE_CLINE,
         harness: None,
         family: None,
         name: "Cline",
-        vendor: UNKNOWN,
     },
     ToolSpec {
         source: crate::source::SOURCE_OPENCODE,
         harness: None,
         family: None,
         name: "OpenCode",
-        vendor: UNKNOWN,
     },
 ];
+
+/// Where a tool answers when nothing here routes it: its default provider,
+/// a fixed label, `unknown` for a tool that talks to many providers.
+///
+/// K2's `source::vendor_label` (#1130) is now this table's source of truth
+/// for WHETHER a source has a fixed default -- `source_default_family`
+/// names the family, `vendor_label` confirms it is one this daemon has a
+/// display word for, and `None` at either step reads `UNKNOWN`, replacing
+/// what used to be a local per-source table here.
+///
+/// The wire label itself stays the *family's own* lowercase spelling
+/// (`"anthropic"`, `"openai"`, `"google"`), not `vendor_label`'s returned
+/// word (`"Anthropic"`, `"OpenAI"`, `"Google"`), which is capitalized for
+/// display (the "answers at" wording) and would change what
+/// `model_calls.to` carries -- a wire format change, not a plumbing change.
+/// `docs/contributor-daemon-ipc-v1_1.md` and this module's own tests both
+/// pin the lowercase word, so this function keeps it.
+fn vendor(source: &str) -> &'static str {
+    crate::source::source_default_family(source)
+        .filter(|family| crate::source::vendor_label(family).is_some())
+        .unwrap_or(UNKNOWN)
+}
 
 /// The source id a harness row is the same tool as, or `None`.
 fn source_for_harness(harness_id: &str) -> Option<&'static str> {
@@ -283,7 +293,7 @@ pub fn destinations(facts: &DestinationFacts) -> serde_json::Value {
             let observed = spec
                 .family
                 .map_or(Observed::default(), |family| observe(&facts.rows, family));
-            let (to, basis) = model_calls_to(spec.vendor, link, facts.private_ai, observed);
+            let (to, basis) = model_calls_to(vendor(spec.source), link, facts.private_ai, observed);
             serde_json::json!({
                 "tool": spec.source,
                 "name": spec.name,

@@ -2364,9 +2364,13 @@ The vendor is a fixed label: `anthropic` (Claude Code), `openai` (Codex),
 `google` (Gemini CLI), and `unknown` for Cline and OpenCode, which talk to
 many providers. It is the tool's **default**, not a reading of its config: a
 tool whose own config names another gateway is still drawn at its default.
-That table is local to `daemon::inference_map` until K2's `answers_at` label
-(#1130, `source::vendor_label`) lands, and should then read K2's value.
-`private_ai` is the `private_inference_state.state` label `status` carries.
+Which tool has a fixed default is now read from K2's `source_default_family`
+and confirmed against `source::vendor_label` (#1130), rather than kept in a
+separate local table. The word on the wire stays the family's own lowercase
+spelling above, not `vendor_label`'s returned word (`Anthropic`, `OpenAI`,
+`Google`), which is capitalized for the "answers at" display and is a
+different surface from this one. `private_ai` is the
+`private_inference_state.state` label `status` carries.
 
 #### `inference_calls`
 
