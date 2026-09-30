@@ -21771,3 +21771,117 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
         "only the retry's own Score objects"
     );
 }
+
+/// Finding 6: the contributor status reads a Review rejection's reason from
+/// `ReviewDecision`'s serialized shape (`{"kind": "rejected", "reason": ..}`).
+/// Two runs Admission quarantined (`privacy_review_required`): the one a
+/// reviewer rejects shows Review's reason, `reviewer_declined`, from Review,
+/// never Admission's reason as if Review gave it; the one a reviewer
+/// approves shows no quarantine reason once Review has committed, and none
+/// once the run completes.
+#[tokio::test]
+async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarantine() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = format!("review-status-reason-{}", uuid::Uuid::new_v4());
+    let store = service.store();
+    let quarantine_reason = ReasonCode::new("privacy_review_required").unwrap();
+    let status_of = |submission_id: uuid::Uuid| {
+        let product = &product;
+        let tenant = &tenant;
+        async move {
+            product
+                .contributor_statuses(tenant, RECEIPT_PRINCIPAL, &[submission_id])
+                .await
+                .unwrap()
+                .pop()
+                .expect("the submission's status")
+        }
+    };
+
+    let rejected = quarantined_and_parked(&service, &tenant).await;
+    let claim = store
+        .claim_review(
+            &tenant,
+            rejected.run_id,
+            &reviewer_principal_ref('d'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the parked run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("reviewer_declined").unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    service
+        .process_run(&tenant, rejected.run_id)
+        .await
+        .unwrap()
+        .expect("Review ends the run with the rejection");
+    let status = status_of(rejected.submission_id).await;
+    assert_eq!(status.processing, PipelineProcessingStatus::Rejected);
+    assert_eq!(status.responsible_phase, Some(Phase::Review));
+    assert_eq!(
+        status.reason_label.as_deref(),
+        Some("reviewer_declined"),
+        "Review's own reason, not Admission's"
+    );
+
+    let approved = quarantined_and_parked(&service, &tenant).await;
+    let claim = store
+        .claim_review(
+            &tenant,
+            approved.run_id,
+            &reviewer_principal_ref('e'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .expect("the parked run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            quarantine_reason.clone(),
+            vec![quarantine_reason],
+        )
+        .await
+        .unwrap();
+    let reviewed = service
+        .process_run(&tenant, approved.run_id)
+        .await
+        .unwrap()
+        .expect("Review approves");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        status_of(approved.submission_id).await.reason_label,
+        None,
+        "an approved quarantine shows no reason"
+    );
+    for phase in ["Score", "Settle"] {
+        service
+            .process_run(&tenant, approved.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let status = status_of(approved.submission_id).await;
+    assert_eq!(status.processing, PipelineProcessingStatus::Complete);
+    assert_eq!(status.reason_label, None, "nor once the run completes");
+}

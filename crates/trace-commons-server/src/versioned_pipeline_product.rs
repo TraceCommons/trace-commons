@@ -1653,20 +1653,32 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
         .transpose()?
         .flatten();
     let submission_status: String = row.get("submission_status");
+    // Zaki review 1, round 2, finding 6: the reason a contributor sees is
+    // the label of the attempt that set the run's state, else Review's own
+    // rejection reason, read from `ReviewDecision`'s serialized shape
+    // (`{"kind": "rejected", "reason": ...}`), else Admission's quarantine or
+    // rejection reason -- but only while Admission's is the latest decision:
+    // once Review has decided, a quarantine it resolved is no longer the
+    // reason for anything, and a rejection is Review's.
+    let latest_outcome_decision =
+        row.get::<_, Option<serde_json::Value>>("latest_outcome_decision");
+    let review_rejection_reason = latest_outcome_decision
+        .as_ref()
+        .filter(|_| latest_outcome_phase == Some(Phase::Review))
+        .filter(|decision| {
+            decision.get("kind").and_then(serde_json::Value::as_str) == Some("rejected")
+        })
+        .and_then(|decision| decision.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let admission_is_latest = matches!(latest_outcome_phase, None | Some(Phase::Admission));
     let reason_label = row
         .get::<_, Option<String>>("last_error_label")
+        .or(review_rejection_reason)
         .or_else(|| {
-            (row.get::<_, String>("admission_decision") != "admit")
+            (admission_is_latest && row.get::<_, String>("admission_decision") != "admit")
                 .then(|| row.get::<_, Option<String>>("admission_reason"))
                 .flatten()
-        })
-        .or_else(|| {
-            row.get::<_, Option<serde_json::Value>>("latest_outcome_decision")
-                .as_ref()
-                .and_then(|decision| decision.get("Rejected"))
-                .and_then(|rejected| rejected.get("reason"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
         });
     let processing = if matches!(submission_status.as_str(), "revoked" | "purged") {
         PipelineProcessingStatus::Withdrawn
