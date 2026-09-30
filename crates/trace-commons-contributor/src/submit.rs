@@ -199,6 +199,22 @@ pub enum SubmitOutcome {
         witnessed: Box<WitnessedEnvelope>,
         attested_inference: Box<InferenceAttestationRecord>,
     },
+    /// The Automatic Scrub check held this session for a person (K4 of
+    /// #1118): the envelope was built and scrubbed, and the scrub is worth a
+    /// second look. Nothing was uploaded. Only returned when the caller asked
+    /// for it with [`SubmitContext::hold_unless_scrub_is_clear`].
+    ///
+    /// `counts` and `reasons` describe the built envelope. `envelope` is that
+    /// envelope, so the caller can pin it and keep the counts beside its
+    /// digest (`QueueEntry::scrub`), exactly as a preview does. `None` on
+    /// the witness path, whose certified bytes are pinned only through the
+    /// witnessed-review artifact; there the entry keeps no counts.
+    HeldForSecondLook {
+        reason_label: String,
+        reasons: Vec<&'static str>,
+        counts: crate::daemon::second_look::ScrubCounts,
+        envelope: Option<Box<TraceContributionEnvelope>>,
+    },
 }
 
 /// The label an unattended witnessed session is held under when its
@@ -222,6 +238,61 @@ fn held_for_review(
         witnessed: Box::new(response.clone()),
         attested_inference: Box::new(record),
     })
+}
+
+/// The Automatic Scrub check's hold, decided (K4 of #1118): `Some` when the
+/// caller asked for it (`hold` carries the entry's `subagents_dropped`) and
+/// the envelope about to be sent is worth a second look.
+///
+/// Counted exactly as a preview counts (`second_look::ScrubCounts::of`, over
+/// the redaction map and `preview::body_of`), but on the envelope that would
+/// be sent, so the scrub is always a real count, never "not yet scrubbed".
+/// A body that cannot be serialized for the unsure-span detector is held as
+/// `looks-unsure`: an unreadable body counts as unsure.
+///
+/// `pinnable` is whether the caller may pin these bytes as a local preview:
+/// true on the local-redaction path, false for a witnessed envelope.
+fn held_for_second_look(
+    hold: Option<u32>,
+    envelope: &TraceContributionEnvelope,
+    pinnable: bool,
+) -> Option<SubmitOutcome> {
+    use crate::daemon::second_look::{self, Scrub};
+    let subagents_dropped = hold?;
+    let counts = built_scrub_counts(
+        &envelope.privacy.redaction_counts,
+        crate::daemon::preview::body_of(envelope),
+    );
+    let scrub = Scrub::Scrubbed(counts);
+    let reason_label = second_look::unattended_hold(
+        crate::daemon::settings::ScrubCheck::Automatic,
+        scrub,
+        subagents_dropped,
+    )?;
+    Some(SubmitOutcome::HeldForSecondLook {
+        reason_label: reason_label.to_string(),
+        reasons: second_look::second_look_reasons(scrub, subagents_dropped),
+        counts,
+        envelope: pinnable.then(|| Box::new(envelope.clone())),
+    })
+}
+
+/// The Flow 2 counts of a built envelope, given its redaction map and the
+/// result of serializing its body. A body that could not be serialized is
+/// unreadable to the unsure-span detector, and unreadable counts as unsure:
+/// it holds, it is never skipped.
+fn built_scrub_counts(
+    redactions: &BTreeMap<String, u32>,
+    body: Result<String>,
+) -> crate::daemon::second_look::ScrubCounts {
+    use crate::daemon::second_look::ScrubCounts;
+    match body {
+        Ok(body) => ScrubCounts::of(redactions, &body),
+        Err(_) => ScrubCounts {
+            unsure_unreadable: true,
+            ..ScrubCounts::of(redactions, "")
+        },
+    }
 }
 
 /// Whether a certificate's verdict lets an unattended session go without a
@@ -438,7 +509,8 @@ pub fn build_manifest(outcomes: &[SubmitOutcome]) -> Vec<ManifestEntry> {
             SubmitOutcome::SkippedParseFailure { .. }
             | SubmitOutcome::Refused { .. }
             | SubmitOutcome::Failed { .. }
-            | SubmitOutcome::HeldForReview { .. } => None,
+            | SubmitOutcome::HeldForReview { .. }
+            | SubmitOutcome::HeldForSecondLook { .. } => None,
         })
         .collect()
 }
@@ -504,6 +576,13 @@ pub struct SubmitContext<'a> {
     /// `HeldForReview` instead of uploaded. One-shot, like the approvals
     /// above. See the spec's R5.
     hold_unless_low_risk: bool,
+    /// Set by the daemon for a session approved on the contributor's behalf
+    /// under the Automatic Scrub check (K4 of #1118): the envelope, once
+    /// built and past every refusal, is held instead of uploaded when its
+    /// scrub is worth a second look. Carries the entry's
+    /// `subagents_dropped`, the one second-look input the envelope does not.
+    /// One-shot, like the hold above.
+    hold_unless_scrub_clear: Option<u32>,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -602,6 +681,7 @@ impl<'a> SubmitContext<'a> {
             approved_witness: None,
             approved_token_bundle: None,
             hold_unless_low_risk: false,
+            hold_unless_scrub_clear: None,
             last_receipt_shipped: ReceiptShipped::NoCall,
             last_sent_witness: None,
             background_witness: false,
@@ -681,6 +761,21 @@ impl<'a> SubmitContext<'a> {
     /// hold stops the upload to the commons but not the send to the witness.
     pub(crate) fn hold_witnessed_unless_low_risk(&mut self) {
         self.hold_unless_low_risk = true;
+    }
+
+    /// Hold, rather than upload, the next session if the envelope built for
+    /// it is worth a second look (`second_look::unattended_hold` under
+    /// Automatic). For sessions nobody reviewed, under the Automatic Scrub
+    /// check. `subagents_dropped` is the queue entry's discovery-time trim.
+    ///
+    /// Decided on the envelope itself, after redaction and before the send,
+    /// so the mark count is exact and a session is never judged on a scrub
+    /// that did not run. On the local-redaction path nothing has left the
+    /// machine at that point. On the witness path the witness has already
+    /// seen the session -- like R5's hold, it stops the upload to the
+    /// commons, not the send to the enclave.
+    pub(crate) fn hold_unless_scrub_is_clear(&mut self, subagents_dropped: u32) {
+        self.hold_unless_scrub_clear = Some(subagents_dropped);
     }
 
     pub(crate) fn use_approved_token_bundle(
@@ -1315,6 +1410,7 @@ impl<'a> SubmitContext<'a> {
             None => (None, None),
         };
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
+        let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1577,6 +1673,12 @@ impl<'a> SubmitContext<'a> {
             {
                 return Ok(outcome);
             }
+            // A dry run reports what the real send would do, hold included.
+            if let Some(held) =
+                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+            {
+                return Ok(held);
+            }
             if !opts.machine_readable {
                 if opts.unenrolled_preview {
                     println!(
@@ -1647,6 +1749,15 @@ impl<'a> SubmitContext<'a> {
             witnessed.as_ref(),
             witnessed_record.take(),
         ) {
+            return Ok(held);
+        }
+        // The Automatic Scrub check (K4 of #1118), at the same point and for
+        // the same reason: after every refusal, before anything reaches the
+        // commons. The scrub is read off the envelope that would be sent, so
+        // it is always a real count, never "not yet scrubbed".
+        if let Some(held) =
+            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+        {
             return Ok(held);
         }
         // Every check above has passed, so this is the certificate the send
@@ -1775,6 +1886,38 @@ pub async fn status(
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
+}
+
+/// The NEAR AI measurement pins ingest enforces, read with this device's own
+/// credential (`GET /v1/contributors/me/near-ai-measurements`).
+///
+/// The same empty-scope mint as [`status`]: a device-authenticated read that
+/// does not depend on the scopes chosen for submission. The document carries
+/// pins only; what a client may pin from it is
+/// [`NearAiMeasurementPins::usable_sets`], never the raw `sets`.
+///
+/// [`NearAiMeasurementPins::usable_sets`]: trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins::usable_sets
+pub async fn near_ai_measurement_pins(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+) -> Result<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins> {
+    let device = DeviceIdentity::load_or_generate_async(store)
+        .await
+        .context("loading device identity")?;
+    let issuer = IssuerClient::new(config_allowlist(cfg)).context("building issuer client")?;
+    let token = mint_status_claim(&issuer, cfg, &device, Utc::now())
+        .await
+        .context("minting upload claim for the measurement read")?;
+    let client = build_ingest_client(cfg, &token).context("building ingest client")?;
+    client
+        .call_json::<(), _>(
+            Method::GET,
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            &[],
+            None,
+        )
+        .await
+        .context("fetching NEAR AI measurement pins")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5236,6 +5379,7 @@ mod tests {
             output_tokens: Some(1),
             cost_usd: Some(0.0),
             status: 200,
+            ..Default::default()
         };
         let call = crate::routing::attested::attested_final_call(&[row], dir.path())
             .expect("the fixture must be attestable, or these tests prove nothing");
@@ -5993,6 +6137,92 @@ mod tests {
     /// witness rates `medium` must come back held with its certified review
     /// saved and nothing sent; and a person's approve of that entry must send
     /// exactly those certified bytes, without running the witness again.
+    /// Reviewed on #1139: the Scrub check's hold on the real send path, not
+    /// a dry run. A claim is minted from the stub issuer and the envelope
+    /// stamped, and the hold still stops it before anything reaches ingest.
+    /// The entry is trimmed to fit, so the hold does not depend on what the
+    /// fixture happens to contain.
+    #[tokio::test]
+    async fn the_scrub_check_holds_on_the_real_send_path_and_nothing_reaches_ingest() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest_raw(capture.clone(), 200)).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        store.save_config(&cfg).unwrap();
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = crate::daemon::queue::QueueEntry {
+            subagents_dropped: 1,
+            ..r5_unattended_entry(&cfg, &reference)
+        };
+        let settings = crate::daemon::settings::DaemonSettings {
+            scrub_check: Some(crate::daemon::settings::ScrubCheck::Automatic),
+            ..Default::default()
+        };
+        let opts = review_options();
+        assert!(!opts.dry_run);
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            Uploader {
+                ctx: &mut ctx,
+                store: &store,
+                settings: &settings,
+                state: &mut state,
+                health: &mut health,
+            }
+            .upload_entry(source.as_ref(), &reference, &entry, Utc::now()),
+        )
+        .await
+        .expect("the upload decides within a minute")
+        .unwrap();
+        let UploadDecision::HeldForSecondLook {
+            reason_label,
+            reasons,
+            pin,
+        } = &decision
+        else {
+            panic!("expected a hold, got {decision:?}");
+        };
+        assert_eq!(
+            reason_label,
+            crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
+        );
+        assert!(
+            reasons.contains(&crate::daemon::second_look::REASON_TRIMMED_TO_FIT),
+            "{reasons:?}"
+        );
+        assert!(pin.is_some(), "the held envelope is pinned");
+        assert!(
+            capture.lock().unwrap().bodies.is_empty(),
+            "nothing reached the commons"
+        );
+        assert_eq!(state.uploads_today, 0);
+    }
+
+    /// A body that cannot be serialized for the unsure-span detector counts
+    /// as unreadable, and unreadable holds: the check is never skipped.
+    #[test]
+    fn a_body_that_cannot_be_read_holds_rather_than_skipping_the_check() {
+        let mut redactions = BTreeMap::new();
+        redactions.insert("private_email".to_string(), 3);
+        let counts = built_scrub_counts(&redactions, Err(anyhow::anyhow!("body-serialize-failed")));
+        assert!(counts.unsure_unreadable);
+        assert_eq!(counts.content_marks, 3, "the marks are still counted");
+        assert_eq!(
+            crate::daemon::second_look::unattended_hold(
+                crate::daemon::settings::ScrubCheck::Automatic,
+                crate::daemon::second_look::Scrub::Scrubbed(counts),
+                0
+            ),
+            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+        );
+    }
+
     #[tokio::test]
     async fn an_unattended_medium_verdict_is_held_and_a_persons_approve_sends_the_pinned_bytes() {
         use crate::daemon::uploader::{UploadDecision, Uploader};
@@ -6607,7 +6837,8 @@ pub fn outcomes_to_json(
                     "size_bytes": size_bytes,
                     "limit_bytes": limit_bytes,
                 }),
-                SubmitOutcome::HeldForReview { reason_label, .. } => serde_json::json!({
+                SubmitOutcome::HeldForReview { reason_label, .. }
+                | SubmitOutcome::HeldForSecondLook { reason_label, .. } => serde_json::json!({
                     "outcome": "held",
                     "reason": reason_label,
                 }),

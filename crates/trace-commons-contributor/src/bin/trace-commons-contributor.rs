@@ -343,6 +343,11 @@ enum DaemonAction {
         /// auto | notify | ignore
         #[arg(long)]
         mode: String,
+        /// With `--mode auto`: also send the sessions already on disk.
+        /// Without it, arming applies to new sessions only and the backlog
+        /// waits for you.
+        #[arg(long)]
+        include_backlog: bool,
     },
     /// Show contribution history and the credit rollup
     History {
@@ -572,9 +577,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             DaemonAction::Pause => commands::daemon_pause(&store, true, cli.json),
             DaemonAction::Resume => commands::daemon_pause(&store, false, cli.json),
             DaemonAction::Projects => commands::daemon_projects(&store, cli.json),
-            DaemonAction::Project { path, mode } => {
-                commands::daemon_set_project(&store, &path, &mode, cli.json)
-            }
+            DaemonAction::Project {
+                path,
+                mode,
+                include_backlog,
+            } => commands::daemon_set_project(&store, &path, &mode, include_backlog, cli.json),
             DaemonAction::History { limit, refresh } => {
                 commands::daemon_history(&store, limit, refresh, cli.json).await
             }

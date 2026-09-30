@@ -204,6 +204,37 @@ impl std::fmt::Debug for NearAiSession {
     }
 }
 
+/// See [`DaemonSettings::scrub_check`]. On the wire: `"automatic"` or
+/// `"manual"`, and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubCheck {
+    /// Unsure sessions wait; the rest of an armed folder sends on its own.
+    Automatic,
+    /// Everything waits for a person.
+    Manual,
+}
+
+impl ScrubCheck {
+    /// The wire value.
+    pub fn label(self) -> &'static str {
+        match self {
+            ScrubCheck::Automatic => "automatic",
+            ScrubCheck::Manual => "manual",
+        }
+    }
+
+    /// From the wire value. Anything else is `None`: a mistyped mode must
+    /// be refused, never read as either one.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "automatic" => Some(ScrubCheck::Automatic),
+            "manual" => Some(ScrubCheck::Manual),
+            _ => None,
+        }
+    }
+}
+
 /// Why the stored Cloud credential could not be loaded at startup.
 ///
 /// Each one is a different thing to tell the contributor, and the old single
@@ -417,6 +448,32 @@ pub struct DaemonSettings {
     /// default.
     #[serde(default)]
     pub private_inference_offer_seen: bool,
+
+    /// The Scrub check (K4 of #1118): whether a session in a folder set to
+    /// share automatically may leave without a person, and which ones.
+    ///
+    /// - [`ScrubCheck::Automatic`] -- armed folders send unattended, **except**
+    ///   a session `second_look::second_look_reasons` flags (nothing matched,
+    ///   looks unsure, or trimmed to fit). That one is held for a person under
+    ///   `second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED` and never moves on
+    ///   its own. The uploader decides the hold from the envelope it has just
+    ///   built, after redaction and before anything is sent, so a session
+    ///   nobody has scrubbed is never taken as fine. See
+    ///   `Uploader::upload_entry`.
+    /// - [`ScrubCheck::Manual`] -- every session waits for a person, armed
+    ///   folders included. The watcher approves nothing on anyone's behalf,
+    ///   and the uploader holds anything already approved that way.
+    ///
+    /// `None` -- **never chosen, the default** -- is the behaviour from
+    /// before this setting existed: armed folders send every session, with
+    /// no second-look hold. A settings file written before this key existed
+    /// loads as `None`, and the watcher and uploader do exactly what they did.
+    /// The hold is opt-in, by choosing Automatic (the design's Customize path
+    /// sets it); holding by default would change what every existing armed
+    /// folder does on upgrade, which is a product decision this setting does
+    /// not take on its own. `get_settings` reports `null` for it.
+    #[serde(default)]
+    pub scrub_check: Option<ScrubCheck>,
 
     /// Legacy spellings, read on load and never written.
     ///
@@ -853,6 +910,7 @@ impl Default for DaemonSettings {
             token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
+            scrub_check: None,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -1244,6 +1302,20 @@ pub fn apply_settings_object(
             "private_inference_offer_seen" => {
                 settings.private_inference_offer_seen =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The Scrub check: `automatic` or `manual`. Anything else is
+            // refused rather than read as either, because a typo read as
+            // `automatic` would send what the contributor meant to hold.
+            // `null` is refused too: never-chosen is where a daemon starts,
+            // not a choice, and returning to it would drop the hold either
+            // chosen value gives.
+            "scrub_check" => {
+                settings.scrub_check = Some(
+                    value
+                        .as_str()
+                        .and_then(ScrubCheck::parse)
+                        .ok_or(ERR_SETTINGS_INVALID_VALUE)?,
+                );
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -1753,6 +1825,46 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(!s.private_inference_offer_seen);
+    }
+
+    /// The Scrub check starts never chosen (today's behaviour, no hold), a
+    /// file written before it existed loads that way, and only the two wire
+    /// values are accepted.
+    #[test]
+    fn the_scrub_check_starts_unchosen_and_takes_only_its_two_values() {
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["scrub_check"], serde_json::Value::Null);
+        v.as_object_mut().unwrap().remove("scrub_check");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert_eq!(settings.scrub_check, None);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"scrub_check": "manual"})),
+            Ok(true)
+        );
+        assert_eq!(s.scrub_check, Some(ScrubCheck::Manual));
+        for bad in [
+            serde_json::json!("Manual"),
+            serde_json::json!("auto"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({ "scrub_check": bad })),
+                Err(ERR_SETTINGS_INVALID_VALUE)
+            );
+            assert_eq!(
+                s.scrub_check,
+                Some(ScrubCheck::Manual),
+                "a refusal changes nothing"
+            );
+        }
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"scrub_check": "automatic"})),
+            Ok(true)
+        );
+        assert_eq!(s.scrub_check, Some(ScrubCheck::Automatic));
     }
 
     // --- the discovery pointer -----------------------------------------

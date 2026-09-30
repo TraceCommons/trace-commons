@@ -8074,6 +8074,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(settlement_posture_handler),
         )
         .route(
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            get(near_ai_measurements_handler),
+        )
+        .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
         )
@@ -15993,6 +15997,30 @@ async fn settlement_posture_handler(
     )))
 }
 
+/// `GET /v1/contributors/me/near-ai-measurements`
+///
+/// The NEAR AI image measurements this deployment pins, for a caller holding
+/// a device credential. A contributor's IronWire ties a NEAR AI receipt's
+/// signer to a DCAP-verified quote and pins that quote's image against these
+/// sets, so the device and ingest agree on which image counts.
+///
+/// Read through `expected_measurements_from_env`, the loader the attestation
+/// drills enforce with, and published by `measurements::published_pins`: pins
+/// only, no URL or secret. Nothing configured is `unconfigured` with no sets,
+/// so a client verifies nothing rather than everything. Deployment-wide, so
+/// any authenticated caller may read it, as with the settlement posture.
+async fn near_ai_measurements_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(
+        trace_commons_server::near_attestation::measurements::published_pins(
+            expected_measurements_from_env(),
+        ),
+    ))
+}
+
 async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -20751,15 +20779,18 @@ struct SourceSessionWithdrawalReconcileSummary {
 ///   side wins). That version has no `trace_withdrawals` row, so it is first
 ///   withdrawn through `withdraw_trace_source_session`, which is idempotent
 ///   and keeps the session's first `withdrawn_at`;
-/// - a withdrawal, from the route or a merge, whose tail failed after the DB
+/// - a source-session-mapped withdrawal whose tail failed after the DB
 ///   tombstone and `revoked` status landed: its object refs, vector entry,
 ///   dedup cluster, derived records, or token attachments are still there.
 ///
 /// Each version then runs the idempotent `complete_trace_withdrawal` tail on
 /// its own, so one failure does not hold up the rest, and a failed version is
 /// found again on the next pass. Runs at merge confirm (scoped to the
-/// survivor) and from the revocation-propagation worker (the whole tenant),
-/// so it converges with nobody acting. Failures are logged hash-only.
+/// survivor) and from the revocation-propagation worker (its authenticated
+/// tenant only). The in-process scheduler covers only its token's tenant;
+/// other tenants require their own worker invocation or external schedule.
+/// Failures are logged hash-only and persisted incomplete state feeds the
+/// tenant's operational withdrawal-completion alert.
 async fn reconcile_source_session_withdrawals(
     state: &AppState,
     db: &Arc<dyn Database>,
@@ -20842,12 +20873,12 @@ async fn reconcile_source_session_withdrawals(
 /// the survivor. The merge is committed and irreversible by then, and the
 /// proposal is consumed, so a failure there cannot be retried through this
 /// route and is not reported as one: the response is still `200`, with
-/// `withdrawal_completion_pending: true`. The guarantee is the reconciler's:
-/// the DB revoke and tombstone land before any content is deleted, so the
-/// version is `revoked` to every consumer at once, and whatever is left (bytes,
-/// vector entry, dedup cluster, derived records, token attachments) is found
-/// from actual state and finished by the revocation-propagation worker's next
-/// pass, with nobody acting.
+/// `withdrawal_completion_pending: true`. Each completion writes the DB revoke
+/// and tombstone before deleting content. Remaining work is re-derived from
+/// actual state and finished by a revocation-propagation worker run for this
+/// tenant. The scheduler covers only its token's tenant, so other tenants need
+/// an explicit worker run; see the account-merge operator runbook. Persisted
+/// incomplete state also feeds the tenant's operational pending alert.
 async fn account_merge_confirm_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -20900,7 +20931,7 @@ async fn account_merge_confirm_handler(
     if withdrawal_completion_pending {
         tracing::warn!(
             tenant_storage_ref = %tenant_storage_ref(&ctx.tenant_id),
-            "Trace Commons merge committed with withdrawal completion pending; the revocation-propagation reconciler finishes it"
+            "Trace Commons merge committed with withdrawal completion pending; run the revocation-propagation worker for this tenant"
         );
     }
 
@@ -49001,6 +49032,19 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         response
             .promotion_gates
             .ranking_worker_run_actionable_skip_count,
+    );
+    body.push_str("# HELP trace_commons_operational_withdrawal_completion_pending Whether persisted source-session withdrawals need completion for this tenant.\n");
+    body.push_str("# TYPE trace_commons_operational_withdrawal_completion_pending gauge\n");
+    push_prometheus_gauge(
+        &mut body,
+        &mut metric_count,
+        "trace_commons_operational_withdrawal_completion_pending",
+        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        usize::from(
+            response
+                .revocation_propagation
+                .withdrawal_completion_pending,
+        ),
     );
     body.push_str("# HELP trace_commons_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.\n");
     body.push_str("# TYPE trace_commons_operational_revocation_propagation_latest_run gauge\n");
@@ -78957,6 +79001,8 @@ impl TraceOperationalObjectStoreSummary {
 
 #[derive(Debug, Clone, Serialize)]
 struct TraceOperationalRevocationPropagationSummary {
+    /// Re-derived from durable DB state, independent of the latest worker run.
+    withdrawal_completion_pending: bool,
     latest_run_recorded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_run_at: Option<DateTime<Utc>>,
@@ -78996,6 +79042,7 @@ struct TraceOperationalRevocationPropagationSummary {
 impl Default for TraceOperationalRevocationPropagationSummary {
     fn default() -> Self {
         Self {
+            withdrawal_completion_pending: false,
             latest_run_recorded: false,
             latest_run_at: None,
             latest_run_dry_run: false,
@@ -79108,6 +79155,23 @@ async fn read_revocation_propagation_summary_for_admin(
         read_all_audit_events(&state.root, &tenant.tenant_id)?
     };
     let mut summary = TraceOperationalRevocationPropagationSummary::from_audit_events(&events)?;
+    if let Some(db) = state.db_mirror.as_ref() {
+        let held_retention_policy_ids = state
+            .legal_hold_retention_policy_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        summary.withdrawal_completion_pending = !db
+            .list_incomplete_source_session_withdrawals(
+                &tenant.tenant_id,
+                None,
+                &held_retention_policy_ids,
+                1,
+            )
+            .await
+            .context("failed to read pending source-session withdrawal completion state")?
+            .is_empty();
+    }
     summary.worker_cache_invalidator_required = state.require_external_worker_cache_invalidator;
     summary.worker_cache_invalidator_configured = state.worker_cache_invalidator.is_some();
     summary.worker_cache_invalidator_ready =

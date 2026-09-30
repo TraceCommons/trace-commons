@@ -177,7 +177,7 @@ impl TraceSource for ClaudeCodeSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        let Ok(project_dirs) = std::fs::read_dir(&self.root) else {
+        let Some(project_dirs) = super::read_dir_for_discovery(&self.root)? else {
             return Ok(sessions);
         };
         for project_dir in project_dirs {
@@ -199,7 +199,11 @@ impl TraceSource for ClaudeCodeSource {
                 continue;
             }
             let discovery_project = discovery_project_label(&project_dir.file_name());
-            let Ok(entries) = std::fs::read_dir(project_dir.path()) else {
+            // A project directory that vanished since the root was listed is
+            // gone, not unreadable; any other failure is a partial listing,
+            // which fails the whole discovery rather than silently dropping
+            // that project's sessions from a recording pass.
+            let Some(entries) = super::read_dir_for_discovery(&project_dir.path())? else {
                 continue;
             };
             // Two passes, because `read_dir` order is unspecified and the
@@ -1408,6 +1412,56 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude-code")
+    }
+
+    /// Whether this process is exempt from permission bits (root), in which
+    /// case a `chmod 000` probe proves nothing and the test says so.
+    #[cfg(unix)]
+    fn permissions_bind(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir).is_err()
+    }
+
+    /// K5: an unreadable root, or an unreadable project directory, fails the
+    /// discovery rather than answering an empty or partial listing. A
+    /// recording pass for an arming from now or the automatic grant then
+    /// leaves the source unrecorded, which holds the backlog, instead of
+    /// recording it as holding nothing. A missing root is still empty.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_listing_fails_discovery_and_a_missing_one_is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let missing = tempfile::tempdir().unwrap().path().join("absent");
+        assert!(
+            ClaudeCodeSource::new(missing)
+                .discover()
+                .unwrap()
+                .is_empty()
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("s.jsonl"), "{}\n").unwrap();
+
+        for locked in [project.clone(), root.path().to_path_buf()] {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let bound = permissions_bind(&locked);
+            let result = ClaudeCodeSource::new(root.path().to_path_buf()).discover();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if !bound {
+                eprintln!("permission bits do not bind for this user; probe skipped");
+                return;
+            }
+            let err = result.expect_err("an unreadable listing must not read as empty");
+            assert!(
+                err.to_string().starts_with("discovery-listing-unreadable"),
+                "{err}"
+            );
+            assert!(
+                !err.to_string().contains(&*root.path().to_string_lossy()),
+                "no path in the error"
+            );
+        }
     }
 
     #[test]

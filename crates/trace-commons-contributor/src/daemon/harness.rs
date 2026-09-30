@@ -750,6 +750,14 @@ fn catalog() -> Catalog {
     }
 }
 
+/// The harness rows as `harness_list` would compute them right now.
+///
+/// For `inference_map`, which needs the same `connected` / `wired` answer the
+/// list gives rather than a second reading of the same files.
+pub(crate) fn rows_now(shared: &DaemonShared) -> Vec<HarnessRow> {
+    list(&catalog(), &activity_for(shared), shared.destination_port())
+}
+
 /// What the ledger can say about calls that arrived, rolled up by family.
 fn activity_for(shared: &DaemonShared) -> FamilyActivity {
     let Some(ledger) = shared.routing_ledger() else {
@@ -1416,6 +1424,7 @@ mod tests {
             output_tokens: None,
             cost_usd: None,
             status: 200,
+            ..Default::default()
         }
     }
 

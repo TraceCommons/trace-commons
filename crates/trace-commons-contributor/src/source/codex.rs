@@ -38,7 +38,7 @@ impl TraceSource for CodexSource {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        collect_rollout_files(&self.root, &mut sessions, &mut skipped);
+        collect_rollout_files(&self.root, &mut sessions, &mut skipped)?;
         if skipped > 0 {
             tracing::warn!(
                 skipped,
@@ -92,9 +92,15 @@ fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
-fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn collect_rollout_files(
+    dir: &Path,
+    sessions: &mut Vec<SessionRef>,
+    skipped: &mut usize,
+) -> anyhow::Result<()> {
+    // Absent is empty; unreadable fails the discovery. See
+    // `read_dir_for_discovery`.
+    let Some(entries) = super::read_dir_for_discovery(dir)? else {
+        return Ok(());
     };
     for entry in entries {
         let entry = match entry {
@@ -113,7 +119,7 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             }
         };
         if file_type.is_dir() {
-            collect_rollout_files(&path, sessions, skipped);
+            collect_rollout_files(&path, sessions, skipped)?;
             continue;
         }
         let file_name = entry.file_name();
@@ -127,6 +133,7 @@ fn collect_rollout_files(dir: &Path, sessions: &mut Vec<SessionRef>, skipped: &m
             sessions.push(session);
         }
     }
+    Ok(())
 }
 
 /// The one way a Codex `SessionRef` is built, used by `collect_rollout_files`
@@ -928,6 +935,29 @@ mod tests {
             peek_cwd_memoized(&path, size, mtime).as_deref(),
             Some("/first/answer"),
             "an unchanged file must be answered from the memo, not re-read"
+        );
+
+        let changed_mtime = meta.modified().unwrap() + std::time::Duration::from_secs(1);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(changed_mtime).unwrap();
+        let changed_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let changed_stamp = Some(chrono::DateTime::<chrono::Utc>::from(changed_mtime));
+        assert_ne!(changed_stamp, mtime);
+        assert_eq!(
+            peek_cwd_memoized(&path, size, changed_stamp).as_deref(),
+            Some("/secnd/answer"),
+            "a changed mtime must invalidate a same-size cached answer"
+        );
+
+        std::fs::write(&path, format!("{first}\n\n")).unwrap();
+        file.set_modified(changed_mtime).unwrap();
+        let grown = std::fs::metadata(&path).unwrap();
+        assert_eq!(grown.len(), size + 1);
+        assert_eq!(grown.modified().unwrap(), changed_mtime);
+        assert_eq!(
+            peek_cwd_memoized(&path, grown.len(), changed_stamp).as_deref(),
+            Some("/first/answer"),
+            "a changed size must invalidate an answer even when the mtime holds"
         );
     }
 

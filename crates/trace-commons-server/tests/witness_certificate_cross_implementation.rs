@@ -670,6 +670,7 @@ fn attestable_call() -> (
         output_tokens: Some(1),
         cost_usd: Some(0.0),
         status: 200,
+        ..Default::default()
     };
     let call =
         trace_commons_contributor::routing::attested::attested_final_call(&[row], dir.path())
