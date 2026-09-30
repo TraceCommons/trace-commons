@@ -18440,12 +18440,13 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
     }
 }
 
-/// A withdrawal after Settle keeps the settled Trace Credit (withdrawal is
-/// not a clawback), but the payout re-checks the submission guard before it
-/// submits: nothing reaches the outbox or the NEAR adapter, the payout ends
-/// `failed` under `submission_inoperable`, and it is not listed again.
+/// Owner decision (Zaki review 1, item S): a withdrawal forfeits only the
+/// legs Settle has not completed. A Trace Credit leg Settle completed keeps
+/// its ledger row, and its payout is still submitted and confirmed after the
+/// withdrawal, as `main`'s submitter pays finalized credit. Once confirmed,
+/// it is not listed again.
 #[tokio::test]
-async fn payout_rechecks_the_guard_before_submit() {
+async fn a_withdrawal_after_settle_still_pays_and_confirms_the_payout() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -18460,7 +18461,7 @@ async fn payout_rechecks_the_guard_before_submit() {
         None,
     )
     .await;
-    let tenant = format!("payout-guard-{}", uuid::Uuid::new_v4());
+    let tenant = format!("payout-after-withdrawal-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(run.state, PipelineRunState::Complete);
     assert_eq!(
@@ -18477,8 +18478,15 @@ async fn payout_rechecks_the_guard_before_submit() {
     );
 
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
-    assert!(near.requests().is_empty(), "nothing is submitted");
-    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert_eq!(near.requests().len(), 1, "the settled credit is submitted");
+    confirm_every_near_request(&near);
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "confirmed");
+    assert_eq!(settlement.last_error_label, None);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "confirmed");
     assert_credit_settled_once(
         &backend,
         &service,
@@ -18487,19 +18495,56 @@ async fn payout_rechecks_the_guard_before_submit() {
         "settled before the withdrawal",
     )
     .await;
-    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
-    assert_ne!(settlement.payout_state, "confirmed");
-    assert_eq!(settlement.payout_state, "failed");
-    assert_eq!(
-        settlement.last_error_label.as_deref(),
-        Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
-    );
     assert_eq!(
         service.process_payouts(&tenant, 32).await.unwrap(),
         0,
-        "a refused payout is not listed again"
+        "a confirmed payout is not listed again"
     );
-    assert!(near.requests().is_empty());
+    assert_eq!(near.requests().len(), 1);
+}
+
+/// Owner decision (Zaki review 1, item S), the other side: a withdrawal
+/// before Settle completes the Trace Credit leg forfeits it. Settle writes
+/// no ledger row for it, and the payout pass has nothing to pay: no outbox
+/// line, no NEAR request.
+#[tokio::test]
+async fn a_withdrawal_before_settle_forfeits_the_leg_and_pays_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-withdrawn-before-settle-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let outcome = withdraw(&service, &tenant, run.submission_id).await;
+    assert!(outcome.trace_credit_forfeited, "the leg had not settled");
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.operation_state, "forfeited");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0,
+        "a forfeited leg writes no ledger row"
+    );
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 0);
+    assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+    assert!(near.requests().is_empty(), "nothing is paid");
 }
 
 /// NEAR ownership: only a `trace_credit` leg on the `near` rail is paid. A
@@ -18783,13 +18828,12 @@ async fn a_payout_error_on_one_run_does_not_stop_the_pass() {
     assert_eq!(recording.requests().len(), 2);
 }
 
-/// Ruling T10-6: a withdrawal after a NEAR submit (here, a crash right after
-/// the outbox recorded it) leaves a call that may have taken effect. The next
-/// pass submits nothing, looks nothing up, and flags the payout
-/// `settlement_unreconciled` (PR 2's rule for a dispatched leg), for an
-/// operator to reconcile against NEAR by hand.
+/// Owner decision (Zaki review 1, item S): a withdrawal after a NEAR submit
+/// (here, a crash right after the outbox recorded it) does not stop the
+/// payout of the settled credit. The next pass sends nothing again and
+/// confirms the line through its stored key.
 #[tokio::test]
-async fn a_withdrawal_after_a_near_submit_flags_the_payout_unreconciled() {
+async fn a_withdrawal_after_a_near_submit_still_confirms_the_payout() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -18805,7 +18849,7 @@ async fn a_withdrawal_after_a_near_submit_flags_the_payout_unreconciled() {
         Some(PipelineCrashPoint::AfterNearSubmit),
     )
     .await;
-    let tenant = format!("payout-unreconciled-{}", uuid::Uuid::new_v4());
+    let tenant = format!("payout-submitted-withdrawn-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&crashing, &tenant, RECEIPT_PRINCIPAL).await;
     let error = crashing
         .process_payouts(&tenant, 32)
@@ -18819,6 +18863,7 @@ async fn a_withdrawal_after_a_near_submit_flags_the_payout_unreconciled() {
     );
 
     withdraw(&crashing, &tenant, run.submission_id).await;
+    confirm_every_near_request(&recording);
 
     let restarted = payout_test_service(
         backend.clone(),
@@ -18833,17 +18878,11 @@ async fn a_withdrawal_after_a_near_submit_flags_the_payout_unreconciled() {
     assert_eq!(near.submits(), 1, "nothing is submitted again");
     assert_eq!(recording.requests().len(), 1);
     let leg = trace_credit_settlement(&restarted, &tenant, run.run_id).await;
-    assert_eq!(leg.payout_state, "failed");
-    assert_eq!(
-        leg.last_error_label.as_deref(),
-        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
-    );
+    assert_eq!(leg.payout_state, "confirmed");
+    assert_eq!(leg.last_error_label, None);
     let outbox = near_outbox_rows(&backend, &tenant).await;
     assert_eq!(outbox.len(), 1);
-    assert_eq!(
-        outbox[0].status, "submitted",
-        "the outbox line is left as sent"
-    );
+    assert_eq!(outbox[0].status, "confirmed");
     assert_eq!(restarted.process_payouts(&tenant, 32).await.unwrap(), 0);
     assert_credit_settled_once(
         &backend,
@@ -18855,13 +18894,12 @@ async fn a_withdrawal_after_a_near_submit_flags_the_payout_unreconciled() {
     .await;
 }
 
-/// Ruling T10-6, PR 2's rule for a dispatched leg: a failed NEAR submit may
-/// still have taken effect (the adapter was called), so a withdrawal after
-/// it flags the payout `settlement_unreconciled` too, and nothing is sent
-/// again. Only a payout with no outbox row -- nothing sent -- ends
-/// `submission_inoperable` (`payout_rechecks_the_guard_before_submit`).
+/// Owner decision (Zaki review 1, item S): a failed NEAR submit before a
+/// withdrawal is taken up again by a direct `process_payout`, as it would be
+/// without the withdrawal: the same call is sent again (the adapter's
+/// idempotency key makes a repeat safe) and the line is confirmed.
 #[tokio::test]
-async fn a_withdrawal_after_a_failed_near_submit_flags_the_payout_unreconciled() {
+async fn a_withdrawal_after_a_failed_near_submit_does_not_stop_its_retry() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -18877,7 +18915,7 @@ async fn a_withdrawal_after_a_failed_near_submit_flags_the_payout_unreconciled()
         None,
     )
     .await;
-    let tenant = format!("payout-failed-unreconciled-{}", uuid::Uuid::new_v4());
+    let tenant = format!("payout-failed-withdrawn-{}", uuid::Uuid::new_v4());
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     recording.fail_next();
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
@@ -18889,13 +18927,13 @@ async fn a_withdrawal_after_a_failed_near_submit_flags_the_payout_unreconciled()
 
     withdraw(&service, &tenant, run.submission_id).await;
     service.process_payout(&tenant, run.run_id).await.unwrap();
-    assert_eq!(near.submits(), 1, "nothing is submitted again");
+    assert_eq!(near.submits(), 2, "the failed call is sent again");
+    confirm_every_near_request(&recording);
+    service.process_payout(&tenant, run.run_id).await.unwrap();
     let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
-    assert_eq!(leg.payout_state, "failed");
-    assert_eq!(
-        leg.last_error_label.as_deref(),
-        Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)
-    );
+    assert_eq!(leg.payout_state, "confirmed");
+    assert_eq!(leg.last_error_label, None);
+    assert_eq!(near.submits(), 2);
 }
 
 /// A NEAR adapter that counts every `submit` call, delegates to a shared
@@ -19228,7 +19266,8 @@ async fn payout_waits_while_mains_near_submitter_holds_the_tenant_lock() {
 /// The pool-size-one rule: the payout pass holds its lock on one pooled
 /// connection and does all its own database work on that same connection,
 /// so on a pool of one it never waits for a second -- through a submit, a
-/// confirmation, a per-run error, and the guard's refusal.
+/// confirmation, a per-run error, and the payout of a run withdrawn after
+/// Settle (item S: it is paid).
 #[tokio::test]
 async fn payout_never_holds_two_pooled_connections() {
     let Some(backend) = runtime_backend(1).await else {
@@ -19299,7 +19338,7 @@ async fn payout_never_holds_two_pooled_connections() {
         .await
         .expect("the confirm pass never waits for a second connection")
         .unwrap();
-    assert_eq!(confirmed, 2);
+    assert_eq!(confirmed, 3);
     let direct = tokio::time::timeout(
         HELD_CALL_BOUND,
         service.process_payout(&tenant, withdrawn.run_id),
@@ -19311,7 +19350,7 @@ async fn payout_never_holds_two_pooled_connections() {
     for (run, state, label) in [
         (&paid, "confirmed", None),
         (&errored, "failed", Some("near_confirmation_invalid")),
-        (&withdrawn, "failed", Some("submission_inoperable")),
+        (&withdrawn, "confirmed", None),
     ] {
         let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
         assert_eq!(leg.payout_state, state);

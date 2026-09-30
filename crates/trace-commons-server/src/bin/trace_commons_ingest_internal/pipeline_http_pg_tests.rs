@@ -1879,6 +1879,33 @@ struct WithdrawalFixture {
 }
 
 async fn withdrawal_fixture() -> Option<WithdrawalFixture> {
+    withdrawal_fixture_with(
+        |runtime, artifacts| {
+            assemble_test_pipeline_service(
+                runtime,
+                artifacts,
+                IsolatedPipelineIndex::new(),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_withdrawal_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        false,
+    )
+    .await
+}
+
+/// `withdrawal_fixture`, with the pipeline service `service` builds over the
+/// runtime backend and the fixture's artifact store, and `main`'s reviewer
+/// reads (credit events and settlement batches among them) from the
+/// database when `db_reviewer_reads`.
+async fn withdrawal_fixture_with(
+    service: impl FnOnce(Arc<PgBackend>, Arc<LocalEncryptedTraceArtifactStore>) -> Arc<PipelineService>,
+    db_reviewer_reads: bool,
+) -> Option<WithdrawalFixture> {
     let runtime = runtime_backend(4).await?;
     let owner = account_owner_backend()
         .await
@@ -1892,23 +1919,13 @@ async fn withdrawal_fixture() -> Option<WithdrawalFixture> {
     insert_token(&mut tokens, &tenant, &other_token, TokenRole::Contributor);
     let dir = tempfile::tempdir().expect("temp dir");
     let artifacts = local_artifacts(&dir);
-    let service = assemble_test_pipeline_service(
-        runtime.clone(),
-        artifacts.clone(),
-        IsolatedPipelineIndex::new(),
-        vec![RecordingSettlementAdapter::new(
-            InstrumentId::new("storage_rebate").unwrap(),
-            "recording_storage_rebate_withdrawal_test_only",
-            "none",
-        ) as Arc<dyn SettlementAdapter>],
-        None,
-    );
+    let service = service(runtime.clone(), artifacts.clone());
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
         Some(owner.clone() as Arc<dyn Database>),
         Some(artifacts),
         false,
-        false,
+        db_reviewer_reads,
         false,
         false,
     );
@@ -2320,6 +2337,73 @@ async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
         queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
         (1, "pending".to_string())
     );
+}
+
+/// Owner decision (Zaki review 1, item S), through the route: a withdrawal
+/// after Settle completed the Trace Credit leg keeps that credit, so the
+/// response says `credit_retained` (with `main`'s reviewer reads on the
+/// database, which see the pipeline's credit event and its finalized
+/// batch), and the payout pass then submits and confirms its line, as
+/// `main`'s submitter pays finalized credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_withdrawal_after_settle_keeps_and_pays_the_settled_trace_credit() {
+    use tower::ServiceExt;
+
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let state = &fixture.state;
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(state, &fixture.token).await;
+    let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
+
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/v1/contributors/me/pipeline-submissions/{}/withdraw",
+            run.submission_id
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.headers_mut().extend(session);
+    let response = app(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 16).await.unwrap()).unwrap();
+    assert_eq!(body["credit_retained"], true, "{body}");
+
+    assert_eq!(
+        fixture.service.process_payouts(tenant, 32).await.unwrap(),
+        1
+    );
+    let requests = near.requests();
+    assert_eq!(requests.len(), 1, "the settled credit is submitted");
+    near.record_confirmation(
+        &requests[0].idempotency_key,
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .expect("confirm the submitted request");
+    assert_eq!(
+        fixture.service.process_payouts(tenant, 32).await.unwrap(),
+        1
+    );
+    let settlements = fixture
+        .service
+        .store()
+        .list_settlements(tenant, run.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].payout_state, "confirmed");
+    assert_eq!(settlements[0].last_error_label, None);
 }
 
 /// Review Focus 1 through the worker: the worker's tenant drain

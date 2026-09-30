@@ -8311,9 +8311,9 @@ impl PipelineService {
     /// submits (Finding I1): while a pass or `main`'s submitter holds it,
     /// this is refused with `payout_lock_held`. `None` when the run does not
     /// exist; a run that is not complete is returned untouched. Unlike the
-    /// pass, this also takes up a `failed` payout again, re-checking the
-    /// guard first, does not wait for the confirmation interval, and returns
-    /// a per-run error to its caller instead of recording it.
+    /// pass, this also takes up a `failed` payout again, does not wait for
+    /// the confirmation interval, and returns a per-run error to its caller
+    /// instead of recording it.
     pub async fn process_payout(
         &self,
         tenant_id: &str,
@@ -8446,17 +8446,12 @@ impl PipelineService {
     ///   never submitted again -- that could pay twice, on two contracts --
     ///   and the payout ends `failed` under `near_contract_changed`; a
     ///   `submitted` line is still confirmed through its stored key.
-    /// - Before any adapter call, the submission guard is read again, on the
-    ///   same connection. An inoperable submission gets no submit and no
-    ///   confirmation lookup, and its payout ends `failed`; the settled
-    ///   credit itself stays (withdrawal is not a clawback). The label
-    ///   follows PR 2's rule for a dispatched leg (Ruling T10-6): a line
-    ///   with an outbox row was, or may have been, sent to the adapter --
-    ///   the row is written just before the submit -- so the payout is
-    ///   `settlement_unreconciled`, for an operator to reconcile against
-    ///   NEAR by hand; with no row nothing was sent, and it is
-    ///   `submission_inoperable`. A payout whose every line is already
-    ///   `confirmed` is recorded `confirmed` (Ruling T10-8).
+    /// - The submission guard is not read: a leg reaches `complete` only
+    ///   through Settle, while the submission was operable, and a later
+    ///   withdrawal forfeits only the legs Settle has not completed. Its
+    ///   settled credit is paid and confirmed after a withdrawal, as
+    ///   `main`'s submitter pays finalized credit (owner decision, Zaki
+    ///   review 1, item S).
     /// - A line already `submitted` is never submitted again: only its
     ///   confirmation is looked up. The submit is recorded after the
     ///   adapter returns, so a crash between the two repeats the call on
@@ -8551,34 +8546,6 @@ impl PipelineService {
                     ),
                 };
                 work.push((line, call, outbox_id, status));
-            }
-
-            let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
-            let guard = PgPipelineStore::submission_guard_on_tx(&tx, run).await?;
-            tx.commit().await?;
-            if !guard.operable {
-                let all_confirmed = !work.is_empty()
-                    && work
-                        .iter()
-                        .all(|(_, _, _, status)| status.as_deref() == Some("confirmed"));
-                if all_confirmed {
-                    record_payout_state_on(client, run, batch_id).await?;
-                } else {
-                    let dispatched = work.iter().any(|(_, _, _, status)| status.is_some());
-                    set_payout_state_on(
-                        client,
-                        &run.tenant_id,
-                        run.run_id,
-                        TraceCreditSettlementNearStatus::Failed,
-                        Some(if dispatched {
-                            PIPELINE_SETTLEMENT_UNRECONCILED_LABEL
-                        } else {
-                            PIPELINE_SUBMISSION_INOPERABLE_LABEL
-                        }),
-                    )
-                    .await?;
-                }
-                continue;
             }
 
             let mut contract_changed = false;

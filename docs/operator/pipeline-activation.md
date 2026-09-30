@@ -358,7 +358,8 @@ The response is `main`'s withdrawal response plus two follow-up states,
 `pending`, `complete`, or `failed`. `credit_retained` is false when the
 withdrawal forfeits a Trace Credit leg that was not `complete`, or when
 `main`'s rule finds settlement-eligible credit that has not settled. A
-completed leg is never clawed back.
+completed leg is never clawed back, and its NEAR payout is still made (see
+"NEAR payout").
 
 The worker processes the invalidations. On each pass, after a tenant's runs,
 it takes up to 32 of the tenant's due invalidations and removes every index
@@ -396,8 +397,11 @@ to NEAR.
   stored, the call is not sent again (it could pay twice, on two
   contracts): the payout is `failed` with `near_contract_changed`. A call
   already submitted is still confirmed through its stored key.
-- Before each submit, the payout checks again that the submission is
-  operable.
+- A withdrawal does not stop a payout. A leg is `complete` only when Settle
+  completed it while the submission was operable, and a withdrawal forfeits
+  only the legs Settle has not completed. A completed leg keeps its credit,
+  and its payout line is submitted and confirmed after the withdrawal, as
+  `main`'s NEAR submitter pays finalized credit.
 - The payout uses `main`'s per-tenant NEAR submit lock, so a payout pass,
   a second ingest replica, and `main`'s NEAR submitter never submit for one
   tenant at once. When the lock is held, the pass skips the tenant's
@@ -422,13 +426,7 @@ to NEAR.
   outbox counts, and the settled credit itself unchanged. The payout stays
   `failed`: nothing in this release takes it up again. A later release adds
   an operator retry route. A failed submit may still have reached NEAR, so
-  until then check a `failed` payout's outbox line against NEAR by hand, as
-  for `settlement_unreconciled` below.
-- When a submission stops being operable after its payout reached the NEAR
-  outbox, the leg is marked `settlement_unreconciled`: the transfer may have
-  happened. Find the leg's outbox row and reconcile it by hand. The
-  exception is a payout whose every outbox line is already confirmed: it
-  stays `confirmed`.
+  until then check a `failed` payout's outbox line against NEAR by hand.
 
 ## Pipeline exports
 
