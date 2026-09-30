@@ -133,6 +133,9 @@ pub const PIPELINE_PAYOUT_ADAPTER_AUTH_MISSING_LABEL: &str = "near_payout_adapte
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
+/// The reason code of an index invalidation `main`'s revocation queues (Zaki
+/// review 1, round 2, finding 5).
+const PIPELINE_REVOCATION_INVALIDATION_REASON: &str = "revoked";
 /// An index invalidation attempt that did not remove the revision, while
 /// the invalidation stays `pending` and is retried: an index outage (the
 /// index answered `Failed` or `Uncertain`; uncharged), or a charged failure
@@ -2760,37 +2763,13 @@ impl PgPipelineStore {
             .map(|(submission_id, _)| submission_id)
             .collect::<Vec<_>>();
 
-        for run in &runs {
-            match run.index_write_state.as_str() {
-                "pending" => {
-                    tx.execute(
-                        "UPDATE pipeline_runs
-                            SET index_membership = 'excluded',
-                                index_write_state = 'cancelled',
-                                updated_at = NOW()
-                          WHERE tenant_id = $1 AND run_id = $2",
-                        &[&tenant_id, &run.run_id],
-                    )
-                    .await?;
-                    Self::enqueue_index_invalidation_on_tx(
-                        &tx,
-                        run,
-                        PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
-                    )
-                    .await?;
-                }
-                "complete" | "failed" | "cancelled" => {
-                    Self::enqueue_index_invalidation_on_tx(
-                        &tx,
-                        run,
-                        PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
-                    )
-                    .await?;
-                }
-                _ => {}
-            }
-            release_awaiting_review(&tx, tenant_id, run.run_id).await?;
-        }
+        Self::end_runs_of_inoperable_submission_on_tx(
+            &tx,
+            tenant_id,
+            &runs,
+            PIPELINE_WITHDRAWAL_INVALIDATION_REASON,
+        )
+        .await?;
 
         let withdrawal_row = tx
             .query_one(
@@ -2873,6 +2852,119 @@ impl PgPipelineStore {
             revocation_propagation,
             trace_credit_forfeited,
         })
+    }
+
+    /// Ends the index and review work of `runs`, whose submission is no
+    /// longer operable, on the caller's transaction, which holds their rows:
+    /// a `pending` index write (which may be partly written) is cancelled
+    /// and excluded, and every run whose write may have written entries
+    /// queues the removal of its revision under `reason_code`; a run parked
+    /// for review is released, so the runner ends it as
+    /// `submission_inoperable`.
+    async fn end_runs_of_inoperable_submission_on_tx(
+        tx: &Transaction<'_>,
+        tenant_id: &str,
+        runs: &[PipelineRunRecord],
+        reason_code: &str,
+    ) -> Result<(), DatabaseError> {
+        for run in runs {
+            match run.index_write_state.as_str() {
+                "pending" => {
+                    tx.execute(
+                        "UPDATE pipeline_runs
+                            SET index_membership = 'excluded',
+                                index_write_state = 'cancelled',
+                                updated_at = NOW()
+                          WHERE tenant_id = $1 AND run_id = $2",
+                        &[&tenant_id, &run.run_id],
+                    )
+                    .await?;
+                    Self::enqueue_index_invalidation_on_tx(tx, run, reason_code).await?;
+                }
+                "complete" | "failed" | "cancelled" => {
+                    Self::enqueue_index_invalidation_on_tx(tx, run, reason_code).await?;
+                }
+                _ => {}
+            }
+            release_awaiting_review(tx, tenant_id, run.run_id).await?;
+        }
+        Ok(())
+    }
+
+    /// The pipeline's follow-up of `main`'s revocation of `submission_id`
+    /// (`DELETE /v1/traces/{id}`, `POST /v1/traces/{id}/revoke`, `DELETE
+    /// /v1/traces`), in one tenant transaction after `main` has marked the
+    /// submission revoked (Zaki review 1, round 2, finding 5). For a
+    /// submission with a pipeline run it does what the pipeline withdrawal
+    /// does for its content (`withdraw_pipeline_content_on_tx`: tombstone,
+    /// invalidations, one payload deletion per live object) and ends its
+    /// runs' work (`end_runs_of_inoperable_submission_on_tx`, reason
+    /// `revoked`). Lock order as the withdrawal's: the run rows, then the
+    /// submission row. Returns whether an index invalidation of the
+    /// submission's runs is pending afterwards; `false`, with nothing
+    /// written, for a submission with no pipeline run.
+    pub async fn follow_up_revocation(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let runs = tx
+            .query(
+                "SELECT * FROM pipeline_runs
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  ORDER BY run_id
+                  FOR UPDATE",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .iter()
+            .map(pipeline_run_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if runs.is_empty() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let submission = tx
+            .query_opt(
+                "SELECT submission_id, trace_id, redaction_hash, canonical_summary_hash
+                   FROM trace_submissions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                  FOR UPDATE",
+                &[&tenant_id, &submission_id],
+            )
+            .await?;
+        if let Some(submission) = submission.as_ref() {
+            withdraw_pipeline_content_on_tx(
+                &tx,
+                tenant_id,
+                &[(submission_id, submission)],
+                actor_principal_ref,
+            )
+            .await?;
+        }
+        Self::end_runs_of_inoperable_submission_on_tx(
+            &tx,
+            tenant_id,
+            &runs,
+            PIPELINE_REVOCATION_INVALIDATION_REASON,
+        )
+        .await?;
+        let run_ids = runs.iter().map(|run| run.run_id).collect::<Vec<_>>();
+        let invalidation_pending: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pipeline_index_invalidations
+                     WHERE tenant_id = $1 AND run_id = ANY($2) AND state = 'pending'
+                 )",
+                &[&tenant_id, &run_ids],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(invalidation_pending)
     }
 
     /// Whether `submission_id` of `tenant_id` has a pipeline run. `main`'s
@@ -5428,6 +5520,31 @@ impl PipelineService {
             );
         }
         Ok(outcome)
+    }
+
+    /// The pipeline's follow-up of `main`'s revocation of `submission_id`
+    /// (`PgPipelineStore::follow_up_revocation`); a queued invalidation
+    /// wakes the worker's invalidation step.
+    pub async fn follow_up_revocation(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        actor_principal_ref: &str,
+    ) -> anyhow::Result<()> {
+        if self
+            .store
+            .follow_up_revocation(tenant_id, submission_id, actor_principal_ref)
+            .await?
+        {
+            self.wake_follow_ups(
+                tenant_id,
+                PipelineFollowUps {
+                    index_invalidations: true,
+                    payouts: false,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Re-enqueues every `failed` index invalidation of `tenant_id`

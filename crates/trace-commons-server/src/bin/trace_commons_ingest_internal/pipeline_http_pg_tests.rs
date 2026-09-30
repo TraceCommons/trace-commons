@@ -6526,3 +6526,90 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
         parity.mismatches.join("\n")
     );
 }
+
+/// `(pending invalidations of the run, the run's index_invalidation_state,
+/// pending payload deletions the pipeline queued for the submission, live
+/// pipeline export snapshot items of the submission)`, for the revocation
+/// tests below.
+async fn pipeline_revocation_follow_up(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run: &trace_commons_server::versioned_pipeline::PipelineRunRecord,
+) -> (i64, String, i64) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations i
+                      WHERE i.tenant_id = r.tenant_id AND i.run_id = r.run_id
+                        AND i.state = 'pending' AND i.reason_code = 'revoked'),
+                    r.index_invalidation_state,
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items p
+                      WHERE p.tenant_id = r.tenant_id AND p.source_submission_id = r.submission_id
+                        AND p.action = 'delete_object_payload' AND p.status = 'pending'
+                        AND p.reason = 'pipeline_withdrawal')
+               FROM pipeline_runs r WHERE r.tenant_id = $1 AND r.run_id = $2",
+            &[&tenant_id, &run.run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1), row.get(2))
+}
+
+/// Zaki review 1, round 2, finding 5: `main`'s revocation routes -- `DELETE
+/// /v1/traces/{id}`, `POST /v1/traces/{id}/revoke` and `DELETE /v1/traces`
+/// -- run the pipeline's follow-up for a submission with a pipeline run, as
+/// the pipeline withdrawal does: the complete run's revision is queued for
+/// removal from the pipeline index (reason `revoked`), a payload deletion is
+/// queued for each of its live objects, and the run's worker wakes to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_revocation_routes_queue_the_pipeline_follow_up() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    for route in [
+        "DELETE /v1/traces/{id}",
+        "POST /v1/traces/{id}/revoke",
+        "DELETE /v1/traces",
+    ] {
+        let run = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+        let _ = fixture.service.take_follow_ups(&tenant);
+        let id = run.submission_id.to_string();
+        let (method, uri, body) = match route {
+            "DELETE /v1/traces/{id}" => ("DELETE", format!("/v1/traces/{id}"), None),
+            "POST /v1/traces/{id}/revoke" => ("POST", format!("/v1/traces/{id}/revoke"), None),
+            _ => (
+                "DELETE",
+                "/v1/traces".to_string(),
+                Some(serde_json::json!({ "submission_id": id })),
+            ),
+        };
+        let (status, response) = route_request(
+            fixture.state.clone(),
+            method,
+            &uri,
+            auth_headers(&fixture.token),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{route}: {response}");
+        let (invalidations, run_state, deletions) =
+            pipeline_revocation_follow_up(&fixture.runtime, &tenant, &run).await;
+        assert_eq!(
+            (invalidations, run_state.as_str()),
+            (1, "pending"),
+            "{route}: the revision is queued for removal"
+        );
+        assert!(
+            deletions >= 2,
+            "{route}: a payload deletion per live object ({deletions})"
+        );
+        assert!(
+            fixture.service.take_follow_ups(&tenant).index_invalidations,
+            "{route}: the worker's invalidation step is woken"
+        );
+    }
+}

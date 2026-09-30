@@ -15048,6 +15048,18 @@ async fn revoke_submission(
         enforce_db_mirror_write_result(state, "revocation", mirror_result)
             .map_err(internal_error)?;
     }
+    // Zaki review 1, round 2, finding 5: a submission with a pipeline run
+    // gets the pipeline's follow-up too -- its revision queued for removal
+    // from the pipeline index, a payload deletion per live object, and its
+    // runs' work ended -- as the pipeline withdrawal does. The submission is
+    // marked revoked above, so Settle, which reads the submission guard,
+    // forfeits whatever it has not completed.
+    if let Some(pipeline) = state.pipeline_service.as_ref() {
+        pipeline
+            .follow_up_revocation(tenant.tenant_id(), submission_id, tenant.principal_ref())
+            .await
+            .map_err(internal_error)?;
+    }
     if !invalidation_counts.is_empty() {
         let purpose_hash = sha256_prefixed(&revocation_reason);
         append_audit_event_mirrored(

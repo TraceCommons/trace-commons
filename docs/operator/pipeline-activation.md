@@ -398,8 +398,18 @@ deletes the queued payloads from the service-owned object store, with its
 own retries; an object that is already gone counts as deleted. A run
 withdrawn after Score and before Settle still completes Settle when its
 index command is already deleted: it is excluded from the index and its
-legs are forfeited. A Score attempt whose commit is refused because the
-submission stopped being operable deletes the objects it wrote.
+legs are forfeited. A Review or Score attempt whose commit is refused, for
+any reason (the submission stopped being operable, its lease expired, a
+settlement adapter is missing), deletes the objects it wrote.
+
+`main`'s revocation routes (`DELETE /v1/traces/{id}`,
+`POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission
+revoked as before, and, when a pipeline runtime is injected and the
+submission has a pipeline run, then make the pipeline's follow-up in one
+transaction: the export snapshot invalidations and payload deletions above,
+the run's index invalidation (reason `revoked`), and the release of a run
+parked in `awaiting_review`. Settle reads the revoked status and forfeits
+every leg it has not completed.
 
 The response is `main`'s withdrawal response plus two follow-up states,
 `index_invalidation` and `revocation_propagation`. Each is `not_required`,
