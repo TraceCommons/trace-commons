@@ -56815,6 +56815,22 @@ async fn gate_evaluate_worker_handler(
 ) -> ApiResult<Json<TraceGateEvaluateWorkerResponse>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_vector_operator(&tenant)?;
+    // Zaki review 1, minor item M-f: a submission the versioned pipeline
+    // scores and credits is not evaluated here, so this path cannot award it
+    // a second `NoveltyUtility` credit under another idempotency key. Without
+    // a pipeline runtime there are no pipeline runs to find.
+    if let Some(pipeline) = state.pipeline_service.as_ref()
+        && pipeline
+            .store()
+            .submission_has_pipeline_run(&tenant.tenant_id, body.submission_id)
+            .await
+            .map_err(internal_error)?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "pipeline_run_owns_submission",
+        ));
+    }
 
     let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await

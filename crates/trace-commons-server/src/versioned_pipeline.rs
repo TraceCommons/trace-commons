@@ -2860,6 +2860,30 @@ impl PgPipelineStore {
         })
     }
 
+    /// Whether `submission_id` of `tenant_id` has a pipeline run. `main`'s
+    /// gate evaluate route refuses such a submission, so the gate path never
+    /// credits a trace the pipeline credits (Zaki review 1, minor item M-f).
+    pub async fn submission_has_pipeline_run(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let has_run: bool = tx
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pipeline_runs
+                     WHERE tenant_id = $1 AND submission_id = $2
+                 )",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(has_run)
+    }
+
     /// Whether a withdrawal of `submission_id` by `account_id` reaches a
     /// pipeline run: the submission itself has one, or a submission mapped
     /// to the same source session of that account does. `main`'s account

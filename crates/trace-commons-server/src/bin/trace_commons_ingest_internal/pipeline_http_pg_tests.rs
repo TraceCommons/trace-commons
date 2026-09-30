@@ -4081,6 +4081,70 @@ async fn pipeline_review_routes_append_hash_only_audit_rows() {
     );
 }
 
+/// Zaki review 1, minor item M-f: `main`'s gate evaluate route
+/// (`POST /v1/workers/gate/evaluate`) refuses a submission that has a
+/// pipeline run with a label-only `409`, before it scores anything, so the
+/// gate path cannot award a second `NoveltyUtility` credit for a trace the
+/// pipeline credits. No gate decision is written. A submission with no run
+/// is not refused by this check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_gate_evaluate_route_refuses_a_submission_with_a_pipeline_run() {
+    let Some(mut fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let vector_token = format!("token-vector-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(
+        &mut tokens,
+        &fixture.tenant,
+        &vector_token,
+        TokenRole::VectorWorker,
+    );
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+
+    let (status, body) = route_request(
+        fixture.state.clone(),
+        "POST",
+        "/v1/workers/gate/evaluate",
+        auth_headers(&vector_token),
+        Some(serde_json::json!({"submission_id": run.submission_id})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "pipeline_run_owns_submission");
+    let decisions: i64 = fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM trace_gate_decisions WHERE submission_id = $1",
+            &[&run.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(decisions, 0, "nothing was scored");
+
+    let legacy =
+        insert_account_test_submission(fixture.owner.as_ref(), &fixture.tenant, &principal).await;
+    let (status, body) = route_request(
+        fixture.state.clone(),
+        "POST",
+        "/v1/workers/gate/evaluate",
+        auth_headers(&vector_token),
+        Some(serde_json::json!({"submission_id": legacy})),
+    )
+    .await;
+    assert_ne!(
+        body["error"], "pipeline_run_owns_submission",
+        "a submission with no run is not refused by this check ({status})"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `main`'s DB/file reconciliation of a tenant with pipeline rows (Ruling F-M10).
 // ---------------------------------------------------------------------------
