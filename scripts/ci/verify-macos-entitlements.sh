@@ -16,11 +16,15 @@ echo "--- the entitlement is present"
 # Extract the array, do not grep the whole document. The same string is also
 # the com.apple.application-identifier value, so a bare grep stayed green with
 # keychain-access-groups deleted outright -- only a launch caught that.
+#
+# Not `GROUPS`: that is bash's own array of the user's group ids. bash 3.2
+# exits 1 silently on the assignment, and newer bash ignores it, so the grep
+# below saw the primary gid and failed every correctly signed bundle.
 ENTS="$(codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -convert xml1 -o - -)" \
   || { echo "FAIL: could not read the signed entitlements; is the bundle signed?"; exit 1; }
-GROUPS="$(printf '%s' "$ENTS" | plutil -extract keychain-access-groups xml1 -o - - 2>/dev/null)" \
+SIGNED_GROUPS="$(printf '%s' "$ENTS" | plutil -extract keychain-access-groups xml1 -o - - 2>/dev/null)" \
   || { echo "FAIL: the signature carries no keychain-access-groups array"; exit 1; }
-printf '%s' "$GROUPS" | grep -q "<string>KXSWJN7WY8.ai.tracecommons.shell</string>" \
+printf '%s' "$SIGNED_GROUPS" | grep -q "<string>KXSWJN7WY8.ai.tracecommons.shell</string>" \
   || { echo "FAIL: keychain access group absent from keychain-access-groups"; exit 1; }
 
 echo "--- the profile grants what the entitlement requests"
@@ -39,6 +43,15 @@ DAYS_LEFT=$(( (EXPIRES_EPOCH - $(date +%s)) / 86400 ))
 echo "profile expires $EXPIRES ($DAYS_LEFT days)"
 test "$DAYS_LEFT" -gt 180 \
   || { echo "FAIL: under 180 days left; renew the profile or the certificate"; exit 1; }
+
+# PR CI runs everything above against an ad-hoc-signed fixture bundle (see
+# test-verify-macos-entitlements.sh). An ad-hoc signature can never be granted
+# the access group, so the launch below means something only on a release
+# build; the fixture stops here.
+if [ "${TC_VERIFY_STATIC_ONLY:-}" = 1 ]; then
+  echo "PASS: static checks (launch skipped: TC_VERIFY_STATIC_ONLY=1)"
+  exit 0
+fi
 
 echo "--- the signed app can actually reach its store"
 BIN="$APP/Contents/MacOS/TraceCommonsApp"

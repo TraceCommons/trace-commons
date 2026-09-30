@@ -24,6 +24,8 @@ on:
       - "scripts/windows/**"
       - "scripts/install.ps1"
       - "scripts/make-appinstaller.ps1"
+      - "scripts/ci/verify-macos-entitlements.sh"
+      - "scripts/ci/test-verify-macos-entitlements.sh"
       - "crates/trace-commons-contributor/**"
       - "crates/trace-commons-contributor-ffi/**"
       - "crates/trace-commons-contributor-gtk/**"
@@ -74,6 +76,11 @@ jobs:
       # `swift test` can link anything. Debug profile, to match that default.
       - name: Build the FFI dylib
         run: cargo build -p trace-commons-contributor-ffi
+      # The release job is the only thing that runs the entitlement verifier
+      # for real, so a bug in the script itself would first show on release
+      # day. This runs its static checks against ad-hoc-signed fixtures.
+      - name: Entitlement verifier against fixtures
+        run: ./scripts/ci/test-verify-macos-entitlements.sh
       # Both language modes and every target in the package, not a filter:
       # TCShellCore, TCUpdates, TCBridge and the app target all carry tests,
       # and a per-target list is how a new one joins untested -- the same
