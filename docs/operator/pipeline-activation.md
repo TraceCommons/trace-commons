@@ -444,17 +444,17 @@ to NEAR.
   contracts): the payout is `failed` with `near_contract_changed`. A call
   already submitted is still confirmed through its stored key.
 - The payout applies every control `main`'s live credit settlement reads
-  from its configuration, from `main`'s own values. A control the payout
-  can apply to a pipeline batch is applied before a line is sent. A control
-  it cannot apply refuses to start a runtime whose payout is enabled while
-  the control is set (ingest does not start). A payout a control refuses at
-  dispatch stays `pending` under the control's label, and every pass checks
-  it again, so it is paid once the configuration is fixed.
+  from its configuration, from `main`'s own values. These are process
+  settings, and every pipeline batch has the same policy version and the
+  same issuer, so each control is decided once, when ingest starts: a
+  control that would refuse a pipeline payout, or that the payout cannot
+  apply to a pipeline batch, refuses to start a runtime whose payout is
+  enabled (ingest does not start). Fix the configuration and restart.
 
   | `main`'s control | Case | What the pipeline does |
   |---|---|---|
-  | `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` | applied at dispatch | A batch whose policy version (`pipeline-internal-v1`) is not listed is not sent: `pending`, `credit_settlement_policy_version_not_allowed`. An empty list allows any version, as on `main`. |
-  | `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` | applied at dispatch | The pipeline settles as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`. With the list set and that issuer missing or not listed, nothing is sent: `pending`, `central_issuer_denied`. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` | refuses an enabled payout when it leaves the pipeline out | Every pipeline batch has policy version `pipeline-internal-v1`. A non-empty list without it: `credit_settlement_policy_version_not_allowed`. An empty list allows any version, as on `main`. |
+  | `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` | refuses an enabled payout when it leaves the pipeline out | The pipeline settles as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`. A non-empty list with that issuer missing or not listed: `central_issuer_denied`. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL` | refuses an enabled payout | `issuer_approval_evidence_hash_missing`. `main`'s approval is evidence an operator records for one batch's source list and names in the settlement request; Settle has no request, and `main`'s own automated settlement does not run live under this flag either. A pipeline batch records no issuer approval evidence. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS` | refuses an enabled payout | It needs `..._REQUIRE_ISSUER_APPROVAL`, so the row above applies. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ROLLOUT_SMOKE_READY` | refuses an enabled payout | `credit_settlement_rollout_smoke_not_ready`. `main` checks recorded rollout-smoke evidence at each settlement run; Settle has no run to check it at. |
@@ -471,9 +471,11 @@ to NEAR.
   active one. When the account has no active NEAR account (`none_enrolled`)
   or several with none designated (`ambiguous_no_designation`), the line is
   held as `main` holds it: the batch line records the label, no outbox row
-  is written, and the payout stays `pending` under the label. Each payout
-  pass resolves the account again, so the line is paid once the contributor
-  enrols or designates a NEAR account. A principal with no account is paid
+  is written, and the payout stays `pending` under the label. A payout pass
+  resolves the account again once per confirmation interval
+  (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`), so the line
+  is paid within one interval after the contributor enrols or designates a
+  NEAR account. A principal with no account is paid
   with no NEAR account, as on `main`. Holds (`credit_holds`) still apply per
   principal, as on `main`.
 - A withdrawal does not stop a payout. A leg is `complete` only when Settle

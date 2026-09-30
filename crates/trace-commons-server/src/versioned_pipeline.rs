@@ -3253,7 +3253,10 @@ impl PgPipelineStore {
     /// listed only once `confirmation_interval` has passed since its
     /// `updated_at`. Every payout write sets `updated_at`, confirmation polls
     /// included, so a `submitted` leg is polled at most once per interval
-    /// (Ruling T10-10). A `pending` leg is always listed.
+    /// (Ruling T10-10). A `pending` leg is listed at once, unless it carries a
+    /// label -- an account hold (`none_enrolled`, `ambiguous_no_designation`)
+    /// -- which waits out the same interval before the account is resolved
+    /// again (Zaki review 1, round 2, item 2).
     async fn list_payout_work_on(
         client: &mut deadpool_postgres::Client,
         tenant_id: &str,
@@ -3276,7 +3279,13 @@ impl PgPipelineStore {
                     AND s.payout_rail = 'near'
                     AND s.settlement_batch_id IS NOT NULL
                     AND (
-                        s.payout_state = 'pending'
+                        (
+                            s.payout_state = 'pending'
+                            AND (
+                                s.last_error_label IS NULL
+                                OR s.updated_at <= NOW() - make_interval(secs => $3)
+                            )
+                        )
                         OR (
                             s.payout_state = 'submitted'
                             AND s.updated_at <= NOW() - make_interval(secs => $3)
@@ -5015,6 +5024,30 @@ impl PipelineServiceBuilder {
                     .settlement_max_micros_per_account
                     .is_none(),
                 PIPELINE_PAYOUT_ACCOUNT_CAP_UNSUPPORTED_LABEL
+            );
+            // Zaki review 1, round 2, item 2: the two allowlists are process
+            // constants, every pipeline batch carries
+            // `PIPELINE_SETTLEMENT_POLICY_VERSION`, and the pipeline settles
+            // as its one configured issuer. So they are decided here, once:
+            // an allowlist that leaves the pipeline out refuses an enabled
+            // payout, under `main`'s label for that refusal.
+            let checks = &self.novelty_utility_checks;
+            anyhow::ensure!(
+                checks.settlement_allowed_policy_versions.is_empty()
+                    || checks
+                        .settlement_allowed_policy_versions
+                        .contains(PIPELINE_SETTLEMENT_POLICY_VERSION),
+                PIPELINE_PAYOUT_POLICY_VERSION_NOT_ALLOWED_LABEL
+            );
+            anyhow::ensure!(
+                checks.central_issuer_principal_refs.is_empty()
+                    || checks
+                        .issuer_principal_ref
+                        .as_ref()
+                        .is_some_and(|issuer| checks
+                            .central_issuer_principal_refs
+                            .contains(issuer)),
+                PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL
             );
         }
         let service = PipelineService {
@@ -8792,11 +8825,8 @@ impl PipelineService {
             let Some(batch_id) = settlement.settlement_batch_id else {
                 continue;
             };
-            let (batch_source_list_hash, batch_policy_version, lines) =
+            let (batch_source_list_hash, lines) =
                 load_payout_batch(client, run, &settlement, batch_id).await?;
-            // Zaki review 1, item 2: `main`'s settlement controls, applied
-            // before anything is sent. `None` lets the line go.
-            let control_refusal = self.payout_control_refusal(&batch_policy_version);
             let mut work = Vec::new();
             for line in lines
                 .iter()
@@ -8832,7 +8862,6 @@ impl PipelineService {
             }
 
             let mut contract_changed = false;
-            let mut refused_by_control = None;
             let mut held_payout = None;
             for (line, call, outbox_id, status) in &work {
                 let outbox_id = *outbox_id;
@@ -8846,10 +8875,6 @@ impl PipelineService {
                         }
                         if call.contract_id != near_contract_id {
                             contract_changed = true;
-                            continue;
-                        }
-                        if let Some(label) = control_refusal {
-                            refused_by_control = Some(label);
                             continue;
                         }
                         if status.is_none() {
@@ -8948,24 +8973,10 @@ impl PipelineService {
                     Some(PIPELINE_NEAR_CONTRACT_CHANGED_LABEL),
                 )
                 .await?;
-            } else if let Some(label) = refused_by_control {
-                // Zaki review 1, fix round, item 2: a refusal by one of
-                // `main`'s settlement controls is configuration, not a
-                // failure of this payout. `main` writes nothing when it
-                // refuses and settles the same events once the operator fixes
-                // the configuration; here the payout stays `pending` under
-                // the control's label, and the next pass checks it again.
-                set_payout_state_on(
-                    client,
-                    &run.tenant_id,
-                    run.run_id,
-                    TraceCreditSettlementNearStatus::Pending,
-                    Some(label),
-                )
-                .await?;
             } else if let Some(label) = held_payout {
                 // Held, as `main` holds it: still `pending`, under the hold
-                // label, so the next pass resolves the account again.
+                // label, so a later pass resolves the account again (once the
+                // confirmation interval has passed, `list_payout_work_on`).
                 set_payout_state_on(
                     client,
                     &run.tenant_id,
@@ -8979,35 +8990,6 @@ impl PipelineService {
             }
         }
         Ok(())
-    }
-
-    /// `main`'s settlement controls a payout line must pass before it is
-    /// sent (Zaki review 1, item 2), from `main`'s configuration as ingest
-    /// hands it over (`PipelineNoveltyUtilityChecks`): the batch's policy
-    /// version on `main`'s allowed list (an empty list allows any), and,
-    /// with `main`'s central-issuer allowlist set, the pipeline's issuer on
-    /// it, where `main` needs the principal that runs its live settlement.
-    /// `Some` is the label of the first control that refuses. `main`'s
-    /// issuer-approval requirement has no per-line check: an enabled payout
-    /// is refused at build while it is set.
-    fn payout_control_refusal(&self, batch_policy_version: &str) -> Option<&'static str> {
-        let checks = &self.novelty_utility_checks;
-        if !checks.settlement_allowed_policy_versions.is_empty()
-            && !checks
-                .settlement_allowed_policy_versions
-                .contains(batch_policy_version)
-        {
-            return Some(PIPELINE_PAYOUT_POLICY_VERSION_NOT_ALLOWED_LABEL);
-        }
-        if !checks.central_issuer_principal_refs.is_empty()
-            && !checks
-                .issuer_principal_ref
-                .as_ref()
-                .is_some_and(|issuer| checks.central_issuer_principal_refs.contains(issuer))
-        {
-            return Some(PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL);
-        }
-        None
     }
 }
 
@@ -9045,11 +9027,11 @@ async fn load_payout_batch(
     run: &PipelineRunRecord,
     settlement: &PipelineSettlementRecord,
     batch_id: Uuid,
-) -> anyhow::Result<(String, String, Vec<TraceCreditAccountSettlementLineItem>)> {
+) -> anyhow::Result<(String, Vec<TraceCreditAccountSettlementLineItem>)> {
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
     let row = tx
         .query_opt(
-            "SELECT source_list_hash, policy_version, line_items_json
+            "SELECT source_list_hash, line_items_json
                FROM trace_credit_settlement_batches
               WHERE tenant_id = $1 AND settlement_batch_id = $2
                 AND instrument_id = $3 AND status = 'finalized'",
@@ -9060,11 +9042,7 @@ async fn load_payout_batch(
     tx.commit().await?;
     let lines = serde_json::from_value(row.get("line_items_json"))
         .map_err(|_| anyhow::anyhow!(PIPELINE_PAYOUT_BATCH_MISSING_LABEL))?;
-    Ok((
-        row.get("source_list_hash"),
-        row.get("policy_version"),
-        lines,
-    ))
+    Ok((row.get("source_list_hash"), lines))
 }
 
 /// The status and stored call of one outbox line, or `None` when it has no
