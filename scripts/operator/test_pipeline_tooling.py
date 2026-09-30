@@ -702,6 +702,22 @@ class HfCorpusTests(unittest.TestCase):
                 corpus.load_direct_corpus(path)
             self.assertEqual(str(ctx.exception), "duplicate_corpus_identity")
 
+        with self.subTest("missing_trace_id"), tempfile.TemporaryDirectory() as tmp:
+            bad = dict(base)
+            del bad["trace_id"]
+            path = self._write_corpus(tmp, [bad])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "missing_corpus_identity")
+
+        with self.subTest("missing_submission_id"), tempfile.TemporaryDirectory() as tmp:
+            bad = dict(base)
+            del bad["submission_id"]
+            path = self._write_corpus(tmp, [bad])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "missing_corpus_identity")
+
         with self.subTest("unsafe_label"), tempfile.TemporaryDirectory() as tmp:
             bad = dict(base, label="Not Safe!")
             path = self._write_corpus(tmp, [bad])
@@ -859,6 +875,10 @@ class HfCorpusTests(unittest.TestCase):
                     self.assertIn("--expected-source-digest", calls[0])
                     self.assertIn("--expected-order-digest", calls[0])
                     self.assertNotIn("--local-jsonl-dir", calls[0])
+                    self.assertIn("--cache-dir", calls[0])
+                    self.assertEqual(
+                        calls[0][calls[0].index("--cache-dir") + 1], str(corpus.HF_CACHE_DIR)
+                    )
             finally:
                 shutil.rmtree(run.run_dir, ignore_errors=True)
 
@@ -883,6 +903,10 @@ class HfCorpusTests(unittest.TestCase):
                     self.assertIn("fixtures/pipeline-hf-jsonl", calls[0])
                     self.assertIn("--expected-source-digest", calls[0])
                     self.assertIn("--expected-order-digest", calls[0])
+                    self.assertIn("--cache-dir", calls[0])
+                    self.assertEqual(
+                        calls[0][calls[0].index("--cache-dir") + 1], str(corpus.HF_CACHE_DIR)
+                    )
             finally:
                 shutil.rmtree(run.run_dir, ignore_errors=True)
 

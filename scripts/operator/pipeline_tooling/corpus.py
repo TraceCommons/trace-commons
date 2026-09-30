@@ -34,11 +34,17 @@ import re
 import uuid
 from pathlib import Path
 
-from .environment import run_child
+from .environment import ROOT, run_child
 from .errors import require
 
 CORPUS_SCHEMA = "trace_commons.pipeline_corpus.v1"
 PIN_SCHEMA = "trace_commons.pipeline_hf_corpus_pin.v1"
+
+# Every HF download made by `export_hf_corpus` stays inside the worktree:
+# without an explicit `--cache-dir`, hf-hub falls back to `$HF_HOME` or
+# `~/.cache/huggingface`. One cache is shared across runs (git-ignored, like
+# the rest of `.local/`) and created on first use.
+HF_CACHE_DIR = ROOT / ".local" / "pipeline" / "hf-cache"
 
 _LABEL = re.compile(r"[a-z0-9_]{1,64}\Z")
 
@@ -86,7 +92,8 @@ def load_direct_corpus(path, expected_digest=None):
         label = fixture.get("label")
         require(isinstance(label, str) and _LABEL.fullmatch(label) is not None, "unsafe_fixture_label")
         for field, values in seen.items():
-            value = fixture[field]
+            value = fixture.get(field)
+            require(value is not None, "missing_corpus_identity")
             require(value not in values, "duplicate_corpus_identity")
             values.add(value)
         uuid.UUID(fixture["trace_id"])
@@ -115,7 +122,10 @@ def export_hf_corpus(run, pin_path, env, *, local_dir=None):
     `local_dir`, when given, is passed through as `--local-jsonl-dir`
     (a local fixture run, as CI uses); the pin's own `source_digest` and
     `order_digest` are used as `--expected-*-digest` either way, exactly as
-    the port script does for both its local and remote modes."""
+    the port script does for both its local and remote modes. `--cache-dir`
+    is always `HF_CACHE_DIR` (one code path for both modes; harmless when
+    `local_dir` is set, since no download happens then), so a real network
+    export never writes outside the worktree."""
     pin = load_pin(pin_path)
     output_dir = run.run_dir / "hf"
     command = [
@@ -152,6 +162,8 @@ def export_hf_corpus(run, pin_path, env, *, local_dir=None):
         "--expected-order-digest",
         str(pin["order_digest"]),
     ]
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    command += ["--cache-dir", str(HF_CACHE_DIR)]
     if local_dir is not None:
         command += ["--local-jsonl-dir", str(local_dir)]
 
