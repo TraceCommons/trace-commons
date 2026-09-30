@@ -108,7 +108,7 @@ public enum TCConsentCopy {
     }
 
     /// What a disclosure surface says when `routeDisclosureJSON` is nil:
-    /// `panel` and `session`, from `tc_route_disclosure_unreadable_copy`.
+    /// `title`, `panel` and `session`, from `tc_route_disclosure_unreadable_copy`.
     public static func routeDisclosureUnreadableJSON() -> String? {
         guard let raw = tc_route_disclosure_unreadable_copy() else { return nil }
         defer { tc_string_free(raw) }
