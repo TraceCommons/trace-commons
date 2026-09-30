@@ -1919,6 +1919,35 @@ impl TraceCorpusStore for PgBackend {
         }))
     }
 
+    async fn list_untombstoned_withdrawn_source_sessions(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT DISTINCT ON (mapping.session_digest) mapping.submission_id
+                   FROM trace_source_sessions source
+                   JOIN trace_submission_sessions mapping
+                     ON mapping.tenant_id = source.tenant_id
+                    AND mapping.account_id = source.account_id
+                    AND mapping.session_digest = source.session_digest
+                  WHERE source.tenant_id = $1 AND source.account_id = $2
+                    AND source.withdrawn_at IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM trace_withdrawals withdrawal
+                         WHERE withdrawal.tenant_id = mapping.tenant_id
+                           AND withdrawal.submission_id = mapping.submission_id)
+                  ORDER BY mapping.session_digest, mapping.submission_id",
+                &[&tenant_id, &account_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     fn supports_token_bundles(&self) -> bool {
         true
     }

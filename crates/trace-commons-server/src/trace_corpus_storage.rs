@@ -2465,6 +2465,24 @@ pub trait TraceCorpusStore: Send + Sync {
         // still fails closed because `claim_trace_source_session` refuses.
         Ok(None)
     }
+
+    /// One representative submission per withdrawn source session of
+    /// `account_id` that still maps a version with no withdrawal tombstone.
+    ///
+    /// A claim on a withdrawn session maps nothing, and a withdrawal
+    /// tombstones every mapped version, so outside an account merge this is
+    /// empty. A merge produces it: when both accounts held the same session
+    /// and only one had withdrawn it, the other's versions join a withdrawn
+    /// session untombstoned. Passing each representative to
+    /// `withdraw_trace_source_session` completes that withdrawal.
+    async fn list_untombstoned_withdrawn_source_sessions(
+        &self,
+        _tenant_id: &str,
+        _account_id: Uuid,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        // No source mappings on a legacy-only backend, so nothing to finish.
+        Ok(Vec::new())
+    }
     fn supports_token_bundles(&self) -> bool {
         false
     }

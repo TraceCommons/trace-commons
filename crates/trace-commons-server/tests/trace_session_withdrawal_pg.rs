@@ -1170,6 +1170,7 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
     let live_digest = [0x11u8; 32];
     let withdrawn_digest = [0x22u8; 32];
     let shared_digest = [0x33u8; 32];
+    let mirror_digest = [0x44u8; 32];
     let (first, second, gone, absorbed_shared, survivor_shared) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -1177,6 +1178,7 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
         Uuid::new_v4(),
         Uuid::new_v4(),
     );
+    let (absorbed_mirror, survivor_mirror) = (Uuid::new_v4(), Uuid::new_v4());
     for (account, principal, digest, id) in [
         (absorbed, "principal:z4-absorbed", live_digest, first),
         (absorbed, "principal:z4-absorbed", live_digest, second),
@@ -1192,6 +1194,18 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
             "principal:z4-survivor",
             shared_digest,
             survivor_shared,
+        ),
+        (
+            absorbed,
+            "principal:z4-absorbed",
+            mirror_digest,
+            absorbed_mirror,
+        ),
+        (
+            survivor,
+            "principal:z4-survivor",
+            mirror_digest,
+            survivor_mirror,
         ),
     ] {
         assert_eq!(
@@ -1221,6 +1235,21 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
         .await
         .unwrap()
         .unwrap();
+    // The mirror case: the survivor withdrew a session the absorbed account
+    // also holds an accepted version of.
+    backend
+        .withdraw_trace_source_session(&tenant, survivor, survivor_mirror, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        backend
+            .list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+            .await
+            .unwrap()
+            .is_empty(),
+        "before a merge every mapped version of a withdrawn session is tombstoned"
+    );
 
     let code_hash = format!(
         "sha256:{}{}",
@@ -1300,6 +1329,54 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
         "a proposal consumed by an earlier transaction authorizes nothing"
     );
     direct.rollback().await.unwrap();
+
+    // Both accounts held the shared and the mirror sessions, and one side had
+    // withdrawn each. The merge joins the other side's accepted version to a
+    // withdrawn session without a tombstone; the withdrawal must still win.
+    let pending = backend
+        .list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.len(),
+        2,
+        "one representative per withdrawn session with an untombstoned version"
+    );
+    for representative in pending {
+        backend
+            .withdraw_trace_source_session(&tenant, survivor, representative, chrono::Utc::now())
+            .await
+            .unwrap()
+            .expect("the representative maps under the surviving account");
+    }
+    for id in [survivor_shared, absorbed_mirror] {
+        assert_eq!(
+            backend
+                .get_trace_submission(&tenant, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            TraceCorpusStatus::Revoked,
+            "the merge-joined version is withdrawn"
+        );
+        assert!(
+            backend
+                .get_trace_withdrawal(&tenant, id)
+                .await
+                .unwrap()
+                .is_some(),
+            "the merge-joined version carries its own withdrawal tombstone"
+        );
+    }
+    assert!(
+        backend
+            .list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+            .await
+            .unwrap()
+            .is_empty(),
+        "completing the withdrawal leaves nothing pending"
+    );
 
     // Withdrawing one version as the survivor withdraws every version the
     // absorbed account submitted from that session.

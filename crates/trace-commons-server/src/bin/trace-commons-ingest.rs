@@ -17952,6 +17952,73 @@ async fn evict_withdrawn_trace_from_derived_surfaces(
     Ok(())
 }
 
+/// Everything a withdrawal does after its DB tombstone and `revoked` status
+/// have landed, for every withdrawn version in `affected_ids`: the file-side
+/// tombstone and records, eviction from derived surfaces, deletion of every
+/// stored object (token bundles included), and one hash-only revoke audit
+/// event per version. Credit needs no step here: unsettled credit on a
+/// revoked record is never batched.
+///
+/// Shared by the withdrawal route and account merge, so a version whose
+/// withdrawal a merge completes is treated exactly as a withdrawn one.
+/// Idempotent: a retry converges rather than leaving content behind.
+async fn complete_trace_withdrawal(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    ctx: &AccountCtx,
+    affected_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    // The file side records the withdrawal too, before any content is deleted:
+    // the file tombstone's redaction hash is read from the stored envelope.
+    // Its DB row is written from the same tombstone.
+    let tombstone_actor = account_audit_tenant(ctx).principal_ref;
+    for affected_id in affected_ids.iter().copied() {
+        revoke_withdrawn_trace_file_records(
+            state,
+            db,
+            &ctx.tenant_id,
+            affected_id,
+            &tombstone_actor,
+        )
+        .await?;
+    }
+
+    // Retained mappings make this list stable across retries. Complete the
+    // external deletion for every content version before reporting success.
+    for affected_id in affected_ids.iter().copied() {
+        evict_withdrawn_trace_from_derived_surfaces(state, db, &ctx.tenant_id, affected_id).await?;
+        delete_withdrawn_trace_objects(state, db, &ctx.tenant_id, affected_id).await?;
+    }
+
+    // Hash-only audit, one event per withdrawn version. The reason is a fixed
+    // label; the actor is the synthetic account-actor ref, never contributor
+    // identity.
+    let audit_tenant = account_audit_tenant(ctx);
+    for affected_id in affected_ids.iter().copied() {
+        let audit_event =
+            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
+        if let Err(error) = append_audit_event_with_db_mirror(
+            state,
+            &audit_tenant,
+            audit_event,
+            StorageTraceAuditAction::Revoke,
+            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
+        )
+        .await
+        {
+            // The content is already gone and the tombstone is durable; a
+            // failed audit append must not resurrect either. Log hash-only
+            // and continue.
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(&error),
+                submission_id = %affected_id,
+                "Trace Commons withdrawal audit append failed"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `POST /v1/account/traces/{submission_id}/withdraw` — contributor-initiated
 /// withdrawal, authenticated by the ACCOUNT SESSION (the same auth that guards
 /// the content read-back), not the device key: withdrawal is an account-level
@@ -18121,64 +18188,9 @@ async fn account_trace_withdraw_handler(
         withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
     });
 
-    // The file side records the withdrawal too, before any content is deleted:
-    // the file tombstone's redaction hash is read from the stored envelope.
-    // Its DB row is written from the same tombstone.
-    let tombstone_actor = account_audit_tenant(&ctx).principal_ref;
-    for affected_id in affected_ids.iter().copied() {
-        revoke_withdrawn_trace_file_records(
-            state.as_ref(),
-            &db,
-            &ctx.tenant_id,
-            affected_id,
-            &tombstone_actor,
-        )
+    complete_trace_withdrawal(state.as_ref(), &db, &ctx, &affected_ids)
         .await
         .map_err(|error| withdrawal_failed(&error))?;
-    }
-
-    // Retained mappings make this list stable across retries. Complete the
-    // external deletion for every content version before reporting success.
-    for affected_id in affected_ids.iter().copied() {
-        evict_withdrawn_trace_from_derived_surfaces(
-            state.as_ref(),
-            &db,
-            &ctx.tenant_id,
-            affected_id,
-        )
-        .await
-        .map_err(|error| withdrawal_failed(&error))?;
-        delete_withdrawn_trace_objects(state.as_ref(), &db, &ctx.tenant_id, affected_id)
-            .await
-            .map_err(|error| withdrawal_failed(&error))?;
-    }
-
-    // Hash-only audit, one event per withdrawn version. The reason is a fixed
-    // label; the actor is the synthetic account-actor ref, never contributor
-    // identity.
-    let audit_tenant = account_audit_tenant(&ctx);
-    for affected_id in affected_ids.iter().copied() {
-        let audit_event =
-            TraceCommonsAuditEvent::revoked(&audit_tenant, affected_id, TRACE_WITHDRAWAL_REASON);
-        if let Err(error) = append_audit_event_with_db_mirror(
-            state.as_ref(),
-            &audit_tenant,
-            audit_event,
-            StorageTraceAuditAction::Revoke,
-            trace_revocation_audit_metadata(TRACE_WITHDRAWAL_REASON),
-        )
-        .await
-        {
-            // The content is already gone and the tombstone is durable; a
-            // failed audit append must not resurrect either. Log hash-only
-            // and continue.
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(&error),
-                submission_id = %affected_id,
-                "Trace Commons withdrawal audit append failed"
-            );
-        }
-    }
 
     let mut response = AccountTraceWithdrawalResponse::from_record(tombstone, credit_retained);
     if db.supports_token_bundles() {
@@ -20692,6 +20704,44 @@ async fn account_merge_start_handler(
     })))
 }
 
+/// Complete, for the surviving account, every source-session withdrawal a
+/// merge left unfinished.
+///
+/// `execute_merge` carries the absorbed account's source sessions onto the
+/// survivor, and a withdrawal on either side wins (V78). When both accounts
+/// held the same session and only one had withdrawn it, the other side's
+/// versions join a withdrawn session with no tombstone: they cannot be
+/// re-accepted, but their content is still live. This runs the withdrawal
+/// itself over each such session, so those versions are revoked,
+/// tombstoned, deleted and audited exactly as a withdrawal would.
+///
+/// DB tombstone and status first, bytes second, as in the withdrawal route.
+/// Every step is idempotent, and the lookup covers the whole survivor
+/// account, so a retry, or the next withdrawal of any member of the
+/// session, finishes whatever a failed run left.
+async fn complete_source_session_withdrawals_after_merge(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    ctx: &AccountCtx,
+) -> anyhow::Result<()> {
+    let survivor = ctx.account_id.as_uuid();
+    let representatives = db
+        .list_untombstoned_withdrawn_source_sessions(&ctx.tenant_id, survivor)
+        .await?;
+    for representative in representatives {
+        // Idempotent over an existing withdrawal: the session keeps its
+        // first `withdrawn_at`, and every mapped version is tombstoned.
+        let Some(withdrawal) = db
+            .withdraw_trace_source_session(&ctx.tenant_id, survivor, representative, Utc::now())
+            .await?
+        else {
+            anyhow::bail!("TraceSourceSessionMappingMissing");
+        };
+        complete_trace_withdrawal(state, db, ctx, &withdrawal.affected_submission_ids).await?;
+    }
+    Ok(())
+}
+
 /// `POST /v1/account/merge/confirm` — execute a staged device-principal merge
 /// (Slice 3b Task 8). This is the IRREVERSIBLE step: it atomically re-keys
 /// account B's principals + strong authenticators onto the caller's account and
@@ -20705,6 +20755,11 @@ async fn account_merge_start_handler(
 /// or a closed survivor/absorbed account all affect zero rows and yield a UNIFORM
 /// 400 — no existence oracle. `execute_merge` writes the `account_merged` audit on
 /// success; this handler adds none. Hash-only: returns counts only.
+///
+/// After the merge commits, a withdrawal either account made wins across the
+/// merged session: see [`complete_source_session_withdrawals_after_merge`].
+/// If that step fails the merge stays done, but the response is a label-only
+/// `500` rather than a success while withdrawn content may survive.
 async fn account_merge_confirm_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -20729,6 +20784,19 @@ async fn account_merge_confirm_handler(
             "merge proposal invalid or expired",
         ));
     };
+
+    complete_source_session_withdrawals_after_merge(state.as_ref(), &db, &ctx)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(&error),
+                "Trace Commons merge withdrawal fan-out failed; failing closed"
+            );
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "merge withdrawal completion failed",
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "merged": true,
