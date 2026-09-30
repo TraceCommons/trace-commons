@@ -713,14 +713,29 @@ person:
   folder, and the grant arms nothing already on disk, so it waits for a
   person instead of going unattended.
 
+A `Pending` entry in an `ignore` folder does not count (setting `ignore`
+refuses what was waiting, so one there is only a transient, and the
+contributor has already said "never offer these"), unless it is
+`held_for_review`. Only `notify_only` ("Ask me") counts every `Pending`
+entry.
+
 Computed fresh on every `status` (and therefore on `snapshot`, since
 `subscribe` sends `status` inside it) from the queue and the policy file, the
 same way `witness_capacity` is: never a second stored counter that could
-disagree with the rows it counts. The single function behind it,
-`queue::decisions_owed(queue, policy)`, is written as one small, explicit
-filter for exactly this reason -- a later state that also must not count
-(a non-permanent "keep on this Mac", K5) extends that filter rather than
-growing a second badge-counting path elsewhere.
+disagree with the rows it counts. `decisions_owed` and `queue_depth` are read
+under the same queue lock, so one `status` never pairs two different queues.
+The single function behind it, `queue::decisions_owed(queue, policy)`, is
+written around one small predicate for exactly this reason: a later state
+that must also count, or must not, extends that predicate rather than
+growing a second badge-counting path elsewhere. Two are already tracked as
+follow-ups for when their PRs land: K5's returned-from-keep entries and
+from-now backlog (#1134), and a `scrub_check` manual hold (#1139).
+
+A policy change can move this count without changing the queue: arming a
+folder with entries waiting (`set_project_mode`), or the watcher arming a
+newly discovered project under the automatic grant. When one does, the daemon
+publishes `status_changed`, so a shell that refreshes status only on
+`queue_changed` does not keep the old badge.
 
 #### `routing`
 

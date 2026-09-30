@@ -1840,27 +1840,42 @@ impl Queue {
 ///   deliberately leaves it for a person rather than sweeping it in.
 ///
 /// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
-/// that is the ordinary Ask-me case the badge exists for. `Ignore`d projects
-/// never appear here because their entries are `Refused`, not `Pending`.
+/// that is the ordinary Ask-me case the badge exists for.
 ///
-/// Deliberately one small function so a later state that also must not count
-/// -- K5's non-permanent "keep on this Mac" -- has exactly one place to add
-/// its own exclusion, rather than a second badge-counting path drifting from
-/// this one. Extend the `filter` below, not `status_value` directly.
+/// An `Ignore`d folder counts nothing but a `held_for_review` entry. Setting
+/// `Ignore` refuses what was waiting (`refuse_pending_for_project`), so a
+/// `Pending` entry there is only a transient (a failed queue save, say), and
+/// the contributor has already said "never offer these": the badge must not
+/// ask them to decide about it. The check is therefore `== NotifyOnly`, not
+/// `!= AutoUpload`.
+///
+/// Deliberately one small function, with one predicate
+/// ([`needs_a_person`]), so a state that must also count or must not --
+/// K5's returned-from-keep entries and from-now backlog (#1134), and a
+/// `scrub_check` manual hold (#1139), once those land -- has exactly one
+/// place to add its rule, rather than a second badge-counting path drifting
+/// from this one. Extend `needs_a_person`, not `status_value`.
 pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy) -> usize {
     queue
         .pending()
         .into_iter()
-        .filter(|entry| {
-            if entry.held_for_review() {
-                return true;
-            }
-            if policy.resolve(&entry.project_key) != ProjectMode::AutoUpload {
-                return true;
-            }
-            policy.holds_back_unattended(&entry.project_key, &entry.path.to_string_lossy())
-        })
+        .filter(|entry| needs_a_person(entry, policy))
         .count()
+}
+
+/// Whether one `Pending` entry is a decision owed to a person. See
+/// [`decisions_owed`] for each rule and why.
+fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy) -> bool {
+    if entry.held_for_review() {
+        return true;
+    }
+    match policy.resolve(&entry.project_key) {
+        ProjectMode::NotifyOnly => true,
+        ProjectMode::AutoUpload => {
+            policy.holds_back_unattended(&entry.project_key, &entry.path.to_string_lossy())
+        }
+        ProjectMode::Ignore => false,
+    }
 }
 
 #[cfg(test)]
@@ -3511,11 +3526,14 @@ mod tests {
         assert_eq!(decisions_owed(&q, &policy), 1);
     }
 
-    /// An armed (`AutoUpload`) entry that has already been approved is not
-    /// even `Pending` any more -- the badge counts only decisions still
-    /// owed, and this one has none left.
+    /// A mixed queue, each entry a different reason to count or not: an
+    /// Ask-me `Pending` (counts), an Ask-me entry already `Approved` (no
+    /// decision left), an armed `Pending` that is settling (goes out
+    /// unattended), and an armed `Pending` held for review (needs a person).
+    /// Replaces a single-entry case that could not fail: an `Approved` entry
+    /// is never in `pending()` whatever the filter says.
     #[test]
-    fn decisions_owed_excludes_an_armed_approved_entry() {
+    fn decisions_owed_counts_only_the_owed_entries_of_a_mixed_queue() {
         let mut policy = ProjectPolicy::new();
         policy
             .set_mode(
@@ -3524,12 +3542,42 @@ mod tests {
                 at("2026-08-08T12:00:00Z"),
             )
             .unwrap();
-        let q = queue_of(vec![entry_in("/w/armed", QueueState::Approved)]);
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut decided = entry_in("/w/ask-me", QueueState::Approved);
+        decided.session_hash = "sha256:decided".into();
+        decided.path = PathBuf::from("/w/ask-me/decided.jsonl");
+        let mut settling = entry_in("/w/armed", QueueState::Pending);
+        settling.session_hash = "sha256:settling".into();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.session_hash = "sha256:held".into();
+        held.path = PathBuf::from("/w/armed/held.jsonl");
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        let q = queue_of(vec![ask_me, decided, settling, held]);
+        assert_eq!(q.pending().len(), 3);
         assert_eq!(
             decisions_owed(&q, &policy),
-            0,
-            "an armed, already-approved entry asks nobody"
+            2,
+            "the Ask-me pending and the held-for-review one"
         );
+    }
+
+    /// `Ignore` asks nobody: a `Pending` entry left in an ignored folder
+    /// (setting `Ignore` normally refuses them, so this is a transient) is
+    /// not a decision the contributor owes. Pins the `== NotifyOnly` rule.
+    #[test]
+    fn decisions_owed_does_not_count_a_pending_entry_in_an_ignored_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/ignored",
+                ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/ignored", QueueState::Pending)]);
+        assert_eq!(q.pending().len(), 1);
+        assert_eq!(decisions_owed(&q, &policy), 0);
     }
 
     /// A fresh session in an armed folder stays `Pending` while it is
