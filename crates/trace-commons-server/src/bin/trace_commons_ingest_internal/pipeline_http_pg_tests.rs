@@ -4980,6 +4980,143 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
     }
 }
 
+/// Zaki review 1, round 2, item 1: one status request for several
+/// compatibility runs in different states -- scored and settled, past Review
+/// with Score to come, withdrawn, and waiting for review (a `received`
+/// submission, which falls back to the pipeline's document) -- answers with
+/// the same documents, in the asked order, as one request per id, under file
+/// and database contributor reads alike. The batched path reads those
+/// submissions and their credit events once for the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_request_for_several_compatibility_runs_matches_one_request_per_id() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-batch-{suffix}");
+    let token = format!("token-compat-batch-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let principal = static_token_principal_ref(&token);
+
+    let settled = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let withdrawn = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    service
+        .withdraw_submission(&tenant, withdrawn.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws a run");
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs");
+    let quarantined = quarantined_pipeline_run(&service, &tenant, &principal).await;
+    let ids = [
+        settled.submission_id,
+        created.submission_id,
+        withdrawn.submission_id,
+        quarantined.submission_id,
+    ];
+
+    for database_reads in [false, true] {
+        let mut state = test_state_with_options(
+            dir.path().to_path_buf(),
+            Some(owner.clone() as Arc<dyn Database>),
+            Some(artifacts.clone()),
+            database_reads,
+            database_reads,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens.clone());
+        state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        let ask = |submission_ids: Vec<Uuid>| {
+            let state = state.clone();
+            let token = token.clone();
+            async move {
+                let (status, documents) = route_request(
+                    state,
+                    "POST",
+                    "/v1/contributors/me/submission-status",
+                    auth_headers(&token),
+                    Some(serde_json::json!({ "submission_ids": submission_ids })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{documents}");
+                documents.as_array().expect("a document list").clone()
+            }
+        };
+        let batched = ask(ids.to_vec()).await;
+        let mut one_by_one = Vec::new();
+        for id in ids {
+            one_by_one.extend(ask(vec![id]).await);
+        }
+        assert_eq!(batched.len(), ids.len(), "{batched:?}");
+        assert_eq!(
+            batched, one_by_one,
+            "database reads {database_reads}: the batched documents are the per-id ones"
+        );
+        let statuses = batched
+            .iter()
+            .map(|document| document["status"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            ["accepted", "accepted", "revoked", "quarantined"],
+            "database reads {database_reads}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The compatibility bundle through the real router and worker, and parity
 // with the legacy path under the same configuration.

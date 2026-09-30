@@ -2301,6 +2301,38 @@ impl TraceCorpusStore for PgBackend {
         Ok(record)
     }
 
+    async fn get_trace_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT
+                    tenant_id, submission_id, trace_id, status, auth_principal_ref,
+                    contributor_pseudonym, submitted_tenant_scope_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts, canonical_summary_hash, submission_score, credit_points_pending,
+                    credit_points_final, received_at, updated_at, reviewed_at,
+                    review_assigned_to_principal_ref, review_assigned_at,
+                    review_lease_expires_at, review_due_at, revoked_at, expires_at, purged_at, last_status_reason, residual_risk_basis
+                 FROM trace_submissions
+                 WHERE tenant_id = $1 AND submission_id = ANY($2)",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_submission).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
     async fn list_trace_submissions(
         &self,
         tenant_id: &str,
@@ -2621,6 +2653,34 @@ impl TraceCorpusStore for PgBackend {
                  WHERE tenant_id = $1
                  ORDER BY occurred_at ASC",
                 &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let records = rows.iter().map(row_to_credit_event).collect();
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        records
+    }
+
+    async fn list_trace_credit_events_for_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT
+                    tenant_id, credit_event_id, submission_id, trace_id, credit_account_ref,
+                    event_type, points_delta, reason, external_ref, actor_principal_ref,
+                    actor_role, settlement_state, occurred_at, witness_provenance_class
+                 FROM trace_credit_ledger
+                 WHERE tenant_id = $1 AND submission_id = ANY($2)
+                 ORDER BY occurred_at ASC",
+                &[&tenant_id, &submission_ids],
             )
             .await
             .map_err(DatabaseError::Postgres)?;

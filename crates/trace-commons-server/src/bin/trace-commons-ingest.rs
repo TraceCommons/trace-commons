@@ -16271,6 +16271,24 @@ async fn submission_status_handler(
         }
         None => BTreeMap::new(),
     };
+    // Zaki review 1, round 2, item 1: every compatibility run `main`'s view
+    // did not describe gets `main`'s document from the database, all of them
+    // from one submission read and one credit-event read.
+    let compatibility_pipelines = body
+        .submission_ids
+        .iter()
+        .filter(|submission_id| !visible_by_submission.contains_key(submission_id))
+        .filter_map(|submission_id| pipeline_by_submission.get(submission_id))
+        .filter(|pipeline| pipeline.compatibility.is_some())
+        .collect::<Vec<_>>();
+    let compatibility_documents = compatibility_statuses_from_database(
+        state.as_ref(),
+        tenant.auth(),
+        account_principals,
+        &compatibility_pipelines,
+    )
+    .await
+    .map_err(internal_error)?;
     let mut statuses = Vec::new();
     for submission_id in body.submission_ids {
         let pipeline = pipeline_by_submission.get(&submission_id);
@@ -16289,19 +16307,8 @@ async fn submission_status_handler(
             status.pipeline = pipeline.map(pipeline_status_for_protocol);
             statuses.push(status);
         } else if let Some(pipeline) = pipeline {
-            let compatibility_status = if pipeline.compatibility.is_some() {
-                compatibility_status_from_database(
-                    state.as_ref(),
-                    tenant.auth(),
-                    account_principals,
-                    pipeline,
-                    compatibility_decision.as_ref(),
-                )
-                .await
-                .map_err(internal_error)?
-            } else {
-                None
-            };
+            // The same id asked twice gets the same document twice.
+            let compatibility_status = compatibility_documents.get(&submission_id).cloned();
             statuses.push(
                 compatibility_status.unwrap_or_else(|| submission_status_from_pipeline(pipeline)),
             );
@@ -16385,45 +16392,78 @@ fn compatibility_credit_decision(
     })
 }
 
-/// Ruling T15-7: the status document of a compatibility run that `main`'s
-/// own view does not hold -- contributor reads come from files, and the
-/// pipeline writes no file record. It is `main`'s document, built by
-/// `main`'s functions from the submission row and the ledger events the
-/// pipeline wrote, with `decision` as the gate decision. `None` when no
-/// database is configured, or the submission is not one `main`'s document
-/// describes (a `received` one) or one the caller may see; the caller then
-/// reports the pipeline's own document.
-async fn compatibility_status_from_database(
+/// Ruling T15-7: `main`'s status documents of the compatibility runs in
+/// `pipelines`, the ones `main`'s own view did not describe (contributor
+/// reads come from files, and the pipeline writes no file record), keyed by
+/// submission id: each
+/// built as `main` builds it, from the submission row the pipeline wrote,
+/// the credit events of those submissions, and the run's gate-equivalent
+/// decision (`compatibility_credit_decision`), with the pipeline block.
+/// One submission read and one credit-event read serve every run. A
+/// submission missing from the result -- no database, a submission `main`'s
+/// document does not describe (a `received` one), or one the caller may not
+/// see -- falls back to the pipeline's own document at the caller.
+async fn compatibility_statuses_from_database(
     state: &AppState,
     auth: &TenantAuth,
     account_principals: Option<&AccountPrincipalSet>,
-    pipeline: &PipelineContributorStatus,
-    decision: Option<&StorageTraceGateCreditDecisionRow>,
-) -> anyhow::Result<Option<TraceSubmissionStatusUpdate>> {
+    pipelines: &[&PipelineContributorStatus],
+) -> anyhow::Result<BTreeMap<Uuid, TraceSubmissionStatusUpdate>> {
     let Some(db) = state.db_mirror.as_ref() else {
-        return Ok(None);
+        return Ok(BTreeMap::new());
     };
-    let Some(stored) = db
-        .get_trace_submission(&auth.tenant_id, pipeline.submission_id)
+    if pipelines.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let submission_ids = pipelines
+        .iter()
+        .map(|pipeline| pipeline.submission_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut records = Vec::with_capacity(submission_ids.len());
+    for stored in db
+        .get_trace_submissions(&auth.tenant_id, &submission_ids)
         .await?
-    else {
-        return Ok(None);
-    };
-    let Some(record) = trace_commons_record_from_storage_submission(stored).transpose()? else {
-        return Ok(None);
-    };
-    let records = visible_submission_records_scoped(auth, account_principals, vec![record]);
-    let Some(record) = records.first() else {
-        return Ok(None);
-    };
+    {
+        if let Some(record) = trace_commons_record_from_storage_submission(stored).transpose()? {
+            records.push(record);
+        }
+    }
+    let records = visible_submission_records_scoped(auth, account_principals, records);
+    if records.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let credit_events = credit_events_for_records(
         &records,
-        read_contributor_credit_events_from_db(state, auth, account_principals, &records).await?,
+        read_contributor_credit_events_for_records_from_db(
+            state,
+            auth,
+            account_principals,
+            &records,
+        )
+        .await?,
     );
-    let mut status =
-        submission_status_from_record(record, &credit_events, state.near_settlement_mode, decision);
-    status.pipeline = Some(pipeline_status_for_protocol(pipeline));
-    Ok(Some(status))
+    let pipeline_by_submission = pipelines
+        .iter()
+        .map(|pipeline| (pipeline.submission_id, *pipeline))
+        .collect::<BTreeMap<_, _>>();
+    let mut documents = BTreeMap::new();
+    for record in &records {
+        let Some(pipeline) = pipeline_by_submission.get(&record.submission_id) else {
+            continue;
+        };
+        let decision = compatibility_credit_decision(pipeline);
+        let mut status = submission_status_from_record(
+            record,
+            &credit_events,
+            state.near_settlement_mode,
+            decision.as_ref(),
+        );
+        status.pipeline = Some(pipeline_status_for_protocol(pipeline));
+        documents.insert(record.submission_id, status);
+    }
+    Ok(documents)
 }
 
 /// The status document of a submission only the pipeline knows. Trace Credit
@@ -60524,6 +60564,42 @@ async fn read_contributor_credit_events_from_db(
     let mut credit_events = Vec::new();
     for event in db
         .list_trace_credit_events(&tenant.tenant_id)
+        .await
+        .context("failed to read Trace Commons credit events from DB mirror")?
+    {
+        let Some(owner_principal_ref) = owner_by_submission.get(&event.submission_id) else {
+            continue;
+        };
+        if let Some(event) =
+            trace_commons_credit_event_from_storage(event, owner_principal_ref.as_str())?
+        {
+            credit_events.push(event);
+        }
+    }
+    Ok(visible_credit_events(tenant, account_scope, credit_events))
+}
+
+/// `read_contributor_credit_events_from_db` for `records` only: the credit
+/// events of those submissions, read with one statement filtered to their
+/// ids rather than the whole ledger.
+async fn read_contributor_credit_events_for_records_from_db(
+    state: &AppState,
+    tenant: &TenantAuth,
+    account_scope: Option<&AccountPrincipalSet>,
+    records: &[TraceCommonsSubmissionRecord],
+) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
+    let db = state
+        .db_mirror
+        .as_ref()
+        .context("TRACE_COMMONS_DB_CONTRIBUTOR_READS is enabled without a DB mirror")?;
+    let owner_by_submission = records
+        .iter()
+        .map(|record| (record.submission_id, record.auth_principal_ref.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let submission_ids = owner_by_submission.keys().copied().collect::<Vec<_>>();
+    let mut credit_events = Vec::new();
+    for event in db
+        .list_trace_credit_events_for_submissions(&tenant.tenant_id, &submission_ids)
         .await
         .context("failed to read Trace Commons credit events from DB mirror")?
     {
