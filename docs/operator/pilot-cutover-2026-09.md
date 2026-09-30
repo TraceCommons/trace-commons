@@ -527,30 +527,56 @@ the cutover itself.
   submitting and reading status against the V91 schema (tested in the
   `5888b8bcd` rehearsal). The schema stays at V91; the old build ignores the
   new tables.
-- **Rolling forward again needs one repair per affected tenant** (#1100 in
-  the roll-forward build). While the old build runs, it appends file audit
-  events whose DB mirrors carry no chain hash, or whose events are file-only.
+- **Rolling forward again needs one repair per affected tenant** (#1100 and
+  its follow-up in the roll-forward build). While the old build runs, it
+  appends file audit events whose DB mirrors carry no chain hash, or whose
+  events are file-only.
   - The new build then chains from the file head. The DB's latest hashed row
     is older, so every mirrored append is refused as stale. Under
     `REQUIRE_DB_MIRROR_WRITES`, every audited write fails for each tenant that
     was active during the rollback.
-  - For each such tenant, run `POST /v1/admin/audit-chain-repair` as that
+  - A submission refused in that state still stores its submission, but not
+    its `submitted` audit event. Its retry after the repair is recorded as an
+    `idempotent_submit`. Repair each tenant before it takes traffic.
+  - Find the affected tenants with the repair dry run, run for every tenant:
+    an affected tenant reports `file_ahead_through_legacy_rows`, and any
+    other reports `clean`. The audit-chain drill also flags them, with
+    `audit_chain_file_head_not_db_head=1`. A roll-forward build without the
+    #1100 follow-up reports those tenants `ready: true`, so there, use the
+    dry run only.
+  - For each affected tenant, run `POST /v1/admin/audit-chain-repair` as that
     tenant's admin:
     1. Dry run (the default). Expect `divergence:
        "file_ahead_through_legacy_rows"`, and segment counts that fit the
-       traffic the rollback served. A tenant that was not active reports
-       `clean`.
+       traffic the rollback served. The rehearsal served two submissions, one
+       re-POST and one status read on the old build, and saw
+       `legacy_segment_file_events: 4`, `legacy_segment_unhashed_db_rows: 3`
+       and `legacy_segment_file_only_events: 3`. Check that
+       `legacy_segment_earliest_at` and `legacy_segment_latest_at` both fall
+       inside the rollback window.
     2. `{"dry_run": false, "accept_legacy_segment": true}`. Without
        `accept_legacy_segment` the repair refuses
        `legacy_segment_not_accepted` and writes nothing. Expect
        `chain_resumed: true`.
-    3. Run it once more: `clean`. Then confirm one submission succeeds, and
-       run the audit-chain and db-reconciliation drills.
-  - Any other refusal label (`db_head_not_in_file`,
-    `file_chain_break_after_db_head`, `legacy_row_mismatch`,
-    `file_head_not_in_db`) is not a rollback. Stop and treat it as chain drift.
-    The procedure and labels are in `audit-trail-forensics.md`, "Rolling
-    forward after a binary rollback".
+    3. Run the dry run once more: `clean`. Then confirm one submission
+       succeeds, and run the audit-chain, db-reconciliation and rollback
+       drills. The audit-chain drill reports `db_legacy_segment_resume_count:
+       1`. The old build's file-only events are counted apart
+       (`db_audit_legacy_segment_file_only_event_count`), not as missing
+       events or reader-parity gaps.
+  - A non-dry run on a clean chain, with or without `accept_legacy_segment`,
+    still writes one `audit_chain_repair` audit event, as every non-dry run
+    does. It is harmless, but repeat step 3 as a dry run.
+  - A dry run reporting `legacy_segment_resume_interrupted: true` means an
+    earlier repair's file line went in but its DB row did not commit. Run
+    step 2: it completes that event and writes no second one.
+  - Any other refusal label is not a rollback. That includes
+    `db_head_not_in_file`, `file_chain_break_after_db_head`,
+    `legacy_row_mismatch`, any other `legacy_…` label, and
+    `file_head_not_in_db`. So is a segment whose times fall outside the
+    rollback window. Stop and treat it as chain drift. The procedure and
+    every label are in `audit-trail-forensics.md`, "Rolling forward after a
+    binary rollback".
   - Without #1100 in the roll-forward build, treat a rollback as final.
 - **Schema.** Schema rollback is a Cloud SQL restore. It loses every write
   since the backup.

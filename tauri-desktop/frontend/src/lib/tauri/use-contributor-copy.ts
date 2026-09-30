@@ -16,6 +16,7 @@ import {
   getRedactionSummary,
   getResidualSecretLine,
   getRouteDisclosure,
+  getRouteDisclosureUnreadableCopy,
   getWithdrawalConfirmationPrompt,
   getWitnessCapacityNotice,
   getWitnessReviewCopy,
@@ -34,6 +35,10 @@ const copyKeys = {
   armingOffer: (projectLabel: string, count: number) =>
     ["contributor-copy", "arming-offer", projectLabel, count] as const,
   disclosure: ["contributor-copy", "disclosure"] as const,
+  routeDisclosureUnreadable: [
+    "contributor-copy",
+    "route-disclosure-unreadable",
+  ] as const,
   automaticGrant: (account: string) =>
     ["account", account, "contributor-copy", "automatic-grant"] as const,
   projectAutomatic: (projectId: string, disclosure: string) =>
@@ -181,6 +186,18 @@ export function useRouteDisclosure(account: string, enabled: boolean) {
     queryFn: getRouteDisclosure,
     enabled,
     staleTime: 0,
+  });
+}
+
+/**
+ * The disclosure section's title and its unreadable lines. Fixed for the
+ * build, so read once.
+ */
+export function useRouteDisclosureUnreadableCopy() {
+  return useQuery({
+    queryKey: copyKeys.routeDisclosureUnreadable,
+    queryFn: getRouteDisclosureUnreadableCopy,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 
