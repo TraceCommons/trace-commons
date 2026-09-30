@@ -261,6 +261,7 @@ use trace_commons_server::versioned_pipeline::{
     PipelineAdmissionLimits, PipelineLeaseConfig, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
     PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim,
     PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
+    is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -63331,6 +63332,34 @@ async fn delete_object_payload_for_revocation_propagation(
                         "service-owned encrypted object verification failed before deletion"
                     )
                 })?;
+        }
+        // An object a pipeline Score attempt stored (the index command or
+        // the neighbour set) is a `worker_intermediate` ref too, but it holds
+        // the pipeline's byte wrapper, not a vector payload of this service.
+        // Reading it under the tenant's key checks the tenant; the wrapper
+        // check checks what it is.
+        TraceArtifactKind::VectorPayload
+            if is_pipeline_score_object_ref(
+                object_ref.object_ref_id,
+                object_ref.created_by_job_id,
+            ) =>
+        {
+            let wrapper = store
+                .get_json_by_object_key::<serde_json::Value>(
+                    &tenant_ref,
+                    TraceArtifactKind::VectorPayload,
+                    &object_ref.object_key,
+                    &object_ref.content_sha256,
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "service-owned encrypted object verification failed before deletion"
+                    )
+                })?;
+            anyhow::ensure!(
+                is_pipeline_artifact_wrapper(&wrapper),
+                "service-owned pipeline object verification failed before deletion"
+            );
         }
         TraceArtifactKind::VectorPayload => {
             let payload = store

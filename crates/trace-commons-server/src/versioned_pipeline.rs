@@ -1914,9 +1914,13 @@ impl PgPipelineStore {
 
     /// Commits the Score outcome together with the exact index command it
     /// proposed (if any) and one pending settlement row per award, in one
-    /// transaction (decision D5). `command`/`neighbor` are each `(object
-    /// ref, hash)`, already stored by the caller before this call opens its
-    /// transaction. Every award's settlement row starts `operation_state =
+    /// transaction (decision D5). `command`/`neighbor` are each `(stored
+    /// ref, hash, object ref)`, already stored by the caller before this call
+    /// opens its transaction. Each object is also recorded as an object ref
+    /// of the submission (`score_object_ref`), as Review records its
+    /// approved object, so everything that deletes a submission's payloads
+    /// -- a withdrawal's queued follow-up above all -- deletes these too.
+    /// Every award's settlement row starts `operation_state =
     /// 'pending'` (the column default) with `result_ref_hash` NULL --
     /// Settle records a result only once a leg completes. An award naming
     /// an instrument that `payout_rails` does not cover fails the whole
@@ -1943,8 +1947,8 @@ impl PgPipelineStore {
         run: &PipelineRunRecord,
         outcome: StoredPhaseResult,
         awards: &InstrumentAwards,
-        command: Option<(&str, &str)>,
-        neighbor: Option<(&str, &str)>,
+        command: Option<(&str, &str, &TraceObjectRefWrite)>,
+        neighbor: Option<(&str, &str, &TraceObjectRefWrite)>,
         payout_rails: &BTreeMap<String, String>,
         payout_enabled: bool,
         trace_credit_event: PipelineTraceCreditEvent,
@@ -2009,12 +2013,15 @@ impl PgPipelineStore {
             .await?;
         }
 
+        for (_, _, object_ref) in command.iter().chain(neighbor.iter()) {
+            insert_score_object_ref_on_tx(&tx, object_ref).await?;
+        }
         let (command_ref, command_hash) = match command {
-            Some((object_ref, hash)) => (Some(object_ref), Some(hash)),
+            Some((stored_ref, hash, _)) => (Some(stored_ref), Some(hash)),
             None => (None, None),
         };
         let (neighbor_ref, neighbor_hash) = match neighbor {
-            Some((object_ref, hash)) => (Some(object_ref), Some(hash)),
+            Some((stored_ref, hash, _)) => (Some(stored_ref), Some(hash)),
             None => (None, None),
         };
         let row = tx
@@ -6784,74 +6791,112 @@ impl PipelineService {
         // artifact is stored, rather than at the database CHECK.
         ensure_trace_credit_awards_fit_the_ledger(result.decision.awards())?;
         let lease_token = required_lease_token(run)?;
-        let command_ref = match &command {
+        let command_bytes = match &command {
             None => None,
             Some(command) => {
                 anyhow::ensure!(
                     command.revision_id() == revision_id,
                     "index_command_invalid"
                 );
-                let bytes = serde_json::to_vec(command)?;
-                let wrapper = encode_pipeline_artifact_bytes(&bytes)?;
-                let receipt = self.artifact_store.put_serialized_json(
-                    tenant.as_str(),
-                    TraceArtifactKind::VectorPayload,
-                    &pipeline_attempt_object_id("index-command", run.run_id, lease_token),
-                    &wrapper,
-                )?;
-                Some((
-                    format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
-                    command.content_hash()?,
-                ))
+                Some((serde_json::to_vec(command)?, command.content_hash()?))
             }
         };
-        let neighbor_ref = match &neighbor {
-            None => None,
-            Some(bytes) => {
-                let wrapper = encode_pipeline_artifact_bytes(bytes)?;
-                let receipt = self.artifact_store.put_serialized_json(
-                    tenant.as_str(),
-                    TraceArtifactKind::VectorPayload,
-                    &pipeline_attempt_object_id("score-neighbors", run.run_id, lease_token),
-                    &wrapper,
-                )?;
-                Some((
-                    format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
-                    sha256_prefixed(bytes),
-                ))
-            }
+        // Each stored object is `(artifact, stored ref, hash, object ref,
+        // receipt)`. A write that fails leaves the objects stored before it;
+        // those are not tracked, like the objects of an attempt that crashes
+        // before its commit.
+        let mut written = Vec::new();
+        for (artifact, bytes, hash) in [
+            command_bytes
+                .as_ref()
+                .map(|(bytes, hash)| ("index-command", bytes, hash.clone())),
+            neighbor
+                .as_ref()
+                .map(|bytes| ("score-neighbors", bytes, sha256_prefixed(bytes))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let wrapper = encode_pipeline_artifact_bytes(bytes)?;
+            let receipt = self.artifact_store.put_serialized_json(
+                tenant.as_str(),
+                TraceArtifactKind::VectorPayload,
+                &pipeline_attempt_object_id(artifact, run.run_id, lease_token),
+                &wrapper,
+            )?;
+            let object_ref = score_object_ref(
+                run,
+                artifact,
+                &receipt,
+                bytes.len(),
+                &self.object_store_name,
+            );
+            written.push((
+                artifact,
+                format!("{}#{}", receipt.object_key, receipt.ciphertext_sha256),
+                hash,
+                object_ref,
+                receipt,
+            ));
+        }
+        let stored = |name: &str| {
+            written.iter().find(|(artifact, ..)| *artifact == name).map(
+                |(_, stored_ref, hash, object_ref, _)| {
+                    (stored_ref.as_str(), hash.as_str(), object_ref)
+                },
+            )
         };
         self.inject_crash(PipelineCrashPoint::AfterScoreArtifactStorage)?;
-        let updated = self
+        let commit_result = self
             .store
             .commit_score(
                 run,
                 StoredPhaseResult::from_result(Phase::Score, &result)?,
                 result.decision.awards(),
-                command_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
-                neighbor_ref.as_ref().map(|(r, h)| (r.as_str(), h.as_str())),
+                stored("index-command"),
+                stored("score-neighbors"),
                 &self.settlement_adapters.payout_rails(),
                 self.payout_enabled(),
                 bundle.trace_credit_event,
             )
-            .await
-            .map_err(|error| match &error {
-                // The store's Display prefixes every Constraint error
-                // ("Constraint violation: ..."), which would not match
-                // decision P2's fixed allowlist verbatim; re-raise the
-                // labels the allowlist expects as bare anyhow errors.
-                DatabaseError::Constraint(label)
-                    if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL =>
-                {
-                    anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL)
+            .await;
+        let updated = match commit_result {
+            Ok(updated) => updated,
+            // The store's Display prefixes every Constraint error
+            // ("Constraint violation: ..."), which would not match decision
+            // P2's fixed allowlist verbatim; re-raise the labels the
+            // allowlist expects as bare anyhow errors.
+            Err(DatabaseError::Constraint(ref label))
+                if label == PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL =>
+            {
+                return Err(anyhow::anyhow!(PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL));
+            }
+            // The submission became inoperable (a withdrawal, expiry, or
+            // purge) between this attempt's read and its commit, so nothing
+            // committed and no object ref names these objects. Delete every
+            // object this attempt wrote, as Review deletes its approved
+            // object: best effort, and a failed delete never masks the
+            // refusal.
+            Err(DatabaseError::Constraint(ref label))
+                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
+            {
+                for (.., receipt) in &written {
+                    if self
+                        .artifact_store
+                        .delete_artifact(tenant.as_str(), receipt)
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            label = "score_object_delete_failed",
+                            "best-effort delete of a Score object failed after commit_score \
+                             refused an inoperable submission"
+                        );
+                    }
                 }
-                DatabaseError::Constraint(label)
-                    if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL =>
-                {
-                    anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
-                }
-                _ => anyhow::Error::from(error),
-            })?;
+                return Err(anyhow::anyhow!(PIPELINE_SUBMISSION_INOPERABLE_LABEL));
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.inject_crash(PipelineCrashPoint::AfterScoreCommit)?;
         Ok(updated)
     }
@@ -6935,8 +6980,22 @@ impl PipelineService {
                 // has a persisted selection never reaches this branch, so
                 // it never pays for this read only to see it replaced
                 // before use at Step 5 or Step 6 below.
+                //
+                // The stored command is read first. A withdrawal's queued
+                // follow-up deletes the objects Score stored (they are the
+                // submission's object refs), and it can do so before this
+                // runs; the deletion is queued only once the submission is
+                // no longer operable, so a guard read after a failed load
+                // sees that. An inoperable submission is excluded from the
+                // index whatever the policy decides, so it settles without
+                // the command.
+                let index_command = self.load_index_command(&run, &score_evidence).await;
                 let guard = self.submission_guard(&run).await?;
-                let index_command = self.load_index_command(&run, &score_evidence).await?;
+                let index_command = match index_command {
+                    Ok(command) => command,
+                    Err(_) if !guard.operable => None,
+                    Err(error) => return Err(error),
+                };
                 let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
                 self.settle_evaluations.fetch_add(1, Ordering::SeqCst);
                 let result = bundle
@@ -9024,9 +9083,134 @@ fn approved_object_ref(
     }
 }
 
+/// The objects a Score attempt stores for its run, by the `artifact` name
+/// `pipeline_attempt_object_id` gives each: the index command and the
+/// neighbour set.
+const PIPELINE_SCORE_OBJECT_ARTIFACTS: [&str; 2] = ["index-command", "score-neighbors"];
+
+/// The object ref id of the Score object `artifact` of `run_id`: derived
+/// from the run id alone, as the approved object ref id is, so a retry
+/// records the identical id and only the object key moves per claim.
+fn pipeline_score_object_ref_id(run_id: Uuid, artifact: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("tracecommons:pipeline-{artifact}-object:{run_id}").as_bytes(),
+    )
+}
+
+/// Builds the `trace_object_refs` write for one object a Score attempt
+/// stored (`artifact` is `index-command` or `score-neighbors`), under the
+/// `worker_intermediate` kind, the kind of every object stored as a
+/// `VectorPayload` artifact. `created_by_job_id` is the run id, and with
+/// the object ref id it is how `is_pipeline_score_object_ref` tells this
+/// ref from a vector payload of `main`'s.
+fn score_object_ref(
+    run: &PipelineRunRecord,
+    artifact: &str,
+    receipt: &EncryptedTraceArtifactReceipt,
+    size_bytes: usize,
+    object_store: &str,
+) -> TraceObjectRefWrite {
+    TraceObjectRefWrite {
+        object_ref_id: pipeline_score_object_ref_id(run.run_id, artifact),
+        tenant_id: run.tenant_id.clone(),
+        submission_id: run.submission_id,
+        artifact_kind: TraceObjectArtifactKind::WorkerIntermediate,
+        object_store: object_store.to_string(),
+        object_key: receipt.object_key.clone(),
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!(
+            "tenant:{}",
+            pipeline_tenant_storage_ref(&run.tenant_id).as_str()
+        ),
+        size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
+        compression: None,
+        created_by_job_id: Some(run.run_id),
+    }
+}
+
+/// Records one Score object (`score_object_ref`) on `commit_score`'s
+/// transaction. A plain insert: the commit happens once per run, so an
+/// existing ref at this id is an error, never something to keep.
+async fn insert_score_object_ref_on_tx(
+    tx: &Transaction<'_>,
+    object_ref: &TraceObjectRefWrite,
+) -> Result<(), DatabaseError> {
+    tx.execute(
+        "INSERT INTO trace_object_refs (
+            tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+            object_key, content_sha256, encryption_key_ref, size_bytes, compression,
+            created_by_job_id
+         ) VALUES ($1,$2,$3,'worker_intermediate',$4,$5,$6,$7,$8,$9,$10)",
+        &[
+            &object_ref.tenant_id,
+            &object_ref.submission_id,
+            &object_ref.object_ref_id,
+            &object_ref.object_store,
+            &object_ref.object_key,
+            &object_ref.content_sha256,
+            &object_ref.encryption_key_ref,
+            &object_ref.size_bytes,
+            &object_ref.compression,
+            &object_ref.created_by_job_id,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Whether an object ref names an object a pipeline Score attempt stored
+/// (`score_object_ref`): its id is the one `pipeline_score_object_ref_id`
+/// derives from the run id it records as `created_by_job_id`. `main`'s
+/// revocation-propagation worker uses this before it deletes a
+/// `worker_intermediate` payload, to check the object as a pipeline object
+/// (`is_pipeline_artifact_wrapper`) instead of as one of its own vector
+/// payloads.
+pub fn is_pipeline_score_object_ref(object_ref_id: Uuid, created_by_job_id: Option<Uuid>) -> bool {
+    created_by_job_id.is_some_and(|run_id| {
+        PIPELINE_SCORE_OBJECT_ARTIFACTS
+            .iter()
+            .any(|artifact| pipeline_score_object_ref_id(run_id, artifact) == object_ref_id)
+    })
+}
+
+/// Whether `wrapper` is the byte wrapper (decision P1) every object the
+/// pipeline stores is written as.
+pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
+    decode_pipeline_artifact_bytes(wrapper).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Zaki review 1, item 1: `main`'s revocation-propagation worker checks a
+    /// `worker_intermediate` object as a pipeline object only when its ref
+    /// is one `score_object_ref` builds. A vector payload ref of `main`'s,
+    /// whose `created_by_job_id` is its vector entry, is not one; nor is a
+    /// Score object ref id recorded against another run, or with no run.
+    #[test]
+    fn only_a_score_object_ref_is_a_pipeline_score_object_ref() {
+        let run_id = Uuid::new_v4();
+        for artifact in PIPELINE_SCORE_OBJECT_ARTIFACTS {
+            let object_ref_id = pipeline_score_object_ref_id(run_id, artifact);
+            assert!(is_pipeline_score_object_ref(object_ref_id, Some(run_id)));
+            assert!(!is_pipeline_score_object_ref(
+                object_ref_id,
+                Some(Uuid::new_v4())
+            ));
+            assert!(!is_pipeline_score_object_ref(object_ref_id, None));
+        }
+        let vector_entry_id = Uuid::new_v4();
+        assert!(!is_pipeline_score_object_ref(
+            Uuid::new_v4(),
+            Some(vector_entry_id)
+        ));
+        assert!(!is_pipeline_score_object_ref(
+            pipeline_score_object_ref_id(run_id, "approved"),
+            Some(run_id)
+        ));
+    }
 
     /// Ruling F-M5: the payout's own result comes first. A lock release that
     /// fails after a failed pass does not hide the pass's error (an injected

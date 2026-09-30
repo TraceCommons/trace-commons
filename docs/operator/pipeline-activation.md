@@ -339,7 +339,19 @@ the same transaction also:
 - queues an index invalidation when the run's index write may have written
   entries: a write that is `complete`, `pending` (cancelled now, and possibly
   partly written), `failed`, or `cancelled`;
-- invalidates every export snapshot that carries the submission.
+- invalidates every export snapshot that carries the submission;
+- invalidates every object ref of the submission and queues the deletion of
+  each payload: the receipt's source envelope, Review's approved revision,
+  and the two objects Score stores, the index command (embeddings and
+  content hashes) and the neighbour set.
+
+`main`'s revocation-propagation worker (`POST /v1/workers/revocation-propagation`)
+deletes the queued payloads from the service-owned object store, with its
+own retries; an object that is already gone counts as deleted. A run
+withdrawn after Score and before Settle still completes Settle when its
+index command is already deleted: it is excluded from the index and its
+legs are forfeited. A Score attempt whose commit is refused because the
+submission stopped being operable deletes the objects it wrote.
 
 The response is `main`'s withdrawal response plus two follow-up states,
 `index_invalidation` and `revocation_propagation`. Each is `not_required`,

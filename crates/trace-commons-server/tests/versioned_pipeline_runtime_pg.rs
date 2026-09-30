@@ -6857,7 +6857,8 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
 
 /// The service-level race window: withdraws the submission
 /// *after* the approved object is written and *before* `commit_review`
-/// runs. `put_serialized_json` is a synchronous call the Review arm makes
+/// runs (or, with another `trigger_object_id_prefix`, after that phase
+/// artifact is written and before its phase commits). `put_serialized_json` is a synchronous call the Review arm makes
 /// mid-transaction-free (there is no open database transaction while it
 /// runs), so a wrapper that intercepts exactly that write and drives the
 /// real withdrawal to completion before returning makes the race
@@ -6880,6 +6881,9 @@ struct WithdrawOnApprovedWriteStore {
     tenant_id: String,
     submission_id: uuid::Uuid,
     triggered: AtomicBool,
+    /// The object id prefix of the write that triggers the withdrawal:
+    /// `pipeline-approved-` for Review's approved object.
+    trigger_object_id_prefix: &'static str,
 }
 
 impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
@@ -6896,7 +6900,7 @@ impl TraceArtifactStore for WithdrawOnApprovedWriteStore {
             object_id,
             serialized_json,
         )?;
-        if object_id.starts_with("pipeline-approved-")
+        if object_id.starts_with(self.trigger_object_id_prefix)
             && !self.triggered.swap(true, Ordering::SeqCst)
         {
             let runtime_url = self.runtime_url.clone();
@@ -7017,6 +7021,7 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
         tenant_id: tenant.clone(),
         submission_id,
         triggered: AtomicBool::new(false),
+        trigger_object_id_prefix: "pipeline-approved-",
     });
     let (service, _, _) = test_service(
         backend.clone(),
@@ -7076,6 +7081,75 @@ async fn withdrawal_during_the_review_commit_race_fails_the_run_and_deletes_the_
         1,
         "the approved object this attempt wrote must be deleted, leaving only \
          the source envelope"
+    );
+}
+
+/// Zaki review 1, item 1: the Score counterpart of the Review race above. The
+/// submission is withdrawn after the Score attempt stored its last object
+/// (the neighbour set, written after the index command) and before
+/// `commit_score`. The commit refuses, and the attempt deletes both objects
+/// it wrote, as Review deletes its approved object: only the source and the
+/// approved revision stay stored.
+#[tokio::test]
+async fn a_refused_score_commit_deletes_the_objects_its_attempt_wrote() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner_url =
+        std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("score-withdraw-race-{}", uuid::Uuid::new_v4());
+    let submission_id = uuid::Uuid::new_v4();
+    let wrapper = Arc::new(WithdrawOnApprovedWriteStore {
+        inner: artifact_store(&dir),
+        runtime_url: runtime_role_url(&owner_url),
+        tenant_id: tenant.clone(),
+        submission_id,
+        triggered: AtomicBool::new(false),
+        trigger_object_id_prefix: "pipeline-score-neighbors-",
+    });
+    let service = compatibility_test_service(
+        backend.clone(),
+        wrapper as Arc<dyn TraceArtifactStore>,
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await;
+    let env = large_envelope(submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "before Score, the source and the approved revision are stored"
+    );
+
+    let refused = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+    assert!(
+        refused.score_neighbor_ref.is_none(),
+        "no neighbour set recorded"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "both objects the refused Score attempt wrote are deleted"
     );
 }
 
@@ -7215,6 +7289,66 @@ async fn withdrawal_between_score_and_settle_excludes_the_index() {
         index.writer_calls(),
         0,
         "dispatch never started for a submission already inoperable at persist time"
+    );
+}
+
+/// Zaki review 1, item 1: a withdrawal's follow-up deletes the objects Score
+/// stored, and it can do so before Settle runs. Settle then has no index
+/// command to read. For a submission that is no longer operable it settles
+/// without one, as it would with the command still stored: the index is
+/// excluded, nothing is written to it, and every leg is forfeited.
+#[tokio::test]
+async fn settle_completes_a_withdrawn_run_whose_score_objects_are_deleted() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("settle-score-objects-deleted-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    // The follow-up's payload deletion, done here directly.
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (command_key, _) = run
+        .index_command_ref
+        .as_deref()
+        .expect("Score recorded an index command")
+        .rsplit_once('#')
+        .unwrap();
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        tenant_ref.as_str(),
+        command_key,
+    ))
+    .expect("delete the stored index command");
+
+    let settled = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.last_error_label, None);
+    assert_eq!(settled.index_membership, "excluded");
+    assert_eq!(settled.index_write_state, "none");
+    assert_eq!(index.writer_calls(), 0, "nothing is written to the index");
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert_eq!(settlements.len(), 2);
+    assert!(
+        settlements
+            .iter()
+            .all(|settlement| settlement.operation_state == "forfeited"),
+        "every leg is forfeited: {settlements:?}"
     );
 }
 
@@ -15762,6 +15896,144 @@ async fn withdrawal_is_idempotent() {
     let second = withdraw(&service, &tenant, submission_id).await;
     assert_eq!(second, first, "the same withdrawal and follow-up states");
     assert_eq!(counts().await, after_first, "no rows added");
+}
+
+/// Submits `envelope` as `RECEIPT_PRINCIPAL` and runs Review and Score, so
+/// the run waits for Settle.
+async fn run_envelope_to_settle_ready(
+    service: &PipelineService,
+    tenant: &str,
+    envelope: &TraceContributionEnvelope,
+) -> PipelineRunRecord {
+    let raw = serde_json::to_vec(envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(tenant, &key, &raw, envelope, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let scored = service
+        .process_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    scored
+}
+
+/// The object keys of the two objects Score stored for `run`: the index
+/// command and the neighbour set. Both must be recorded.
+fn score_object_keys(run: &PipelineRunRecord) -> [String; 2] {
+    let key = |stored: Option<&String>, name: &str| {
+        stored
+            .unwrap_or_else(|| panic!("Score recorded no {name}"))
+            .rsplit_once('#')
+            .expect("a stored ref is `{object_key}#{ciphertext_sha256}`")
+            .0
+            .to_string()
+    };
+    [
+        key(run.index_command_ref.as_ref(), "index command"),
+        key(run.score_neighbor_ref.as_ref(), "neighbour set"),
+    ]
+}
+
+/// For the object ref of `submission_id` at `object_key`: whether it is
+/// invalidated, and how many `delete_object_payload` propagation items name
+/// it, and how many of those are `pending`. `None` when the submission has
+/// no object ref at that key. Read on an owner connection, as an observer.
+async fn object_deletion_state(
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+    object_key: &str,
+) -> Option<(bool, i64, i64)> {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT object_ref.invalidated_at IS NOT NULL,
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items item
+                      WHERE item.tenant_id = object_ref.tenant_id
+                        AND item.source_submission_id = object_ref.submission_id
+                        AND item.action = 'delete_object_payload'
+                        AND item.target_json->>'object_ref_id'
+                            = object_ref.object_ref_id::text),
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items item
+                      WHERE item.tenant_id = object_ref.tenant_id
+                        AND item.source_submission_id = object_ref.submission_id
+                        AND item.action = 'delete_object_payload'
+                        AND item.status = 'pending'
+                        AND item.target_json->>'object_ref_id'
+                            = object_ref.object_ref_id::text)
+               FROM trace_object_refs object_ref
+              WHERE object_ref.tenant_id = $1 AND object_ref.submission_id = $2
+                AND object_ref.object_key = $3",
+            &[&tenant_id, &submission_id, &object_key],
+        )
+        .await
+        .expect("read the object ref's deletion state");
+    tx.commit().await.expect("commit the deletion-state read");
+    row.map(|row| (row.get(0), row.get(1), row.get(2)))
+}
+
+/// Zaki review 1, item 1: Score stores the index command (embeddings and
+/// content hashes) and the neighbour set as objects of their own. They are
+/// object refs of the submission, as the source and the approved revision
+/// are, so the withdrawal invalidates each and queues the deletion of its
+/// payload in the same transaction as the tombstone: by the time the
+/// withdrawal returns, both deletions are durably queued. A second
+/// withdrawal queues nothing more.
+#[tokio::test]
+async fn withdrawal_queues_the_deletion_of_the_score_objects() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await;
+    let tenant = format!("withdraw-score-objects-{}", uuid::Uuid::new_v4());
+    let scored = run_envelope_to_settle_ready(
+        &service,
+        &tenant,
+        &large_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    let keys = score_object_keys(&scored);
+
+    let first = withdraw(&service, &tenant, scored.submission_id).await;
+    assert_eq!(
+        first.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    for key in &keys {
+        assert_eq!(
+            object_deletion_state(&tenant, scored.submission_id, key).await,
+            Some((true, 1, 1)),
+            "the Score object is an invalidated object ref with one pending payload deletion"
+        );
+    }
+
+    let second = withdraw(&service, &tenant, scored.submission_id).await;
+    assert_eq!(second, first, "the same withdrawal and follow-up states");
+    for key in &keys {
+        assert_eq!(
+            object_deletion_state(&tenant, scored.submission_id, key).await,
+            Some((true, 1, 1)),
+            "a second withdrawal queues no second deletion"
+        );
+    }
 }
 
 /// Ruling T7-1: a withdrawal releases a run parked for review, due at once,

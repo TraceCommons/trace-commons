@@ -909,7 +909,9 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     );
 
     // M11: the submitted envelope's and the approved content's object refs
-    // carry the configured store's name, as a legacy receipt's do.
+    // carry the configured store's name, as a legacy receipt's do, and so
+    // does the ref of the index command Score stored (Zaki review 1, item 1:
+    // the minimal bundle stores no neighbour set).
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, "tenant-a").await;
     let stores: Vec<(String, String)> = tx
@@ -934,6 +936,10 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
             ),
             (
                 "submitted_envelope".to_string(),
+                TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()
+            ),
+            (
+                "worker_intermediate".to_string(),
                 TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()
             ),
         ]
@@ -2369,6 +2375,207 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
             .1,
         "complete"
     );
+}
+
+/// Zaki review 1, item 1: Score stores the index command (embeddings and
+/// content hashes) and the neighbour set as objects of their own. A run of
+/// the compatibility bundle has both. The run is withdrawn after Score and
+/// before Settle, through the pipeline withdrawal alone (none of the route's
+/// own content cleanup), so the only thing that deletes the two objects is
+/// the follow-up the withdrawal queued: `main`'s revocation-propagation
+/// worker. After one worker pass both objects are gone from the artifact
+/// store; the neighbour set was already gone before the pass, which is not
+/// an error. A second withdrawal queues nothing and a second pass has
+/// nothing to do. Settle then completes the withdrawn run without the
+/// deleted command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_revocation_worker_deletes_the_score_objects_of_a_withdrawn_run() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-score-objects-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-score-objects-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    // The service-owned local store: the worker deletes payloads only from a
+    // service-owned store, and the pipeline records this store's name.
+    let configured_store = || {
+        ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifacts.clone(),
+        )
+    };
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &configured_store(),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).artifact_store = Some(configured_store());
+
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    for _ in 0..2 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let scored = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    let tenant_ref = tenant_storage_ref(&tenant);
+    let score_objects = [
+        scored
+            .index_command_ref
+            .clone()
+            .expect("Score stored an index command"),
+        scored
+            .score_neighbor_ref
+            .clone()
+            .expect("Score stored a neighbour set"),
+    ]
+    .map(|stored| {
+        let (object_key, ciphertext_sha256) = stored.rsplit_once('#').unwrap();
+        (object_key.to_string(), ciphertext_sha256.to_string())
+    });
+    let present = |object_key: &str| {
+        artifacts
+            .artifact_present_by_object_key(
+                &tenant_ref,
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                "",
+            )
+            .expect("the store answers")
+    };
+    for (object_key, _) in &score_objects {
+        assert_eq!(present(object_key), Some(true), "Score's object is stored");
+    }
+
+    let outcome = service
+        .withdraw_submission(&tenant, scored.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    assert_eq!(
+        outcome.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let (neighbor_key, neighbor_sha256) = &score_objects[1];
+    artifacts
+        .delete_artifact(
+            &tenant_ref,
+            &EncryptedTraceArtifactReceipt {
+                tenant_storage_ref: tenant_ref.clone(),
+                artifact_kind: TraceArtifactKind::VectorPayload,
+                object_key: neighbor_key.clone(),
+                ciphertext_sha256: neighbor_sha256.clone(),
+                encrypted_at: Utc::now(),
+            },
+        )
+        .expect("delete the neighbour set ahead of the worker");
+
+    let auth = revocation_worker_tenant_auth(&tenant);
+    let worker_request = || TraceRevocationPropagationWorkerRequest {
+        purpose: Some("score object deletion".to_string()),
+        dry_run: false,
+        limit: 100,
+    };
+    let first_pass = run_revocation_propagation_worker(state.as_ref(), &auth, worker_request())
+        .await
+        .expect("the worker runs");
+    assert_eq!(
+        first_pass.checked, 4,
+        "one deletion per object: the source, the approved revision, and the two Score objects"
+    );
+    assert_eq!(
+        (first_pass.failed, first_pass.skipped),
+        (0, 0),
+        "every queued deletion completes"
+    );
+    assert_eq!(first_pass.completed, first_pass.checked);
+    for (object_key, _) in &score_objects {
+        assert_eq!(
+            present(object_key),
+            Some(false),
+            "the withdrawn run's Score object is deleted"
+        );
+    }
+    let object_refs = owner
+        .list_trace_object_refs(&tenant, scored.submission_id)
+        .await
+        .unwrap();
+    for (object_key, _) in &score_objects {
+        let object_ref = object_refs
+            .iter()
+            .find(|object_ref| &object_ref.object_key == object_key)
+            .expect("the Score object is an object ref of the submission");
+        assert!(object_ref.deleted_at.is_some(), "marked deleted");
+    }
+
+    let again = service
+        .withdraw_submission(&tenant, scored.submission_id, &principal, None)
+        .await
+        .expect("a second withdrawal succeeds");
+    assert_eq!(
+        again.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Complete
+    );
+    let second_pass = run_revocation_propagation_worker(state.as_ref(), &auth, worker_request())
+        .await
+        .expect("the worker runs again");
+    assert_eq!(second_pass.checked, 0, "nothing more to do");
+
+    let settled = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .expect("Settle runs")
+        .expect("the run is claimed");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert_eq!(settled.index_membership, "excluded");
 }
 
 // ---------------------------------------------------------------------------
