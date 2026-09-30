@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -25,7 +26,8 @@ from pathlib import Path
 from unittest import mock
 
 import pipeline
-from pipeline_tooling import cargo, checks, corpus, environment, errors, results
+from pipeline_tooling import cargo, catalog, checks, corpus, environment, errors, results
+from pipeline_tooling import report as report_module
 
 
 def _fake_hash(label):
@@ -1888,6 +1890,473 @@ class RestorePrivilegeTests(unittest.TestCase):
             self.assertEqual(str(ctx.exception), "pipeline_tooling_database_name_invalid")
         finally:
             shutil.rmtree(run.run_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Task 11: the required checks, `pipeline.py qualify`, its report, and the
+# catalog.
+# ---------------------------------------------------------------------------
+
+_PROMOTION_SOURCE = environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_qualification.rs"
+_PROMOTION_ONLY = frozenset(
+    {"pipeline_production_adapters", "pipeline_remote_restore", "pipeline_hf_network_canary"}
+)
+_QUALIFICATION_BLOCKERS = (
+    "local_reference_scorer",
+    "local_reference_embedder",
+    "synthetic_index",
+    "synthetic_settlement",
+    "static_bearer_authentication",
+    "filesystem_restore_local_only",
+    "hf_network_canary_not_run",
+)
+_CONTRACT_MANIFEST = (
+    environment.ROOT / "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json"
+)
+_INVENTORY_SCRIPT = "pipeline-deployment-inventory.py"
+
+
+def _promotion_required_checks():
+    """`PROMOTION_REQUIRED_CHECKS`, read out of the Rust source."""
+    source = _PROMOTION_SOURCE.read_text()
+    match = re.search(r"pub const PROMOTION_REQUIRED_CHECKS: &\[&str\] = &\[(.*?)\];", source, re.S)
+    if match is None:
+        raise AssertionError("PROMOTION_REQUIRED_CHECKS not found")
+    return re.findall(r'"([a-z0-9_]+)"', match.group(1))
+
+
+def _emit_check(env, check_id, *, digests=True, evidence=None, **overrides):
+    """One passing result and its evidence, as `PipelineCheckEmitter` writes
+    them from the variables `pipeline.py` sets."""
+    evidence = {"observed": 1} if evidence is None else evidence
+    raw = {
+        "schema": results.SCHEMA,
+        "run_id": env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"],
+        "check_id": check_id,
+        "status": "pass",
+        "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
+        "package_hash": _fake_hash("package") if digests else None,
+        "configuration_digest": _fake_hash("configuration") if digests else None,
+        "dependency_digest": _fake_hash("dependency") if digests else None,
+        "observed_at": _iso(datetime.now(timezone.utc)),
+        "evidence_hash": _digest(results.canonical(evidence)),
+        "safe_blockers": [],
+    }
+    raw.update(overrides)
+    result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+    (result_dir / f"{check_id}.result.json").write_text(json.dumps(raw))
+    (result_dir / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
+
+
+def _hf_manifest(bootstrap_bytes, holdout_bytes):
+    """The export binary's `source-manifest.json` for these two corpora."""
+    return {
+        "schema": "trace_commons.pipeline_hf_corpus_manifest.v1",
+        "source": {
+            "repository": "jedisct1/security-audits",
+            "revision": "6d527ff0081eec6704c2a4f00e1ef8d308ae7366",
+            "split": "train",
+            "translator": "swival",
+            "bootstrap_count": 1,
+            "holdout_count": 1,
+            "min_words": 1,
+            "max_words": 2000,
+            "expected_instrument_count": 1,
+        },
+        "source_digest": _fake_hash("source"),
+        "configuration_digest": _fake_hash("hf-configuration"),
+        "order_digest": _fake_hash("order"),
+        "bootstrap_corpus_digest": _digest(bootstrap_bytes),
+        "holdout_corpus_digest": _digest(holdout_bytes),
+        "sample_count": 2,
+        "bootstrap_count": 1,
+        "holdout_count": 1,
+        "contains_raw_trace_text": False,
+        "contains_contributor_identity": False,
+    }
+
+
+class RequiredCheckTests(unittest.TestCase):
+    def test_required_checks_are_a_subset_of_promotion_checks(self):
+        promotion = _promotion_required_checks()
+        self.assertEqual(len(promotion), len(set(promotion)), "no duplicate promotion id")
+        self.assertTrue(
+            checks.REQUIRED_CHECK_IDS.issubset(promotion),
+            sorted(checks.REQUIRED_CHECK_IDS.difference(promotion)),
+        )
+        self.assertTrue(_PROMOTION_ONLY.issubset(promotion))
+        self.assertEqual(checks.REQUIRED_CHECK_IDS & _PROMOTION_ONLY, frozenset())
+        self.assertNotIn("pipeline_http_corpus_package", checks.REQUIRED_CHECK_IDS)
+
+        database_ids = [check.check_id for check in checks.REQUIRED_DATABASE_CHECKS]
+        self.assertEqual(len(database_ids), 12)
+        self.assertEqual(len(set(database_ids)), 12)
+        self.assertEqual(
+            checks.REQUIRED_CHECK_IDS,
+            frozenset(database_ids) | set(checks.REQUIRED_CORPUS_CHECK_IDS) | {checks.RESTORE_CHECK_ID},
+        )
+        for check in checks.REQUIRED_DATABASE_CHECKS:
+            with self.subTest(check=check.check_id):
+                self.assertRegex(check.check_id, r"^[a-z0-9_]{1,64}$")
+                self.assertIn(check.database, ("upgrade", "runtime", "pilot"))
+                self.assertEqual(check.digests, check.database != "upgrade")
+
+
+class _QualifyCase(_RestoreDrillCase):
+    """Fakes for `qualify`. Every binding step succeeds, and the inventory
+    script writes its output. Each database check's exact test emits its
+    own check id from the variables it receives (unless named in
+    `self.silent`). The corpus harness and the restore drill leave what
+    their Task 9 and Task 10 fakes leave, and the HF export writes two
+    corpora and their manifest."""
+
+    def setUp(self):
+        super().setUp()
+        self.silent = set()
+        self.foreign = set()
+        self.harness_emits = True
+        self.fail_lock_drop = False
+
+    def _invoke(self, command, *, env, capture=False, input_text=None, log_path=None):
+        if any(str(part).endswith(_INVENTORY_SCRIPT) for part in command) and "--output" in command:
+            Path(command[command.index("--output") + 1]).write_text(
+                json.dumps(
+                    {
+                        "schema": "trace_commons.pipeline_deployment_inventory.v1",
+                        "inventory_digest": _fake_hash("inventory"),
+                    }
+                )
+            )
+        if self.fail_lock_drop and input_text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in input_text:
+            self.calls.append(("invoke", list(command), input_text))
+            return (1, "") if capture else (1, None)
+        return super()._invoke(command, env=env, capture=capture, input_text=input_text, log_path=log_path)
+
+    def _fake_cargo(self, **overrides):
+        restore = super()._fake_cargo(**overrides)
+        by_test = {check.test_name: check for check in checks.REQUIRED_DATABASE_CHECKS}
+
+        def fake_cargo_test(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            if test_filter in (_RESTORE_SEED, _RESTORE_RESUME):
+                restore(run, step, cargo_args, test_filter, env, exact=exact, ignored=ignored)
+                return
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            if test_filter == _HARNESS:
+                _write_harness_outputs(env, emit=self.harness_emits)
+            elif test_filter in by_test and "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR" in env:
+                check = by_test[test_filter]
+                if check.check_id in self.foreign:
+                    _emit_check(env, check.check_id, digests=check.digests, run_id="qforeign0")
+                elif check.check_id not in self.silent:
+                    _emit_check(env, check.check_id, digests=check.digests)
+
+        return fake_cargo_test
+
+    def _fake_export(self, run, path, env, *, local_dir=None):
+        self.calls.append(("export", Path(path), local_dir))
+        output = run.run_dir / "hf"
+        output.mkdir(parents=True, exist_ok=True)
+        bootstrap = output / "bootstrap-corpus.json"
+        holdout = output / "holdout-corpus.json"
+        bootstrap.write_text(json.dumps(_direct_corpus(["hf_bootstrap_0000"], prefix="b")))
+        holdout.write_text(json.dumps(_direct_corpus(["hf_holdout_0000"], prefix="h")))
+        manifest = _hf_manifest(bootstrap.read_bytes(), holdout.read_bytes())
+        (output / "source-manifest.json").write_text(json.dumps(manifest, indent=2))
+        return [bootstrap, holdout]
+
+    def _qualify(self, *extra):
+        with mock.patch.object(environment, "_invoke", self._invoke), mock.patch.object(
+            pipeline, "export_hf_corpus", self._fake_export
+        ):
+            return self._main(["qualify", "--postgres-admin-url", _ADMIN_URL, *extra], cargo=self._fake_cargo())
+
+    def _fresh_run(self):
+        shutil.rmtree(self.run.run_dir, ignore_errors=True)
+        self.run = _scratch_run("qualify")
+        self.calls.clear()
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+
+    @property
+    def report_path(self):
+        return self.tmp / "local" / "pipeline-qualification-report.json"
+
+    @property
+    def catalog_path(self):
+        return self.tmp / "local" / "pipeline-lab-catalog.json"
+
+
+class QualifyTests(_QualifyCase):
+    def test_qualify_fails_when_a_required_check_emits_nothing(self):
+        self.silent = {"pipeline_payout_recovery"}
+        code = self._qualify()
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            self.stderr.getvalue().strip(), "PipelineFailure: check_result_missing:pipeline_payout_recovery"
+        )
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual(value["status"], "fail")
+        self.assertEqual(value["failure"], "check_result_missing:pipeline_payout_recovery")
+        self.assertIs(value["production_promotion_ready"], False)
+        self.assertNotIn("pipeline_payout_recovery", {item["check_id"] for item in value["checks"]})
+        results.validate_evidence(value)
+        self.assertEqual(
+            (self.run.run_dir / "qualification-report.json").read_bytes(), self.report_path.read_bytes()
+        )
+        self.assertNotIn(_HARNESS, [call[3] for call in self._cargo_calls()], "qualify stops at the first failure")
+        self.assertFalse(self.catalog_path.exists())
+
+        with self.subTest("a result from another run is refused and left out of the report"):
+            self._fresh_run()
+            self.silent = set()
+            self.foreign = {"pipeline_receipt_replay_exact"}
+            self.assertEqual(self._qualify(), 1)
+            self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_result_foreign_run")
+            value = json.loads(self.report_path.read_text())
+            self.assertEqual((value["status"], value["failure"]), ("fail", "check_result_foreign_run"))
+            reported = {item["check_id"] for item in value["checks"]}
+            self.assertNotIn("pipeline_receipt_replay_exact", reported)
+            self.assertIn("pipeline_stale_lease_fence", reported, "this run's earlier results stay")
+            self.foreign = set()
+
+        with self.subTest("a corpus run that emits nothing"):
+            self._fresh_run()
+            self.silent = set()
+            self.harness_emits = False
+            self.assertEqual(self._qualify("--archive"), 1)
+            self.assertEqual(
+                self.stderr.getvalue().strip(), "PipelineFailure: check_result_missing:pipeline_http_corpus_minimal"
+            )
+            value = json.loads(self.report_path.read_text())
+            self.assertEqual(value["status"], "fail")
+            self.assertEqual(value["failure"], "check_result_missing:pipeline_http_corpus_minimal")
+            self.assertFalse(self.catalog_path.exists(), "a failed qualify archives nothing")
+
+    def test_qualify_runs_each_check_in_a_fresh_scenario(self):
+        code = self._qualify()
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        cargo_indexes = [index for index, call in enumerate(self.calls) if call[0] == "cargo"]
+        by_test = {check.test_name: check for check in checks.REQUIRED_DATABASE_CHECKS}
+        databases = []
+        steps = []
+        for position, index in enumerate(cargo_indexes):
+            call = self.calls[index]
+            steps.append(call[1])
+            if call[3] not in by_test:
+                continue
+            check = by_test[call[3]]
+            _, step, cargo_args, _, env, exact, ignored = call
+            self.assertEqual(
+                (step, cargo_args, exact, ignored), (check.check_id, check.cargo_args, True, check.ignored)
+            )
+            self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"], self.run.run_id)
+            self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"], str(self.run.results_dir))
+            self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"], self.run.code_revision_hash)
+            if check.database == "upgrade":
+                database = env["TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"].rsplit("/", 1)[1]
+                self.assertRegex(database, r"^pipeline_test_[0-9a-f]{8}_[0-9]{2}$")
+                self.assertNotIn("TRACE_COMMONS_PG_TEST_DATABASE_URL", env)
+                guarded = database
+            else:
+                database = env["TRACE_COMMONS_PG_TEST_DATABASE_URL"].rsplit("/", 1)[1]
+                self.assertRegex(database, r"^admission_test_[0-9a-f]{8}_[0-9]{2}$")
+                self.assertNotIn("TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL", env)
+                guarded = f"{database}_pilot" if check.database == "pilot" else database
+            self.assertNotIn(database, databases, f"{check.check_id} reuses a scenario")
+            databases.append(database)
+            created = [
+                item for item in self.calls[:index]
+                if item[0] == "invoke" and item[2] and f"CREATE DATABASE {database};" in item[2]
+            ]
+            self.assertEqual(len(created), 1, f"{check.check_id} gets its own new database")
+            following = cargo_indexes[position + 1] if position + 1 < len(cargo_indexes) else len(self.calls)
+            guards = [
+                item for item in self.calls[index + 1:following]
+                if item[0] == "invoke" and item[2] and "pg_stat_database" in item[2] and f"'{guarded}'" in item[2]
+            ]
+            self.assertEqual(len(guards), 1, f"the xact guard runs after {check.check_id}")
+        self.assertEqual(len(databases), 12)
+
+        # The binding checks run first, then migration atomicity in its own
+        # scenario, then the database checks in table order, the three
+        # corpus runs, and the restore drill.
+        binding = [step.step for step in (*checks.CONTRACTS_STEPS, *checks.RUNTIME_STEPS) if step.kind == "cargo"]
+        database_steps = [check.check_id for check in checks.REQUIRED_DATABASE_CHECKS]
+        self.assertEqual(
+            steps,
+            [
+                *binding,
+                "postgres_migration_atomicity",
+                *database_steps,
+                *checks.REQUIRED_CORPUS_CHECK_IDS,
+                "restore_seed",
+                "restore_resume",
+            ],
+        )
+        inventory = [
+            item[1] for item in self.calls
+            if item[0] == "invoke" and any(str(part).endswith(_INVENTORY_SCRIPT) for part in item[1])
+        ]
+        self.assertEqual(len(inventory), 1)
+        self.assertEqual(inventory[0][-3:], ["--check", "--output", str(self.run.run_dir / "inventory.json")])
+        self.assertTrue(
+            any(
+                item[0] == "invoke" and any(str(part).endswith("test_pipeline_tooling.py") for part in item[1])
+                for item in self.calls
+            ),
+            "the tooling self-tests are a binding check",
+        )
+        # One environment for the whole command.
+        locks = [
+            item for item in self.calls
+            if item[0] == "invoke" and item[2] and "CREATE DATABASE pipeline_tooling_lock" in item[2]
+        ]
+        self.assertEqual(len(locks), 1)
+        # The corpus runs each get their own scenario too, and no corpus run
+        # reuses a database check's.
+        corpus_databases = [
+            call[4]["TRACE_COMMONS_PG_TEST_DATABASE_URL"].rsplit("/", 1)[1]
+            for call in self._cargo_calls() if call[3] == _HARNESS
+        ]
+        self.assertEqual(len(set(corpus_databases)), 3)
+        self.assertEqual(set(corpus_databases) & set(databases), set())
+        self.assertEqual(
+            [call[4]["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"] for call in self._cargo_calls() if call[3] == _HARNESS],
+            list(checks.REQUIRED_CORPUS_CHECK_IDS),
+        )
+
+    def test_routine_runs_do_not_archive(self):
+        self.assertEqual(self._qualify(), 0, self.stderr.getvalue())
+        self.assertTrue(self.report_path.is_file())
+        self.assertFalse(self.catalog_path.exists(), "a routine qualify writes no catalog")
+        self.assertFalse((self.catalog_path.parent / "lab-records").exists())
+
+        self._fresh_run()
+        self.assertEqual(self._qualify("--archive"), 0, self.stderr.getvalue())
+        value = json.loads(self.catalog_path.read_text())
+        self.assertEqual(value["schema"], "trace_commons.pipeline_lab_catalog.v1")
+        [entry] = value["qualifications"]
+        self.assertEqual(entry["status"], "pass")
+        self.assertIs(entry["production_promotion_ready"], False)
+        report_value = json.loads(self.report_path.read_text())
+        self.assertEqual(entry["evidence_hash"], report_value["evidence_hash"])
+        archived = self.catalog_path.parent / entry["report"]
+        self.assertEqual(json.loads(archived.read_bytes()), report_value)
+        self.assertEqual(archived.name, f"qualification-{_digest(archived.read_bytes())[7:]}.json")
+        self.assertEqual(len(entry["records"]), 4, "three corpus reports and the HF manifest")
+        schemas = sorted(
+            json.loads((self.catalog_path.parent / path).read_bytes())["schema"] for path in entry["records"]
+        )
+        self.assertEqual(
+            schemas,
+            ["trace_commons.pipeline_corpus_report.v1"] * 3 + ["trace_commons.pipeline_hf_corpus_manifest.v1"],
+        )
+        for path in entry["records"]:
+            data = (self.catalog_path.parent / path).read_bytes()
+            self.assertEqual(Path(path).name, f"evidence-{_digest(data)[7:]}.json")
+
+        # Archiving the same report and records again changes nothing.
+        before = self.catalog_path.read_bytes()
+        records = pipeline.corpus_records(self.run)
+        self.assertEqual(len(records), 4)
+        catalog.update_catalog(self.catalog_path, self.report_path, records=records)
+        self.assertEqual(self.catalog_path.read_bytes(), before)
+
+        # A record whose bytes changed at an existing digest is refused, and
+        # the catalog is left as it was.
+        changed = self.catalog_path.parent / entry["records"][0]
+        changed.write_bytes(changed.read_bytes() + b" ")
+        with self.assertRaises(errors.ToolingError) as ctx:
+            catalog.update_catalog(self.catalog_path, self.report_path, records=records)
+        self.assertEqual(str(ctx.exception), "immutable_record_conflict")
+        self.assertEqual(self.catalog_path.read_bytes(), before)
+
+        # A record that does not belong to the report is refused before any
+        # file changes.
+        other = self.tmp / "other-corpus-report.json"
+        other.write_bytes(results.canonical(_corpus_report("pipeline_http_corpus_minimal", [
+            ("corpus", _fake_hash("other-corpus"), [_fixture_report("other_fixture")])
+        ])) + b"\n")
+        with self.assertRaises(errors.ToolingError) as ctx:
+            catalog.update_catalog(self.catalog_path, self.report_path, records=[other])
+        self.assertEqual(str(ctx.exception), "qualification_corpus_mismatch")
+
+    def test_report_contains_no_private_fields(self):
+        code = self._qualify()
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        data = self.report_path.read_bytes()
+        value = json.loads(data)
+        results.validate_evidence(value)
+        report_module.validate_qualification_report(value)
+        self.assertEqual(value["schema"], "trace_commons.pipeline_qualification_report.v1")
+        self.assertEqual(value["scope"], "local_test")
+        self.assertEqual(value["status"], "pass")
+        self.assertIsNone(value["failure"])
+        self.assertIs(value["production_promotion_ready"], False)
+        self.assertIs(value["external_payout_enabled"], False)
+        self.assertEqual(value["safe_blockers"], list(_QUALIFICATION_BLOCKERS))
+        self.assertEqual({item["check_id"] for item in value["checks"]}, checks.REQUIRED_CHECK_IDS)
+        [restore] = [item for item in value["checks"] if item["check_id"] == checks.RESTORE_CHECK_ID]
+        self.assertEqual(restore["safe_blockers"], ["filesystem_restore_local_only"])
+        for item in value["checks"]:
+            self.assertEqual(item["status"], "pass")
+            self.assertEqual(item["evidence_hash"], _digest(results.canonical(item["evidence"])))
+        self.assertEqual(
+            value["evidence_hash"],
+            _digest(results.canonical({"inputs": value["inputs"], "checks": value["checks"]})),
+        )
+        inputs = value["inputs"]
+        self.assertEqual(inputs["code_revision_hash"], self.run.code_revision_hash)
+        self.assertEqual(inputs["inventory_digest"], _fake_hash("inventory"))
+        self.assertEqual(inputs["contract_manifest_digest"], _digest(_CONTRACT_MANIFEST.read_bytes()))
+        self.assertEqual(
+            [run["check_id"] for run in inputs["corpus_runs"]], sorted(checks.REQUIRED_CORPUS_CHECK_IDS)
+        )
+        for run in inputs["corpus_runs"]:
+            self.assertEqual(run["bundle_id"], _fake_hash("bundle"))
+            self.assertEqual(run["package_hash"], _fake_hash("package"))
+            self.assertRegex(run["report_digest"], r"^sha256:[0-9a-f]{64}$")
+        [hf_run] = [run for run in inputs["corpus_runs"] if run["check_id"] == "pipeline_http_corpus_hf_local"]
+        self.assertEqual(len(hf_run["corpus_digests"]), 2)
+
+        text = data.decode()
+        self.assertNotIn("postgres://", text)
+        self.assertNotIn("tenant-a", text)
+        self.assertNotIn("probe_", text)
+        for call in self._cargo_calls():
+            key = call[4].get("TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX")
+            if key:
+                self.assertNotIn(key, text)
+        self.assertEqual((self.run.run_dir / "qualification-report.json").read_bytes(), data)
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(lines[0], f"PipelineQualificationOK: report={self.report_path.name} checks=16")
+        self.assertTrue(lines[1].startswith("PipelineQualificationScope: production_promotion_ready=false"))
+        self.assertEqual(self.stderr.getvalue(), "")
+
+        for label, tampered in (
+            ("private field", {**value, "secret_probe": "x"}),
+            ("promotion ready", {**value, "production_promotion_ready": True}),
+            ("missing blocker", {**value, "safe_blockers": value["safe_blockers"][1:]}),
+            ("changed input", {**value, "inputs": {**inputs, "inventory_digest": _fake_hash("other")}}),
+            ("missing check", {**value, "checks": value["checks"][1:]}),
+            (
+                "a check blocker left out",
+                {**value, "safe_blockers": [label for label in value["safe_blockers"]
+                                            if label != "filesystem_restore_local_only"]},
+            ),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(errors.ToolingError):
+                    report_module.validate_qualification_report(tampered)
+
+    def test_qualify_reports_a_cleanup_failure(self):
+        self.fail_lock_drop = True
+        code = self._qualify("--archive")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: cleanup_failed")
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "cleanup_failed"))
+        self.assertFalse(self.catalog_path.exists())
 
 
 if __name__ == "__main__":

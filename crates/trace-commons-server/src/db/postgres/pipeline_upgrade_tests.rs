@@ -8,6 +8,7 @@ use super::{MIGRATIONS, PgBackend, TRACE_COMMONS_RLS_TABLES, apply_and_record_mi
 use crate::{
     config::{DatabaseConfig, SslMode},
     db::Database,
+    versioned_pipeline_qualification::PipelineCheckEmitter,
 };
 
 fn database_config(url: String) -> DatabaseConfig {
@@ -331,6 +332,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         );
     }
 
+    let mut forced_rls_tables = 0usize;
     for table in PIPELINE_TABLES {
         assert!(
             TRACE_COMMONS_RLS_TABLES.contains(&table),
@@ -351,6 +353,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             row.get::<_, bool>(0) && row.get::<_, bool>(1) && row.get::<_, bool>(2),
             "{table} must enable and force RLS with the tenant policy"
         );
+        forced_rls_tables += 1;
     }
 
     for (table, column) in [
@@ -461,4 +464,14 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         .get(0);
     assert_eq!(unscoped, 0, "no tenant context sees nothing");
     admin.batch_execute("RESET ROLE").await.unwrap();
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_storage_upgrade_rls",
+        None,
+        serde_json::json!({
+            "tables": PIPELINE_TABLES.len(),
+            "forced_rls": forced_rls_tables,
+            "maximum_version": version,
+        }),
+    );
 }

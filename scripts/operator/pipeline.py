@@ -10,6 +10,7 @@ convention: hash-only, label-only operational surfaces).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import re
@@ -17,10 +18,22 @@ import secrets
 import shutil
 import sys
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 from pipeline_tooling.cargo import cargo_test
 from pipeline_tooling.catalog import CATALOG_NAME, update_catalog
-from pipeline_tooling.checks import TEST_CHECKS, CheckSpec
+from pipeline_tooling.checks import (
+    CONTRACTS_STEPS,
+    INVENTORY_STEP,
+    MIGRATION_ATOMICITY_STEP,
+    REQUIRED_CORPUS_CHECK_IDS,
+    REQUIRED_DATABASE_CHECKS,
+    RESTORE_CHECK_ID,
+    RUNTIME_STEPS,
+    TEST_CHECKS,
+    CheckSpec,
+    required_specs,
+)
 from pipeline_tooling.corpus import (
     DEFAULT_CORPUS,
     PIN_SCHEMA,
@@ -33,6 +46,7 @@ from pipeline_tooling.corpus import (
 from pipeline_tooling.environment import ROOT, Environment, Run, child_environment, run_child
 from pipeline_tooling.errors import StepFailed, ToolingError, require
 from pipeline_tooling.files import atomic_write, sha256_digest
+from pipeline_tooling.report import SAFE_BLOCKERS, corpus_run_input, write_report
 from pipeline_tooling.results import load_results, require_current_pass_results, validate_evidence
 
 # Where routine outputs go (the latest bounded report of each kind), and the
@@ -50,7 +64,6 @@ BUNDLES = ("minimal", "compatibility")
 # the artifact copy, and the one check the resume emits.
 RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
 RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
-RESTORE_CHECK_ID = "pipeline_restore_drill"
 RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
 RESTORE_SAFE_BLOCKER = "filesystem_restore_local_only"
 _RESTORE_FINGERPRINT_HASHES = (
@@ -68,8 +81,20 @@ _RESTORE_FINGERPRINT_COUNTS = (
     "completed_credit_event_count",
 )
 
+# `qualify`: the contract test manifest whose bytes it hashes (ruling T11-2),
+# and its three corpus runs, in `REQUIRED_CORPUS_CHECK_IDS` order, as
+# `(bundle, corpus)`. The HF run uses the local fixture pin (ruling HF-1).
+CONTRACT_MANIFEST = ROOT / "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json"
+HF_LOCAL_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-local.json"
+QUALIFY_CORPUS_RUNS = (
+    ("minimal", DEFAULT_CORPUS),
+    ("compatibility", DEFAULT_CORPUS),
+    ("compatibility", HF_LOCAL_PIN),
+)
+
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_FAILURE_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 # A bare `scheme://` anywhere in an argument. `--postgres-admin-url` is the
 # one flag allowed to carry a URL; every other argument that looks like one
@@ -158,6 +183,20 @@ def build_parser():
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
     restore_parser.set_defaults(handler=restore_drill)
+
+    qualify_parser = subparsers.add_parser(
+        "qualify", help="Run every required pipeline check and write one qualification report (local evidence)"
+    )
+    qualify_parser.add_argument(
+        "--archive", action="store_true", help="Also archive the report and its records in the lab catalog."
+    )
+    qualify_parser.add_argument(
+        "--postgres-admin-url",
+        dest="postgres_admin_url",
+        default=None,
+        help="Use this existing PostgreSQL server instead of starting a container.",
+    )
+    qualify_parser.set_defaults(handler=qualify)
 
     return parser
 
@@ -281,10 +320,31 @@ def _keep_failed_report(report_path, label):
     print(line)
 
 
-def run_corpus(args, run):
-    bundle, package_path, key_path = _corpus_source(args)
-    corpus_path = Path(args.corpus).resolve()
-    is_pin, partitions = _corpus_partitions(run, corpus_path, args.corpus_digest)
+class CorpusRun(NamedTuple):
+    """A corpus run ready to start: its label (the check id's suffix), the
+    source it serves (a built-in bundle, or a package and its trusted key),
+    the corpus partition files, and their digests."""
+
+    label: str
+    bundle: Optional[str]
+    package_path: Optional[Path]
+    key_path: Optional[Path]
+    partitions: list
+    digests: list
+
+    @property
+    def check_id(self):
+        return f"pipeline_http_corpus_{self.label}"
+
+
+def _corpus_report_path(run, label):
+    return run.run_dir / f"corpus-report-{label}.json"
+
+
+def prepare_corpus_run(run, bundle, package_path, key_path, corpus_path, expected_digest):
+    """Checks the corpus file (and exports an HF pin) before any database
+    starts, and names the check the run will emit."""
+    is_pin, partitions = _corpus_partitions(run, corpus_path, expected_digest)
     digests = [load_direct_corpus(path)[1] for path in partitions]
     if is_pin:
         label = "hf_local"
@@ -292,43 +352,46 @@ def run_corpus(args, run):
         label = "package"
     else:
         label = bundle
-    check_id = f"pipeline_http_corpus_{label}"
+    return CorpusRun(label, bundle, package_path, key_path, partitions, digests)
 
-    report_path = run.run_dir / "corpus-report.json"
-    failure = None
-    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
-        scenario = environment.scenario("corpus_run")
-        extra = {
-            "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
-            "TRACE_COMMONS_PIPELINE_CORPUS_PATH": str(partitions[0]),
-            "TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID": check_id,
-            "TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH": str(report_path),
-            "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(scenario.artifact_root),
-            # One random key per command (P4-D18); only the child sees it.
-            "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
-            "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
-            "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
-            "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
-        }
-        if len(partitions) == 2:
-            extra["TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH"] = str(partitions[1])
-        if package_path is not None:
-            extra["TRACE_COMMONS_PIPELINE_CORPUS_PACKAGE_PATH"] = str(package_path)
-            extra["TRACE_COMMONS_PIPELINE_CORPUS_TRUSTED_KEY_PATH"] = str(key_path)
-        else:
-            extra["TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE"] = bundle
-        try:
-            cargo_test(
-                run, "corpus_run", INGEST_TEST_ARGS, CORPUS_HARNESS, child_environment(extra), exact=True, ignored=True
-            )
-        except StepFailed as error:
-            failure = error
-        if failure is None:
-            committed = scenario.committed_transactions(scenario.pilot_database)
-            require(committed >= 5, "database_check_executed_nothing:corpus_run")
-    if failure is not None:
-        _keep_failed_report(report_path, label)
-        raise failure
+
+def run_corpus_check(run, environment, corpus_run, *, step=None):
+    """One corpus run in its own scenario of `environment`: the harness, the
+    transaction guard, and every check of its report, result, and evidence.
+    Writes the latest report of its kind under `.local/` and returns
+    `(local report path, report)`. `step` labels the harness step and the
+    scenario (default: the check id). `run` and `qualify` both call this
+    (ruling T11-4)."""
+    check_id = corpus_run.check_id
+    step = step or check_id
+    report_path = _corpus_report_path(run, corpus_run.label)
+    scenario = environment.scenario(step)
+    extra = {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
+        "TRACE_COMMONS_PIPELINE_CORPUS_PATH": str(corpus_run.partitions[0]),
+        "TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID": check_id,
+        "TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH": str(report_path),
+        "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(scenario.artifact_root),
+        # One random key per corpus run (P4-D18); only the child sees it.
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
+        "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
+        "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+    }
+    if len(corpus_run.partitions) == 2:
+        extra["TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH"] = str(corpus_run.partitions[1])
+    if corpus_run.package_path is not None:
+        extra["TRACE_COMMONS_PIPELINE_CORPUS_PACKAGE_PATH"] = str(corpus_run.package_path)
+        extra["TRACE_COMMONS_PIPELINE_CORPUS_TRUSTED_KEY_PATH"] = str(corpus_run.key_path)
+    else:
+        extra["TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE"] = corpus_run.bundle
+    try:
+        cargo_test(run, step, INGEST_TEST_ARGS, CORPUS_HARNESS, child_environment(extra), exact=True, ignored=True)
+    except StepFailed:
+        _keep_failed_report(report_path, corpus_run.label)
+        raise
+    committed = scenario.committed_transactions(scenario.pilot_database)
+    require(committed >= 5, f"database_check_executed_nothing:{step}")
 
     require(report_path.is_file(), "corpus_report_missing")
     report_bytes = report_path.read_bytes()
@@ -338,11 +401,13 @@ def run_corpus(args, run):
         raise ToolingError("corpus_report_malformed") from error
     validate_report(report)
     require(report["check_id"] == check_id, "corpus_report_check_mismatch")
-    require([section["corpus_digest"] for section in report["partitions"]] == digests, "corpus_digest_mismatch")
+    require(
+        [section["corpus_digest"] for section in report["partitions"]] == corpus_run.digests,
+        "corpus_digest_mismatch",
+    )
     require(report["failure_count"] == 0, "corpus_report_has_failures")
 
     results = load_results(run)
-    require(set(results) == {check_id}, "corpus_check_results_unexpected")
     require_current_pass_results(run, results, {check_id: CheckSpec(check_id, digests_required=True)})
     result = results[check_id]
     require(
@@ -364,8 +429,17 @@ def run_corpus(args, run):
         },
         "corpus_evidence_mismatch",
     )
+    return _write_local_report(corpus_run.label, report_bytes, report), report
 
-    local_report = _write_local_report(label, report_bytes, report)
+
+def run_corpus(args, run):
+    bundle, package_path, key_path = _corpus_source(args)
+    corpus_run = prepare_corpus_run(
+        run, bundle, package_path, key_path, Path(args.corpus).resolve(), args.corpus_digest
+    )
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+        local_report, report = run_corpus_check(run, environment, corpus_run, step="corpus_run")
+    require(set(load_results(run)) == {corpus_run.check_id}, "corpus_check_results_unexpected")
     if args.archive:
         update_catalog(LOCAL_DIR / CATALOG_NAME, local_report)
     print(f"PipelineRunOK: bundle={report['bundle_id']} fixtures={report['fixture_count']}")
@@ -559,10 +633,144 @@ def restore_drill(args, run):
     )
 
 
+def run_binding_checks(run):
+    """The checks `qualify` requires by exit status before any database
+    check: every `pipeline.py test` step of `contracts` and `runtime` (the
+    runtime group holds the tooling self-tests), with the deployment
+    inventory also writing `<run dir>/inventory.json` (ruling T11-3).
+    Returns that inventory's `inventory_digest`."""
+    inventory_path = run.run_dir / "inventory.json"
+    for step in (*CONTRACTS_STEPS, *RUNTIME_STEPS):
+        if step.step == INVENTORY_STEP:
+            step = dataclasses.replace(step, argv=(*step.argv, "--output", str(inventory_path)))
+        _run_plain_step(run, step)
+    inventory = _read_json(inventory_path, "inventory_output_invalid")
+    digest = inventory.get("inventory_digest") if isinstance(inventory, dict) else None
+    require(isinstance(digest, str) and _HASH.fullmatch(digest) is not None, "inventory_output_invalid")
+    return digest
+
+
+def run_database_check(run, scenario, check):
+    """One required database check in its own scenario: its exact test,
+    pointed at the scenario's database and the run's result directory, then
+    the transaction guard on the database the test ran in, then a current
+    pass result for its check id."""
+    extra = {
+        "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
+        "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
+        "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+    }
+    if check.database == "upgrade":
+        extra["TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"] = scenario.upgrade_url
+        database = scenario.upgrade_database
+    else:
+        extra["TRACE_COMMONS_PG_TEST_DATABASE_URL"] = scenario.runtime_url
+        database = scenario.pilot_database if check.database == "pilot" else scenario.runtime_database
+    env = child_environment(extra)
+    cargo_test(run, check.check_id, check.cargo_args, check.test_name, env, exact=True, ignored=check.ignored)
+    require(scenario.committed_transactions(database) >= 5, f"database_check_executed_nothing:{check.check_id}")
+    require_current_pass_results(run, load_results(run), {check.check_id: CheckSpec(check.check_id, check.digests)})
+
+
+def corpus_records(run):
+    """What `qualify --archive` archives beside its report (ruling T11-1):
+    the run directory's copy of each required corpus report, and the HF
+    export's manifest."""
+    labels = [check_id.removeprefix("pipeline_http_corpus_") for check_id in REQUIRED_CORPUS_CHECK_IDS]
+    return [*(_corpus_report_path(run, label) for label in labels), run.run_dir / "hf" / "source-manifest.json"]
+
+
+def _run_required_checks(args, run, inputs):
+    """Every required check, in order, filling `inputs` as it goes; returns
+    the run's results once each required check has a current pass."""
+    require(CONTRACT_MANIFEST.is_file(), "contract_manifest_missing")
+    inputs["contract_manifest_digest"] = sha256_digest(CONTRACT_MANIFEST.read_bytes())
+    inputs["inventory_digest"] = run_binding_checks(run)
+    corpus_runs = [
+        prepare_corpus_run(run, bundle, None, None, corpus_path, None) for bundle, corpus_path in QUALIFY_CORPUS_RUNS
+    ]
+    require(
+        [corpus_run.check_id for corpus_run in corpus_runs] == list(REQUIRED_CORPUS_CHECK_IDS),
+        "qualify_corpus_checks_invalid",
+    )
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+        _run_postgres_step(run, environment, MIGRATION_ATOMICITY_STEP)
+        for check in REQUIRED_DATABASE_CHECKS:
+            run_database_check(run, environment.scenario(check.check_id), check)
+        for corpus_run in corpus_runs:
+            _, report = run_corpus_check(run, environment, corpus_run)
+            inputs["corpus_runs"].append(corpus_run_input(report))
+        run_restore_drill(run, environment)
+    # The environment is gone by now: a scenario database, the lock
+    # database, or the container that outlived it fails the qualification.
+    require(not run.cleanup_failed, "cleanup_failed")
+    results = load_results(run)
+    require_current_pass_results(run, results, required_specs())
+    return results
+
+
+def _write_failed_report(run, inputs, label):
+    """The report of a failed qualification: `status: fail`, the safe label,
+    and whatever results and inputs the run reached. Nothing here may
+    replace the original failure, so a report that cannot be written is
+    skipped silently."""
+    if _FAILURE_LABEL.fullmatch(label) is None:
+        label = "qualify_failed"
+    try:
+        try:
+            results = load_results(run)
+        except ToolingError:
+            results = {}
+        write_report(run, results, inputs, failure=label, local_dir=LOCAL_DIR)
+    except Exception:  # noqa: BLE001 -- the original failure must win (see above)
+        return
+
+
+def _shown(path):
+    return path.relative_to(ROOT) if path.is_relative_to(ROOT) else path.name
+
+
+def qualify(args, run):
+    """Runs every required check (binding checks by exit status, then each
+    database check, corpus run, and the restore drill in its own scenario of
+    one environment), requires a current pass result for each, and writes
+    one bounded report. A failure anywhere still writes the report, with
+    `status: fail` and the safe label, then raises."""
+    inputs = {
+        "code_revision_hash": run.code_revision_hash,
+        "contract_manifest_digest": None,
+        "inventory_digest": None,
+        "corpus_runs": [],
+    }
+    catalog_path = None
+    try:
+        results = _run_required_checks(args, run, inputs)
+        report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR)
+        if args.archive:
+            catalog_path = LOCAL_DIR / CATALOG_NAME
+            update_catalog(catalog_path, report_path, records=corpus_records(run))
+    except ToolingError as error:
+        _write_failed_report(run, inputs, str(error))
+        raise
+    except Exception:
+        _write_failed_report(run, inputs, "qualify_internal_error")
+        raise
+    line = f"PipelineQualificationOK: report={_shown(report_path)} checks={len(results)}"
+    if catalog_path is not None:
+        line += f" catalog={_shown(catalog_path)}"
+    print(line)
+    print(
+        "PipelineQualificationScope: production_promotion_ready=false blockers="
+        + ",".join(SAFE_BLOCKERS)
+        + " -- local evidence only, not a production promotion"
+    )
+
+
 def main(argv=None):
     args = parse_args(argv)
     run = Run.create()
     primary = 0
+    primary_label = None
     try:
         args.handler(args, run)
     except StepFailed as failure:
@@ -575,10 +783,13 @@ def main(argv=None):
     except ToolingError as error:
         print(f"PipelineFailure: {error}", file=sys.stderr)
         primary = 1
+        primary_label = str(error)
     except KeyboardInterrupt:
         primary = 130
     cleanup = 1 if run.cleanup_failed else 0
-    if cleanup:
+    # `qualify` raises `cleanup_failed` itself (its report must say so);
+    # the line is printed once.
+    if cleanup and primary_label != "cleanup_failed":
         print("PipelineFailure: cleanup_failed", file=sys.stderr)
     return primary if primary != 0 else cleanup
 

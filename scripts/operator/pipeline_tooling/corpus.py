@@ -129,6 +129,34 @@ _MANIFEST_DIGEST_FIELDS = (
     "holdout_corpus_digest",
 )
 
+MANIFEST_SCHEMA = "trace_commons.pipeline_hf_corpus_manifest.v1"
+# Exactly the keys `trace-commons-pipeline-corpus-export` writes into
+# `source-manifest.json`, and into its `source` object.
+_MANIFEST_KEYS = frozenset(
+    {
+        "schema",
+        "source",
+        *_MANIFEST_DIGEST_FIELDS,
+        "configuration_digest",
+        "sample_count",
+        "bootstrap_count",
+        "holdout_count",
+        "contains_raw_trace_text",
+        "contains_contributor_identity",
+    }
+)
+_MANIFEST_SOURCE_LABELS = ("revision", "split", "translator")
+_MANIFEST_SOURCE_COUNTS = (
+    "bootstrap_count",
+    "holdout_count",
+    "min_words",
+    "max_words",
+    "expected_instrument_count",
+)
+_MANIFEST_COUNTS = ("sample_count", "bootstrap_count", "holdout_count")
+# A public dataset name, `owner/name`.
+_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\Z")
+
 
 def load_direct_corpus(path, expected_digest=None):
     """Loads and validates a `trace_commons.pipeline_corpus.v1` file. Returns
@@ -229,6 +257,41 @@ def export_hf_corpus(run, pin_path, env, *, local_dir=None):
     require(manifest.get("contains_raw_trace_text") is False, "hf_manifest_contains_raw_trace_text")
 
     return [output_dir / "bootstrap-corpus.json", output_dir / "holdout-corpus.json"]
+
+
+def validate_hf_manifest(manifest):
+    """The export binary's `source-manifest.json`, exactly: its fixed keys,
+    `sha256:` digests, whole-number counts, label-shaped source settings,
+    the dataset's `owner/name`, and both privacy flags false. The dataset
+    name is the one value with a `/`, which `results.validate_evidence`'s
+    labels do not allow, so the catalog archives a manifest only after this
+    check (and never after a looser one)."""
+    require(
+        isinstance(manifest, dict) and set(manifest) == _MANIFEST_KEYS and manifest["schema"] == MANIFEST_SCHEMA,
+        "hf_manifest_invalid",
+    )
+    source = manifest["source"]
+    require(
+        isinstance(source, dict)
+        and set(source) == {"repository", *_MANIFEST_SOURCE_LABELS, *_MANIFEST_SOURCE_COUNTS},
+        "hf_manifest_invalid",
+    )
+    require(
+        isinstance(source["repository"], str) and _REPOSITORY.fullmatch(source["repository"]) is not None,
+        "hf_manifest_invalid",
+    )
+    for key in _MANIFEST_SOURCE_LABELS:
+        value = source[key]
+        require(isinstance(value, str) and _REPORT_LABEL.fullmatch(value) is not None, "hf_manifest_invalid")
+    for value in [source[key] for key in _MANIFEST_SOURCE_COUNTS] + [manifest[key] for key in _MANIFEST_COUNTS]:
+        require(type(value) is int and value >= 0, "hf_manifest_invalid")
+    for key in (*_MANIFEST_DIGEST_FIELDS, "configuration_digest"):
+        value = manifest[key]
+        require(isinstance(value, str) and _REPORT_HASH.fullmatch(value) is not None, "hf_manifest_invalid")
+    require(
+        manifest["contains_raw_trace_text"] is False and manifest["contains_contributor_identity"] is False,
+        "hf_manifest_invalid",
+    )
 
 
 def safe_report_value(value):

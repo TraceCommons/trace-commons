@@ -56,6 +56,7 @@ use trace_commons_server::versioned_pipeline_credit::{
     RecordingNearAdapter, RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::versioned_pipeline_qualification::PipelineCheckEmitter;
 use trace_commons_server::witness_service;
 
 /// This suite's own runtime login, distinct from `trace_pipeline_runtime_test`
@@ -823,7 +824,14 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     expire_run_lease(&backend, "tenant-a", envelope.submission_id).await;
 
     // ---- App 2: same database, artifact root, index, and adapters; no crash point ----
-    let (base, stop, server) = serve_pipeline_app(start(None)).await;
+    let resumed_state = start(None);
+    let package = resumed_state
+        .pipeline_service
+        .as_ref()
+        .expect("app 2 serves the injected pipeline service")
+        .default_package()
+        .clone();
+    let (base, stop, server) = serve_pipeline_app(resumed_state).await;
 
     // Readiness is live while app 2 runs.
     wait_for_pipeline_ready(&client, &base).await;
@@ -982,6 +990,18 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 
     stop.send(()).expect("send shutdown to app 2");
     join_within(server, 20, "app 2").await;
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_http_restart_recovery",
+        Some(&package),
+        serde_json::json!({
+            "phase_outcomes": 4,
+            "replay_status": 200,
+            "conflict_status": 409,
+            "bad_credential_status": 403,
+            "other_tenant_rows": 0,
+        }),
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -1702,6 +1722,7 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
 
     let dir = tempfile::tempdir().expect("temp dir");
     let service = o1_pipeline_service(backend.clone(), &dir);
+    let package = service.default_package().clone();
 
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
@@ -1814,6 +1835,17 @@ async fn real_http_pipeline_receipt_checks_ownership_on_replay() {
 
     stop.send(()).expect("send shutdown");
     join_within(server, 20, "ownership-on-replay test server").await;
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_http_receipt_ownership",
+        Some(&package),
+        serde_json::json!({
+            "other_principal_refusals": 2,
+            "refusal_status": 409,
+            "owner_replay_status": 200,
+            "owner_replay_same_receipt": true,
+        }),
+    );
 }
 
 /// Requirement in the completed-admission branch when the tenant is routed

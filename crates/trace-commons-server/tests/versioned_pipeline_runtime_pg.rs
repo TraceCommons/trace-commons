@@ -351,6 +351,21 @@ async fn stale_lease_cannot_commit_after_reclaim() {
             .lease_token,
         second.lease_token
     );
+
+    let package = store
+        .load_bundle(&tenant, &run.bundle_id)
+        .await
+        .unwrap()
+        .expect("the run's bundle is registered");
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_stale_lease_fence",
+        Some(&package),
+        serde_json::json!({
+            "claims": 2,
+            "stale_writes_refused": 1,
+            "reclaim_lease_kept": true,
+        }),
+    );
 }
 
 /// The token-only fence. `record_lease_expired` is fenced by the lease
@@ -3543,6 +3558,16 @@ async fn receipt_replay_and_conflict_are_exact() {
         PipelineReceiptResult::ContentConflict
     ));
     assert_eq!(count_runs(&backend, &tenant).await, 1);
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_receipt_replay_exact",
+        Some(service.default_package()),
+        serde_json::json!({
+            "runs": 1,
+            "replay_same_run": true,
+            "changed_content_refused": true,
+        }),
+    );
 }
 
 /// `replay_receipt` is the read-only lookup `submit_trace_handler`'s
@@ -10490,6 +10515,18 @@ async fn independent_instruments_retry_without_repeating_a_completed_one() {
     }
     let evidence: SettleEvidence = serde_json::from_value(settle_outcome.evidence).unwrap();
     assert_eq!(evidence.settlement_progress.len(), 2);
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_independent_instruments",
+        Some(service.default_package()),
+        serde_json::json!({
+            "uncharged_retries": run.max_attempts + 2,
+            "completed_leg_dispatches": 1,
+            "retried_leg_requests": 1,
+            "settle_outcomes": 1,
+            "credit_ledger_rows": 1,
+        }),
+    );
 }
 
 /// Brief 3C / amendments-971: a withdrawal recorded after Score forfeits
@@ -12560,6 +12597,8 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
+    let mut points_checked = 0usize;
+    let mut checked_package = None;
     for point in [
         PipelineCrashPoint::AfterArtifactStorage,
         PipelineCrashPoint::AfterReviewArtifactStorage,
@@ -12844,7 +12883,21 @@ async fn crash_matrix_produces_one_logical_effect_per_point() {
                 }
             }
         }
+        points_checked += 1;
+        checked_package = Some(service_b.default_package().clone());
     }
+
+    let package = checked_package.expect("at least one crash point ran");
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_crash_matrix",
+        Some(&package),
+        serde_json::json!({
+            "crash_points": points_checked,
+            "outcomes_per_phase": 1,
+            "dispatches_per_leg": 1,
+            "settlement_operations": 2,
+        }),
+    );
 }
 
 // A Settle failure that is not the
@@ -21890,6 +21943,8 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
+    let mut points_checked = 0usize;
+    let mut checked_package = None;
     for point in [
         PipelineCrashPoint::AfterNearSubmit,
         PipelineCrashPoint::AfterNearConfirm,
@@ -21977,7 +22032,21 @@ async fn payout_crash_between_submit_and_confirm_submits_once() {
             outcomes_before,
             "payout never writes an outcome ({point:?})"
         );
+        points_checked += 1;
+        checked_package = Some(restarted.default_package().clone());
     }
+
+    let package = checked_package.expect("at least one crash point ran");
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_payout_recovery",
+        Some(&package),
+        serde_json::json!({
+            "crash_points": points_checked,
+            "outbox_lines_per_point": 1,
+            "submits_per_point": 1,
+            "outcomes_unchanged": true,
+        }),
+    );
 }
 
 /// Owner decision (Zaki review 1, item S): a withdrawal forfeits only the
