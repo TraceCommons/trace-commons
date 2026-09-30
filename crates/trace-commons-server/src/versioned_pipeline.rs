@@ -1645,8 +1645,6 @@ impl PgPipelineStore {
                   WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.next_phase = 'review'
                     AND p.state IN ('pending', 'retry', 'awaiting_review')
                     AND p.admission_decision = 'quarantine'
-                    AND NOT EXISTS (SELECT 1 FROM pipeline_review_assessments a
-                                     WHERE a.tenant_id = p.tenant_id AND a.run_id = p.run_id)
                   FOR UPDATE",
                 &[&tenant_id, &run_id],
             )
@@ -1655,6 +1653,23 @@ impl PgPipelineStore {
             tx.commit().await?;
             return Ok(None);
         };
+        // Zaki review 1, round 2, finding 8: the assessment check is a
+        // statement of its own, run after the run's lock is held, so it reads
+        // an assessment committed while this claim waited for that lock. A
+        // check inside the locking statement would read the snapshot taken
+        // before the wait.
+        let assessed: bool = tx
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pipeline_review_assessments
+                                 WHERE tenant_id = $1 AND run_id = $2)",
+                &[&tenant_id, &run_id],
+            )
+            .await?
+            .get(0);
+        if assessed {
+            tx.commit().await?;
+            return Ok(None);
+        }
         let run_state: String = run_row.get("state");
         let submission_id: Uuid = run_row.get("submission_id");
         if !review_submission_is_operable(&tx, tenant_id, submission_id).await? {
@@ -1710,7 +1725,7 @@ impl PgPipelineStore {
     ///
     /// Ruling T3-6 adds the same submission-operability re-check
     /// `claim_review` takes, under the same row locks this already holds
-    /// (`FOR UPDATE OF c, p`): an inoperable submission refuses with the
+    /// (the run's, then the claim's): an inoperable submission refuses with the
     /// port's stale-claim label and releases an `awaiting_review` run back
     /// to `pending` in this same transaction, so the run still ends under
     /// `submission_inoperable` rather than staying parked with a claim that
@@ -1724,8 +1739,8 @@ impl PgPipelineStore {
     /// state predicate, a worker that leased the run between the claim and
     /// the assessment (or that failed it, which leaves `next_phase =
     /// 'review'`) would never block this call, and the assessment could
-    /// land after -- or racing -- the worker's own Review attempt. `FOR
-    /// UPDATE OF ... p` makes this the same lock-and-recheck pattern
+    /// land after -- or racing -- the worker's own Review attempt. The run's
+    /// `FOR UPDATE` makes this the same lock-and-recheck pattern
     /// `claim_review` uses: a worker's `claim_run` and this lookup take the
     /// same row lock, so the loser re-reads the winner's committed state.
     ///
@@ -1750,29 +1765,44 @@ impl PgPipelineStore {
         };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
+        // Zaki review 1, round 2, finding 7: the run row first, then the
+        // claim row, in two statements -- the order `claim_review` takes
+        // them in (the run's `FOR UPDATE`, then the claim's upsert) -- so
+        // a claim and an assessment of one run never wait on each other in
+        // opposite orders.
         let row = tx
             .query_opt(
                 "SELECT p.admission_reason, p.state, p.submission_id
-                 FROM pipeline_review_claims c
-                 JOIN pipeline_runs p
-                   ON p.tenant_id = c.tenant_id AND p.run_id = c.run_id
-                 WHERE c.tenant_id = $1 AND c.run_id = $2
-                   AND c.lease_token = $3
-                   AND c.reviewer_principal_ref = $4
-                   AND c.lease_expires_at > NOW()
+                 FROM pipeline_runs p
+                 WHERE p.tenant_id = $1 AND p.run_id = $2
                    AND p.next_phase = 'review'
                    AND p.state IN ('pending', 'retry', 'awaiting_review')
                    AND p.admission_decision = 'quarantine'
-                 FOR UPDATE OF c, p",
-                &[
-                    &claim.tenant_id,
-                    &claim.run_id,
-                    &claim.lease_token,
-                    &claim.reviewer_principal_ref,
-                ],
+                 FOR UPDATE",
+                &[&claim.tenant_id, &claim.run_id],
             )
             .await?;
-        let Some(row) = row else {
+        let claim_held = match row {
+            Some(_) => tx
+                .query_opt(
+                    "SELECT 1 FROM pipeline_review_claims c
+                     WHERE c.tenant_id = $1 AND c.run_id = $2
+                       AND c.lease_token = $3
+                       AND c.reviewer_principal_ref = $4
+                       AND c.lease_expires_at > NOW()
+                     FOR UPDATE",
+                    &[
+                        &claim.tenant_id,
+                        &claim.run_id,
+                        &claim.lease_token,
+                        &claim.reviewer_principal_ref,
+                    ],
+                )
+                .await?
+                .is_some(),
+            None => false,
+        };
+        let Some(row) = row.filter(|_| claim_held) else {
             return Err(DatabaseError::Constraint(
                 "review claim is stale or inoperable".to_string(),
             ));

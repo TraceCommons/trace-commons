@@ -21885,3 +21885,91 @@ async fn the_review_status_shows_reviews_own_reason_and_drops_a_resolved_quarant
     assert_eq!(status.processing, PipelineProcessingStatus::Complete);
     assert_eq!(status.reason_label, None, "nor once the run completes");
 }
+
+/// Finding 8: `claim_review` checks for an assessment in a statement of its
+/// own, after it holds the run's lock. Here an assessment's transaction
+/// holds the run row, records the assessment, and commits only once a
+/// reviewer's claim is waiting on that lock. The claim then sees the
+/// committed assessment and is refused as ineligible -- it is not granted a
+/// claim whose assessment would break the one-assessment-per-run rule.
+#[tokio::test]
+async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-claim-after-lock-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let reviewer = reviewer_principal_ref('a');
+
+    let mut owner = owner_client().await;
+    let assessment = owner_tenant_tx(&mut owner, &tenant).await;
+    assessment
+        .execute(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &parked.run_id],
+        )
+        .await
+        .unwrap();
+    assessment
+        .execute(
+            "INSERT INTO pipeline_review_assessments (
+                tenant_id, assessment_id, run_id, reviewer_principal_ref,
+                recommendation, reason_code, resolved_quarantine_reasons, evidence_hash
+             ) VALUES ($1, $2, $3, $4, 'reject', 'reviewer_declined', '[]'::JSONB, $5)",
+            &[
+                &tenant,
+                &uuid::Uuid::new_v4(),
+                &parked.run_id,
+                &reviewer,
+                &format!("sha256:{}", "e".repeat(64)),
+            ],
+        )
+        .await
+        .unwrap();
+    assessment
+        .execute(
+            "UPDATE pipeline_runs SET state = 'pending', last_error_label = NULL
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &parked.run_id],
+        )
+        .await
+        .unwrap();
+    let xid: String = assessment
+        .query_one("SELECT txid_current()::text", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    let store = PgPipelineStore::new(backend.clone());
+    let claim_tenant = tenant.clone();
+    let claim = tokio::spawn(async move {
+        store
+            .claim_review(
+                &claim_tenant,
+                parked.run_id,
+                &reviewer,
+                chrono::Duration::minutes(30),
+            )
+            .await
+    });
+    wait_for_a_waiter_on(&backend, &xid, &claim).await;
+    assessment.commit().await.unwrap();
+
+    assert_eq!(
+        claim.await.unwrap().unwrap(),
+        None,
+        "a claim on a run assessed while it waited is refused"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_review_claims").await,
+        0
+    );
+}
