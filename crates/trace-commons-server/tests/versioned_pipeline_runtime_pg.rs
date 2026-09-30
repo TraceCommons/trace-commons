@@ -17116,6 +17116,85 @@ async fn a_failed_invalidation_runs_again_when_it_is_queued_again() {
     );
 }
 
+/// Zaki review 1, fix round, item 3: the re-enqueue locks each run row
+/// before its invalidation row, the order the withdrawal, Settle's cancel
+/// and the invalidation worker all take. A transaction holds the run row (as
+/// a second withdrawal would); the re-enqueue waits for it without having
+/// touched the invalidation row, which another session can still lock at
+/// once. Taking the rows in the other order would hold the invalidation row
+/// while it waits, and a withdrawal that then reaches the invalidation row
+/// would deadlock with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requeue_locks_the_run_row_before_the_invalidation_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("requeue-lock-order-{}", uuid::Uuid::new_v4());
+    let (run, _) = complete_indexed_run(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    fail_invalidation_as_owner(&tenant, run.run_id).await;
+
+    let mut holder_client = owner_client().await;
+    let holder = owner_tenant_tx(&mut holder_client, &tenant).await;
+    holder
+        .query_one(
+            "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .unwrap();
+    let xid: String = holder
+        .query_one(
+            "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let requeue = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        async move {
+            service
+                .store()
+                .requeue_failed_index_invalidations(&tenant)
+                .await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &xid, &requeue).await;
+
+    let mut probe_client = owner_client().await;
+    let probe = owner_tenant_tx(&mut probe_client, &tenant).await;
+    let invalidation_free = probe
+        .query_opt(
+            "SELECT 1 FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE NOWAIT",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .is_ok();
+    probe.rollback().await.ok();
+    holder.rollback().await.unwrap();
+    let requeued = tokio::time::timeout(HELD_CALL_BOUND, requeue)
+        .await
+        .expect("the re-enqueue finishes once the run row is free")
+        .unwrap()
+        .unwrap();
+    assert!(
+        invalidation_free,
+        "the re-enqueue held the invalidation row while it waited for the run row"
+    );
+    assert_eq!(requeued, 1);
+}
+
 /// Zaki review 1, item 6: the operator's re-enqueue resets every `failed`
 /// invalidation of the caller's tenant to `pending` and answers how many,
 /// and touches no other tenant's. A second call finds none.

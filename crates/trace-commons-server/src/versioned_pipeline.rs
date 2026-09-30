@@ -4356,20 +4356,47 @@ async fn withdraw_pipeline_content_on_tx(
 /// given -- back to `pending`: no attempt charged, no label, due now, not
 /// complete; and each one's run `index_invalidation_state` from `failed` to
 /// `pending`. Returns how many invalidations it moved.
+///
+/// Lock order (Zaki review 1, fix round, item 3): the run rows first, by run
+/// id, then the invalidation rows, as the withdrawal, Settle's cancel and the
+/// invalidation worker take them. The enqueue path already holds its run row;
+/// taking it again is a no-op.
 async fn reset_failed_index_invalidations_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
     run_id: Option<Uuid>,
 ) -> Result<u64, DatabaseError> {
+    let locked = tx
+        .query(
+            "SELECT run.run_id
+               FROM pipeline_runs run
+              WHERE run.tenant_id = $1
+                AND ($2::UUID IS NULL OR run.run_id = $2)
+                AND EXISTS (
+                    SELECT 1 FROM pipeline_index_invalidations invalidation
+                     WHERE invalidation.tenant_id = run.tenant_id
+                       AND invalidation.run_id = run.run_id
+                       AND invalidation.state = 'failed'
+                )
+              ORDER BY run.run_id
+              FOR UPDATE OF run",
+            &[&tenant_id, &run_id],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, Uuid>(0))
+        .collect::<Vec<_>>();
+    if locked.is_empty() {
+        return Ok(0);
+    }
     let reset = tx
         .query(
             "UPDATE pipeline_index_invalidations
                 SET state = 'pending', attempt_count = 0, last_error_label = NULL,
                     completed_at = NULL, next_attempt_at = NOW()
-              WHERE tenant_id = $1 AND state = 'failed'
-                AND ($2::UUID IS NULL OR run_id = $2)
+              WHERE tenant_id = $1 AND state = 'failed' AND run_id = ANY($2)
               RETURNING run_id",
-            &[&tenant_id, &run_id],
+            &[&tenant_id, &locked],
         )
         .await?
         .iter()

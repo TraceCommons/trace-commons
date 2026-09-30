@@ -16884,6 +16884,34 @@ async fn pipeline_requeue_failed_index_invalidations_handler(
         .requeue_failed_index_invalidations(tenant.tenant_id())
         .await
         .map_err(internal_error)?;
+    // Zaki review 1, fix round, item 4: an index maintenance row, as the
+    // vector index routes append, hash-only and label-only: a fixed purpose
+    // (hashed), and a count under its own label. The row's surface is its
+    // kind, `vector_index`, as `main`'s maintenance rows record it.
+    let purpose = "pipeline_index_invalidation_requeue";
+    let action_counts = BTreeMap::from([(
+        "pipeline_index_invalidations_requeued".to_string(),
+        u32::try_from(requeued).unwrap_or(u32::MAX),
+    )]);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        tenant.auth(),
+        TraceCommonsAuditEvent::vector_index(
+            tenant.auth(),
+            false,
+            Some(purpose),
+            action_counts.clone(),
+        ),
+        StorageTraceAuditAction::VectorIndex,
+        StorageTraceAuditSafeMetadata::Maintenance {
+            surface: Some("vector_index".to_string()),
+            purpose_hash: Some(sha256_prefixed(purpose)),
+            dry_run: false,
+            action_counts,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     tracing::info!(
         tenant_storage_ref = %tenant_storage_ref(tenant.tenant_id()),
         requeued,

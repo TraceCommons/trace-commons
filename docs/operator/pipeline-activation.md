@@ -412,7 +412,8 @@ index. A `failed` invalidation is not final. Once the fault is fixed,
 credential; the tenant is the credential's) moves every `failed`
 invalidation of the tenant back to `pending`, with no attempt charged and
 due at once, and answers `{"requeued": <count>}`; the worker's next pass
-tries each again. Queuing the same revision's invalidation again (a repeated
+tries each again. Each call appends a `vector_index` audit row with the
+count (`pipeline_index_invalidations_requeued`) and nothing else. Queuing the same revision's invalidation again (a repeated
 withdrawal, for example) resets it in the same way.
 
 ## NEAR payout

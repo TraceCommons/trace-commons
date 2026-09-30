@@ -3085,6 +3085,41 @@ async fn the_operator_route_requeues_the_tenants_failed_invalidations() {
     )
     .await;
     assert_eq!(again, serde_json::json!({"requeued": 0}));
+
+    // Zaki review 1, fix round, item 4: each call the route answered
+    // appends a hash-only, label-only audit row (a count, no ids).
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT action, metadata_json FROM trace_audit_events
+              WHERE tenant_id = $1
+                AND metadata_json->'action_counts' ? 'pipeline_index_invalidations_requeued'
+              ORDER BY audit_sequence",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(rows.len(), 2, "one row per admitted call of this tenant");
+    assert_eq!(rows[0].get::<_, String>("action"), "vector_index");
+    let metadata: serde_json::Value = rows[0].get("metadata_json");
+    assert_eq!(
+        metadata["action_counts"]["pipeline_index_invalidations_requeued"], 1,
+        "{metadata}"
+    );
+    assert_eq!(
+        metadata["purpose_hash"],
+        sha256_prefixed("pipeline_index_invalidation_requeue"),
+        "{metadata}"
+    );
+    assert!(!metadata.to_string().contains(&run.run_id.to_string()));
 }
 
 /// `POST /v1/pipeline/exports` for `use`, with `limit`, keyed by `key`.
