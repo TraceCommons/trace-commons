@@ -758,6 +758,9 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     // Re-approving it unattended would restart the retry budget the cap
     // just spent, and the classifier would get the session every hour again.
     crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+    // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
+    // unsure about the session, and an unsure session never moves on its own.
+    super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -1707,6 +1710,51 @@ impl Queue {
             return false;
         }
         self.record_previewed_envelope(entry_id, pin, attested_inference)
+    }
+
+    /// Return every unsent approval made on the contributor's behalf to
+    /// waiting, under `second_look::REASON_SCRUB_CHECK_MANUAL`, and say how
+    /// many moved. For the switch to the Manual Scrub check (K4 of #1118):
+    /// such an entry would be held by the uploader anyway, and until then a
+    /// row still reading approved would be telling the contributor something
+    /// Manual no longer allows. A person's own approval is never touched, and
+    /// an entry already `Uploading` is left to its pass.
+    pub fn return_unattended_to_waiting(&mut self) -> usize {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| e.state == QueueState::Approved && e.approved_unattended)
+            .map(|e| e.entry_id)
+            .collect();
+        for id in &ids {
+            self.revoke_approval(*id, super::second_look::REASON_SCRUB_CHECK_MANUAL);
+        }
+        ids.len()
+    }
+
+    /// Revoke an unattended approval the Scrub check holds for a person (K4
+    /// of #1118), and pin the envelope the hold was decided on, with its
+    /// counts beside the digest, so the entry reads `scrubbed` with the
+    /// `second_look` that held it and a person's review shows those bytes.
+    ///
+    /// `pin` is the digest the uploader saved the envelope under
+    /// (`approved_envelope::save`) and its counts, or `None` when nothing was
+    /// saved: the entry is held all the same and reads not yet scrubbed.
+    pub fn hold_with_scrub_pin(
+        &mut self,
+        entry_id: Uuid,
+        reason_label: &str,
+        pin: Option<(&str, super::second_look::ScrubCounts)>,
+    ) -> bool {
+        if !self.revoke_approval(entry_id, reason_label) {
+            return false;
+        }
+        if let Some((digest, counts)) = pin {
+            if self.record_previewed_envelope(entry_id, digest, None) {
+                self.record_scrub(entry_id, digest, counts);
+            }
+        }
+        true
     }
 
     /// Revoke an approval and put the entry back in front of the

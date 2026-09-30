@@ -591,6 +591,43 @@ pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects th
 /// witness or the privacy scan sends a session somewhere before approval.
 pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
 
+// ---------------------------------------------------------------------------
+// The Scrub check (K4 of #1118)
+// ---------------------------------------------------------------------------
+//
+// Every constant in this section is DRAFT, NEEDS APPROVAL. Written for the
+// Settings row and the held-session row so that no shell writes its own.
+//
+// "Trust relaxes what may be sent, never what may be said" (the spec's R1):
+// the Automatic check counts what the scrubber removed and notices a trimmed
+// session. It is not a quality check, and it never says a model looked at
+// anything, because on most routes nothing confirms one did.
+// `the_scrub_check_copy_claims_no_model_or_quality_check` holds that.
+
+/// **DRAFT, NEEDS APPROVAL.** The Settings row's heading.
+pub const SCRUB_CHECK_TITLE: &str = "Scrub check";
+
+/// **DRAFT, NEEDS APPROVAL.** The Automatic choice (`scrub_check:
+/// "automatic"`). Opt-in: a daemon where nothing was chosen reports `null`
+/// and holds nothing, so a shell must not render that state as this one.
+pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
+
+/// **DRAFT, NEEDS APPROVAL.** What Automatic does. Names both second-look
+/// reasons and says what the check is not.
+pub const SCRUB_CHECK_AUTOMATIC_HELP: &str = "In folders set to share automatically, a session is sent on its own once it has been scrubbed, unless nothing personal was removed from it, something left in it still looks like personal data, or it was trimmed to fit. Those wait for you. This only counts and looks for patterns; it does not check that the scrubbing was right.";
+
+/// **DRAFT, NEEDS APPROVAL.** The Manual choice (`scrub_check: "manual"`).
+pub const SCRUB_CHECK_MANUAL_LABEL: &str = "Manual";
+
+/// **DRAFT, NEEDS APPROVAL.** What Manual does.
+pub const SCRUB_CHECK_MANUAL_HELP: &str = "Every session waits for you, including in folders set to share automatically. Nothing is sent until you approve it.";
+
+/// **DRAFT, NEEDS APPROVAL.** On a session held under
+/// `second-look-review-required`. The particular reason is the row's own
+/// `second_look` sentence; this says only that it did not move and will not.
+pub const SCRUB_CHECK_HELD: &str =
+    "This session was not sent on its own. It waits until you decide.";
+
 /// What the fixed patterns remove and where they stop, for one disclosure.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ScrubCopy {
@@ -3155,6 +3192,33 @@ mod tests {
             WitnessOrigin::ConnectedInference,
         ));
         assert!(line.contains("connected inference"));
+    }
+
+    /// R1: the Scrub check's words never claim a model looked at a session
+    /// or that anything was quality checked. The Automatic check is a count
+    /// of what the scrubber removed, and must read as one.
+    #[test]
+    fn the_scrub_check_copy_claims_no_model_or_quality_check() {
+        for sentence in [
+            SCRUB_CHECK_TITLE,
+            SCRUB_CHECK_AUTOMATIC_LABEL,
+            SCRUB_CHECK_AUTOMATIC_HELP,
+            SCRUB_CHECK_MANUAL_LABEL,
+            SCRUB_CHECK_MANUAL_HELP,
+            SCRUB_CHECK_HELD,
+        ] {
+            let lower = sentence.to_lowercase();
+            for claim in ["model", "quality", "verified", "certified", "safe"] {
+                assert!(
+                    !lower.contains(claim),
+                    "{claim:?} in Scrub check copy: {sentence}"
+                );
+            }
+        }
+        assert!(
+            SCRUB_CHECK_AUTOMATIC_HELP.contains("does not check that the scrubbing was right"),
+            "Automatic says what it is not"
+        );
     }
 
     /// The design's own worked example (Flow 2), verbatim.

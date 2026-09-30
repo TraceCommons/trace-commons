@@ -807,6 +807,12 @@ struct PassContext {
     /// with the config, because every requirement it checks today is about
     /// the contributor rather than a particular session.
     gate: super::automatic_gate::GateVerdict,
+    /// The Manual Scrub check (K4 of #1118): no session is approved on
+    /// anyone's behalf this pass, armed folders included. Read once with the
+    /// settings, like everything else here. Not a gate hold: nothing is
+    /// waiting for a requirement to be met, everything is waiting for a
+    /// person, as the contributor asked.
+    scrub_check_manual: bool,
     /// R1's disclosure for this contributor, from the same config: what the
     /// Flow 1 grant screen claimed, recorded when the grant arms a project.
     /// The K5 sweep reads each folder's own disclosure instead; see
@@ -853,9 +859,13 @@ impl PassContext {
             .as_ref()
             .map(|c| c.consent_scopes.clone())
             .unwrap_or_default();
-        let (near_ai, attested_bodies) = {
+        let (near_ai, attested_bodies, scrub_check_manual) = {
             let s = shared.settings.lock().expect("settings lock");
-            (s.near_ai.clone(), s.ironwire_attested_bodies)
+            (
+                s.near_ai.clone(),
+                s.ironwire_attested_bodies,
+                s.scrub_check == Some(super::settings::ScrubCheck::Manual),
+            )
         };
         let approval_inputs = cfg.as_ref().map(|c| {
             crate::daemon::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
@@ -885,6 +895,7 @@ impl PassContext {
             approval_inputs,
             admission_evidence,
             gate,
+            scrub_check_manual,
             disclosure,
             grant_terms,
             source_identities,
@@ -1085,7 +1096,10 @@ fn visit_session(
         // made on the contributor's behalf. See `automatic_gate`. A session
         // the grant holds back would not be approved either way, so it is
         // not counted as one the gate holds; nor is one held for a person.
+        // Nor under the Manual Scrub check, where everything waits for a
+        // person (K4 of #1118).
         let would_approve = mode == ProjectMode::AutoUpload
+            && !ctx.scrub_check_manual
             && state == QueueState::Pending
             && !held_for_review
             && !waits_for_a_person(shared, ctx, source, &project_key, &obs.path);
@@ -1257,7 +1271,10 @@ fn visit_session(
             transcript.started_at,
         );
     }
+    // The Manual Scrub check arms nothing either (K4 of #1118): the session
+    // is queued `Pending` for a person, like any in an Ask me folder.
     let would_arm = mode == ProjectMode::AutoUpload
+        && !ctx.scrub_check_manual
         && !from_staging
         && !returned_from_keep
         && armed_settle_elapsed(obs.modified_at, ctx.now)
@@ -2274,6 +2291,53 @@ mod tests {
         assert!(f.shared.queue.lock().unwrap().revoke_approval(
             id,
             crate::daemon::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED
+        ));
+
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        let e = f.shared.queue.lock().unwrap().all()[0].clone();
+        assert_eq!(e.state, QueueState::Pending, "held, not re-approved");
+        assert!(e.held_for_review());
+    }
+
+    /// The Manual Scrub check (K4 of #1118): an armed, settled session is
+    /// queued for a person, on first sight and on every later pass, and
+    /// Automatic arms it again.
+    #[tokio::test]
+    async fn the_manual_scrub_check_approves_nothing_on_anyones_behalf() {
+        let f = WatcherFixture::new();
+        f.shared.settings.lock().unwrap().scrub_check =
+            Some(super::super::settings::ScrubCheck::Manual);
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(report.auto_ready, 0, "{report:?}");
+        assert_eq!(f.states(), vec![QueueState::Pending], "first sight");
+
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(f.states(), vec![QueueState::Pending], "a later pass");
+        assert!(!f.shared.queue.lock().unwrap().all()[0].approved_unattended);
+
+        f.shared.settings.lock().unwrap().scrub_check =
+            Some(super::super::settings::ScrubCheck::Automatic);
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        assert_eq!(f.states(), vec![QueueState::Approved], "armed again");
+    }
+
+    /// The Automatic Scrub check's hold is one the watcher leaves for a
+    /// person, like the others in `REASONS_NEEDING_A_PERSON`.
+    #[tokio::test]
+    async fn a_session_held_for_a_second_look_is_not_re_approved_on_their_behalf() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let id = f.shared.queue.lock().unwrap().all()[0].entry_id;
+
+        // What `drain_approved` does with the uploader's HeldForSecondLook.
+        assert!(f.shared.queue.lock().unwrap().revoke_approval(
+            id,
+            super::super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
         ));
 
         f.settle(Utc::now() + chrono::Duration::hours(31)).await;
