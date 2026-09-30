@@ -2057,7 +2057,7 @@ mod tests {
             source: r.source.to_string(),
             submitted_at: chrono::Utc::now(),
             status: "accepted".into(),
-            approved_unattended: false,
+            approved_unattended: None,
             approved_verdict: None,
         };
         assert_eq!(
@@ -3884,7 +3884,9 @@ async fn refresh_history_cache(store: &ConfigStore) -> Result<()> {
         }
         m
     };
-    let records = crate::daemon::history::join(&receipts, &updates, &labels, Utc::now());
+    // Keep local withdrawals across the rebuild; see `history::join`.
+    let previous = crate::daemon::history::HistoryCache::load(store).unwrap_or_default();
+    let records = crate::daemon::history::join(&receipts, &updates, &labels, &previous, Utc::now());
     crate::daemon::history::HistoryCache::save(store, &records)
 }
 
@@ -4621,7 +4623,7 @@ mod logout_tests {
                     source: "claude-code".to_string(),
                     submitted_at: Utc::now(),
                     status: "accepted".to_string(),
-                    approved_unattended: false,
+                    approved_unattended: None,
                     approved_verdict: None,
                 })
                 .unwrap();

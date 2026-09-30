@@ -1447,8 +1447,9 @@ mod tests {
 
         let receipts = store.load_receipts().unwrap();
         assert_eq!(receipts.len(), 1);
-        assert!(
+        assert_eq!(
             receipts[0].approved_unattended,
+            Some(true),
             "the entry was sent by an armed folder, not a person"
         );
     }

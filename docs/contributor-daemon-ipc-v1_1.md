@@ -96,15 +96,18 @@ old behaviour, because no application has shipped against `v1` yet. See
     later, so a client can draw "you approved · Worked" versus "armed ·
     went without asking" without a second request. See
     ["History provenance (K7)"](#history-provenance-k7).
-  - `history_rollup` now carries `taken_back`, alongside the existing
-    status buckets, for the design's "2 taken back" tile.
+  - `history_rollup` now carries `taken_back`, and each of `week`,
+    `month` and `all_time` a `withdrawn` bucket, for the design's "2 taken
+    back" tile. A row withdrawn here or `revoked` by a withdrawal on the web
+    counts there, once, and never in `other`.
   - `list_projects` now carries a top-level `unpurposed_traces`: scrubbed
     (previewed), undecided, Ask-me sessions, for the design's upsell
     sentence. See ["`list_projects`"](#list_projects).
-  - `commons_credit_summary` is new: the commons' own settlement posture and
-    this contributor's points on its ledger, read from
-    `GET /v1/account/credit-summary` with the account session, which the
-    daemon never read before this. See
+  - `commons_credit_summary` is new: the commons' own settlement posture,
+    read from the device route `GET /v1/contributors/me/settlement-posture`,
+    and this contributor's points on its ledger, read from
+    `GET /v1/account/credit-summary` with the account session. The daemon
+    never read either before this. See
     ["`commons_credit_summary`"](#commons_credit_summary).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
@@ -490,8 +493,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored) | `ok: true`, `purged: <count>`, `retracted: <count>` | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above and "`set_project_mode` and the ignore purge" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended` and `approved_verdict` | see "History provenance (K7)" below |
-| `history_rollup` | — | see below | now also carries `taken_back` |
-| `commons_credit_summary` | — | `state`, plus `commons_settlement`, `commons_settlement_explanation`, `commons_graded`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as `state: "unknown"`; see "`commons_credit_summary`" below |
+| `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
+| `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
 | `skill_candidate` | `submission_id` | candidate, correction, up to six evidence excerpts, default draft, manual control, evaluation contract, and optional replacement review id | reads the same account-owned redacted record as `history_detail`; no model call |
 | `skill_review` | `candidate_id`, `draft: {name, description, procedure}`, `replaces_review_id` (optional) | reviewed draft, complete `SKILL.md`, SHA-256, and source lineage | validates and freezes the exact skill locally; a changed prior review requires its id |
@@ -1398,6 +1401,11 @@ decided." It is the number of queue entries that are, all three:
 - **Previewed at least once** (`previewed_envelope_digest` is set on the
   entry) -- "scrubbed", in the design's word. An entry nobody has opened a
   preview for has not been through the redaction pass this count is about.
+
+A follow-up will share one predicate between this count and K6's
+`status.decisions_owed` (#1132) once both have landed; they differ today
+(this one is Ask-me only and requires a preview), and neither changes the
+other's number.
 
 Like `pending_count` and `contributable_count`, this is a plain count with no
 side effects, computed from the same queue and policy state a client already
@@ -3023,7 +3031,8 @@ design's per-trace credit log: "just now · you approved · Worked" versus
 
 - **`approved_unattended`** -- whether this trace reached upload without the
   contributor deciding: `true` for an armed (`auto_upload`) folder's send,
-  `false` for a person's own approval. Carried from the queue entry's own
+  `false` for a person's own approval, and **`null` when it was not
+  recorded**. Carried from the queue entry's own
   `approved_unattended` at the moment of upload (`daemon::uploader`, via
   `SubmitContext::set_upload_provenance`), not derived after the fact --
   the entry itself is gone by the time a client asks, so this is the only
@@ -3032,13 +3041,14 @@ design's per-trace credit log: "just now · you approved · Worked" versus
   (`worked` / `partly` / `failed`), or `null` when none was given. Carried
   from the same queue entry, the same way.
 
-Both are fixed labels, both `#[serde(default)]` on the wire: a row cached
-before this existed reads `approved_unattended: false` (the safe reading --
-"you approved" -- for a row this daemon can no longer ask) and
-`approved_verdict: null`. A row written by the CLI's own `submit` command,
-outside the daemon's queue, also reads `approved_unattended: false`: a
-person typing a command is exactly the "you approved" case, and there is no
-queue entry to ask otherwise.
+Both are fixed labels, both `#[serde(default)]` on the wire: a row whose
+receipt predates this reads `approved_unattended: null` and
+`approved_verdict: null`. **A client must render `null` as "not recorded",
+never as "you approved"** -- an older row may well have been sent by an
+armed folder, and a consent label must not guess in the reassuring
+direction. A row written by the CLI's own `submit` command reads
+`approved_unattended: false` (a person ran the command) and carries the
+`--verdict` it was given, if any.
 
 Render both as fixed labels, never as prose composed from anything else on
 the row -- "you approved" and "armed" are not synonyms for any existing
@@ -3064,15 +3074,15 @@ quarantined, or withdrawn.
 Quarantine means **held for operator privacy review**, not rejected. A
 contributor who sees it grouped with failures reads it as rejection.
 
-`taken_back` (K7) is how many history records carry a local `withdrawn_at`
--- the design's third tile, "2 taken back". It is reported separately from
-the status buckets above for the same reason `quarantined` is: a withdrawn
-record's `status` is the fixed local label `withdrawn`, which
-`all_time`/`month`/`week` have no bucket for and would otherwise fold into
-`other`, indistinguishable there from a status this client simply does not
-recognize. `#[serde(default)]` on the wire, so an old client that ignores it
-is unaffected and a cache line written before it existed still reports `0`
-rather than refusing to load.
+`taken_back` (K7) is how many history records have been taken back -- the
+design's third tile, "2 taken back": withdrawn from this daemon (a local
+`withdrawn_at`, status `withdrawn`), or reported `revoked` by the server
+after a withdrawal on the web (#1112). Each of `all_time`/`month`/`week`
+counts the same rows in a `withdrawn` bucket, so a withdrawn row is counted
+exactly once and never in `other`. A local withdrawal survives the next
+history refresh: the refresh carries `withdrawn_at` over from the cache it
+replaces. Both fields are `#[serde(default)]` on the wire, so an old client
+that ignores them is unaffected.
 
 `last_refreshed_at` is `null` when history has never been refreshed from the
 server; show staleness rather than presenting a stale cache as current.
@@ -3342,50 +3352,75 @@ instance of a pattern.
 
 ### `commons_credit_summary`
 
-K7's settlement-posture relay: what the commons itself says about this
-contributor's credit, read with the **account session** (`crate::account_auth`,
-the same one `withdraw` presents -- never the device key). The daemon never
-read this before K7; the design's "Settlement off" line and per-trace credit
-log needed it.
+K7's credit relay: what the commons itself says, in two halves, each read on
+the credential that can read it. The daemon never read either before K7; the
+design's "Settlement off" line and per-trace credit log needed them.
+
+- **Posture** (`posture_state` and the three `commons_settlement*` /
+  `commons_graded` fields) comes from the DEVICE route
+  `GET /v1/contributors/me/settlement-posture` (#1119), with a
+  device-signed status claim like `status`'s read-back. So a contributor
+  with no account session still learns "Settlement off".
+- **Points** (`points_state` and the rest) come from the ACCOUNT route
+  `GET /v1/account/credit-summary`, with the account session
+  (`crate::account_auth`, the one `withdraw` presents), only when one is
+  stored.
 
 ```json
 {
-  "state": "known",
+  "posture_state": "known",
   "commons_settlement": "disabled",
   "commons_settlement_explanation": "Credit is recorded but not settled: on-chain settlement is not enabled on this deployment, so this figure stays pending.",
   "commons_graded": false,
+  "points_state": "known",
   "commons_points_earned_this_period": 12,
   "commons_points_lifetime_earned": 45,
   "commons_pending_review": 2,
-  "commons_currency_code": "USD",
-  "commons_currency_earned_this_period": "1.20",
+  "commons_currency_code": null,
+  "commons_currency_earned_this_period": null,
+  "commons_period_start": "2026-09-01T00:00:00Z",
+  "commons_period_end": "2026-10-01T00:00:00Z",
   "observed_at": "2026-09-28T09:17:15Z"
 }
 ```
 
-`state` is `known` or `unknown` -- only two, unlike `near_ai_balance`'s five,
-because this route has one honest failure mode rather than several distinct
-ones a client needs to act on differently. Every one of these collapses to
-`unknown`: no account session (device-key-only enrollment), a transport
-failure, and **any HTTP status other than exactly 200** -- a 2xx that is not
-200, same as `account_admission::fetch_status` applies to its sibling
-account route. This method never returns an IPC error for any of them: like
-`near_ai_balance`, it **always succeeds**, because a missing settlement
-posture is a fact about the machine or the network, not a caller mistake.
+Each state is `known` or `unknown`. Every failure of a half collapses that
+half to `unknown`: for points, no account session; for either, a transport
+failure, or **any HTTP status other than exactly 200** (a 2xx that is not
+200 included, the rule `account_admission::fetch_status` applies to its
+sibling account route). This method never returns an IPC error for any of
+them: like `near_ai_balance`, it **always succeeds**, because missing
+figures are a fact about the machine or the network, not a caller mistake.
 
-**Every field but `state` and `observed_at` is present and `null` when
-`state` is `unknown`.** The same rule `near_ai_balance` documents: an absent
-key would be ambiguous between "this build is too old to know" and "this
-daemon knows it does not know," and a `null` must never be rendered as a
-zero point balance or as "settlement is off" -- it means the daemon could
-not ask.
+**Every field of an `unknown` half is present and `null`.** The same rule
+`near_ai_balance` documents: an absent key would be ambiguous between "this
+build is too old to know" and "this daemon knows it does not know," and a
+`null` must never be rendered as a zero point balance or as "settlement is
+off" -- it means the daemon could not ask.
 
-`commons_currency_code` and `commons_currency_earned_this_period` are `null`
-together when this deployment has no configured points-to-currency rate --
-never one without the other, and never a fabricated rate.
+`commons_currency_code` and `commons_currency_earned_this_period` are relayed
+**only when the account route's own posture says `graded` and settlement is
+`http`**; otherwise both are `null`, together. The app never shows a dollar
+figure it cannot verify: a currency amount beside ungraded points, or under
+a settlement mode that moves no money, would be one. `null` makes no claim
+about what a point is worth.
 
-`observed_at` is when THIS daemon asked, not any server timestamp, so a
-client can say how old the figure is, exactly as `near_ai_balance` does.
+`commons_period_start` / `commons_period_end` are the window
+`commons_points_earned_this_period` covers.
+
+The answer is cached per daemon for 60 seconds when both halves are known
+and 15 seconds otherwise (the account route allows 30 calls per window, and
+a shell may ask on every screen open). An answer carrying a
+`credential_warning` is not cached.
+
+When the account route rotated the session and the daemon could not store
+the new one, the answer carries `credential_warning:
+"commons_credential_storage_unavailable"`, as `withdraw` and the public-run
+methods do.
+
+`observed_at` is when THIS daemon asked (the cached answer keeps the time it
+was fetched), not any server timestamp, so a client can say how old the
+figure is, exactly as `near_ai_balance` does.
 
 #### Naming: these are the commons' figures, never near.ai's
 

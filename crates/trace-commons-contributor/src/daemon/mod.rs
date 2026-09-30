@@ -1456,7 +1456,10 @@ async fn refresh_history(
         }
         m
     };
-    let records = history::join(&receipts, &updates, &labels, now);
+    // The cache being replaced carries local withdrawals that neither the
+    // receipts nor the server's read-back know about yet; `join` keeps them.
+    let previous = run_blocking(|| history::HistoryCache::load(&shared.store).unwrap_or_default());
+    let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
     let mut state = shared.state.lock().expect("state lock");
     state.last_history_poll_at = Some(now);

@@ -455,6 +455,10 @@ pub async fn submit_sessions(
     })?;
     let mut outcomes = Vec::with_capacity(sessions.len());
     for (source, session_ref) in sessions {
+        // The CLI's `submit`: a person ran the command, so the receipt says a
+        // person approved it, with the `--verdict` they passed (K7). Set per
+        // session because `submit_loaded` takes it one-shot.
+        ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
         outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
     }
     Ok(outcomes)
@@ -516,10 +520,11 @@ pub struct SubmitContext<'a> {
     /// and taken once at the top of `submit_loaded` like `approved_envelope`
     /// -- a value left behind would apply to whatever session came next.
     ///
-    /// `None` for every caller that never sets it: the CLI's own `submit`
-    /// command has no queue entry to ask, and a person typing a command is
-    /// exactly the "you approved" case the design's history rows
-    /// distinguish, so the receipt defaults to `(false, None)` (see K7).
+    /// `None` for a caller that never sets it, and the receipt then records
+    /// provenance as UNRECORDED (`approved_unattended: None`) rather than
+    /// guessing "you approved". Both production drivers set it:
+    /// `daemon::uploader` from the queue entry, and [`submit_sessions`] (the
+    /// CLI's `submit`, run by a person) with `false` and its `--verdict`.
     upload_provenance: Option<(bool, Option<String>)>,
     /// The delay a saturated witness asked for on the last submission, in
     /// seconds; zero for none. Reset at the start of each submission, like
@@ -1297,10 +1302,12 @@ impl<'a> SubmitContext<'a> {
         let approved_witness = self.approved_witness.take();
         // Same one-shot rule as `approved_envelope` above: taken here so it
         // cannot apply to a later submission this context happens to run.
-        // Absent for any caller that never set it (K7's "you approved"
-        // default -- see `set_upload_provenance`).
-        let (provenance_unattended, provenance_verdict) =
-            self.upload_provenance.take().unwrap_or((false, None));
+        // Absent for a caller that never set it, which is recorded as
+        // unrecorded (`None`), never as "you approved" (K7).
+        let (provenance_unattended, provenance_verdict) = match self.upload_provenance.take() {
+            Some((unattended, verdict)) => (Some(unattended), verdict),
+            None => (None, None),
+        };
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
 
         if opts.no_reasoning {
@@ -2270,7 +2277,7 @@ async fn mint_claim(
 /// Mint a claim for a status read-back: an empty consent_scopes/allowed_uses
 /// request, which the issuer resolves to the caller's full grant ceiling
 /// regardless of what was requested for submission.
-async fn mint_status_claim(
+pub(crate) async fn mint_status_claim(
     issuer: &IssuerClient,
     cfg: &ContributorConfig,
     device: &DeviceIdentity,
@@ -2375,7 +2382,7 @@ fn ensure_certified_grant(
     Ok(())
 }
 
-fn build_ingest_client(
+pub(crate) fn build_ingest_client(
     cfg: &ContributorConfig,
     token: &ClaimToken,
 ) -> std::result::Result<Client, OcError> {
@@ -3770,8 +3777,9 @@ mod tests {
 
         let receipts = store.load_receipts().unwrap();
         assert_eq!(receipts.len(), 1);
-        assert!(
-            !receipts[0].approved_unattended,
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(false),
             "a person approved this one"
         );
         assert_eq!(receipts[0].approved_verdict.as_deref(), Some("worked"));
@@ -3803,8 +3811,9 @@ mod tests {
 
         let receipts = store.load_receipts().unwrap();
         assert_eq!(receipts.len(), 1);
-        assert!(
+        assert_eq!(
             receipts[0].approved_unattended,
+            Some(true),
             "an armed folder sent this one without asking"
         );
         assert_eq!(receipts[0].approved_verdict, None);
@@ -3842,13 +3851,45 @@ mod tests {
 
         let receipts = store.load_receipts().unwrap();
         assert_eq!(receipts.len(), 2);
-        assert!(receipts[0].approved_unattended);
+        assert_eq!(receipts[0].approved_unattended, Some(true));
         assert_eq!(receipts[0].approved_verdict.as_deref(), Some("failed"));
-        assert!(
-            !receipts[1].approved_unattended,
-            "provenance must not leak onto a later submission"
+        assert_eq!(
+            receipts[1].approved_unattended, None,
+            "provenance must not leak onto a later submission; unset is unrecorded"
         );
         assert_eq!(receipts[1].approved_verdict, None);
+    }
+
+    /// K7 review: the CLI's `submit --verdict` is a person approving, and
+    /// the verdict they passed is recorded on the receipt rather than
+    /// dropped.
+    #[tokio::test]
+    async fn cli_submit_records_a_persons_approval_and_its_verdict() {
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let opts = SubmitOptions {
+            machine_readable: true,
+            verdict: Some(crate::envelope::ContributorVerdict::Partly),
+            ..Default::default()
+        };
+        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
+            .await
+            .unwrap();
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| matches!(o, SubmitOutcome::Submitted { .. })),
+            "got {outcomes:?}"
+        );
+        let receipts = store.load_receipts().unwrap();
+        assert!(!receipts.is_empty());
+        for receipt in &receipts {
+            assert_eq!(receipt.approved_unattended, Some(false));
+            assert_eq!(receipt.approved_verdict.as_deref(), Some("partly"));
+        }
     }
 
     #[tokio::test]
@@ -4680,7 +4721,7 @@ mod tests {
                 source: "claude-code".to_string(),
                 submitted_at: Utc::now(),
                 status: "submitted".to_string(),
-                approved_unattended: false,
+                approved_unattended: None,
                 approved_verdict: None,
             })
             .unwrap();

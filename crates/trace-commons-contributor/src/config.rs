@@ -684,18 +684,21 @@ pub struct Receipt {
     /// without the contributor deciding (`QueueEntry::approved_unattended`),
     /// i.e. an armed folder sent it rather than a person approving it.
     ///
-    /// Set once, at upload time, by `daemon::uploader` handing the pipeline
-    /// the entry's own provenance (`SubmitContext::set_upload_provenance`).
-    /// A submission built outside the daemon's queue -- the CLI's own
-    /// `submit` command, run directly by a person -- carries no entry to ask,
-    /// and defaults to `false`: a person typing a command is exactly the
-    /// "you approved" case the design's history rows distinguish.
+    /// Set once, at upload time, by whoever drove the upload
+    /// (`SubmitContext::set_upload_provenance`): `daemon::uploader` with the
+    /// entry's own flag, and the CLI's `submit` command with `Some(false)`,
+    /// since a person typed it.
+    ///
+    /// `None` means UNRECORDED: a receipt written before this field existed,
+    /// or a path that never said. It must never be rendered as "you
+    /// approved" -- an old receipt may well have been sent by an armed
+    /// folder, and a consent label that guesses in the reassuring direction
+    /// is the unsafe default.
     ///
     /// `#[serde(default)]` so a receipts file written before this field
-    /// existed still parses; an old receipt reads as `false`, the same
-    /// "you approved" default a command-line submission gets.
+    /// existed still parses, as `None`.
     #[serde(default)]
-    pub approved_unattended: bool,
+    pub approved_unattended: Option<bool>,
     /// The contributor's verdict at approval time (`worked` / `partly` /
     /// `failed`), carried from `QueueEntry::approved_verdict`. `None` when
     /// no verdict was given, or when this receipt predates the field.
@@ -1609,7 +1612,7 @@ mod tests {
             source: "claude-code".into(),
             submitted_at: chrono::Utc::now(),
             status: "accepted".into(),
-            approved_unattended: false,
+            approved_unattended: None,
             approved_verdict: None,
         };
         store.append_receipt(&r).unwrap();
@@ -1625,9 +1628,9 @@ mod tests {
     }
 
     /// K7: a receipts line written before `approved_unattended` /
-    /// `approved_verdict` existed must still load -- and load as "you
-    /// approved" (`false`, `None`), the safe reading, rather than being
-    /// skipped as garbage.
+    /// `approved_verdict` existed must still load -- and load as UNRECORDED
+    /// (`None`, `None`), never as "you approved", rather than being skipped
+    /// as garbage.
     #[test]
     fn a_receipt_line_written_before_provenance_existed_still_loads() {
         let (_d, store) = store();
@@ -1645,7 +1648,7 @@ mod tests {
         .unwrap();
         let loaded = store.load_receipts().unwrap();
         assert_eq!(loaded.len(), 1);
-        assert!(!loaded[0].approved_unattended);
+        assert_eq!(loaded[0].approved_unattended, None);
         assert_eq!(loaded[0].approved_verdict, None);
     }
 

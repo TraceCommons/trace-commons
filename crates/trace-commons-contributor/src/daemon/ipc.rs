@@ -2823,6 +2823,10 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     //   preview for has not been through the redaction pass this count is
     //   about, and including it would inflate "27" with sessions no
     //   preview-then-decide flow has touched.
+    //
+    // Deliberately not yet shared with K6's `queue::decisions_owed` (#1132),
+    // which is not on main: once both land, the two should share one
+    // predicate. Tracked as a follow-up on #1129.
     let unpurposed_traces = queue
         .pending()
         .iter()
@@ -10247,7 +10251,7 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
-            approved_unattended: false,
+            approved_unattended: None,
             approved_verdict: None,
         };
         let json = serde_json::to_string(&record).unwrap();

@@ -462,7 +462,7 @@ mod tests {
                 explanations: Vec::new(),
                 last_refreshed_at: None,
                 withdrawn_at: None,
-                approved_unattended: false,
+                approved_unattended: None,
                 approved_verdict: None,
             })
             .collect();
