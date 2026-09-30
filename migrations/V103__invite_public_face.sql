@@ -1,4 +1,4 @@
--- V96: what an invite shows a contributor before they join (#1118, Z1).
+-- V103: what an invite shows a contributor before they join (#1118, Z1).
 --
 -- The Join screen looks an invite up without redeeming it and names the issuer
 -- and its pay range. Neither belongs in the operator-only labels V42 already
@@ -16,8 +16,8 @@
 -- invite_lookup and trace_invite_registry_all policies) and its table-level
 -- grants, and the only reader is the registry role.
 --
--- Number V96 is provisional: main is at V91 and #1115 / #1107 hold V92-V95.
--- Renumber at landing if those merge first.
+-- First written as V96 and renumbered to V103 on rebasing onto main, which
+-- had taken V92-V101 in the meantime.
 
 ALTER TABLE onboarding_invite_grants
     ADD COLUMN IF NOT EXISTS issuer_display_name TEXT,

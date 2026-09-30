@@ -1099,7 +1099,7 @@ async fn an_expired_invite_cannot_be_redeemed() {
     assert!(result.is_none(), "an expired invite must not redeem");
 }
 
-// ---- V96 public face and the non-redeeming lookup route (#1118 Z1) ----
+// ---- V103 public face and the non-redeeming lookup route (#1118 Z1) ----
 
 mod lookup_route {
     use super::*;
