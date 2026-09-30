@@ -157,6 +157,96 @@ class CargoZeroMatchTests(unittest.TestCase):
             shutil.rmtree(run.run_dir, ignore_errors=True)
 
 
+class CargoListFailureTests(unittest.TestCase):
+    """Final review I5: a `--list` step that exits nonzero (a compile error)
+    fails with its own label and the protected log holding its output --
+    never as a zero-match filter -- and the real command never runs."""
+
+    def test_a_failed_list_step_fails_with_its_own_label_and_log(self):
+        run = _scratch_run()
+        calls = []
+        compiler_output = "error[E0425]: cannot find value `x` in this scope\n"
+
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            calls.append(list(command))
+            return (101, compiler_output) if capture else (0, None)
+
+        try:
+            with mock.patch.object(environment, "_invoke", fake_invoke):
+                with self.assertRaises(errors.StepFailed) as ctx:
+                    cargo.cargo_test(run, "list_step", ("-p", "example", "--lib"), "some_test", {})
+            failure = ctx.exception
+            self.assertEqual(str(failure), "cargo_test_list_failed:list_step")
+            self.assertEqual(failure.exit_code, 101)
+            self.assertEqual(failure.log_path, run.run_dir / "logs" / "list_step.log")
+            self.assertEqual(failure.log_path.read_text(), compiler_output)
+            self.assertEqual(len(calls), 1, "the real command must not run after a failed list")
+
+            def handler(args, r):
+                with mock.patch.object(environment, "_invoke", fake_invoke):
+                    cargo.cargo_test(r, "list_step", ("-p", "example", "--lib"), "some_test", {})
+
+            with mock.patch.object(pipeline, "Run") as mock_run_cls, mock.patch.object(
+                pipeline, "parse_args", return_value=argparse.Namespace(handler=handler)
+            ):
+                mock_run_cls.create.return_value = run
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = pipeline.main([])
+            self.assertEqual(code, 101)
+            line = stderr.getvalue().strip()
+            self.assertTrue(line.startswith("PipelineFailure: cargo_test_list_failed:list_step exit=101 log="), line)
+            self.assertNotIn("E0425", line)
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+
+class ObservedAtParsingTests(unittest.TestCase):
+    """Final review I2: chrono writes nine fractional digits on Linux, which
+    `datetime.fromisoformat` refuses before Python 3.11."""
+
+    def test_nine_fraction_digits_parse_on_every_supported_python(self):
+        expected = datetime(2026, 9, 30, 14, 57, 21, 810069, tzinfo=timezone.utc)
+        for label, value in (
+            ("z_suffix", "2026-09-30T14:57:21.810069123Z"),
+            ("offset", "2026-09-30T15:57:21.810069123+01:00"),
+            ("six_digits", "2026-09-30T14:57:21.810069Z"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(results._parse_observed_at(value), expected)
+        self.assertEqual(
+            results._parse_observed_at("2026-09-30T14:57:21.8Z"),
+            datetime(2026, 9, 30, 14, 57, 21, 800000, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            results._parse_observed_at("2026-09-30T14:57:21Z"),
+            datetime(2026, 9, 30, 14, 57, 21, tzinfo=timezone.utc),
+        )
+        # What `fromisoformat` receives: six digits, whatever Python runs.
+        self.assertEqual(
+            results._six_fraction_digits("2026-09-30T14:57:21.810069123+00:00"),
+            "2026-09-30T14:57:21.810069+00:00",
+        )
+        for refused in ("2026-09-30T14:57:21.810069123", "not-a-time", 12):
+            with self.subTest(refused=refused):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    results._parse_observed_at(refused)
+                self.assertEqual(str(ctx.exception), "check_result_schema_invalid")
+
+    def test_a_nine_digit_result_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = _make_run(Path(tmp))
+            _write_check_files(
+                run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+                observed_at=_iso(datetime.now(timezone.utc) - timedelta(seconds=1)).replace("Z", "123Z"),
+            )
+            loaded = results.load_results(run)
+            results.require_current_pass_results(
+                run, loaded, {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", True)}
+            )
+
+
 class ResultsValidationTests(unittest.TestCase):
     def test_results_reject_missing_stale_foreign_and_tampered(self):
         required = {"pipeline_crash_matrix": checks.CheckSpec("pipeline_crash_matrix", digests_required=True)}
@@ -257,6 +347,29 @@ class ResultsValidationTests(unittest.TestCase):
             with self.assertRaises(errors.ToolingError) as ctx:
                 results.load_results(run)
             self.assertEqual(str(ctx.exception), "check_evidence_missing")
+
+        for label, text in (("empty_result_file", ""), ("malformed_result_json", '{"schema": ')):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                run = _make_run(Path(tmp))
+                _write_check_files(
+                    run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                    run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+                )
+                (run.results_dir / "pipeline_crash_matrix.result.json").write_text(text)
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    results.load_results(run)
+                self.assertEqual(str(ctx.exception), "check_result_schema_invalid")
+
+        with self.subTest("malformed_evidence_json"), tempfile.TemporaryDirectory() as tmp:
+            run = _make_run(Path(tmp))
+            _write_check_files(
+                run.results_dir, "pipeline_crash_matrix", {"a": 1},
+                run_id=run.run_id, code_revision_hash=run.code_revision_hash,
+            )
+            (run.results_dir / "pipeline_crash_matrix.evidence.json").write_text("")
+            with self.assertRaises(errors.ToolingError) as ctx:
+                results.load_results(run)
+            self.assertEqual(str(ctx.exception), "check_evidence_malformed")
 
         with self.subTest("extra_key"), tempfile.TemporaryDirectory() as tmp:
             run = _make_run(Path(tmp))
@@ -468,6 +581,98 @@ class EnterFailureTeardownTests(unittest.TestCase):
             rm_calls = [c for c in calls if c[:2] == ["docker", "rm"]]
             self.assertEqual(len(rm_calls), 1)
             self.assertIn(f"tc-pipeline-{run.run_id}", rm_calls[0])
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+    def test_a_failed_docker_run_removes_the_container_it_created(self):
+        """Final review M2: `docker run` can create the container and then
+        fail to start it (a port bind failure); teardown removes it by name,
+        and a removal that leaves it behind sets `cleanup_failed`."""
+        for removal_fails in (False, True):
+            with self.subTest(removal_fails=removal_fails):
+                calls = []
+
+                def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+                    calls.append(list(command))
+                    if command[:2] == ["docker", "run"]:
+                        return 125, "port is already allocated\n"
+                    if command[:3] == ["docker", "ps", "-a"]:
+                        return 0, "deadbeefcontainerid\n" if removal_fails else ""
+                    return 0, ""
+
+                run = _scratch_run()
+                try:
+                    with mock.patch.object(environment, "_invoke", fake_invoke):
+                        with self.assertRaises(errors.ToolingError) as ctx:
+                            with environment.Environment(run):
+                                pass
+                    self.assertEqual(str(ctx.exception), "pipeline_tooling_container_start_failed")
+                    self.assertIn(["docker", "rm", "-f", f"tc-pipeline-{run.run_id}"], calls)
+                    self.assertIs(run.cleanup_failed, removal_fails)
+                finally:
+                    shutil.rmtree(run.run_dir, ignore_errors=True)
+
+    def test_a_teardown_exception_never_replaces_the_primary_failure(self):
+        """Final review M3: every teardown step runs, and one that raises
+        (the docker binary gone) sets `cleanup_failed` instead of replacing
+        the failure that ended the body."""
+        calls = []
+
+        def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            calls.append((list(command), input_text))
+            if input_text and "DROP DATABASE IF EXISTS \"admission_test_" in input_text:
+                raise OSError("psql vanished")
+            if input_text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in input_text:
+                raise OSError("psql vanished")
+            return (0, "") if capture else (0, None)
+
+        run = _scratch_run()
+        try:
+            with mock.patch.object(environment, "_invoke", fake_invoke):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    with environment.Environment(
+                        run, postgres_admin_url="postgres://trace@127.0.0.1:55431/postgres"
+                    ) as env:
+                        env.scenario("teardown_probe")
+                        raise errors.ToolingError("primary_failure")
+            self.assertEqual(str(ctx.exception), "primary_failure")
+            self.assertTrue(run.cleanup_failed)
+            lock_drops = [
+                text for _, text in calls if text and "DROP DATABASE IF EXISTS pipeline_tooling_lock" in text
+            ]
+            self.assertEqual(len(lock_drops), 1, "the lock drop still runs after the scenario drop raised")
+        finally:
+            shutil.rmtree(run.run_dir, ignore_errors=True)
+
+        # The same in container mode, through `main`: the primary label is
+        # what the terminal shows, and the exit code is the primary's.
+        def fake_container_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+            if command[:2] == ["docker", "rm"]:
+                raise OSError("docker vanished")
+            if command[:2] == ["docker", "port"]:
+                return 0, "127.0.0.1:49153\n"
+            return (0, "") if capture else (0, None)
+
+        def handler(args, r):
+            with environment.Environment(r):
+                raise errors.ToolingError("primary_failure")
+
+        run = _scratch_run()
+        try:
+            with mock.patch.object(environment, "_invoke", fake_container_invoke), mock.patch.object(
+                pipeline, "Run"
+            ) as mock_run_cls, mock.patch.object(
+                pipeline, "parse_args", return_value=argparse.Namespace(handler=handler)
+            ):
+                mock_run_cls.create.return_value = run
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = pipeline.main([])
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                stderr.getvalue().splitlines(),
+                ["PipelineFailure: primary_failure", "PipelineFailure: cleanup_failed"],
+            )
         finally:
             shutil.rmtree(run.run_dir, ignore_errors=True)
 
@@ -2014,6 +2219,8 @@ class _QualifyCase(_RestoreDrillCase):
         super().setUp()
         self.silent = set()
         self.foreign = set()
+        self.empty = set()
+        self.interrupt = None
         self.harness_emits = True
         self.fail_lock_drop = False
 
@@ -2045,7 +2252,14 @@ class _QualifyCase(_RestoreDrillCase):
                 _write_harness_outputs(env, emit=self.harness_emits)
             elif test_filter in by_test and "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR" in env:
                 check = by_test[test_filter]
-                if check.check_id in self.foreign:
+                if check.check_id == self.interrupt:
+                    raise KeyboardInterrupt
+                if check.check_id in self.empty:
+                    # What the emitter's `create_new` reservation leaves when
+                    # the test dies before its final rename.
+                    result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+                    (result_dir / f"{check.check_id}.result.json").write_text("")
+                elif check.check_id in self.foreign:
                     _emit_check(env, check.check_id, digests=check.digests, run_id="qforeign0")
                 elif check.check_id not in self.silent:
                     _emit_check(env, check.check_id, digests=check.digests)
@@ -2348,6 +2562,42 @@ class QualifyTests(_QualifyCase):
             with self.subTest(label=label):
                 with self.assertRaises(errors.ToolingError):
                     report_module.validate_qualification_report(tampered)
+
+    def test_qualify_reports_an_empty_result_file_with_a_label(self):
+        """Final review M1: an empty (or malformed) result file fails with
+        `check_result_schema_invalid` and a fail report, not a traceback."""
+        self.empty = {"pipeline_stale_lease_fence"}
+        code = self._qualify()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: check_result_schema_invalid")
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "check_result_schema_invalid"))
+        self.assertEqual(value["checks"], [], "results that no longer load are left out")
+
+    def test_an_interrupted_qualify_writes_a_fail_report(self):
+        """Final review M1 (deferred Task 11 M1): Ctrl-C during `qualify`
+        writes the `status: fail` report under `qualify_interrupted`, with
+        the results the run reached, then ends the command with 130."""
+        self.interrupt = "pipeline_stale_lease_fence"
+        code = self._qualify()
+        self.assertEqual(code, 130)
+        value = json.loads(self.report_path.read_text())
+        self.assertEqual((value["status"], value["failure"]), ("fail", "qualify_interrupted"))
+        reported = {item["check_id"] for item in value["checks"]}
+        self.assertIn("pipeline_independent_instruments", reported, "the results reached are kept")
+        self.assertNotIn("pipeline_stale_lease_fence", reported)
+        self.assertNotIn("PipelineQualificationOK", self.stdout.getvalue())
+
+    def test_qualify_removes_the_previous_report_before_it_runs(self):
+        """Final review M1: an older passing report never stays the latest
+        report, even when a failed run cannot write its own."""
+        self.report_path.parent.mkdir(parents=True, exist_ok=True)
+        self.report_path.write_text('{"status": "pass"}')
+        self.silent = {"pipeline_payout_recovery"}
+        with mock.patch.object(pipeline, "write_report", side_effect=OSError("disk full")):
+            code = self._qualify()
+        self.assertEqual(code, 1)
+        self.assertFalse(self.report_path.exists(), "the older report is gone")
 
     def test_qualify_reports_a_cleanup_failure(self):
         self.fail_lock_drop = True

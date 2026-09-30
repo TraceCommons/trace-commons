@@ -108,10 +108,25 @@ class CheckResult:
     safe_blockers: tuple
 
 
+# The fractional seconds of an ISO time: the digits after the seconds' dot.
+_FRACTION = re.compile(r"(T[0-9]{2}:[0-9]{2}:[0-9]{2})\.([0-9]+)")
+
+
+def _six_fraction_digits(text):
+    """`text` with its fractional seconds cut or padded to six digits.
+    chrono writes `observed_at` with as many digits as the clock gives
+    (`SecondsFormat::AutoSi`): nine on Linux's nanosecond clock. Before
+    Python 3.11, `datetime.fromisoformat` accepts only three or six, so a
+    Rust result from Linux would fail to parse. Cutting below a microsecond
+    changes no comparison this tooling makes."""
+    return _FRACTION.sub(lambda match: f"{match.group(1)}.{(match.group(2) + '000000')[:6]}", text, count=1)
+
+
 def _parse_observed_at(value):
     if not isinstance(value, str):
         raise ToolingError("check_result_schema_invalid")
     text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    text = _six_fraction_digits(text)
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as error:
@@ -146,24 +161,36 @@ def _validate_schema(raw):
     )
 
 
+def _read_json_file(path, label):
+    """The JSON value in `path`. An unreadable, empty, or malformed file
+    fails with `label`, never a traceback: the emitter's `create_new`
+    reservation leaves an empty result file when a test dies before its
+    final rename."""
+    try:
+        return json.loads(path.read_bytes())
+    except (OSError, ValueError) as error:
+        raise ToolingError(label) from error
+
+
 def load_results(run):
     """Loads every `results/*.result.json` in `run.results_dir`, validating
     each against the Rust schema and its paired evidence file's hash.
-    Structural problems (schema-invalid, tampered or missing evidence) raise
-    here; relational problems (foreign run, stale, failed, ...) are
+    Structural problems (an empty, malformed, or schema-invalid result,
+    tampered, malformed, or missing evidence) raise here, each with a label;
+    relational problems (foreign run, stale, failed, ...) are
     `require_current_pass_results`'s job."""
     results = {}
     results_dir = run.results_dir
     if not results_dir.is_dir():
         return results
     for result_path in sorted(results_dir.glob("*.result.json")):
-        raw = json.loads(result_path.read_text())
+        raw = _read_json_file(result_path, "check_result_schema_invalid")
         _validate_schema(raw)
         check_id = raw["check_id"]
 
         evidence_path = results_dir / f"{check_id}.evidence.json"
         require(evidence_path.is_file(), "check_evidence_missing")
-        evidence_value = json.loads(evidence_path.read_text())
+        evidence_value = _read_json_file(evidence_path, "check_evidence_malformed")
         require(sha256_digest(canonical(evidence_value)) == raw["evidence_hash"], "check_evidence_hash_mismatch")
 
         results[check_id] = CheckResult(

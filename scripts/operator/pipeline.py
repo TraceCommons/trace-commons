@@ -46,7 +46,7 @@ from pipeline_tooling.corpus import (
 from pipeline_tooling.environment import ROOT, Environment, Run, child_environment, run_child
 from pipeline_tooling.errors import StepFailed, ToolingError, require
 from pipeline_tooling.files import atomic_write, sha256_digest
-from pipeline_tooling.report import SAFE_BLOCKERS, corpus_run_input, write_report
+from pipeline_tooling.report import REPORT_NAME, SAFE_BLOCKERS, corpus_run_input, write_report
 from pipeline_tooling.results import load_results, require_current_pass_results, validate_evidence
 
 # Where routine outputs go (the latest bounded report of each kind), and the
@@ -712,14 +712,16 @@ def _run_required_checks(args, run, inputs):
 def _write_failed_report(run, inputs, label):
     """The report of a failed qualification: `status: fail`, the safe label,
     and whatever results and inputs the run reached. Nothing here may
-    replace the original failure, so a report that cannot be written is
-    skipped silently."""
+    replace the original failure: results that no longer load are left out
+    (the report then lists none), and a report that cannot be written is
+    skipped silently -- `qualify` already removed the previous `.local`
+    report when it started, so no older report stands in for this one."""
     if _FAILURE_LABEL.fullmatch(label) is None:
         label = "qualify_failed"
     try:
         try:
             results = load_results(run)
-        except ToolingError:
+        except Exception:  # noqa: BLE001 -- a result that does not load is left out
             results = {}
         write_report(run, results, inputs, failure=label, local_dir=LOCAL_DIR)
     except Exception:  # noqa: BLE001 -- the original failure must win (see above)
@@ -734,8 +736,14 @@ def qualify(args, run):
     """Runs every required check (binding checks by exit status, then each
     database check, corpus run, and the restore drill in its own scenario of
     one environment), requires a current pass result for each, and writes
-    one bounded report. A failure anywhere still writes the report, with
-    `status: fail` and the safe label, then raises."""
+    one bounded report.
+
+    It first removes the previous `.local` report, so an older passing
+    report never stays the latest one. A failed run writes its report with
+    `status: fail` and the safe label, then raises: a tooling failure under
+    its own label, an interrupt (Ctrl-C) as `qualify_interrupted`, anything
+    else as `qualify_internal_error`. Only a report that itself cannot be
+    written is left out."""
     inputs = {
         "code_revision_hash": run.code_revision_hash,
         "contract_manifest_digest": None,
@@ -743,6 +751,7 @@ def qualify(args, run):
         "corpus_runs": [],
     }
     catalog_path = None
+    (LOCAL_DIR / REPORT_NAME).unlink(missing_ok=True)
     try:
         results = _run_required_checks(args, run, inputs)
         report_path = write_report(run, results, inputs, local_dir=LOCAL_DIR)
@@ -751,6 +760,9 @@ def qualify(args, run):
             update_catalog(catalog_path, report_path, records=corpus_records(run))
     except ToolingError as error:
         _write_failed_report(run, inputs, str(error))
+        raise
+    except KeyboardInterrupt:
+        _write_failed_report(run, inputs, "qualify_interrupted")
         raise
     except Exception:
         _write_failed_report(run, inputs, "qualify_internal_error")

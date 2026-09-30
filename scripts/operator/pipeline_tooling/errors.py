@@ -13,8 +13,13 @@ class ToolingError(Exception):
 
 
 class StepFailed(ToolingError):
-    def __init__(self, step, exit_code, log_path):
-        super().__init__(f"step_failed:{step}")
+    """A child step that exited nonzero: `<label>:<step>`, its exit code,
+    and the protected log that holds its output. `label` is `step_failed`
+    unless the caller names the part of the step that failed (for example
+    `cargo_test_list_failed`)."""
+
+    def __init__(self, step, exit_code, log_path, *, label="step_failed"):
+        super().__init__(f"{label}:{step}")
         self.step, self.exit_code, self.log_path = step, exit_code, log_path
 
 

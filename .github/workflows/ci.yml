@@ -718,6 +718,24 @@ jobs:
         run: python3 scripts/operator/test_pipeline_tooling.py
       - name: pipeline qualify
         run: python3 scripts/operator/pipeline.py qualify
+      # A failed run prints only its label and a log path on this runner.
+      # Keep the run directories `pipeline.py` writes (`Run.create`:
+      # `.local/pipeline/runs/<run id>/`) -- the protected step logs, results,
+      # evidence, and reports -- so the failure can be read without
+      # reproducing it. The encrypted `artifacts/` are left out: their key
+      # only ever reached a child process. Every value in the rest comes from
+      # the synthetic fixtures and test constants.
+      - name: upload the pipeline run directories on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pipeline-qualification-runs
+          path: |
+            .local/pipeline/runs/
+            !.local/pipeline/runs/*/artifacts/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why.
       - uses: ./.github/actions/trim-cargo-cache

@@ -299,8 +299,12 @@ class Environment:
         return False
 
     def _teardown(self):
-        for scenario in self._scenarios:
-            self._drop_scenario_databases(scenario)
+        """Every cleanup step, each run even when an earlier one raised. A
+        step that raises (for example `OSError` when the docker or psql
+        binary is gone) sets `cleanup_failed` instead of propagating, so
+        teardown never replaces the failure that caused it, and `__exit__`
+        and `__enter__` re-raise that original failure."""
+        steps = [lambda scenario=scenario: self._drop_scenario_databases(scenario) for scenario in self._scenarios]
         if self._postgres_admin_url:
             # Only drop the lock database if this Environment is the one
             # that created it. `_enter_admin_mode` raising
@@ -308,9 +312,14 @@ class Environment:
             # database already exists; dropping it here would release a
             # different, still-running process's lock.
             if self._lock_acquired:
-                self._exit_admin_mode()
+                steps.append(self._exit_admin_mode)
         else:
-            self._exit_container_mode()
+            steps.append(self._exit_container_mode)
+        for step in steps:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 -- the primary failure must win
+                self._run.cleanup_failed = True
 
     # -- admin-url mode ----------------------------------------------------
 
@@ -342,6 +351,10 @@ class Environment:
 
     def _enter_container_mode(self):
         name = f"tc-pipeline-{self._run.run_id}"
+        # Named before `docker run`, so teardown removes (and checks for) a
+        # container that `docker run` created and then failed to start (a
+        # port bind failure, for example), not only one that started.
+        self._container = name
         returncode, _ = _invoke(
             [
                 "docker",
@@ -362,7 +375,6 @@ class Environment:
             capture=True,
         )
         require(returncode == 0, "pipeline_tooling_container_start_failed")
-        self._container = name
 
         # `-h 127.0.0.1 -p 5432` probes TCP on the container's own loopback,
         # not the default unix socket. The official postgres image runs a
