@@ -76,6 +76,42 @@ jobs:
     name: database suites against a real PostgreSQL
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Every database this job creates and then requires a suite to have used.
+    # "Create one database per suite" and "Refuse a run that executed nothing"
+    # both read this one list, so a database added for a new suite is guarded
+    # the moment it is created. When the two lists were spelled out separately,
+    # `admission_test_pipeline`, `admission_test_pipeline_http` and
+    # `admission_test_unbound_reaper` were created but never checked.
+    #
+    # This is the only job-wide variable, and it is safe as one because no
+    # suite reads it. The `reward_test_*` databases are not listed: each of
+    # their steps proves its own run by querying the rows it must have written.
+    env:
+      PG_SUITE_DATABASES: >-
+        admission_test_onboarding
+        admission_test_ledger
+        admission_test_account_ledger
+        admission_test_migration
+        admission_test_ingest
+        admission_test_invite
+        admission_test_merge
+        admission_test_rls
+        admission_test_store
+        admission_test_tokens
+        admission_test_account_trust
+        admission_test_account_trust_growth
+        admission_test_account_trust_route
+        admission_test_witness_evidence
+        admission_test_source_sessions
+        admission_test_inference_connection
+        admission_test_inference_connection_route
+        admission_test_walletv2
+        admission_test_legacy_invite_link
+        admission_test_device_invite_subject
+        admission_test_pipeline
+        admission_test_pipeline_http
+        admission_test_unbound_reaper
+        pipeline_test_upgrade
     # The tests in this repository that touch PostgreSQL do not run anywhere.
     # Each skips or is `#[ignore]`d without an environment variable, no job sets
     # one, and `cargo test` therefore reports them as passing or ignored while
@@ -177,8 +213,8 @@ jobs:
       - name: Create one database per suite
         run: |
           set -euo pipefail
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject pipeline pipeline_http; do
-            PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "admission_test_$db"
+          for db in $PG_SUITE_DATABASES; do
+            PGPASSWORD=trace createdb -h 127.0.0.1 -U trace "$db"
           done
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_missions_upgrade
@@ -186,9 +222,9 @@ jobs:
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_participant_http
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_packages
           PGPASSWORD=trace createdb -h 127.0.0.1 -U trace reward_test_mission_http
-          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace pipeline_test_upgrade
       # Each step carries only the variables its own suite reads, NOT a job-wide
-      # `env:` block. That is not tidiness: `trace_invite_registry_pg` reads
+      # `env:` block (`PG_SUITE_DATABASES` above is job-wide only because no
+      # suite reads it). That is not tidiness: `trace_invite_registry_pg` reads
       # `TRACE_COMMONS_PG_TEST_DATABASE_URL` as its own main URL, so setting
       # that variable job-wide for `migration_atomicity_pg` silently repoints
       # another suite at the wrong database.
@@ -206,6 +242,13 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_growth_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
+      # V101: the unbound-account reaper, run as a login holding only
+      # trace_unbound_account_reaper, with a control that a superuser-owned
+      # function would fail.
+      - name: unbound_account_reaper_pg
+        run: cargo test -p trace-commons-server --test unbound_account_reaper_pg
+        env:
+          TRACE_COMMONS_UNBOUND_REAPER_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_unbound_reaper
       - name: account invite HTTP session and authority guards
         run: cargo test -p trace-commons-server --bin trace-commons-ingest account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
         env:
@@ -476,12 +519,12 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for db in onboarding ledger account_ledger migration ingest invite merge rls store tokens account_trust account_trust_growth account_trust_route witness_evidence source_sessions inference_connection inference_connection_route walletv2 legacy_invite_link device_invite_subject; do
+          for db in $PG_SUITE_DATABASES; do
             n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
-                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='admission_test_$db';")
-            echo "admission_test_$db committed ${n:-0} transactions"
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions"
             if [ "${n:-0}" -lt 5 ]; then
-              echo "::error::admission_test_$db shows no activity; its suite skipped instead of running"
+              echo "::error::$db shows no activity; its suite skipped instead of running"
               fail=1
             fi
           done

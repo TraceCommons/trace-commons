@@ -621,7 +621,12 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
+# Pinned to the exact version `apple-native-keyring-store` resolves, because
+# `storage_error` downcasts to this crate's `base::Error` to recover the
+# OSStatus. A different version is a different type and the downcast would
+# silently never match.
+security-framework = "=3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
@@ -630,6 +635,13 @@ zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = fal
 # Itself, for the test-only feature: see `test-credential-store` above.
 trace-commons-contributor = { path = ".", features = ["test-credential-store"] }
 axum = "0.8"
+# Test-only: `daemon::notify`'s evening digest schedule is generic over
+# `chrono::TimeZone` so production can pass `chrono::Local` (the real system
+# timezone) while a test picks a fixed IANA zone with known DST transitions
+# (`America/New_York`) instead of depending on the CI runner's own timezone.
+# Already resolved in Cargo.lock via `ironclaw_common`'s dependency on it, so
+# this adds no new lock entry, only a direct edge to one that existed.
+chrono-tz = "0.10"
 # Signing test certificates, so the certificate-verification tests exercise
 # real secp256k1/EIP-191 rather than a fixture nobody can regenerate. Both are
 # already in this crate's graph through trace-commons-attestation, so they add

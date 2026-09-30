@@ -1545,14 +1545,58 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "native_passkey_creation",
         include_str!("../../../../migrations/V98__native_passkey_creation.sql"),
     ),
-    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V99 is claimed
-    // by S5 (the unbound reaper) in flight; V100 depends only on V97 and V90.
+    // Z2 S3: the runtime's UPDATE (state, bound_at) for bind. V100 depends
+    // only on V97 and V90. V99 was never used: S5 held it in flight and took
+    // V101 when it rebased onto main.
     (
         100,
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
+    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // and V97.
+    (
+        101,
+        "unbound_account_reaper",
+        include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
+    ),
+    // #1135 review: closed-but-not-yet-reaped passkey accounts count against
+    // the unbound ceiling. Supersedes V101's note that closed rows fall
+    // outside V98's count. Depends only on V97 and V98.
+    (
+        102,
+        "passkey_ceiling_counts_closed",
+        include_str!("../../../../migrations/V102__passkey_ceiling_counts_closed.sql"),
+    ),
 ];
+
+/// One account's active strong authenticators (unrevoked passkeys plus
+/// unrevoked NEAR identities), inside a transaction already scoped to its
+/// tenant. The single definition of the count: `count_active_strong_
+/// authenticators` and bind's existing-account branch both read it here.
+pub(super) async fn active_strong_authenticator_count(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: &Uuid,
+) -> Result<i64, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT (
+                SELECT count(*) FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) + (
+                SELECT count(*) FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) AS strong_count",
+            &[account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.get("strong_count"))
+}
 
 #[async_trait]
 impl Database for PgBackend {
@@ -4665,25 +4709,9 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let row = tx
-            .query_one(
-                "SELECT (
-                    SELECT count(*) FROM trace_webauthn_credentials
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) + (
-                    SELECT count(*) FROM trace_near_identities
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) AS strong_count",
-                &[&account_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let strong = active_strong_authenticator_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(row.get("strong_count"))
+        Ok(strong)
     }
 
     async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
@@ -7439,47 +7467,6 @@ mod tests {
         );
     }
 
-    /// Two changes that each add a `V75` pass every check on their own branch
-    /// and collide on merge. On a fresh database the second insert fails its
-    /// primary key; on a database that already applied the first, the runner
-    /// used to skip the second silently. Refuse the table outright instead.
-    #[test]
-    fn migration_versions_are_unique_and_strictly_increasing() {
-        for pair in super::MIGRATIONS.windows(2) {
-            let ((earlier, earlier_name, _), (later, later_name, _)) = (&pair[0], &pair[1]);
-            assert!(
-                later > earlier,
-                "MIGRATIONS must be strictly increasing by version: V{earlier}                  ({earlier_name}) is followed by V{later} ({later_name})"
-            );
-        }
-    }
-
-    /// The directory can hold two files with one version and different stems
-    /// (two branches, both merged); the table test above only sees the one the
-    /// table lists. Catch the duplicate at the file level too.
-    #[test]
-    fn no_two_migration_files_share_a_version() {
-        const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations");
-        let mut seen: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(MIGRATIONS_DIR).expect("read migrations/") {
-            let name = entry
-                .expect("dir entry")
-                .file_name()
-                .into_string()
-                .expect("utf-8 name");
-            let Some(rest) = name.strip_prefix('V') else {
-                continue;
-            };
-            let Some((version, _)) = rest.split_once("__") else {
-                continue;
-            };
-            let version: i32 = version.parse().expect("numeric migration version");
-            if let Some(previous) = seen.insert(version, name.clone()) {
-                panic!("V{version} is claimed by both {previous} and {name}");
-            }
-        }
-    }
-
     #[test]
     fn an_unrecorded_version_is_applied() {
         assert!(!super::recorded_migration_state(None, 75, "account_trust").expect("not an error"));
@@ -7507,6 +7494,12 @@ mod tests {
         );
     }
 
+    /// Also the check for two migrations claiming one version, whether from
+    /// two branches that each added a `V75` or from a hand-edited table:
+    /// `migrations_on_disk` lists every file, duplicates included, so a second
+    /// `V75__*.sql` makes the table and the directory disagree, and a second
+    /// `V75` row in `MIGRATIONS` fails the strictly-increasing loop. A separate
+    /// test for either would repeat this one.
     #[test]
     fn every_migration_is_wired_into_run_migrations() {
         const THIS_FILE: &str = include_str!("postgres.rs");

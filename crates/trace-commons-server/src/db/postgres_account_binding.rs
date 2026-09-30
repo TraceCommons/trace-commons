@@ -47,7 +47,8 @@ impl PgBackend {
         Ok(())
     }
 
-    /// The V98 cross-tenant count of `unbound` passkey-origin accounts, on the
+    /// The V98 cross-tenant count of `unbound` (and, since V102, not yet
+    /// reaped `closed`) passkey-origin accounts, on the
     /// runtime pool with no tenant context. The definer function is the only
     /// thing that can see across tenants; this caller cannot.
     pub(super) async fn unbound_passkey_account_count(&self) -> Result<i64, DatabaseError> {

@@ -62,8 +62,9 @@ pub fn drawn(rows: &[Row]) -> Vec<Drawn> {
 /// The Settings section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Panel {
-    /// The section title, or `None` when the disclosure is unreadable.
-    pub title: Option<String>,
+    /// The section title: the core's, whether or not the route could be
+    /// read.
+    pub title: String,
     /// The card's rows.
     pub rows: Vec<Row>,
 }
@@ -77,11 +78,12 @@ pub struct Panel {
 #[must_use]
 pub fn panel(facts: Option<&serde_json::Value>) -> Panel {
     let Some(payload) = facts.and_then(consent_copy::route_disclosure_for_wire) else {
-        // No title: it would head a disclosure that is not there. macOS
-        // draws the unreadable line alone, too.
+        // Still titled, from the core's unreadable copy, so the section is
+        // named on every shell: macOS, Windows and Tauri draw it too.
+        let unreadable = consent_copy::disclosure_unreadable_copy();
         return Panel {
-            title: None,
-            rows: vec![Row::Text(consent_copy::DISCLOSURE_UNREADABLE.to_string())],
+            title: unreadable.title.to_string(),
+            rows: vec![Row::Text(unreadable.panel.to_string())],
         };
     };
     let copy = &payload["copy"];
@@ -113,7 +115,7 @@ pub fn panel(facts: Option<&serde_json::Value>) -> Panel {
     push_optional(&mut rows, &copy["attested_bodies"]);
     push_optional(&mut rows, &copy["receipts"]);
     Panel {
-        title: Some(text(&copy["title"])),
+        title: text(&copy["title"]),
         rows,
     }
 }
@@ -216,7 +218,7 @@ mod tests {
     fn the_settings_section_draws_every_pin_under_one_label() {
         use consent_copy as c;
         let panel = panel(Some(&witness_facts()));
-        assert_eq!(panel.title.as_deref(), Some(c::DISCLOSURE_TITLE));
+        assert_eq!(panel.title, c::DISCLOSURE_TITLE);
         let eyebrow = |s: &str| Drawn::Eyebrow(s.into());
         let body = |s: &str| Drawn::Body(s.into());
         let mono = |s: &str| Drawn::Mono(s.into());
@@ -241,13 +243,16 @@ mod tests {
         );
     }
 
-    /// An unreadable disclosure draws its one line and no section title
-    /// over it, as macOS does: the title would head a disclosure that is
-    /// not there.
+    /// An unreadable disclosure is still named: the core's title heads its
+    /// one line, as on macOS, Windows and Tauri, so the section is not an
+    /// anonymous warning.
     #[test]
-    fn an_unreadable_disclosure_draws_no_title() {
+    fn an_unreadable_disclosure_is_titled_from_the_core() {
         let panel = panel(None);
-        assert_eq!(panel.title, None);
+        assert_eq!(
+            panel.title,
+            consent_copy::disclosure_unreadable_copy().title
+        );
         assert_eq!(
             drawn(&panel.rows),
             vec![Drawn::Body(consent_copy::DISCLOSURE_UNREADABLE.into())]
@@ -300,7 +305,7 @@ mod tests {
     #[test]
     fn the_witness_route_shows_the_witness_its_pins_and_origin_in_the_cores_words() {
         let Panel { title, rows } = panel(Some(&witness_facts()));
-        assert_eq!(title.as_deref(), Some(consent_copy::DISCLOSURE_TITLE));
+        assert_eq!(title, consent_copy::DISCLOSURE_TITLE);
         let lines = texts(&rows);
         assert_eq!(lines[0], consent_copy::AUTO_RAW_SEND_BOTH_ENCLAVES);
         assert!(lines.contains(&consent_copy::DISCLOSURE_WITNESS_CHECK));

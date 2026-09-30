@@ -23,8 +23,12 @@ const DEFAULT_QUIESCENCE_SECS: u64 = 1800;
 /// quiescence window, so the poll rate costs nothing in responsiveness.
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 /// Minimum gap between digest notifications, so a busy day is one interruption
-/// rather than a dozen.
+/// rather than a dozen. Only meaningful under `DigestSchedule::Interval`.
 const DEFAULT_DIGEST_INTERVAL_SECS: u64 = 14_400;
+/// The local hour `DigestSchedule::Evening` fires at when a contributor does
+/// not choose one -- the open decision #5 in #1118 is interval vs. a fixed
+/// evening time, and this is the "evening" side's default.
+const DEFAULT_DIGEST_EVENING_HOUR: u8 = 18;
 const DEFAULT_QUEUE_TTL_DAYS: i64 = 14;
 /// A resumed session must grow by this factor to be worth re-uploading.
 const DEFAULT_GROWTH_FACTOR: f64 = 2.0;
@@ -200,6 +204,28 @@ impl std::fmt::Debug for NearAiSession {
     }
 }
 
+/// Why the stored Cloud credential could not be loaded at startup.
+///
+/// Each one is a different thing to tell the contributor, and the old single
+/// "unlock your credential store and restart" was false for two of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CloudStorageFailure {
+    /// The store did not answer: locked, denied, or a platform error. Unlock
+    /// and restart is the advice, and it is true.
+    #[default]
+    Unavailable,
+    /// This binary is not entitled to the store at all. Permanent for this
+    /// build; restarting changes nothing.
+    Unentitled,
+    /// macOS only: the store answered, and has nothing under the reference
+    /// settings name. A build from before the data-protection move kept it
+    /// in the legacy keychain, which is the only other place it can be. Not
+    /// confirmed by reading the legacy keychain -- that read can prompt, and
+    /// startup is not a moment the contributor chose -- so the move is
+    /// offered, and the move does the one read.
+    LegacyOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
     /// Opaque OS entry and Cloud metadata. Legacy documents omit this field.
@@ -208,10 +234,21 @@ pub struct DaemonSettings {
     /// Runtime-only failure, never a credential or a platform error string.
     #[serde(skip)]
     pub cloud_storage_unavailable: bool,
+    /// Why, when `cloud_storage_unavailable` is set. Runtime-only, like it.
+    /// The boolean stays the gate every credential use checks; this only
+    /// chooses which state, and so which sentence, a contributor is shown.
+    #[serde(skip)]
+    pub cloud_storage_failure: CloudStorageFailure,
     pub schema_version: String,
     pub poll_interval_secs: u64,
     pub quiescence_secs: u64,
     pub digest_interval_secs: u64,
+    /// Open decision #5 in #1118: whether the digest fires on the interval
+    /// above or once a day at a fixed local hour. `#[serde(default)]` so a
+    /// settings file written before this field existed loads as
+    /// `Interval` -- the unchanged, shipped behaviour.
+    #[serde(default)]
+    pub digest_schedule: DigestSchedule,
     pub queue_ttl_days: i64,
     pub growth_factor: f64,
     pub growth_min_new_bytes: u64,
@@ -396,6 +433,64 @@ pub struct DaemonSettings {
     /// See `legacy_claude_root`.
     #[serde(default, rename = "codex_root", skip_serializing)]
     pub legacy_codex_root: Option<PathBuf>,
+}
+
+/// When the digest fires: the interval behaviour that shipped first, or once
+/// a day at a fixed local hour.
+///
+/// K9 (#1118): the WYSIWYG design's Flow 2/3 alerts show a single evening
+/// digest ("1 session contributed from orchard-api. 6.0 credit pending."),
+/// and the issue's open decision #5 asks whether that is a fixed evening
+/// time or the interval this daemon already had. Both stay supported --
+/// `Interval` is the default and unchanged, so no existing install's
+/// behaviour moves under it -- and this is the choice, not the answer.
+///
+/// Serialized tagged, like [`SourceDeclaration`], so a shell reads `mode`
+/// without guessing at a bare string, and `Evening` has somewhere to put its
+/// hour.
+///
+/// ```json
+/// "digest_schedule": { "mode": "interval" }
+/// "digest_schedule": { "mode": "evening", "hour": 18 }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum DigestSchedule {
+    /// One digest every `digest_interval_secs`, whatever the local time.
+    Interval,
+    /// One digest a day, computed in the contributor's local timezone at
+    /// `hour` (0-23), defaulting to [`DEFAULT_DIGEST_EVENING_HOUR`] (18:00
+    /// local) when a caller sends `{"mode":"evening"}` with no hour of its
+    /// own. See `daemon::notify::evening_window_elapsed` for how DST and a
+    /// missed day are handled.
+    Evening {
+        #[serde(default = "default_digest_evening_hour")]
+        hour: u8,
+    },
+}
+
+impl DigestSchedule {
+    /// Whether an `Evening` hour is a real hour of the day. `Interval` is
+    /// always valid.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        match self {
+            DigestSchedule::Interval => true,
+            DigestSchedule::Evening { hour } => hour <= 23,
+        }
+    }
+}
+
+fn default_digest_evening_hour() -> u8 {
+    DEFAULT_DIGEST_EVENING_HOUR
+}
+
+impl Default for DigestSchedule {
+    /// `Interval` -- the behaviour every install already has. K9 adds the
+    /// alternative; it does not change anyone's default.
+    fn default() -> Self {
+        DigestSchedule::Interval
+    }
 }
 
 /// What the contributor said about one agent's session store.
@@ -728,6 +823,7 @@ impl Default for DaemonSettings {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             quiescence_secs: DEFAULT_QUIESCENCE_SECS,
             digest_interval_secs: DEFAULT_DIGEST_INTERVAL_SECS,
+            digest_schedule: DigestSchedule::Interval,
             queue_ttl_days: DEFAULT_QUEUE_TTL_DAYS,
             growth_factor: DEFAULT_GROWTH_FACTOR,
             growth_min_new_bytes: DEFAULT_GROWTH_MIN_NEW_BYTES,
@@ -745,6 +841,7 @@ impl Default for DaemonSettings {
             near_ai_session: None,
             cloud_credentials: None,
             cloud_storage_unavailable: false,
+            cloud_storage_failure: CloudStorageFailure::default(),
             claude_source: None,
             codex_source: None,
             gemini_source: None,
@@ -796,7 +893,24 @@ impl DaemonSettings {
             .context("parsing daemon settings")
             .context(crate::daemon::StartFailure::SettingsUnreadable)?;
         settings.absorb_legacy_roots();
+        settings.validate_digest_schedule();
         Ok(settings)
+    }
+
+    /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
+    /// edit, or a future build's value), rather than letting
+    /// `daemon::notify` clamp it silently -- a clamped 99 fires at 23:00 and
+    /// nobody learns why. The schedule falls back to `Interval`, the
+    /// shipped default, and says so in a label-only log line; the rest of
+    /// the file still loads, since a notification schedule is no reason to
+    /// refuse to start.
+    fn validate_digest_schedule(&mut self) {
+        if !self.digest_schedule.is_valid() {
+            tracing::warn!(
+                "digest_schedule hour out of range in daemon settings; using interval schedule"
+            );
+            self.digest_schedule = DigestSchedule::Interval;
+        }
     }
 
     /// Fold `claude_root` / `codex_root` from an older file into the source
@@ -1034,6 +1148,11 @@ pub fn apply_settings_object(
             "digest_interval_secs" => {
                 settings.digest_interval_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
+            // `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`.
+            // See `DigestSchedule`; K9 (#1118), open decision #5.
+            "digest_schedule" => {
+                settings.digest_schedule = parse_digest_schedule(value)?;
+            }
             "approval_hold_secs" => {
                 settings.approval_hold_secs = value.as_u64().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
@@ -1198,6 +1317,22 @@ fn parse_source_declaration(
             .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
+}
+
+/// `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`. An `hour`
+/// outside that range is refused rather than clamped -- a silently clamped
+/// 25 would fire at midnight and the caller would never learn why. Never
+/// formats `value` into the error, as `apply_settings_object`'s doc requires,
+/// though a schedule carries no secret either way.
+fn parse_digest_schedule(
+    value: &serde_json::Value,
+) -> std::result::Result<DigestSchedule, &'static str> {
+    let schedule: DigestSchedule =
+        serde_json::from_value(value.clone()).map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
+    if !schedule.is_valid() {
+        return Err(ERR_SETTINGS_INVALID_VALUE);
+    }
+    Ok(schedule)
 }
 
 #[cfg(test)]
@@ -2456,6 +2591,110 @@ mod tests {
                 &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
             ),
             Err(ERR_SETTINGS_UNKNOWN_FIELD)
+        );
+    }
+
+    #[test]
+    fn digest_schedule_defaults_to_interval() {
+        assert_eq!(
+            DaemonSettings::default().digest_schedule,
+            DigestSchedule::Interval
+        );
+    }
+
+    #[test]
+    fn digest_schedule_is_settable_to_evening_and_back() {
+        let mut s = DaemonSettings::default();
+        assert!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "evening", "hour": 18}})
+            )
+            .unwrap()
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Evening { hour: 18 });
+        assert!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "interval"}})
+            )
+            .unwrap()
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Interval);
+    }
+
+    #[test]
+    fn digest_schedule_evening_defaults_the_hour_to_18_local() {
+        let mut s = DaemonSettings::default();
+        assert!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "evening"}})
+            )
+            .unwrap()
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Evening { hour: 18 });
+    }
+
+    #[test]
+    fn digest_schedule_refuses_an_hour_outside_the_day() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"digest_schedule": {"mode": "evening", "hour": 24}})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert_eq!(s.digest_schedule, DigestSchedule::Interval);
+    }
+
+    /// A settings file written before K9 has no `digest_schedule` key and
+    /// must load as `Interval`, the behaviour it already had.
+    #[test]
+    fn a_settings_file_written_before_the_digest_schedule_loads_as_interval() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("digest_schedule");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.digest_schedule, DigestSchedule::Interval);
+    }
+
+    /// `hour: 99` in the file is refused on load, not clamped: the schedule
+    /// falls back to `Interval` and every other setting still loads.
+    #[test]
+    fn an_out_of_range_evening_hour_in_the_file_is_refused_on_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["digest_schedule"] = serde_json::json!({"mode": "evening", "hour": 99});
+        v["queue_ttl_days"] = serde_json::json!(3);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.digest_schedule, DigestSchedule::Interval);
+        assert_eq!(loaded.queue_ttl_days, 3);
+
+        // A valid hour survives the same path untouched.
+        v["digest_schedule"] = serde_json::json!({"mode": "evening", "hour": 23});
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().digest_schedule,
+            DigestSchedule::Evening { hour: 23 }
+        );
+    }
+
+    #[test]
+    fn digest_schedule_refuses_an_unknown_shape() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"digest_schedule": "evening"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
         );
     }
 

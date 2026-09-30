@@ -56,6 +56,83 @@ pub enum QueueState {
     Superseded,
 }
 
+/// The shape of a session, for the queue rows, the review sheet's header and
+/// the past-session picker: when it started and ended, and how many prompts
+/// the person gave.
+///
+/// `user_turns` counts what someone reading the session would call a turn --
+/// a prompt they typed -- and is deliberately not `preview_turns`'
+/// `turn_count`, which indexes every event of the redacted envelope, tool
+/// calls and results included.
+/// Where a group transcript's delegated members begin: the adapter's
+/// `subagent_group` / `subagent_transcript` markers.
+fn is_delegated_boundary(event: &crate::source::SessionEvent) -> bool {
+    matches!(
+        event.structured.get("record_type").and_then(|v| v.as_str()),
+        Some("subagent_group" | "subagent_transcript")
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionShape {
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub user_turns: u32,
+}
+
+impl SessionShape {
+    /// The shape of the conversation a person had.
+    ///
+    /// Only the parent transcript counts: a Claude Code group appends each
+    /// delegated transcript behind a `subagent_transcript` marker, and a
+    /// subagent's opening prompt is the agent's, not the person's. A user
+    /// event counts as a turn only when `preview::task_prompt` finds a
+    /// request in it, so injected wrappers -- system reminders, command
+    /// metadata, AGENTS.md and environment preambles -- are not turns, and
+    /// the count agrees with what the card calls the task.
+    ///
+    /// `started_at` is the earlier of the source's declared start and the
+    /// first event timestamp, so it is never after `ended_at`.
+    pub fn of(transcript: &crate::source::SessionTranscript) -> Self {
+        let first = transcript.events.iter().filter_map(|e| e.timestamp).min();
+        let last = transcript.events.iter().filter_map(|e| e.timestamp).max();
+        let started_at = match (transcript.started_at, first) {
+            (Some(declared), Some(first)) => Some(declared.min(first)),
+            (declared, first) => declared.or(first),
+        };
+        let user_turns = transcript
+            .events
+            .iter()
+            .take_while(|e| !is_delegated_boundary(e))
+            .filter(|e| e.kind == crate::source::SessionEventKind::User)
+            .filter(|e| {
+                e.content
+                    .as_deref()
+                    .and_then(crate::daemon::preview::task_prompt)
+                    .is_some()
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        Self {
+            started_at,
+            ended_at: last,
+            user_turns,
+        }
+    }
+
+    /// Wall-clock length, when both ends are known and in order.
+    pub fn duration_secs(&self) -> Option<i64> {
+        match (self.started_at, self.ended_at) {
+            (Some(start), Some(end)) if end >= start => Some((end - start).num_seconds()),
+            _ => None,
+        }
+    }
+}
+
 /// One session offered to the contributor.
 ///
 /// `Default` supports focused test fixtures, which spell
@@ -138,6 +215,12 @@ pub struct QueueEntry {
     pub reason_label: Option<String>,
     pub attempts: u32,
     pub retry_after: Option<DateTime<Utc>>,
+    /// Transient classifier failures since this entry was last approved.
+    /// `attempts` counts every try for the entry's whole life; this counts
+    /// only the run the daemon caps (`MAX_TRANSIENT_REDACTION_FAILURES`), and
+    /// an approval (a person's, or a standing opt-in's) starts it again.
+    #[serde(default)]
+    pub transient_redaction_failures: u32,
     pub submission_id: Option<Uuid>,
     /// The consent scopes in force at the moment this entry was approved.
     ///
@@ -315,6 +398,11 @@ pub struct QueueEntry {
     pub subagent_count: u32,
     #[serde(default)]
     pub subagents_dropped: u32,
+    /// When the session ran and how many prompts it had, from the loaded
+    /// transcript. Metadata, not content: timestamps and a count, never a
+    /// word of what was said. `None` on an entry written before this existed.
+    #[serde(default)]
+    pub shape: Option<SessionShape>,
     /// The `modified_at` of the observation this entry was built from --
     /// the group mtime for a claude-code session, the file's own mtime for
     /// every single-file source. Pairs with `size_bytes`, which is the
@@ -614,6 +702,9 @@ pub const REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED: &str = "token-distribution-
 pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED,
     crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED,
+    // Re-approving it unattended would restart the retry budget the cap
+    // just spent, and the classifier would get the session every hour again.
+    crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -629,6 +720,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         reason_label: None,
         attempts: 0,
         retry_after: None,
+        transient_redaction_failures: 0,
         submission_id: None,
         // Provenance carries over; the approval and every term it was given
         // under -- scopes, envelope-determining inputs, and the artifact
@@ -1225,6 +1317,9 @@ impl Queue {
         e.state = QueueState::Approved;
         e.reason_label = None;
         e.retry_after = None;
+        // A fresh approval gets a whole retry budget, or a session a person
+        // re-approved after the cap would be held again after one try.
+        e.transient_redaction_failures = 0;
         // The latest approver wins. An entry can be auto-approved, revoked
         // back to `Pending` by a scope change or an Undo, and then approved
         // by hand; without this reset it would still be marked unattended
@@ -1555,6 +1650,18 @@ impl Queue {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Count one more transient classifier failure against the entry's
+    /// current approval, returning the new count (0 for an unknown id).
+    pub fn record_transient_redaction_failure(&mut self, entry_id: Uuid) -> u32 {
+        match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            Some(e) => {
+                e.transient_redaction_failures = e.transient_redaction_failures.saturating_add(1);
+                e.transient_redaction_failures
+            }
+            None => 0,
         }
     }
 
@@ -1892,6 +1999,117 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(
+        kind: crate::source::SessionEventKind,
+        at: Option<&str>,
+        content: Option<&str>,
+    ) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            kind,
+            timestamp: at.map(|t| t.parse().unwrap()),
+            content: content.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn marker(record_type: &str) -> crate::source::SessionEvent {
+        crate::source::SessionEvent {
+            structured: serde_json::json!({ "record_type": record_type, "index": 0 }),
+            ..Default::default()
+        }
+    }
+
+    /// K1: a session's turns are the prompts the person typed in the parent
+    /// transcript. Injected wrappers (a system reminder, a Codex AGENTS.md
+    /// preamble) are not turns, and neither is anything behind a Claude Code
+    /// group's delegated-transcript boundary.
+    #[test]
+    fn a_session_shape_counts_only_the_persons_prompts() {
+        use crate::source::SessionEventKind::{Assistant, ToolCall, ToolResult, User};
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                event(
+                    User,
+                    Some("2026-09-12T10:00:00Z"),
+                    Some("# AGENTS.md instructions for x\n<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>"),
+                ),
+                event(
+                    User,
+                    Some("2026-09-12T10:00:05Z"),
+                    Some("add a rate limiter"),
+                ),
+                event(Assistant, Some("2026-09-12T10:01:00Z"), Some("ok")),
+                event(ToolCall, None, None),
+                event(ToolResult, Some("2026-09-12T10:05:00Z"), None),
+                event(
+                    User,
+                    Some("2026-09-12T10:06:00Z"),
+                    Some("<system-reminder>be careful</system-reminder>"),
+                ),
+                event(User, Some("2026-09-12T11:00:00Z"), Some("now add a test")),
+                marker("subagent_group"),
+                marker("subagent_transcript"),
+                event(
+                    User,
+                    Some("2026-09-12T11:10:00Z"),
+                    Some("search the repo for callers"),
+                ),
+                event(Assistant, Some("2026-09-12T11:18:00Z"), Some("found 3")),
+            ],
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&transcript);
+        assert_eq!(
+            shape.user_turns, 2,
+            "two typed prompts, no wrappers, no subagent"
+        );
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(
+            shape.ended_at,
+            Some("2026-09-12T11:18:00Z".parse().unwrap()),
+            "the delegated work is part of the session's span"
+        );
+        assert_eq!(shape.duration_secs(), Some(78 * 60));
+    }
+
+    /// The start is the earlier of the declared start and the first event, so
+    /// a declared start later than the events cannot give a null duration.
+    #[test]
+    fn a_session_shape_starts_at_the_earlier_of_declared_and_first_event() {
+        use crate::source::SessionEventKind::User;
+        let events = vec![
+            event(User, Some("2026-09-12T10:00:00Z"), Some("go")),
+            event(User, Some("2026-09-12T10:30:00Z"), Some("again")),
+        ];
+        let later = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T10:10:00Z".parse().unwrap()),
+            events: events.clone(),
+            ..Default::default()
+        };
+        let shape = SessionShape::of(&later);
+        assert_eq!(
+            shape.started_at,
+            Some("2026-09-12T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(shape.duration_secs(), Some(30 * 60));
+        let earlier = crate::source::SessionTranscript {
+            started_at: Some("2026-09-12T09:59:00Z".parse().unwrap()),
+            events,
+            ..Default::default()
+        };
+        assert_eq!(SessionShape::of(&earlier).started_at, earlier.started_at);
+        assert_eq!(SessionShape::default().duration_secs(), None);
+        let backwards = SessionShape {
+            started_at: Some("2026-09-12T11:00:00Z".parse().unwrap()),
+            ended_at: Some("2026-09-12T10:00:00Z".parse().unwrap()),
+            user_turns: 0,
+        };
+        assert_eq!(backwards.duration_secs(), None, "no negative lengths");
+    }
 
     /// R5, the queue half: an unattended approval held after the witness
     /// goes back to waiting with its certified review pinned, and nothing
@@ -2541,6 +2759,24 @@ mod tests {
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].subagent_count, 0);
         assert_eq!(loaded.all()[0].subagents_dropped, 0);
+    }
+
+    /// K1: a line queued before `shape` existed still loads, with no shape.
+    /// It is not backfilled: the entry gets a shape when its session is next
+    /// loaded (it grows, or is re-offered), and `list_pending` reports the
+    /// shape fields as null until then.
+    #[test]
+    fn a_queue_line_written_before_the_session_shape_still_loads() {
+        let (_d, store) = temp_store();
+        let mut value = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("shape");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].shape, None);
     }
 
     #[test]
