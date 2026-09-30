@@ -100,12 +100,13 @@ const PIPELINE_TABLES: [&str; 13] = [
     "pipeline_export_snapshot_items",
 ];
 
-/// Every privilege any role but the owner holds on the pipeline tables once
-/// V92 to V95, V103 and V104 have run, as `(table, privilege, columns)`; no columns means
-/// the whole table. The ingest runtime group, `trace_ingest_runtime`, is the
-/// only grantee, and it holds what the pipeline code reads and writes and
-/// nothing broader. A privilege the code comes to need goes into its
-/// migration and into this list in the same change.
+/// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
+/// the pipeline tables once V92 to V95, V103 and V104 have run, as
+/// `(table, privilege, columns)`; no columns means the whole table. It holds
+/// what the pipeline code reads and writes and nothing broader. The only
+/// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
+/// privilege the code comes to need goes into its migration and into this
+/// list in the same change.
 const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_runs", "SELECT", &[]),
     ("pipeline_runs", "INSERT", &[]),
@@ -229,6 +230,12 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
         &["invalidated_at", "invalidation_reason"],
     ),
 ];
+
+/// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
+/// tables (V103): the two `pipeline_runs` columns its enumeration joins on to
+/// leave pipeline submissions out (Zaki review 1, round 2, finding 1).
+const GATE_DRIVER_PIPELINE_GRANTS: &[(&str, &str, &[&str])] =
+    &[("pipeline_runs", "SELECT", &["tenant_id", "submission_id"])];
 
 /// The privileges non-owner roles hold on the pipeline tables, table-wide and
 /// per column, as sorted `(grantee, table, column, privilege, is_grantable)`
@@ -362,9 +369,13 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // Least privilege for the ingest runtime, pinned: exactly these grants on
     // the pipeline tables, to trace_ingest_runtime only, and none of them
     // `WITH GRANT OPTION`.
-    let mut expected: Vec<(String, String, String, String, bool)> = RUNTIME_PIPELINE_GRANTS
-        .iter()
-        .flat_map(|(table, privilege, columns)| {
+    let mut expected: Vec<(String, String, String, String, bool)> = [
+        ("trace_ingest_runtime", RUNTIME_PIPELINE_GRANTS),
+        ("trace_gate_driver", GATE_DRIVER_PIPELINE_GRANTS),
+    ]
+    .into_iter()
+    .flat_map(|(grantee, grants)| {
+        grants.iter().flat_map(move |(table, privilege, columns)| {
             let columns: Vec<&str> = if columns.is_empty() {
                 vec![""]
             } else {
@@ -372,7 +383,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             };
             columns.into_iter().map(move |column| {
                 (
-                    "trace_ingest_runtime".to_string(),
+                    grantee.to_string(),
                     table.to_string(),
                     column.to_string(),
                     privilege.to_string(),
@@ -380,13 +391,15 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
                 )
             })
         })
-        .collect();
+    })
+    .collect();
     expected.sort();
     assert_eq!(
         pipeline_table_grants(&admin).await,
         expected,
         "the pipeline tables must grant trace_ingest_runtime what the pipeline code uses, \
-         nothing to anyone else, and none of it WITH GRANT OPTION"
+         trace_gate_driver its two pipeline_runs columns, nothing to anyone else, and none \
+         of it WITH GRANT OPTION"
     );
 
     // Isolation as a role that cannot bypass RLS.

@@ -21208,3 +21208,111 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
     assert!(disabled.tenant_isolation_passed);
     tx.rollback().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Zaki review 1, round 2: correctness findings
+// ---------------------------------------------------------------------------
+
+/// A login whose only privilege source is membership in `trace_gate_driver`,
+/// the role `main`'s gate driver pool connects as (V36, V45), and a backend
+/// whose gate driver pool connects as it. The enumeration then reads every
+/// table through that role's grants and policies, as it does in production.
+async fn gate_driver_backend() -> PgBackend {
+    const GATE_DRIVER_LOGIN: &str = "trace_gate_driver_pipeline_test";
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("runtime_backend read the same variable");
+    let owner = owner_client().await;
+    owner
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{GATE_DRIVER_LOGIN}') THEN
+                     CREATE ROLE {GATE_DRIVER_LOGIN} LOGIN;
+                 END IF;
+             END $$;
+             ALTER ROLE {GATE_DRIVER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
+             GRANT trace_gate_driver TO {GATE_DRIVER_LOGIN};"
+        ))
+        .await
+        .expect("provision the gate driver login");
+    let mut gate_url = reqwest::Url::parse(&url).expect("parse test URL");
+    gate_url
+        .set_username(GATE_DRIVER_LOGIN)
+        .expect("set the gate driver user");
+    let mut config = DatabaseConfig::from_postgres_url(&url, 2);
+    config.gate_driver_url = Some(SecretString::from(gate_url.to_string()));
+    PgBackend::new(&config)
+        .await
+        .expect("connect with a gate driver pool")
+}
+
+/// Finding 1: `main`'s gate enumeration (the in-process gate driver's work
+/// list and its backlog count) leaves out a submission that has a pipeline
+/// run, so `main` never scores a pipeline trace a second time. A legacy
+/// submission with a submitted envelope is still listed and counted. The
+/// enumeration runs as `trace_gate_driver`, which reads `pipeline_runs`
+/// across tenants only through the grant and policy V103 gives it.
+#[tokio::test]
+async fn mains_gate_enumeration_leaves_out_pipeline_submissions() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("gate-enumeration-{}", uuid::Uuid::new_v4());
+    let legacy = insert_submission_without_a_run(&owner, &tenant).await;
+    owner
+        .append_trace_object_ref(TraceObjectRefWrite {
+            tenant_id: tenant.clone(),
+            object_ref_id: uuid::Uuid::new_v4(),
+            submission_id: legacy,
+            artifact_kind: TraceObjectArtifactKind::SubmittedEnvelope,
+            object_store: "local".to_string(),
+            object_key: format!("{tenant}/legacy.json"),
+            content_sha256: "sha256:legacy".to_string(),
+            encryption_key_ref: "kms:legacy".to_string(),
+            size_bytes: 64,
+            compression: None,
+            created_by_job_id: None,
+        })
+        .await
+        .expect("the legacy submission's envelope");
+    let before = gate
+        .count_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30)
+        .await
+        .expect("count as the gate driver");
+
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+
+    let listed = gate
+        .list_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30, 10_000)
+        .await
+        .expect("list as the gate driver");
+    let listed_ids: BTreeSet<uuid::Uuid> = listed
+        .iter()
+        .filter(|item| item.tenant_id == tenant)
+        .map(|item| item.submission_id)
+        .collect();
+    assert_eq!(
+        listed_ids,
+        BTreeSet::from([legacy]),
+        "the legacy submission is listed and the pipeline one is not"
+    );
+    assert_eq!(
+        gate.count_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30)
+            .await
+            .expect("count as the gate driver"),
+        before,
+        "the pipeline submission is not counted"
+    );
+    assert_ne!(run.submission_id, legacy);
+}

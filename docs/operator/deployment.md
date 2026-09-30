@@ -761,7 +761,9 @@ V103 adds the human review claims and assessments, the index invalidation
 queue, a column on `pipeline_runs`, and an index for the payout pass. V104
 adds the export snapshots and their items. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
-nothing broader, and each refuses to apply if the group does not exist:
+nothing broader, and each refuses to apply if the group does not exist. V103
+also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
+`pipeline_runs`, and refuses to apply if that role (V36) does not exist:
 
 | Object | Grant | Why |
 |---|---|---|
@@ -769,6 +771,7 @@ nothing broader, and each refuses to apply if the group does not exist:
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
 | `pipeline_runs` | `UPDATE (index_invalidation_state)`, the column V103 adds | queueing an invalidation marks the run `pending`; the worker marks it `complete` or `failed` |
+| `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
 

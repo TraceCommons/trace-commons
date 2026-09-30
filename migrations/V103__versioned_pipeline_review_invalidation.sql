@@ -197,3 +197,20 @@ GRANT UPDATE (reviewer_principal_ref, lease_token, lease_expires_at, claimed_at)
 -- leaves only with its run, through the foreign key's cascade, which runs
 -- as the table owner.
 GRANT SELECT, INSERT ON pipeline_review_assessments TO trace_ingest_runtime;
+
+-- pipeline_runs, for main's gate driver: its work list and backlog count
+-- (list_submissions_needing_gate_decision, count_submissions_needing_gate_decision)
+-- leave out every submission that has a pipeline run, since the pipeline's
+-- own Score phase scores it. The driver enumerates across tenants with no
+-- tenant context, as it does on the tables V36 and V45 grant it, so it gets
+-- the same shape here: the two columns it joins on, and a permissive
+-- cross-tenant SELECT policy for its role only.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_gate_driver') THEN
+        RAISE EXCEPTION 'V103: trace_gate_driver is missing; V36 creates it';
+    END IF;
+END $$;
+GRANT SELECT (tenant_id, submission_id) ON pipeline_runs TO trace_gate_driver;
+DROP POLICY IF EXISTS trace_gate_driver_cross_tenant_read ON pipeline_runs;
+CREATE POLICY trace_gate_driver_cross_tenant_read ON pipeline_runs
+    FOR SELECT TO trace_gate_driver USING (true);

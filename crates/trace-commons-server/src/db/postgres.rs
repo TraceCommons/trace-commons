@@ -5243,6 +5243,10 @@ impl Database for PgBackend {
                       AND COALESCE(a.attempts, 0) < $1
                       AND (a.last_attempt_at IS NULL
                            OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pipeline_runs r
+                           WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                      )
                  ) pending",
                 &[&max_attempts, &backoff_base_seconds, &now],
             )
@@ -5294,6 +5298,14 @@ impl Database for PgBackend {
                    AND COALESCE(a.attempts, 0) < $1
                    AND (a.last_attempt_at IS NULL
                         OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                   -- A submission with a pipeline run is scored by the
+                   -- pipeline's own Score phase, never a second time here
+                   -- (Zaki review 1, round 2, finding 1). V103 lets
+                   -- trace_gate_driver read these two columns across tenants.
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pipeline_runs r
+                        WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                   )
                  ORDER BY s.received_at ASC
                  LIMIT $4",
                 &[&max_attempts, &backoff_base_seconds, &now, &limit],
