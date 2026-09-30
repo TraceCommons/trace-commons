@@ -16493,6 +16493,412 @@ async fn withdrawal_of_either_session_submission_withdraws_the_session() {
     }
 }
 
+/// One withdrawn submission's rows: its `trace_withdrawals` row
+/// (`prior_status`, `distribution_reach`), its withdrawal columns, its
+/// tombstones, its `trace_revocation_propagation_items` (id, idempotency
+/// key, target, trace id, action, status, reason, metadata; by id), and
+/// how many of its object refs, derived records, vector entries, legacy
+/// manifest items, and pipeline snapshot items are still live.
+#[derive(Debug, Clone, PartialEq)]
+struct WithdrawnVersion {
+    withdrawal: Option<(String, String)>,
+    submission: (String, bool, bool, bool),
+    tombstones: Vec<(
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        Option<String>,
+        String,
+        String,
+    )>,
+    propagation_items: Vec<(
+        uuid::Uuid,
+        String,
+        serde_json::Value,
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        serde_json::Value,
+    )>,
+    live_object_refs: i64,
+    live_derived_records: i64,
+    live_vector_entries: i64,
+    live_manifest_items: i64,
+    live_snapshot_items: i64,
+}
+
+/// `WithdrawnVersion` as read now, on an owner connection.
+async fn withdrawn_version(tenant_id: &str, submission_id: uuid::Uuid) -> WithdrawnVersion {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let key = &[
+        &tenant_id as &(dyn tokio_postgres::types::ToSql + Sync),
+        &submission_id,
+    ];
+    let withdrawal = tx
+        .query_opt(
+            "SELECT prior_status, distribution_reach FROM trace_withdrawals
+              WHERE tenant_id = $1 AND submission_id = $2",
+            key,
+        )
+        .await
+        .unwrap()
+        .map(|row| (row.get(0), row.get(1)));
+    let submission = tx
+        .query_one(
+            "SELECT status, withdrawn_at IS NOT NULL, revoked_at IS NOT NULL,
+                    purged_at IS NOT NULL
+               FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            key,
+        )
+        .await
+        .unwrap();
+    let tombstones = tx
+        .query(
+            "SELECT tombstone_id, trace_id, redaction_hash, canonical_summary_hash, reason,
+                    created_by_principal_ref
+               FROM trace_tombstones WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY tombstone_id",
+            key,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+            )
+        })
+        .collect();
+    let propagation_items = tx
+        .query(
+            "SELECT propagation_item_id, idempotency_key, target_json, trace_id, action,
+                    status, reason, metadata_json
+               FROM trace_revocation_propagation_items
+              WHERE tenant_id = $1 AND source_submission_id = $2
+              ORDER BY propagation_item_id",
+            key,
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+                row.get(6),
+                row.get(7),
+            )
+        })
+        .collect();
+    let count = |sql: &'static str| {
+        let tx = &tx;
+        async move { tx.query_one(sql, key).await.unwrap().get::<_, i64>(0) }
+    };
+    let live_object_refs = count(
+        "SELECT COUNT(*) FROM trace_object_refs
+          WHERE tenant_id = $1 AND submission_id = $2 AND invalidated_at IS NULL",
+    )
+    .await;
+    let live_derived_records = count(
+        "SELECT COUNT(*) FROM trace_derived_records
+          WHERE tenant_id = $1 AND submission_id = $2 AND status <> 'revoked'",
+    )
+    .await;
+    let live_vector_entries = count(
+        "SELECT COUNT(*) FROM trace_vector_entries
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND status <> 'invalidated' AND deleted_at IS NULL",
+    )
+    .await;
+    let live_manifest_items = count(
+        "SELECT COUNT(*) FROM trace_export_manifest_items
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND (source_invalidated_at IS NULL
+                 OR source_invalidation_reason IS DISTINCT FROM 'revoked')",
+    )
+    .await;
+    let live_snapshot_items = count(
+        "SELECT COUNT(*) FROM pipeline_export_snapshot_items
+          WHERE tenant_id = $1 AND submission_id = $2
+            AND (invalidated_at IS NULL
+                 OR invalidation_reason IS DISTINCT FROM 'withdrawn')",
+    )
+    .await;
+    tx.commit().await.unwrap();
+    WithdrawnVersion {
+        withdrawal,
+        submission: (
+            submission.get(0),
+            submission.get(1),
+            submission.get(2),
+            submission.get(3),
+        ),
+        tombstones,
+        propagation_items,
+        live_object_refs,
+        live_derived_records,
+        live_vector_entries,
+        live_manifest_items,
+        live_snapshot_items,
+    }
+}
+
+/// The rows a withdrawal of `submission_id` alone writes for it (with the
+/// tier given), computed from its row and its live object refs as read
+/// before the withdrawal: one tombstone under its fixed id, and one pending
+/// payload deletion under its fixed idempotency key per live object ref.
+async fn expected_withdrawn_version(
+    tenant_id: &str,
+    submission_id: uuid::Uuid,
+    prior_status: &str,
+    distribution_reach: &str,
+) -> WithdrawnVersion {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let submission = tx
+        .query_one(
+            "SELECT trace_id, redaction_hash, canonical_summary_hash FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap();
+    let object_ref_ids: Vec<uuid::Uuid> = tx
+        .query(
+            "SELECT object_ref_id FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2 AND deleted_at IS NULL",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    tx.commit().await.unwrap();
+    assert!(
+        object_ref_ids.len() >= 2,
+        "the source and the approved object at least"
+    );
+    let trace_id: uuid::Uuid = submission.get(0);
+    let mut propagation_items = object_ref_ids
+        .iter()
+        .map(|object_ref_id| {
+            let key = format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    format!(
+                        "pipeline-withdrawal-object-delete:v1:{tenant_id}:{submission_id}:{object_ref_id}"
+                    )
+                    .as_bytes()
+                )
+            );
+            (
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()),
+                key,
+                serde_json::json!({"kind": "object_ref", "object_ref_id": object_ref_id}),
+                trace_id,
+                "delete_object_payload".to_string(),
+                "pending".to_string(),
+                "pipeline_withdrawal".to_string(),
+                serde_json::json!({"source": "versioned_pipeline"}),
+            )
+        })
+        .collect::<Vec<_>>();
+    propagation_items.sort_by_key(|item| item.0);
+    WithdrawnVersion {
+        withdrawal: Some((prior_status.to_string(), distribution_reach.to_string())),
+        submission: ("revoked".to_string(), true, true, true),
+        tombstones: vec![(
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("pipeline-withdrawal:{tenant_id}:{submission_id}").as_bytes(),
+            ),
+            trace_id,
+            submission.get(1),
+            submission.get(2),
+            "withdrawn".to_string(),
+            RECEIPT_PRINCIPAL.to_string(),
+        )],
+        propagation_items,
+        live_object_refs: 0,
+        live_derived_records: 0,
+        live_vector_entries: 0,
+        live_manifest_items: 0,
+        live_snapshot_items: 0,
+    }
+}
+
+/// Zaki review 1, round 2, item 5: the withdrawal writes the pipeline
+/// follow-up of every submission of a session in one set of statements.
+/// A session of three versions, each a complete pipeline run with its own
+/// object refs; the first two are in a delivered export (a pipeline
+/// snapshot and `main`'s manifest of both), the third only in a snapshot
+/// not yet delivered. Withdrawing the middle version withdraws all three,
+/// and each gets exactly the rows a withdrawal of it alone writes: its tier
+/// (the delivered two `commons_distributed`, the third
+/// `commons_not_distributed`), one tombstone, every object ref invalidated
+/// with one payload deletion each, its derived records, vector entries,
+/// manifest items and snapshot items invalidated. Every manifest and
+/// snapshot is invalidated. A second withdrawal changes nothing.
+#[tokio::test]
+async fn a_session_withdrawal_writes_each_versions_rows_as_its_own_withdrawal_would() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(true),
+        None,
+    )
+    .await;
+    let product = PipelineProductStore::new(backend.clone());
+    let tenant = format!("withdraw-three-versions-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for version in 0..3 {
+        let (run, _) = run_to_settle_ready(&service, &tenant).await;
+        let settled = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs");
+        assert_eq!(settled.state, PipelineRunState::Complete);
+        runs.push(settled);
+        if version == 1 {
+            let snapshot = create_snapshot(
+                &product,
+                &tenant,
+                "three-versions",
+                TraceAllowedUse::Evaluation,
+            )
+            .await;
+            let mut exported = vec![runs[0].run_id, runs[1].run_id];
+            exported.sort();
+            assert_eq!(item_runs(&snapshot), exported);
+            product
+                .complete_export_snapshot(&tenant, EXPORTER, snapshot.snapshot_id)
+                .await
+                .expect("deliver the snapshot");
+        }
+    }
+    insert_export_snapshot(&runs[2], false).await;
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    for run in &runs {
+        assert_eq!(
+            owner
+                .claim_trace_source_session(&tenant, account_id, &digest, run.submission_id)
+                .await
+                .unwrap(),
+            TraceSourceSessionStatus::Active
+        );
+    }
+    let mut expected = BTreeMap::new();
+    for (index, run) in runs.iter().enumerate() {
+        let reach = if index < 2 {
+            "commons_distributed"
+        } else {
+            "commons_not_distributed"
+        };
+        expected.insert(
+            run.submission_id,
+            expected_withdrawn_version(&tenant, run.submission_id, "accepted", reach).await,
+        );
+    }
+    let mut all = runs.iter().map(|run| run.submission_id).collect::<Vec<_>>();
+    all.sort();
+
+    let outcome = service
+        .withdraw_submission(
+            &tenant,
+            runs[1].submission_id,
+            RECEIPT_PRINCIPAL,
+            Some(account_id),
+        )
+        .await
+        .expect("the owner's withdrawal succeeds");
+    assert_eq!(outcome.affected_submission_ids, all);
+    assert_eq!(
+        outcome.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    assert_eq!(
+        outcome.index_invalidation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    for run in &runs {
+        assert_eq!(
+            withdrawn_version(&tenant, run.submission_id).await,
+            expected[&run.submission_id]
+        );
+    }
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let live_exports: (i64, i64) = {
+        let row = tx
+            .query_one(
+                "SELECT
+                    (SELECT COUNT(*) FROM trace_export_manifests
+                      WHERE tenant_id = $1 AND invalidated_at IS NULL),
+                    (SELECT COUNT(*) FROM pipeline_export_snapshots
+                      WHERE tenant_id = $1 AND state <> 'invalidated')",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1))
+    };
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        live_exports,
+        (0, 0),
+        "every manifest and snapshot is invalidated"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_export_manifests").await,
+        1
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_export_snapshots").await,
+        2
+    );
+
+    let again = service
+        .withdraw_submission(
+            &tenant,
+            runs[0].submission_id,
+            RECEIPT_PRINCIPAL,
+            Some(account_id),
+        )
+        .await
+        .expect("a second withdrawal succeeds");
+    assert_eq!(again.affected_submission_ids, all);
+    for run in &runs {
+        assert_eq!(
+            withdrawn_version(&tenant, run.submission_id).await,
+            expected[&run.submission_id],
+            "a second withdrawal changes nothing"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Index invalidation (`PipelineService::process_index_invalidations`)
 // ---------------------------------------------------------------------------

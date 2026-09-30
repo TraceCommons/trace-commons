@@ -2710,26 +2710,29 @@ impl PgPipelineStore {
             return Err(not_found());
         }
 
+        // A delivered pipeline export snapshot also put copies out: the
+        // affected submissions one carries, read once for all of them (Zaki
+        // review 1, round 2, item 5).
+        let exported_by_a_pipeline_snapshot = tx
+            .query(
+                "SELECT DISTINCT item.submission_id
+                   FROM pipeline_export_snapshot_items item
+                   JOIN pipeline_export_snapshots snapshot
+                     ON snapshot.tenant_id = item.tenant_id
+                    AND snapshot.snapshot_id = item.snapshot_id
+                  WHERE item.tenant_id = $1 AND item.submission_id = ANY($2)
+                    AND snapshot.completed_at IS NOT NULL",
+                &[&tenant_id, &affected],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get::<_, Uuid>(0))
+            .collect::<std::collections::BTreeSet<_>>();
         let mut with_runs = Vec::new();
         for affected_id in &affected {
             let submission = submissions.get(affected_id);
-            // `main`'s per-submission rows, with its tier rule; a delivered
-            // pipeline export snapshot also put copies out.
-            let exported_by_a_pipeline_snapshot: bool = tx
-                .query_one(
-                    "SELECT EXISTS (
-                        SELECT 1
-                          FROM pipeline_export_snapshot_items item
-                          JOIN pipeline_export_snapshots snapshot
-                            ON snapshot.tenant_id = item.tenant_id
-                           AND snapshot.snapshot_id = item.snapshot_id
-                         WHERE item.tenant_id = $1 AND item.submission_id = $2
-                           AND snapshot.completed_at IS NOT NULL
-                     )",
-                    &[&tenant_id, affected_id],
-                )
-                .await?
-                .get(0);
+            // `main`'s per-submission rows, with its tier rule. They are
+            // `main`'s code and stay one call per submission.
             let content_status = submission.map(|row| row.get::<_, String>("status"));
             record_source_submission_withdrawal_on_tx(
                 &tx,
@@ -2737,23 +2740,20 @@ impl PgPipelineStore {
                 *affected_id,
                 content_status.as_deref(),
                 withdrawn_at,
-                exported_by_a_pipeline_snapshot,
+                exported_by_a_pipeline_snapshot.contains(affected_id),
             )
             .await?;
             if let Some(submission) = submission
                 && runs.iter().any(|run| run.submission_id == *affected_id)
             {
-                withdraw_pipeline_content_on_tx(
-                    &tx,
-                    tenant_id,
-                    *affected_id,
-                    submission,
-                    actor_principal_ref,
-                )
-                .await?;
-                with_runs.push(*affected_id);
+                with_runs.push((*affected_id, submission));
             }
         }
+        withdraw_pipeline_content_on_tx(&tx, tenant_id, &with_runs, actor_principal_ref).await?;
+        let with_runs = with_runs
+            .into_iter()
+            .map(|(submission_id, _)| submission_id)
+            .collect::<Vec<_>>();
 
         for run in &runs {
             match run.index_write_state.as_str() {
@@ -4211,50 +4211,81 @@ async fn release_awaiting_review(
     Ok(())
 }
 
-/// The pipeline follow-up of a withdrawal, for one submission that has a
-/// pipeline run, on the withdrawal's transaction (which already holds the
-/// submission row): a tombstone; its object refs invalidated and each live
-/// one queued for payload deletion (`delete_object_payload`, done by the
-/// revocation-propagation worker); its derived records revoked; its vector
-/// entries, legacy export manifests and items, and pipeline export
-/// snapshots and items invalidated. Every write is idempotent.
+/// The pipeline follow-up of a withdrawal, for the submissions that have a
+/// pipeline run (each with its row), on the withdrawal's transaction (which
+/// already holds those submission rows): a tombstone each; their object refs
+/// invalidated and each live one queued for payload deletion
+/// (`delete_object_payload`, done by the revocation-propagation worker);
+/// their derived records revoked; their vector entries, legacy export
+/// manifests and items, and pipeline export snapshots and items
+/// invalidated. Every statement runs once for all of them (Zaki review 1,
+/// round 2, item 5), and every write is idempotent. Nothing at all for no
+/// submission.
 async fn withdraw_pipeline_content_on_tx(
     tx: &Transaction<'_>,
     tenant_id: &str,
-    submission_id: Uuid,
-    submission: &Row,
+    submissions: &[(Uuid, &Row)],
     actor_principal_ref: &str,
 ) -> Result<(), DatabaseError> {
-    let trace_id: Uuid = submission.get("trace_id");
-    let redaction_hash: String = submission.get("redaction_hash");
-    let canonical_summary_hash: Option<String> = submission.get("canonical_summary_hash");
+    if submissions.is_empty() {
+        return Ok(());
+    }
+    let submission_ids = submissions
+        .iter()
+        .map(|(submission_id, _)| *submission_id)
+        .collect::<Vec<_>>();
+    let trace_ids = submissions
+        .iter()
+        .map(|(_, row)| row.get::<_, Uuid>("trace_id"))
+        .collect::<Vec<_>>();
     let object_rows = tx
         .query(
-            "SELECT object_ref_id
+            "SELECT submission_id, object_ref_id
                FROM trace_object_refs
-              WHERE tenant_id = $1 AND submission_id = $2
+              WHERE tenant_id = $1 AND submission_id = ANY($2)
                 AND deleted_at IS NULL
-              ORDER BY object_ref_id",
-            &[&tenant_id, &submission_id],
+              ORDER BY submission_id, object_ref_id",
+            &[&tenant_id, &submission_ids],
         )
         .await?;
-    let tombstone_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("pipeline-withdrawal:{tenant_id}:{submission_id}").as_bytes(),
-    );
+    let tombstone_ids = submission_ids
+        .iter()
+        .map(|submission_id| {
+            Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("pipeline-withdrawal:{tenant_id}:{submission_id}").as_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let redaction_hashes = submissions
+        .iter()
+        .map(|(_, row)| row.get::<_, String>("redaction_hash"))
+        .collect::<Vec<_>>();
+    let canonical_summary_hashes = submissions
+        .iter()
+        .map(|(_, row)| row.get::<_, Option<String>>("canonical_summary_hash"))
+        .collect::<Vec<_>>();
     tx.execute(
         "INSERT INTO trace_tombstones (
             tenant_id, tombstone_id, submission_id, trace_id, redaction_hash,
             canonical_summary_hash, reason, effective_at, created_by_principal_ref
-         ) VALUES ($1,$2,$3,$4,$5,$6,'withdrawn',NOW(),$7)
+         )
+         SELECT $1, tombstone.tombstone_id, tombstone.submission_id, tombstone.trace_id,
+                tombstone.redaction_hash, tombstone.canonical_summary_hash, 'withdrawn',
+                NOW(), $7
+           FROM unnest($2::UUID[], $3::UUID[], $4::UUID[], $5::TEXT[], $6::TEXT[])
+                AS tombstone(
+                    tombstone_id, submission_id, trace_id, redaction_hash,
+                    canonical_summary_hash
+                )
          ON CONFLICT (tenant_id, submission_id) DO NOTHING",
         &[
             &tenant_id,
-            &tombstone_id,
-            &submission_id,
-            &trace_id,
-            &redaction_hash,
-            &canonical_summary_hash,
+            &tombstone_ids,
+            &submission_ids,
+            &trace_ids,
+            &redaction_hashes,
+            &canonical_summary_hashes,
             &actor_principal_ref,
         ],
     )
@@ -4262,50 +4293,50 @@ async fn withdraw_pipeline_content_on_tx(
     tx.execute(
         "UPDATE trace_object_refs
             SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
-          WHERE tenant_id = $1 AND submission_id = $2 AND invalidated_at IS NULL",
-        &[&tenant_id, &submission_id],
+          WHERE tenant_id = $1 AND submission_id = ANY($2) AND invalidated_at IS NULL",
+        &[&tenant_id, &submission_ids],
     )
     .await?;
     tx.execute(
         "UPDATE trace_derived_records
             SET status = 'revoked', updated_at = NOW()
-          WHERE tenant_id = $1 AND submission_id = $2 AND status <> 'revoked'",
-        &[&tenant_id, &submission_id],
+          WHERE tenant_id = $1 AND submission_id = ANY($2) AND status <> 'revoked'",
+        &[&tenant_id, &submission_ids],
     )
     .await?;
     tx.execute(
         "UPDATE trace_vector_entries
             SET status = 'invalidated',
                 invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
-          WHERE tenant_id = $1 AND submission_id = $2
+          WHERE tenant_id = $1 AND submission_id = ANY($2)
             AND status <> 'invalidated' AND deleted_at IS NULL",
-        &[&tenant_id, &submission_id],
+        &[&tenant_id, &submission_ids],
     )
     .await?;
     tx.execute(
         "UPDATE trace_export_manifest_items
             SET source_invalidated_at = COALESCE(source_invalidated_at, NOW()),
                 source_invalidation_reason = 'revoked', updated_at = NOW()
-          WHERE tenant_id = $1 AND submission_id = $2
+          WHERE tenant_id = $1 AND submission_id = ANY($2)
             AND source_invalidated_at IS NULL",
-        &[&tenant_id, &submission_id],
+        &[&tenant_id, &submission_ids],
     )
     .await?;
     tx.execute(
         "UPDATE trace_export_manifests
             SET invalidated_at = COALESCE(invalidated_at, NOW()), updated_at = NOW()
-          WHERE tenant_id = $1 AND $2 = ANY(source_submission_ids)
+          WHERE tenant_id = $1 AND source_submission_ids && $2::UUID[]
             AND invalidated_at IS NULL AND deleted_at IS NULL",
-        &[&tenant_id, &submission_id],
+        &[&tenant_id, &submission_ids],
     )
     .await?;
     tx.execute(
         "UPDATE pipeline_export_snapshot_items
             SET invalidated_at = COALESCE(invalidated_at, NOW()),
                 invalidation_reason = 'withdrawn'
-          WHERE tenant_id = $1 AND submission_id = $2
+          WHERE tenant_id = $1 AND submission_id = ANY($2)
             AND invalidated_at IS NULL",
-        &[&tenant_id, &submission_id],
+        &[&tenant_id, &submission_ids],
     )
     .await?;
     tx.execute(
@@ -4319,13 +4350,26 @@ async fn withdraw_pipeline_content_on_tx(
                   FROM pipeline_export_snapshot_items item
                  WHERE item.tenant_id = snapshot.tenant_id
                    AND item.snapshot_id = snapshot.snapshot_id
-                   AND item.submission_id = $2
+                   AND item.submission_id = ANY($2)
             )",
-        &[&tenant_id, &submission_id],
+        &[&tenant_id, &submission_ids],
     )
     .await?;
-    let metadata_json = serde_json::json!({"source": "versioned_pipeline"});
+    if object_rows.is_empty() {
+        return Ok(());
+    }
+    let trace_id_of = submission_ids
+        .iter()
+        .copied()
+        .zip(trace_ids.iter().copied())
+        .collect::<BTreeMap<_, _>>();
+    let mut propagation_item_ids = Vec::with_capacity(object_rows.len());
+    let mut source_submission_ids = Vec::with_capacity(object_rows.len());
+    let mut item_trace_ids = Vec::with_capacity(object_rows.len());
+    let mut target_jsons = Vec::with_capacity(object_rows.len());
+    let mut idempotency_keys = Vec::with_capacity(object_rows.len());
     for row in &object_rows {
+        let submission_id: Uuid = row.get("submission_id");
         let object_ref_id: Uuid = row.get("object_ref_id");
         let idempotency_key = sha256_prefixed(
             format!(
@@ -4333,33 +4377,45 @@ async fn withdraw_pipeline_content_on_tx(
             )
             .as_bytes(),
         );
-        let propagation_item_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, idempotency_key.as_bytes());
-        let target_json = serde_json::json!({
+        propagation_item_ids.push(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            idempotency_key.as_bytes(),
+        ));
+        source_submission_ids.push(submission_id);
+        item_trace_ids.push(trace_id_of[&submission_id]);
+        target_jsons.push(serde_json::json!({
             "kind": "object_ref",
             "object_ref_id": object_ref_id,
-        });
-        tx.execute(
-            "INSERT INTO trace_revocation_propagation_items (
-                tenant_id, propagation_item_id, source_submission_id, trace_id,
-                target_kind, target_json, action, status, idempotency_key, reason,
-                attempt_count, metadata_json
-             ) VALUES (
-                $1,$2,$3,$4,'object_ref',$5,'delete_object_payload','pending',$6,
-                'pipeline_withdrawal',0,$7
-             )
-             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
-            &[
-                &tenant_id,
-                &propagation_item_id,
-                &submission_id,
-                &trace_id,
-                &target_json,
-                &idempotency_key,
-                &metadata_json,
-            ],
-        )
-        .await?;
+        }));
+        idempotency_keys.push(idempotency_key);
     }
+    let metadata_json = serde_json::json!({"source": "versioned_pipeline"});
+    tx.execute(
+        "INSERT INTO trace_revocation_propagation_items (
+            tenant_id, propagation_item_id, source_submission_id, trace_id,
+            target_kind, target_json, action, status, idempotency_key, reason,
+            attempt_count, metadata_json
+         )
+         SELECT $1, item.propagation_item_id, item.source_submission_id, item.trace_id,
+                'object_ref', item.target_json, 'delete_object_payload', 'pending',
+                item.idempotency_key, 'pipeline_withdrawal', 0, $7
+           FROM unnest($2::UUID[], $3::UUID[], $4::UUID[], $5::JSONB[], $6::TEXT[])
+                AS item(
+                    propagation_item_id, source_submission_id, trace_id, target_json,
+                    idempotency_key
+                )
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+        &[
+            &tenant_id,
+            &propagation_item_ids,
+            &source_submission_ids,
+            &item_trace_ids,
+            &target_jsons,
+            &idempotency_keys,
+            &metadata_json,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
