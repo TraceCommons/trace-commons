@@ -111,6 +111,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         platform::quit_confirmation_copy,
         private_ai::cancel_private_ai_credential,
         private_ai::forget_private_ai_credential,
+        private_ai::migrate_private_ai_credential,
         native_flows::native_wallet_flow,
         native_flows::contributor_disclosure_copy,
         native_flows::witness_review_copy,

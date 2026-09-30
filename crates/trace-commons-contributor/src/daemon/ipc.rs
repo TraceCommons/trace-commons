@@ -145,6 +145,7 @@ use super::audit::{self, AuditEntry};
 use super::enroll;
 use super::health::HealthState;
 use super::history::{HistoryCache, rollup};
+use super::notify;
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
     UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
@@ -302,6 +303,7 @@ pub const METHODS: &[&str] = &[
     "route_disclosure",
     "cancel",
     "clear_public_profile",
+    "commons_credit_summary",
     "consent_options",
     "discover_routing",
     "dismiss",
@@ -319,6 +321,7 @@ pub const METHODS: &[&str] = &[
     "near_ai_credential_status",
     "near_ai_credential_cancel",
     "near_ai_credential_forget",
+    "near_ai_credential_migrate",
     "near_ai_balance",
     "near_ai_funding",
     "get_public_profile",
@@ -725,8 +728,16 @@ impl DaemonShared {
         super::legacy_migration::recover(&store)?;
         let policy = ProjectPolicy::load(&store)?;
         let state = DaemonState::load(&store)?;
-        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|_| {
+        let settings = DaemonSettings::load_with_cloud_credentials(&store).or_else(|error| {
             let mut settings = DaemonSettings::load(&store)?;
+            settings.cloud_storage_failure =
+                super::cloud_credential_lifecycle::classify_load_failure(&settings, &error);
+            // The label only: never the reference, never a platform string.
+            tracing::warn!(
+                reason =
+                    super::nearai_credential::storage_failure_label(settings.cloud_storage_failure),
+                "Private AI credential not loaded at startup"
+            );
             settings.near_ai_inference = None;
             settings.near_ai_session = None;
             settings.cloud_storage_unavailable = true;
@@ -877,6 +888,7 @@ impl DaemonShared {
         settings.near_ai_session = stored.near_ai_session;
         settings.cloud_credentials = stored.cloud_credentials;
         settings.cloud_storage_unavailable = false;
+        settings.cloud_storage_failure = super::settings::CloudStorageFailure::default();
         drop(settings);
         self.near_ai_credential_changes
             .store(observed, Ordering::Release);
@@ -1519,7 +1531,7 @@ impl DaemonShared {
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
-            "next_digest_at": self.next_digest_at(),
+            "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
                 "since": health.since,
@@ -1745,12 +1757,25 @@ impl DaemonShared {
         })
     }
 
-    fn next_digest_at(&self) -> Option<chrono::DateTime<Utc>> {
+    /// The next time a digest is expected, or `None` when nothing has fired
+    /// yet under `Interval` -- there is no fixed clock to project forward
+    /// from in that case, only "some time after the interval next elapses".
+    /// `Evening` always answers `Some`, and honours `last_digest_at` the way
+    /// the firing predicate does (see `notify::next_evening_at`).
+    fn next_digest_at(&self, now: chrono::DateTime<Utc>) -> Option<chrono::DateTime<Utc>> {
         let state = self.state.lock().expect("state lock");
         let settings = self.settings.lock().expect("settings lock");
-        state
-            .last_digest_at
-            .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64))
+        match settings.digest_schedule {
+            super::settings::DigestSchedule::Interval => state
+                .last_digest_at
+                .map(|t| t + chrono::Duration::seconds(settings.digest_interval_secs as i64)),
+            super::settings::DigestSchedule::Evening { hour } => Some(notify::next_evening_at(
+                state.last_digest_at,
+                now,
+                hour,
+                &chrono::Local,
+            )),
+        }
     }
 
     fn snapshot_value(&self) -> serde_json::Value {
@@ -1959,6 +1984,12 @@ pub fn entry_value(
         // to expose, because nothing in the format supplies one.
         "subagent_count": e.subagent_count,
         "subagents_dropped": e.subagents_dropped,
+        // When the session ran and how many prompts it had. Metadata only;
+        // null for an entry queued before this was recorded.
+        "started_at": e.shape.as_ref().and_then(|s| s.started_at),
+        "ended_at": e.shape.as_ref().and_then(|s| s.ended_at),
+        "duration_secs": e.shape.as_ref().and_then(super::queue::SessionShape::duration_secs),
+        "user_turns": e.shape.as_ref().map(|s| s.user_turns),
     });
     // ABSENT, NOT `unknown`, WHENEVER THE SIGNUP FLAG IS OFF.
     //
@@ -2194,6 +2225,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "near_ai_credential_start",
         "near-ai-credential-requires-async",
     ),
+    (
+        "near_ai_credential_migrate",
+        "near-ai-credential-requires-async",
+    ),
     ("native_wallet_flow", "near-signup-requires-async"),
     ("near_ai_funding", "near-ai-funding-requires-async"),
     ("witness_preview_request", "witness-review-requires-async"),
@@ -2205,6 +2240,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("enroll", "enroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
+    (
+        "commons_credit_summary",
+        "commons-credit-summary-requires-async",
+    ),
     (
         "inference_connection_offers",
         "inference-connection-requires-async",
@@ -2798,6 +2837,56 @@ fn handle_undo_keep(shared: &DaemonShared, req: &Request) -> Response {
 // which every shell does to it, because the raw label is a slug no
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
+/// Sessions the watcher has observed per project key, with the latest one's
+/// modification time, from the cwd cache.
+///
+/// The project key is read from each entry, where the watcher recorded it at
+/// insert, so this canonicalizes nothing under the state lock. An entry
+/// written before that field existed is resolved once, outside the lock, and
+/// the key written back.
+///
+/// What it counts: sessions observed on this machine and still present at
+/// the last full pass (the watcher prunes entries whose file is gone), and
+/// the latest session's file modification time -- when it was last written,
+/// not when it started.
+fn sessions_seen_per_project(
+    shared: &DaemonShared,
+) -> std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> {
+    let unresolved: Vec<(String, Option<String>)> = {
+        let state = shared.state.lock().expect("state lock");
+        state
+            .cwd_cache
+            .iter()
+            .filter(|(_, e)| e.project_key.is_none())
+            .map(|(path, e)| (path.clone(), e.cwd.clone()))
+            .collect()
+    };
+    if !unresolved.is_empty() {
+        let resolved: Vec<(String, String)> = unresolved
+            .into_iter()
+            .map(|(path, cwd)| (path, super::policy::project_for(cwd.as_deref()).0))
+            .collect();
+        let mut state = shared.state.lock().expect("state lock");
+        for (path, key) in resolved {
+            if let Some(entry) = state.cwd_cache.get_mut(&path) {
+                entry.project_key.get_or_insert(key);
+            }
+        }
+    }
+    let state = shared.state.lock().expect("state lock");
+    let mut seen: std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> =
+        std::collections::BTreeMap::new();
+    for cached in state.cwd_cache.values() {
+        let Some(key) = cached.project_key.clone() else {
+            continue;
+        };
+        let slot = seen.entry(key).or_insert((0, cached.modified_at));
+        slot.0 += 1;
+        slot.1 = slot.1.max(cached.modified_at);
+    }
+    seen
+}
+
 fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // What a group-level send would actually do, answerable before the
     // press.
@@ -2816,8 +2905,14 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     let group_filters = super::contribution_eligibility::evidence_flag(
         shared.store.load_config().ok().flatten().as_ref(),
     );
+    // How many sessions the watcher has seen in each project, and when the
+    // latest was last written: from the cwd cache every observed session
+    // passes through, so it counts sessions whatever their queue state.
+    // Taken before the policy lock, so it adds no lock ordering.
+    let seen = sessions_seen_per_project(shared);
     let policy = shared.policy.lock().expect("policy lock");
     let queue = shared.queue.lock().expect("queue lock");
+    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let counts = |key: &str| {
         let pending: Vec<&super::queue::QueueEntry> = queue
             .pending()
@@ -2838,13 +2933,20 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // exactly as it does for `eligibility`; a null would be one more thing
     // three shells each decide how to read.
     let with_counts = |mut row: serde_json::Value, counts: (usize, Option<usize>)| {
+        let key = row["project_id"]
+            .as_str()
+            .and_then(|id| project_key_for_id(id, &known));
+        let (session_count, last_session_at) = key
+            .and_then(|k| seen.get(&k).copied())
+            .map_or((0, None), |(n, at)| (n, Some(at)));
+        row["session_count"] = serde_json::Value::from(session_count);
+        row["last_session_at"] = serde_json::json!(last_session_at);
         row["pending_count"] = serde_json::Value::from(counts.0);
         if let Some(contributable) = counts.1 {
             row["contributable_count"] = serde_json::Value::from(contributable);
         }
         row
     };
-    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
     let discovered: std::collections::BTreeMap<String, Option<String>> = queue
         .all()
         .iter()
@@ -2905,7 +3007,40 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             )
         }))
         .collect();
-    Response::ok(req.id, serde_json::json!({ "projects": projects }))
+    // K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    // folders set to Ask me. None has been decided." Three conditions,
+    // all required:
+    //
+    // - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
+    //   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded`
+    //   entry has already been decided, one way or another.
+    // - The project's mode resolves to `NotifyOnly` ("Ask me"), never
+    //   `AutoUpload` ("armed") or `Ignore`. Armed is excluded on the
+    //   project's resolved mode rather than the entry's own
+    //   `approved_unattended` flag, because a gate-held armed session is
+    //   `Pending` with nothing decided about it yet either -- see
+    //   `policy::resolve` and the design's note that "gate-held armed
+    //   sessions stay Pending". Counting those into this upsell would tell a
+    //   contributor to go decide about a folder they already armed.
+    // - Previewed at least once (`previewed_envelope_digest.is_some()`) --
+    //   "scrubbed", in the design's word. An entry nobody has opened a
+    //   preview for has not been through the redaction pass this count is
+    //   about, and including it would inflate "27" with sessions no
+    //   preview-then-decide flow has touched.
+    //
+    // Deliberately not yet shared with K6's `queue::decisions_owed` (#1132),
+    // which is not on main: once both land, the two should share one
+    // predicate. Tracked as a follow-up on #1129.
+    let unpurposed_traces = queue
+        .pending()
+        .iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| e.previewed_envelope_digest.is_some())
+        .count();
+    Response::ok(
+        req.id,
+        serde_json::json!({ "projects": projects, "unpurposed_traces": unpurposed_traces }),
+    )
 }
 
 /// The arming disclosure for one project (K6, R1), as the grant screens'
@@ -3716,7 +3851,8 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// `"probe_routed_tools"`,
 /// `"quiesce"`, `"enroll"`, `"near_ai_credential_status"`,
 /// `"near_ai_credential_forget"`,
-/// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
+/// `"withdraw"`, `"withdraw_bulk"`, `"commons_credit_summary"`,
+/// `"set_public_profile"`,
 /// `"clear_public_profile"`, `"skill_candidate"`, `"skill_evaluate"`, and the
 /// four `"skill_install_*"` methods) for
 /// real and delegates every other method, unchanged, to the synchronous
@@ -3735,6 +3871,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "near_ai_account_enroll" => super::nearai_onboarding::handle_enroll(shared, req).await,
         "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
+        "near_ai_credential_migrate" => super::nearai_credential::handle_migrate(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
         // override exists so the reconcile that makes the answer true of the
@@ -3766,6 +3903,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "commons_credit_summary" => {
+            super::commons_credit::handle_commons_credit_summary(shared, req).await
+        }
         "inference_connection_offers" => {
             super::inference_connection::handle_offers(shared, req).await
         }
@@ -4830,6 +4970,7 @@ pub(crate) fn preview_card_value(
     serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
+        "title": summary.title,
         "event_count": summary.event_count,
         "opening_prompt": summary.opening_prompt,
         "redactions": summary.redactions,
@@ -8553,6 +8694,43 @@ mod tests {
         );
     }
 
+    /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    /// folders set to Ask me. None has been decided." Three entries, each
+    /// failing exactly one of the three conditions the count requires, so a
+    /// broken filter shows up as a wrong number rather than a coincidence:
+    ///
+    /// - one in an Ask-me (unconfigured, `notify_only`) project, previewed
+    ///   -- the only one that must count;
+    /// - one in the same Ask-me project, never previewed -- undecided but
+    ///   unpreviewed, must be excluded;
+    /// - one in an armed (`auto_upload`) project, previewed -- must be
+    ///   excluded even though it is otherwise identical to the first.
+    #[test]
+    fn list_projects_unpurposed_traces_counts_only_previewed_ask_me_pending_entries() {
+        let s = shared();
+        let ask_project = "/tmp/askproj";
+        let armed_project = "/tmp/armedproj";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(armed_project, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+
+        let scrubbed_and_undecided = seed_entry(&s, ask_project);
+        let _undecided_but_unpreviewed = seed_entry(&s, ask_project);
+        let armed_and_previewed = seed_entry(&s, armed_project);
+        {
+            let mut queue = s.queue.lock().unwrap();
+            assert!(queue.record_previewed_envelope(scrubbed_and_undecided, "sha256:a", None));
+            assert!(queue.record_previewed_envelope(armed_and_previewed, "sha256:b", None));
+        }
+
+        let result = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
     /// Seed one pending queue entry for `project_key`, the way a poll that
     /// discovered a session would, without running the watcher.
     fn seed_entry(s: &DaemonShared, project_key: &str) -> uuid::Uuid {
@@ -10371,6 +10549,8 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(
@@ -12127,7 +12307,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 33);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 35);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -12557,7 +12737,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 53, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 40, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 42, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

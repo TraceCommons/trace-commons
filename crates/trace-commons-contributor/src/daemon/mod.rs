@@ -35,6 +35,7 @@ pub(crate) mod cloud_credential_lifecycle;
 mod cloud_credential_lifecycle_tests;
 #[cfg(test)]
 pub(crate) mod cloud_credential_test_support;
+pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
 pub(crate) mod credential_store;
@@ -1338,6 +1339,39 @@ pub async fn drain_approved_for_test(
     drain_approved(shared, now, std::time::Instant::now()).await
 }
 
+/// Can this process reach the Cloud credential store?
+///
+/// The FFI crate cannot reach `cloud_credential_lifecycle` directly -- that
+/// module is `pub(crate)` here -- so this is the public wrapper it calls
+/// through. The probe is the same shape as
+/// [`cloud_credential_lifecycle::CloudCredentialLifecycle::probe`]: a read of
+/// a reference that was never stored, which answers without writing anything.
+///
+/// The two map their errors **differently, on purpose**. `probe` guards a
+/// sign-in, so it treats everything that is not `Unentitled` as go -- a
+/// transient store error must not stop a contributor signing in. This one
+/// gates a release, where the same leniency reports PASS against a store that
+/// is failing for any reason at all. So only `NoEntry` is reachable here: it
+/// means the store answered and nothing was stored, which is exactly the
+/// question. Every other error is 2.
+///
+/// Returns 0 reachable, 1 unentitled, 2 for a backend that could not be
+/// constructed or a read that failed for any other reason.
+pub fn credential_store_self_check() -> i32 {
+    use credential_store::{CredentialError, CredentialReference, CredentialStore};
+
+    let backend = match os_secret_store::OsSecretBackend::new() {
+        Ok(backend) => backend,
+        Err(CredentialError::Unentitled) => return 1,
+        Err(_) => return 2,
+    };
+    match CredentialStore::new(backend).load_bytes(&CredentialReference::allocate()) {
+        Err(CredentialError::Unentitled) => 1,
+        Err(CredentialError::NoEntry) | Ok(_) => 0,
+        Err(_) => 2,
+    }
+}
+
 /// Find the adapter and session reference matching a queue entry's path.
 fn find_session<'a>(
     sources: &'a [Box<dyn crate::source::TraceSource>],
@@ -1489,7 +1523,10 @@ async fn refresh_history(
         }
         m
     };
-    let records = history::join(&receipts, &updates, &labels, now);
+    // The cache being replaced carries local withdrawals that neither the
+    // receipts nor the server's read-back know about yet; `join` keeps them.
+    let previous = run_blocking(|| history::HistoryCache::load(&shared.store).unwrap_or_default());
+    let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
     let mut state = shared.state.lock().expect("state lock");
     state.last_history_poll_at = Some(now);
@@ -1564,14 +1601,21 @@ async fn refresh_community(
 
 /// Age out undecided entries, then decide whether a digest is due.
 fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) {
-    let (ttl_days, digest_interval_secs, local_notifications) = {
+    let (ttl_days, digest_interval_secs, digest_schedule, local_notifications) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.queue_ttl_days,
             s.digest_interval_secs,
+            s.digest_schedule,
             s.local_notifications,
         )
     };
+    // The contributor's own local timezone, read fresh on every call so a
+    // laptop that travels (or a DST transition) is reflected immediately --
+    // never cached alongside `digest_schedule`, which would go stale exactly
+    // when it matters most. Ignored entirely under `Interval`, which the
+    // generic `Tz` parameter never touches.
+    let local_tz = chrono::Local;
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
@@ -1606,20 +1650,29 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // file before the clock is even close is work whose result is discarded.
     // `interval_elapsed` is the same expression `digest_due` applies, not a
     // second opinion about it.
-    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+    let contributed = if notify::schedule_elapsed(
+        digest_schedule,
+        last_digest_at,
+        now,
+        digest_interval_secs,
+        &local_tz,
+    ) {
         history::contributed_since(
             &history::HistoryCache::load(&shared.store).unwrap_or_default(),
             last_digest_at,
         )
     } else {
-        // Only reachable when `digest_due` is about to be false anyway: the
-        // interval has not elapsed, so neither half of the digest can fire.
+        // Only reachable when `digest_due_for_schedule` is about to be false
+        // anyway: the schedule's window has not elapsed, so neither half of
+        // the digest can fire.
         history::ContributedSince::default()
     };
-    if notify::digest_due(
+    if notify::digest_due_for_schedule(
+        digest_schedule,
         last_digest_at,
         now,
         digest_interval_secs,
+        &local_tz,
         pending_count,
         contributed.count,
     ) {
