@@ -1587,14 +1587,21 @@ async fn refresh_community(
 
 /// Age out undecided entries, then decide whether a digest is due.
 fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>) {
-    let (ttl_days, digest_interval_secs, local_notifications) = {
+    let (ttl_days, digest_interval_secs, digest_schedule, local_notifications) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.queue_ttl_days,
             s.digest_interval_secs,
+            s.digest_schedule,
             s.local_notifications,
         )
     };
+    // The contributor's own local timezone, read fresh on every call so a
+    // laptop that travels (or a DST transition) is reflected immediately --
+    // never cached alongside `digest_schedule`, which would go stale exactly
+    // when it matters most. Ignored entirely under `Interval`, which the
+    // generic `Tz` parameter never touches.
+    let local_tz = chrono::Local;
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
@@ -1629,20 +1636,29 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // file before the clock is even close is work whose result is discarded.
     // `interval_elapsed` is the same expression `digest_due` applies, not a
     // second opinion about it.
-    let contributed = if notify::interval_elapsed(last_digest_at, now, digest_interval_secs) {
+    let contributed = if notify::schedule_elapsed(
+        digest_schedule,
+        last_digest_at,
+        now,
+        digest_interval_secs,
+        &local_tz,
+    ) {
         history::contributed_since(
             &history::HistoryCache::load(&shared.store).unwrap_or_default(),
             last_digest_at,
         )
     } else {
-        // Only reachable when `digest_due` is about to be false anyway: the
-        // interval has not elapsed, so neither half of the digest can fire.
+        // Only reachable when `digest_due_for_schedule` is about to be false
+        // anyway: the schedule's window has not elapsed, so neither half of
+        // the digest can fire.
         history::ContributedSince::default()
     };
-    if notify::digest_due(
+    if notify::digest_due_for_schedule(
+        digest_schedule,
         last_digest_at,
         now,
         digest_interval_secs,
+        &local_tz,
         pending_count,
         contributed.count,
     ) {

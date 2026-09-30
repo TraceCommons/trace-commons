@@ -516,7 +516,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -582,6 +582,16 @@ invite identity" below.
 `health.last_error_label` is the field a tray renders when something is
 wrong. It is one of the labels in "Health precedence" below, or `null` when
 healthy.
+
+`next_digest_at` depends on `digest_schedule` (see `set_settings`). Under
+`interval` it is `null` until a first digest has fired, then that digest's
+time plus `digest_interval_secs` -- unchanged from before `digest_schedule`
+existed. Under `evening` it is always a timestamp, whether or not a digest
+has ever fired, and it honours the last digest: when an evening target has
+passed that no digest answered (the daemon slept through it, or it had
+nothing to say), it is that target, at or before now -- already due, the
+same reading `interval` gives when last-plus-interval is in the past.
+Otherwise it is the next occurrence of the configured local hour.
 
 #### `daily_budget`
 
@@ -2241,7 +2251,8 @@ second edit to the same file, and on a file that did not exist before.
 ### `set_settings`
 
 Takes a JSON object whose top-level keys must come from
-`quiescence_secs`, `digest_interval_secs`, `approval_hold_secs`,
+`quiescence_secs`, `digest_interval_secs`, `digest_schedule`,
+`approval_hold_secs`,
 `local_notifications`, `claude_root`, `codex_root`, `claude_source`,
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
@@ -2254,6 +2265,26 @@ ignored, so a caller that mistypes a key gets a definite signal rather than
 a daemon that quietly kept the old value. A recognized key holding the
 wrong JSON type returns `bad_params` / `settings-invalid-value`; an empty
 object returns `bad_params` / `no-known-setting-supplied`.
+
+`digest_schedule` picks when the digest fires: `{"mode":"interval"}` (the
+default, unchanged from before this key existed -- one digest every
+`digest_interval_secs`) or `{"mode":"evening","hour":H}` for one digest a
+day at local hour `H` (0-23; omitted, it defaults to 18, i.e. 18:00 local).
+"Local" is computed in the contributor's own timezone (`chrono::Local` on
+the daemon's host), handling DST transitions and a missed window: an
+evening the daemon was asleep or unreachable through still fires once, at
+the next opportunity (a laptop that sleeps from 17:30 and wakes at 07:00
+fires at 07:00), never once per missed day. The first digest after
+switching to `evening` waits for that day's hour. A last-digest time in the
+future (the clock was moved backwards) is treated as stale on either
+schedule rather than holding digests off. `hour` outside `0..=23` is
+`bad_params` / `settings-invalid-value` from `set_settings`; read from a
+settings file, it falls back to `interval` with a label-only log line. Either mode keeps "only with
+something to say" unchanged (see the `digest_due` event, under "Events"
+below): a digest with nothing pending and nothing contributed since the
+last one never fires, on either schedule. This is open decision #5 on issue
+#1118; both schedules ship rather than picking one, so the choice is a
+setting rather than a release cliff.
 
 `opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
 `{"mode":"off"}`, or `null`; absent, null, and Off construct no adapter, including
