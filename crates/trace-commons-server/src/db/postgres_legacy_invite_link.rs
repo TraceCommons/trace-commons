@@ -1,12 +1,12 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Legacy invite link storage (V81). Every statement runs in the NEAR
+//! Legacy invite link storage (V81, V91, V104). Every statement runs in the NEAR
 //! account's tenant context; the only cross-tenant read is inside
 //! `trace_link_legacy_invite`, owned by a NOLOGIN, NOBYPASSRLS guard.
 
 use trace_commons_protocol::legacy_invite_link::{
-    LegacyInviteLinkRecord, LegacyInviteLinkStatement,
+    LegacyInviteLinkRecord, LegacyInviteLinkRecordKind, LegacyInviteLinkStatement,
 };
 
 use super::PgBackend;
@@ -95,10 +95,11 @@ impl PgBackend {
             )
             .await?;
         let outcome: String = row.get(0);
-        // V91: the same account, from another of the tenant's devices. The
-        // link function answered with the first device's record, which this
-        // device cannot verify; record and return its own attestation
-        // instead, in the same transaction that spent its challenge.
+        // V91/V104: the same account, from another of the tenant's devices.
+        // The link function answered with the first device's record, which
+        // this device cannot verify; record and return its own attestation
+        // instead, countersigned under the attestation domain, in the same
+        // transaction that spent its challenge (V104 checks that it did).
         if outcome == "already_linked"
             && row.get::<_, Option<String>>(2).as_deref() != Some(statement.device_key_id.as_str())
         {
@@ -120,10 +121,12 @@ impl PgBackend {
                         &record.linked_at,
                         &record.device_signature,
                         &record.server_kid,
-                        &attempt.server_signature,
+                        &attempt.attestation_server_signature,
                     ],
                 )
                 .await?;
+            // Refusals commit too: the spent challenge stays spent, and an
+            // invite_not_linked refusal stays recorded for the operator.
             tx.commit().await?;
             let attested_outcome: String = attested.get(0);
             let refusal = match attested_outcome.as_str() {
@@ -131,7 +134,10 @@ impl PgBackend {
                 "challenge_invalid" => Some(LinkRefusal::ChallengeInvalid),
                 "account_ineligible" => Some(LinkRefusal::AccountIneligible),
                 "device_not_eligible" => Some(LinkRefusal::DeviceNotEligible),
+                "tenant_pooled" => Some(LinkRefusal::TenantPooled),
+                "invite_revoked" => Some(LinkRefusal::InviteRevoked),
                 "tenant_claimed" => Some(LinkRefusal::TenantClaimed),
+                "invite_not_linked" => Some(LinkRefusal::InviteNotLinked),
                 _ => Some(LinkRefusal::Unavailable),
             };
             if let Some(refusal) = refusal {
@@ -155,6 +161,7 @@ impl PgBackend {
                     device_signature: attested.get(6),
                     linked_at: attested.get(7),
                     server_kid: attested.get(8),
+                    kind: LegacyInviteLinkRecordKind::DeviceAttestation,
                 }),
                 server_signature: attested.get(9),
                 trust_version,
@@ -195,6 +202,7 @@ impl PgBackend {
                 device_signature: row.get(6),
                 linked_at: row.get(7),
                 server_kid: row.get(8),
+                kind: LegacyInviteLinkRecordKind::Link,
             }),
             server_signature: row.get(9),
             trust_version,
