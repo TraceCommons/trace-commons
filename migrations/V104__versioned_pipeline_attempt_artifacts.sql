@@ -49,10 +49,10 @@ END $$;
 
 -- pipeline_attempt_artifacts: a write site stages its row before it
 -- publishes the object the row names (INSERT), the commit transaction moves
--- a `staged` row to `committed` and the sweep deletes a due `staged` row
--- outright or moves a withdrawn run's `committed` row to `deleted`
--- (UPDATE), and the sweep also deletes a `staged` row once its object is
--- gone (DELETE). Nothing updates a row's tenant, run, lease token, artifact
--- kind, object key, ciphertext hash, or cleanup_after.
+-- a `staged` row to `committed` (UPDATE), and the sweep either deletes a due
+-- `staged` row outright once it has handled that row's object (DELETE) or
+-- moves a withdrawn run's `committed` row to `deleted` (UPDATE). Nothing
+-- updates a row's tenant, run, lease token, artifact kind, object key,
+-- ciphertext hash, or cleanup_after.
 GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;
 GRANT UPDATE (state, committed_at, deleted_at) ON pipeline_attempt_artifacts TO trace_ingest_runtime;

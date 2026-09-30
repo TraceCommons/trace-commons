@@ -7519,13 +7519,17 @@ impl PipelineService {
     /// never claimed (PR 4): a `staged` row whose `cleanup_after` has
     /// passed -- an attempt that crashed, lost its lease, or had its commit
     /// refused -- and the Score objects (`index-command`, `score-neighbors`)
-    /// of a run that finished (`complete` or `failed`) with its index
-    /// invalidation settled (`none` or `complete`, never `pending`: the
-    /// invalidation still needs the stored `index-command` to know what to
-    /// remove) whose submission was withdrawn, by either signal
-    /// (`trace_withdrawals` or `trace_submissions.withdrawn_at`) -- the
-    /// review-time tombstone-only test helper sets only the latter, the real
-    /// withdrawal path sets both.
+    /// of a run that finished (`complete` or `failed`) whose submission was
+    /// withdrawn, by either signal (`trace_withdrawals` or
+    /// `trace_submissions.withdrawn_at` -- the review-time tombstone-only
+    /// test helper sets only the latter, the real withdrawal path sets
+    /// both), once that run's own index invalidation has settled (`none` or
+    /// `complete`, never `pending`). Plan decision P4-D10: the `pending`
+    /// exclusion is an ordering rule, not a dependency on the object's
+    /// content -- `process_index_invalidations` invalidates by registry
+    /// revision id, never by reading the stored `index-command` -- so a
+    /// Score object is never removed while its run's own withdrawal
+    /// follow-up is still in flight.
     ///
     /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, up to `limit` rows
     /// across both selections combined. For each row, the object is deleted
@@ -7602,8 +7606,13 @@ impl PipelineService {
             let artifact: String = row.get("artifact");
             let object_key: String = row.get("object_key");
             let ciphertext_sha256: String = row.get("ciphertext_sha256");
+            // The column is CHECK-constrained to the three known artifacts,
+            // so this should never fire; if it ever does (a future migration
+            // loosens the constraint, or direct DB tampering), fail this
+            // sweep pass closed -- an error the caller logs and retries next
+            // pass -- rather than panic the worker's supervised task.
             let artifact_kind = PipelineAttemptArtifact::from_db_str(&artifact)
-                .expect("pipeline_attempt_artifacts.artifact is CHECK-constrained")
+                .ok_or_else(|| anyhow::anyhow!("pipeline_attempt_artifact_kind_unrecognized"))?
                 .store_kind();
 
             let present = self.artifact_store.artifact_present_by_object_key(
@@ -7612,8 +7621,17 @@ impl PipelineService {
                 &object_key,
                 &ciphertext_sha256,
             );
+            // `Some(false)` -- confirmed absent -- is the only answer that
+            // skips the delete outright. `Some(true)` and `None` ("the store
+            // cannot tell", the trait's documented default, and what
+            // `GcsRemoteTraceArtifactProvider` answers today since it does
+            // not override this method) both attempt the delete: a store
+            // that cannot report presence may still hold the object, and a
+            // store whose delete errors on an absent object keeps the row
+            // for the next pass rather than mistaking "unknown" for "gone".
             let delete_failed = match present {
-                Ok(Some(true)) => {
+                Ok(Some(false)) => false,
+                Ok(Some(true)) | Ok(None) => {
                     let receipt = EncryptedTraceArtifactReceipt {
                         tenant_storage_ref: tenant_storage_ref.as_str().to_string(),
                         artifact_kind,
@@ -7625,7 +7643,6 @@ impl PipelineService {
                         .delete_artifact(tenant_storage_ref.as_str(), &receipt)
                         .is_err()
                 }
-                Ok(_) => false,
                 Err(_) => true,
             };
             if delete_failed {
@@ -8349,7 +8366,7 @@ impl PipelineService {
                             "review_output_invalid"
                         );
                         let object_id = pipeline_attempt_object_id(
-                            "approved",
+                            PipelineAttemptArtifact::Approved.as_str(),
                             run.run_id,
                             required_lease_token(run)?,
                         );

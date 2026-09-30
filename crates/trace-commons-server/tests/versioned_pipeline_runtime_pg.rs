@@ -9290,13 +9290,17 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
 
 /// Step 2's third test: a complete, indexed run whose submission is
 /// withdrawn afterward. The Score objects stay while the queued index
-/// invalidation is pending -- Score's stored `index-command` is what the
-/// invalidation reads to know which entries to remove -- and are swept only
-/// once the invalidation completes. The approved object, per the brief, is
-/// checked for readability rather than deleted here: if the existing
-/// withdrawal path (`PgPipelineStore::withdraw_submission`) ever starts
-/// leaving it readable, that is a PR 3 finding, not something this task
-/// fixes.
+/// invalidation is pending, and are swept only once the invalidation
+/// completes -- plan decision P4-D10's ordering rule, not because
+/// `process_index_invalidations` needs to read the stored `index-command`
+/// (it invalidates by registry revision id). Runs a compatibility bundle
+/// (`CompatibilityBundleConfig::local_reference`), whose `CompatibilityScorePolicy`
+/// -- unlike the minimal reference bundle's `FixedScorePolicy` -- proposes a
+/// real `score-neighbors` artifact too, so both committed Score objects are
+/// covered. The approved object, per the brief, is checked for readability
+/// rather than deleted here: if the existing withdrawal path
+/// (`PgPipelineStore::withdraw_submission`) ever starts leaving it readable,
+/// that is a PR 3 finding, not something this task fixes.
 #[tokio::test]
 async fn withdrawal_deletes_committed_score_objects_after_the_run_ends() {
     let Some(backend) = runtime_backend(4).await else {
@@ -9304,40 +9308,31 @@ async fn withdrawal_deletes_committed_score_objects_after_the_run_ends() {
     };
     let dir = tempfile::tempdir().unwrap();
     let artifacts = artifact_store(&dir);
-    let (service, index, _) = test_service(
+    let service = compatibility_test_service(
         backend.clone(),
         artifacts.clone(),
-        minimal_config(true),
-        None,
+        CompatibilityBundleConfig::local_reference(),
     )
     .await;
     let tenant = format!("withdrawn-score-sweep-{}", uuid::Uuid::new_v4());
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
-    let (run, _) = run_to_settle_ready(&service, &tenant).await;
-
-    let settled = service
-        .process_run(&tenant, run.run_id)
-        .await
-        .unwrap()
-        .expect("Settle completes");
+    let settled = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
     assert_eq!(settled.state, PipelineRunState::Complete);
     assert_eq!(settled.index_write_state, "complete");
-    assert!(
-        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
-        "the index write left entries"
-    );
 
-    // `FixedScorePolicy` (the minimal reference bundle) never proposes a
-    // `score-neighbors` artifact -- its `ScoreOutput::new` call always passes
-    // `None` for it -- so only `approved` and `index-command` commit here.
+    // `CompatibilityScorePolicy` -- unlike the minimal reference bundle's
+    // `FixedScorePolicy` -- always proposes a `score-neighbors` artifact
+    // (`ScoreOutput::new(result, command, Some(neighbor_bytes))`, never
+    // `None`), so both committed Score objects are covered here.
     let committed_before = attempt_artifact_rows(&backend, &tenant, settled.run_id).await;
     assert_eq!(
         committed_before,
         vec![
             ("approved".to_string(), "committed".to_string()),
             ("index-command".to_string(), "committed".to_string()),
+            ("score-neighbors".to_string(), "committed".to_string()),
         ],
-        "the approved and index-command attempt objects are committed"
+        "the approved, index-command, and score-neighbors attempt objects are all committed"
     );
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
@@ -9363,8 +9358,8 @@ async fn withdrawal_deletes_committed_score_objects_after_the_run_ends() {
     tx.commit().await.unwrap();
     assert_eq!(
         score_objects.len(),
-        1,
-        "only index-command is committed here"
+        2,
+        "both index-command and score-neighbors are committed here"
     );
 
     let outcome = withdraw(&service, &tenant, settled.submission_id).await;
@@ -9433,6 +9428,7 @@ async fn withdrawal_deletes_committed_score_objects_after_the_run_ends() {
         vec![
             ("approved".to_string(), "committed".to_string()),
             ("index-command".to_string(), "deleted".to_string()),
+            ("score-neighbors".to_string(), "deleted".to_string()),
         ]
     );
 
@@ -9512,6 +9508,253 @@ async fn the_sweep_treats_an_absent_object_as_removed() {
         attempt_artifact_rows(&backend, &tenant, claimed.run_id).await,
         Vec::<(String, String)>::new(),
         "the row is removed even though its object was already gone"
+    );
+}
+
+/// Review fix round 1, I1: a store double whose presence check always
+/// answers `Ok(None)` -- "the store cannot tell", the trait's documented
+/// default (`trace_artifact_store.rs`'s `artifact_present_by_object_key`),
+/// and what `GcsRemoteTraceArtifactProvider` answers today since it never
+/// overrides that method. `force_delete_failure` makes every
+/// `delete_artifact` call fail instead of delegating, so a test can exercise
+/// the sweep's "delete failed, keep the row" path without needing a real
+/// backend that fails on delete -- both the local file store and
+/// `GcsRemoteTraceArtifactProvider` (checked directly: `FileRemoteTraceArtifactProvider::delete_encrypted_artifact`
+/// returns `Ok(false)` when the path does not exist, and
+/// `GcsObjectClient::delete_object` -- both the in-memory test double and
+/// the production client, which maps a not-found error to `Ok(false)` --
+/// return `Ok(false)` too) answer `Ok(false)` rather than an error for an
+/// absent object, so neither ever takes this path against a truly-missing
+/// object; this double is what exercises it.
+struct PresenceUnknownStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    delete_calls: AtomicUsize,
+    force_delete_failure: bool,
+}
+
+impl TraceArtifactStore for PresenceUnknownStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.delete_calls.fetch_add(1, Ordering::SeqCst);
+        if self.force_delete_failure {
+            anyhow::bail!("forced delete failure for the unknown-presence test");
+        }
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        _expected_tenant_storage_ref: &str,
+        _expected_artifact_kind: TraceArtifactKind,
+        _object_key: &str,
+        _expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        Ok(None)
+    }
+}
+
+/// I1: an unknown presence answer (`Ok(None)`) is not treated as "absent" --
+/// the sweep still attempts the delete (the double records the call), and
+/// once that delete succeeds against the real underlying store, the row is
+/// removed exactly as it would be for a confirmed-present object.
+#[tokio::test]
+async fn the_sweep_deletes_through_an_unknown_presence_answer() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let double = Arc::new(PresenceUnknownStore {
+        inner: artifact_store(&dir),
+        delete_calls: AtomicUsize::new(0),
+        force_delete_failure: false,
+    });
+    let artifacts: Arc<dyn TraceArtifactStore> = double.clone();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant = format!("presence-unknown-delete-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim for review");
+    let content = b"an object the presence check cannot see".to_vec();
+    let receipt = stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::Approved,
+        &content,
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+
+    let removed = service
+        .sweep_attempt_artifacts(&tenant, 10)
+        .await
+        .expect("the sweep still succeeds against an unknown-presence store");
+    assert_eq!(removed, 1);
+    assert_eq!(
+        double.delete_calls.load(Ordering::SeqCst),
+        1,
+        "the sweep attempted the delete despite the unknown presence answer"
+    );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, claimed.run_id).await,
+        Vec::<(String, String)>::new(),
+        "the row is removed once the delete succeeds"
+    );
+    // The delete reached the real underlying store -- the double only masks
+    // presence, never the delete itself.
+    assert_eq!(
+        double
+            .inner
+            .artifact_present_by_object_key(
+                tenant_ref.as_str(),
+                TraceArtifactKind::ContributionEnvelope,
+                &receipt.object_key,
+                &receipt.ciphertext_sha256,
+            )
+            .unwrap(),
+        Some(false)
+    );
+}
+
+/// I1: when the delete itself fails, an unknown presence answer must not
+/// make the sweep record a deletion anyway -- the row stays `staged` for the
+/// next pass, and is not counted as removed.
+#[tokio::test]
+async fn the_sweep_keeps_a_row_whose_delete_fails_despite_unknown_presence() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let double = Arc::new(PresenceUnknownStore {
+        inner: artifact_store(&dir),
+        delete_calls: AtomicUsize::new(0),
+        force_delete_failure: true,
+    });
+    let artifacts: Arc<dyn TraceArtifactStore> = double.clone();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifacts.clone(),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = service.store();
+    let tenant = format!("presence-unknown-delete-fails-{}", uuid::Uuid::new_v4());
+    let seeded = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("claim for review");
+    let content = b"an object whose delete the double forces to fail".to_vec();
+    stage_and_publish_attempt_artifact(
+        store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::Approved,
+        &content,
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+
+    let removed = service
+        .sweep_attempt_artifacts(&tenant, 10)
+        .await
+        .expect("a delete failure is kept for the next pass, not an error from the sweep itself");
+    assert_eq!(removed, 0, "the row is kept, not counted as removed");
+    assert_eq!(
+        double.delete_calls.load(Ordering::SeqCst),
+        1,
+        "the delete was attempted once"
+    );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, claimed.run_id).await,
+        vec![("approved".to_string(), "staged".to_string())],
+        "the row stays staged for the next pass"
     );
 }
 
