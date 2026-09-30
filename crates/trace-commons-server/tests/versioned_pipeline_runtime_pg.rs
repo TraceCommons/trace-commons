@@ -70,12 +70,12 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineProductStore, pipeline_control_health,
 };
 
-use pilot_runtime_login::{
-    grant_admission_runtime_membership, migrate_like_the_pilot, provision_member_only_login,
-};
+use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
 
-/// The login every test here connects as. Its only privilege source is
-/// membership in `trace_ingest_runtime`, the ingest runtime group V90 names.
+/// The login every test here connects as. Its only privilege sources are
+/// membership in `trace_ingest_runtime`, the ingest runtime group V90 names,
+/// and in `trace_account_admission_runtime` (V77), as the pilot's ingest
+/// login holds both.
 const RUNTIME_ROLE: &str = "trace_pipeline_runtime_test";
 static PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
@@ -84,7 +84,8 @@ static PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new
 /// The pipeline service connects as the pilot's least-privilege runtime, not
 /// as a role with blanket grants: the database is migrated the way the
 /// pilot's was (`migrate_like_the_pilot`), and the login holds nothing but
-/// membership in `trace_ingest_runtime` (`provision_member_only_login`). The
+/// membership in `trace_ingest_runtime` and `trace_account_admission_runtime`,
+/// the pilot ingest login's two groups (`provision_runtime_login`). The
 /// pipeline tables are created after V62, so the runtime reaches them only
 /// through the grants their own migrations make, and a missing grant fails
 /// here with `permission denied`, as it would on the pilot.
@@ -93,12 +94,12 @@ async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     PROVISIONED
         .get_or_init(|| async {
             migrate_like_the_pilot(&url).await;
-            provision_member_only_login(&url, RUNTIME_ROLE).await;
             // withdrawal_of_either_session_submission_withdraws_the_session
             // withdraws through a mapped source session: main's withdrawal
             // path reads trace_account_admission_submissions, which only
             // trace_account_admission_runtime may read (owner ruling RB-11).
-            grant_admission_runtime_membership(&url, RUNTIME_ROLE).await;
+            // Granted before the login's membership check runs.
+            provision_runtime_login(&url, RUNTIME_ROLE, &["trace_account_admission_runtime"]).await;
         })
         .await;
     let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");

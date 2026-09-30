@@ -60,8 +60,8 @@ use trace_commons_server::witness_service;
 
 /// This suite's own runtime login, distinct from `trace_pipeline_runtime_test`
 /// (`tests/versioned_pipeline_runtime_pg.rs`). Like that one, its only
-/// privilege source is membership in `trace_ingest_runtime`, the ingest
-/// runtime group V90 names.
+/// privilege sources are membership in `trace_ingest_runtime`, the ingest
+/// runtime group V90 names, and in `trace_account_admission_runtime` (V77).
 const PIPELINE_HTTP_RUNTIME_ROLE: &str = "trace_pipeline_http_runtime_test";
 static PIPELINE_HTTP_DATABASE: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
 
@@ -117,19 +117,16 @@ async fn pipeline_http_database_url() -> Option<String> {
                 let _ = connection.await;
                 let pilot_url = pilot_url.to_string();
                 pilot_runtime_login::migrate_like_the_pilot(&pilot_url).await;
-                pilot_runtime_login::provision_member_only_login(
-                    &pilot_url,
-                    PIPELINE_HTTP_RUNTIME_ROLE,
-                )
-                .await;
                 // legacy_withdrawal_route_uses_the_pipeline_for_a_session_with_a_run
                 // and pipeline_withdrawal_route_withdraws_through_the_account_session
                 // withdraw through a mapped source session: main's withdrawal
                 // path reads trace_account_admission_submissions, which only
                 // trace_account_admission_runtime may read (owner ruling RB-11).
-                pilot_runtime_login::grant_admission_runtime_membership(
+                // Granted before the login's membership check runs.
+                pilot_runtime_login::provision_runtime_login(
                     &pilot_url,
                     PIPELINE_HTTP_RUNTIME_ROLE,
+                    &["trace_account_admission_runtime"],
                 )
                 .await;
                 pilot_url
@@ -1973,6 +1970,58 @@ async fn account_owner_backend() -> Option<Arc<PgBackend>> {
     Some(Arc::new(backend))
 }
 
+/// `main`'s database connection for the `AppState` these tests build: the
+/// suite's runtime login (`PIPELINE_HTTP_RUNTIME_ROLE`, `NOBYPASSRLS`, the
+/// pilot ingest login's groups only) with the login resolver pool the
+/// account routes use, so `main`'s half of every parity and HTTP test runs
+/// under the grants and row-level security the pilot's ingest runs under,
+/// never as the owner superuser (Zaki review 1, round 2, finding 17).
+/// Fixture writes that are not the ingest runtime's go through
+/// `account_owner_backend` instead.
+async fn mains_database() -> Arc<dyn Database> {
+    let url = pipeline_http_database_url()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    runtime_url
+        .set_username(PIPELINE_HTTP_RUNTIME_ROLE)
+        .expect("set runtime user");
+    let login_resolver_url = DatabaseConfig::login_resolver_url_from_env().map(|resolver| {
+        let mut resolver_url =
+            reqwest::Url::parse(resolver.expose_secret()).expect("parse the resolver URL");
+        resolver_url.set_path(runtime_url.path());
+        SecretString::from(resolver_url.to_string())
+    });
+    let config = DatabaseConfig {
+        url: SecretString::from(runtime_url.to_string()),
+        pool_size: 4,
+        ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url,
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    };
+    let backend = PgBackend::new(&config)
+        .await
+        .expect("connect as the runtime login");
+    let row = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !row.get::<_, bool>(0) && !row.get::<_, bool>(1),
+        "main's database connection must not bypass RLS"
+    );
+    Arc::new(backend)
+}
+
 /// One tenant with two contributor tokens (an owner and another account), an
 /// `AppState` whose account side runs on the migration owner, and a pipeline
 /// service on the runtime role, injected into the state.
@@ -2031,7 +2080,7 @@ async fn withdrawal_fixture_with(
     let service = service(runtime.clone(), artifacts.clone());
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         Some(artifacts),
         false,
         db_reviewer_reads,
@@ -2813,7 +2862,7 @@ async fn the_revocation_worker_deletes_the_score_objects_of_a_withdrawn_run() {
     );
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         None,
         false,
         false,
@@ -4443,7 +4492,7 @@ async fn db_reconciliation_leaves_pipeline_rows_out_of_the_file_comparison() {
     let artifacts = local_artifacts(&dir);
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         Some(artifacts.clone()),
         false,
         false,
@@ -4748,7 +4797,7 @@ async fn compatibility_credit_rows_stay_readable_by_mains_database_reads() {
     );
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         Some(artifacts),
         true,
         true,
@@ -4890,7 +4939,8 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
     let Some(runtime) = runtime_backend(4).await else {
         return;
     };
-    let owner = account_owner_backend()
+    // Migrates the suite's database and resets the account rate limiter.
+    account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -4929,7 +4979,7 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
     for database_reads in [true, false] {
         let mut state = test_state_with_options(
             dir.path().to_path_buf(),
-            Some(owner.clone() as Arc<dyn Database>),
+            Some(mains_database().await),
             Some(artifacts.clone()),
             database_reads,
             database_reads,
@@ -5020,7 +5070,8 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
     let Some(runtime) = runtime_backend(4).await else {
         return;
     };
-    let owner = account_owner_backend()
+    // Migrates the suite's database and resets the account rate limiter.
+    account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -5096,7 +5147,7 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
     for database_reads in [false, true] {
         let mut state = test_state_with_options(
             dir.path().to_path_buf(),
-            Some(owner.clone() as Arc<dyn Database>),
+            Some(mains_database().await),
             Some(artifacts.clone()),
             database_reads,
             database_reads,
@@ -5158,7 +5209,8 @@ async fn the_status_route_reads_the_pipeline_only_for_a_routed_or_drained_tenant
     let Some(runtime) = runtime_backend(4).await else {
         return;
     };
-    let owner = account_owner_backend()
+    // Migrates the suite's database and resets the account rate limiter.
+    account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -5191,7 +5243,7 @@ async fn the_status_route_reads_the_pipeline_only_for_a_routed_or_drained_tenant
     ] {
         let mut state = test_state_with_options(
             dir.path().to_path_buf(),
-            Some(owner.clone() as Arc<dyn Database>),
+            Some(mains_database().await),
             Some(artifacts.clone()),
             false,
             false,
@@ -5451,7 +5503,8 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
     let Some(runtime) = runtime_backend(4).await else {
         return;
     };
-    let owner = account_owner_backend()
+    // Migrates the suite's database and resets the account rate limiter.
+    account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -5502,7 +5555,7 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
     // and the product store run on the runtime login.
     let mut state = test_state_with_options(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         Some(artifacts.clone()),
         false,
         false,
@@ -6071,7 +6124,7 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
     let (configured_store, _) = fixture_gate_worker_artifact_store(artifact_dir.path());
     let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
         dir.path().to_path_buf(),
-        Some(owner.clone() as Arc<dyn Database>),
+        Some(mains_database().await),
         Some(configured_store),
         true,
         true,
