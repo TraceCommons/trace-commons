@@ -48,3 +48,38 @@ Copying or synchronizing the settings directory no longer copies the migrated Cl
 ## Commons credentials
 
 Commons credentials retain separate authority from Cloud authentication. Their migration preserves the enrolled device key and rejects stale sign-in and sign-out operations. Validation and platform-test instructions are recorded in the [Commons storage runbook](commons-credential-storage.md).
+
+## The Tauri desktop app on macOS
+
+The Tauri desktop app (`tauri-desktop/`, bundle id `ai.tracecommons.desktop`) links the same contributor crate as the native shell, so it stores the Cloud credential in the same data-protection keychain under the same access group, `KXSWJN7WY8.ai.tracecommons.shell`. Access groups are scoped to the team, not to the App ID, so a credential either app stored is readable by the other with no prompt and no re-sign-in. Both apps share the `tracecommons://` scheme, and a contributor who moves from one to the other keeps their Private AI sign-in.
+
+The two apps have different App IDs, so each needs its own signing inputs:
+
+| | Native shell | Tauri desktop app |
+| --- | --- | --- |
+| Entitlements | `macos/entitlements.plist` | `tauri-desktop/src-tauri/entitlements.plist` |
+| `com.apple.application-identifier` | `KXSWJN7WY8.ai.tracecommons.shell` | `KXSWJN7WY8.ai.tracecommons.desktop` |
+| `keychain-access-groups` | `KXSWJN7WY8.ai.tracecommons.shell` | `KXSWJN7WY8.ai.tracecommons.shell` (the same group, deliberately) |
+| Provisioning profile | `macos/TraceCommons-DeveloperID.provisionprofile` | `tauri-desktop/src-tauri/TraceCommonsDesktop-DeveloperID.provisionprofile` |
+
+Neither profile can stand in for the other. Both grant `KXSWJN7WY8.*`, so the access-group check passes either way, but a profile names exactly one App ID, and a signed application identifier that does not match the embedded profile's gets the app killed at exec. `scripts/ci/verify-macos-entitlements.sh` checks that match for both apps; it reads the bundle id and executable from the bundle's own `Info.plist`.
+
+`tauri.release.conf.json` passes the entitlements file to the Tauri bundler (`bundle.macOS.entitlements`) and copies the profile into the bundle as `Contents/embedded.provisionprofile` (`bundle.macOS.files`). `tauri-desktop/scripts/package-macos-release.sh` refuses to start without the profile, and runs the verifier against the signed app before notarizing. The verifier runs its static checks only for the Tauri app: its launch check needs the app to answer `TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT`, which only the native shell does so far.
+
+A Tauri build signed without these inputs -- `pnpm tauri dev`, or any build that does not pass `tauri.release.conf.json` -- is unentitled, and shows `storage_unentitled` for Private AI, as an ad-hoc native build does.
+
+### Creating the Tauri profile
+
+This needs the Apple Developer account for team `KXSWJN7WY8`, and is done once; the profile does not carry a private key and is committed like the native one.
+
+1. In Certificates, Identifiers & Profiles, register an explicit App ID for macOS with bundle id `ai.tracecommons.desktop` (Identifiers > App IDs > App, platform macOS). No extra capability is needed for the access group: the native shell's profile carries no capability beyond the defaults, and its `keychain-access-groups` grant is the default `KXSWJN7WY8.*`.
+2. Under Profiles, create a **Developer ID** provisioning profile (Distribution > Developer ID) for that App ID, selecting the same Developer ID Application certificate the releases are signed with.
+3. Download it and commit it as `tauri-desktop/src-tauri/TraceCommonsDesktop-DeveloperID.provisionprofile`.
+4. Confirm it grants what the app requests:
+
+   ```bash
+   security cms -D -i tauri-desktop/src-tauri/TraceCommonsDesktop-DeveloperID.provisionprofile \
+     | plutil -extract Entitlements xml1 -o - -
+   ```
+
+   `com.apple.application-identifier` must be `KXSWJN7WY8.ai.tracecommons.desktop`, and `keychain-access-groups` must contain `KXSWJN7WY8.*`.
