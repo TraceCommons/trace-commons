@@ -88,12 +88,10 @@ fi
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
 # Before notarization, so a bundle that would be killed at exec does not cost
-# a notary round trip. Static checks only: the launch half runs the app with
-# TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT set, and the Tauri app does not yet
-# answer that variable (the native shell does, through the FFI self-check).
-# Until it does, the verifier's application-identifier check stands in for
-# the launch: it is exactly what fails when the wrong profile is embedded.
-TC_VERIFY_STATIC_ONLY=1 bash "$REPO_ROOT/scripts/ci/verify-macos-entitlements.sh" "$APP_PATH"
+# a notary round trip. The last check launches the signed binary with
+# TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT set; the app answers it from main()
+# (src/credential_store_check.rs) before opening any window, and exits.
+bash "$REPO_ROOT/scripts/ci/verify-macos-entitlements.sh" "$APP_PATH"
 
 APP_NAME="$(basename "$APP_PATH" .app)"
 NOTARY_UPLOAD="$OUT_DIR/$APP_NAME.notary-upload.zip"
