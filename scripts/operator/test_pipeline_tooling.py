@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 import pipeline
-from pipeline_tooling import cargo, checks, environment, errors, results
+from pipeline_tooling import cargo, checks, corpus, environment, errors, results
 
 
 def _fake_hash(label):
@@ -644,6 +644,247 @@ class FailureOutputTests(unittest.TestCase):
         self.assertNotIn(secret_url, output)
         self.assertNotIn(secret_token, output)
         self.assertNotIn("fake-command", output)
+
+
+class HfCorpusTests(unittest.TestCase):
+    """Task 4: `pipeline_tooling.corpus` -- `load_direct_corpus`, `load_pin`,
+    `export_hf_corpus`."""
+
+    def _base_fixture(self):
+        return {
+            "label": "hf_bootstrap_0000",
+            "trace_id": str(uuid.uuid4()),
+            "submission_id": str(uuid.uuid4()),
+            "secret_probe": "qualification_probe_bootstrap_0000",
+        }
+
+    def _write_corpus(self, tmp, fixtures, schema=corpus.CORPUS_SCHEMA):
+        path = Path(tmp) / "corpus.json"
+        path.write_text(json.dumps({"schema": schema, "fixtures": fixtures}))
+        return path
+
+    def test_corpus_validation_refuses_changed_bytes_order_and_duplicates(self):
+        base = self._base_fixture()
+
+        with self.subTest("unsupported_schema"), tempfile.TemporaryDirectory() as tmp:
+            path = self._write_corpus(tmp, [dict(base)], schema="wrong.schema.v1")
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "unsupported_corpus_schema")
+
+        with self.subTest("empty_fixtures"), tempfile.TemporaryDirectory() as tmp:
+            path = self._write_corpus(tmp, [])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "empty_corpus")
+
+        with self.subTest("duplicate_label"), tempfile.TemporaryDirectory() as tmp:
+            first = dict(base)
+            second = dict(base, trace_id=str(uuid.uuid4()), submission_id=str(uuid.uuid4()))
+            path = self._write_corpus(tmp, [first, second])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "duplicate_corpus_identity")
+
+        with self.subTest("duplicate_trace_id"), tempfile.TemporaryDirectory() as tmp:
+            first = dict(base, label="hf_bootstrap_0000")
+            second = dict(base, label="hf_bootstrap_0001", submission_id=str(uuid.uuid4()))
+            path = self._write_corpus(tmp, [first, second])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "duplicate_corpus_identity")
+
+        with self.subTest("duplicate_submission_id"), tempfile.TemporaryDirectory() as tmp:
+            first = dict(base, label="hf_bootstrap_0000")
+            second = dict(base, label="hf_bootstrap_0001", trace_id=str(uuid.uuid4()))
+            path = self._write_corpus(tmp, [first, second])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "duplicate_corpus_identity")
+
+        with self.subTest("unsafe_label"), tempfile.TemporaryDirectory() as tmp:
+            bad = dict(base, label="Not Safe!")
+            path = self._write_corpus(tmp, [bad])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "unsafe_fixture_label")
+
+        with self.subTest("empty_secret_probe"), tempfile.TemporaryDirectory() as tmp:
+            bad = dict(base, secret_probe="")
+            path = self._write_corpus(tmp, [bad])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path)
+            self.assertEqual(str(ctx.exception), "empty_secret_probe")
+
+        with self.subTest("digest_mismatch"), tempfile.TemporaryDirectory() as tmp:
+            path = self._write_corpus(tmp, [dict(base)])
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_direct_corpus(path, expected_digest=_fake_hash("not-this-corpus"))
+            self.assertEqual(str(ctx.exception), "corpus_digest_mismatch")
+
+        with self.subTest("digest_match_and_shape_ok"), tempfile.TemporaryDirectory() as tmp:
+            path = self._write_corpus(tmp, [dict(base)])
+            actual_digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            loaded, digest_value = corpus.load_direct_corpus(path, expected_digest=actual_digest)
+            self.assertEqual(digest_value, actual_digest)
+            self.assertEqual(loaded["fixtures"][0]["label"], base["label"])
+
+        valid_pin = {
+            "schema": corpus.PIN_SCHEMA,
+            "repository": "jedisct1/security-audits",
+            "revision": "deadbeef",
+            "split": "train",
+            "translator": "swival",
+            "bootstrap_count": 1,
+            "holdout_count": 1,
+            "min_words": 1,
+            "max_words": 2000,
+            "expected_instrument_count": 1,
+            "source_digest": _fake_hash("source"),
+            "order_digest": _fake_hash("order"),
+        }
+
+        with self.subTest("pin_wrong_schema"), tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pin.json"
+            path.write_text(json.dumps(dict(valid_pin, schema="wrong.schema.v1")))
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_pin(path)
+            self.assertEqual(str(ctx.exception), "unsupported_pin_schema")
+
+        with self.subTest("pin_missing_field"), tempfile.TemporaryDirectory() as tmp:
+            incomplete = dict(valid_pin)
+            del incomplete["order_digest"]
+            path = Path(tmp) / "pin.json"
+            path.write_text(json.dumps(incomplete))
+            with self.assertRaises(errors.ToolingError) as ctx:
+                corpus.load_pin(path)
+            self.assertEqual(str(ctx.exception), "pin_missing_field")
+
+        with self.subTest("pin_valid"), tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pin.json"
+            path.write_text(json.dumps(valid_pin))
+            loaded = corpus.load_pin(path)
+            self.assertEqual(loaded["repository"], valid_pin["repository"])
+
+        def _fake_export_invoke(manifest, calls=None):
+            def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+                if calls is not None:
+                    calls.append(list(command))
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "bootstrap-corpus.json").write_text("{}")
+                (output_dir / "holdout-corpus.json").write_text("{}")
+                (output_dir / "source-manifest.json").write_text(json.dumps(manifest))
+                return (0, "") if capture else (0, None)
+
+            return fake_invoke
+
+        def _base_manifest(pin):
+            return {
+                "schema": "trace_commons.pipeline_hf_corpus_manifest.v1",
+                "source_digest": pin["source_digest"],
+                "order_digest": pin["order_digest"],
+                "configuration_digest": _fake_hash("configuration"),
+                "bootstrap_corpus_digest": _fake_hash("bootstrap"),
+                "holdout_corpus_digest": _fake_hash("holdout"),
+                "contains_raw_trace_text": False,
+                "contains_contributor_identity": False,
+            }
+
+        for field in ("source_digest", "order_digest", "bootstrap_corpus_digest", "holdout_corpus_digest"):
+            with self.subTest(f"export_manifest_mismatch_{field}"):
+                run = _scratch_run()
+                pin = dict(
+                    valid_pin,
+                    bootstrap_corpus_digest=_fake_hash("bootstrap"),
+                    holdout_corpus_digest=_fake_hash("holdout"),
+                )
+                manifest = _base_manifest(pin)
+                manifest[field] = _fake_hash("a-different-value")
+                try:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        pin_path = Path(tmp) / "pin.json"
+                        pin_path.write_text(json.dumps(pin))
+                        with mock.patch.object(environment, "_invoke", _fake_export_invoke(manifest)):
+                            with self.assertRaises(errors.ToolingError) as ctx:
+                                corpus.export_hf_corpus(run, pin_path, {})
+                        self.assertEqual(str(ctx.exception), f"hf_{field}_mismatch")
+                finally:
+                    shutil.rmtree(run.run_dir, ignore_errors=True)
+
+        with self.subTest("export_refuses_raw_trace_text"):
+            run = _scratch_run()
+            pin = dict(
+                valid_pin,
+                bootstrap_corpus_digest=_fake_hash("bootstrap"),
+                holdout_corpus_digest=_fake_hash("holdout"),
+            )
+            manifest = _base_manifest(pin)
+            manifest["bootstrap_corpus_digest"] = pin["bootstrap_corpus_digest"]
+            manifest["holdout_corpus_digest"] = pin["holdout_corpus_digest"]
+            manifest["contains_raw_trace_text"] = True
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    pin_path = Path(tmp) / "pin.json"
+                    pin_path.write_text(json.dumps(pin))
+                    with mock.patch.object(environment, "_invoke", _fake_export_invoke(manifest)):
+                        with self.assertRaises(errors.ToolingError) as ctx:
+                            corpus.export_hf_corpus(run, pin_path, {})
+                    self.assertEqual(str(ctx.exception), "hf_manifest_contains_raw_trace_text")
+            finally:
+                shutil.rmtree(run.run_dir, ignore_errors=True)
+
+        with self.subTest("export_success_returns_bootstrap_then_holdout"):
+            run = _scratch_run()
+            pin = dict(
+                valid_pin,
+                bootstrap_corpus_digest=_fake_hash("bootstrap"),
+                holdout_corpus_digest=_fake_hash("holdout"),
+            )
+            manifest = _base_manifest(pin)
+            manifest["bootstrap_corpus_digest"] = pin["bootstrap_corpus_digest"]
+            manifest["holdout_corpus_digest"] = pin["holdout_corpus_digest"]
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    pin_path = Path(tmp) / "pin.json"
+                    pin_path.write_text(json.dumps(pin))
+                    calls = []
+                    with mock.patch.object(environment, "_invoke", _fake_export_invoke(manifest, calls)):
+                        outputs = corpus.export_hf_corpus(run, pin_path, {})
+                    self.assertEqual(len(outputs), 2)
+                    self.assertEqual(outputs[0].name, "bootstrap-corpus.json")
+                    self.assertEqual(outputs[1].name, "holdout-corpus.json")
+                    for path in outputs:
+                        self.assertTrue(path.is_file())
+                    self.assertIn("--expected-source-digest", calls[0])
+                    self.assertIn("--expected-order-digest", calls[0])
+                    self.assertNotIn("--local-jsonl-dir", calls[0])
+            finally:
+                shutil.rmtree(run.run_dir, ignore_errors=True)
+
+        with self.subTest("export_local_dir_adds_flag_and_keeps_expected_digests"):
+            run = _scratch_run()
+            pin = dict(
+                valid_pin,
+                bootstrap_corpus_digest=_fake_hash("bootstrap"),
+                holdout_corpus_digest=_fake_hash("holdout"),
+            )
+            manifest = _base_manifest(pin)
+            manifest["bootstrap_corpus_digest"] = pin["bootstrap_corpus_digest"]
+            manifest["holdout_corpus_digest"] = pin["holdout_corpus_digest"]
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    pin_path = Path(tmp) / "pin.json"
+                    pin_path.write_text(json.dumps(pin))
+                    calls = []
+                    with mock.patch.object(environment, "_invoke", _fake_export_invoke(manifest, calls)):
+                        corpus.export_hf_corpus(run, pin_path, {}, local_dir="fixtures/pipeline-hf-jsonl")
+                    self.assertIn("--local-jsonl-dir", calls[0])
+                    self.assertIn("fixtures/pipeline-hf-jsonl", calls[0])
+                    self.assertIn("--expected-source-digest", calls[0])
+                    self.assertIn("--expected-order-digest", calls[0])
+            finally:
+                shutil.rmtree(run.run_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
