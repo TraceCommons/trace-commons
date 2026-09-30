@@ -10,7 +10,11 @@
     "macOS": {
       "minimumSystemVersion": "13.0",
       "hardenedRuntime": true,
-      "infoPlist": "Info.release.plist"
+      "infoPlist": "Info.release.plist",
+      "entitlements": "entitlements.plist",
+      "files": {
+        "embedded.provisionprofile": "TraceCommonsDesktop-DeveloperID.provisionprofile"
+      }
     }
   }
 }
