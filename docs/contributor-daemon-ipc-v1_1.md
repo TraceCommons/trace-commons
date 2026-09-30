@@ -3664,8 +3664,8 @@ it as unanswered and asks once.
 The Settings row "Scrub check" (K4 of #1118). `set_settings` takes a string,
 `"automatic"` or `"manual"`; anything else, including another case, a boolean
 or `null`, is `bad_params` / `settings-invalid-value` and changes nothing.
-`get_settings` always reports the key: `null` until one of the two has been
-chosen, then the string. It is persisted with the other settings and read at
+`get_settings` always reports the key as one of the two strings, never
+`null`: `"automatic"` until the contributor chooses otherwise. It is persisted with the other settings and read at
 each watcher pass and each upload, so a change reaches a running daemon
 without a restart.
 
@@ -3675,8 +3675,7 @@ they are the second look.
 
 | Value | Armed folders |
 |---|---|
-| `null` (never chosen, **the default**) | exactly as before this setting existed: every settled session sends on its own, with no second-look hold. |
-| `automatic` | send on their own, **except** a session that is worth a second look (`second_look` would be `nothing-matched`, `looks-unsure` or `trimmed-to-fit` for the envelope about to be sent, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
+| `automatic` (**the default**) | send on their own, **except** a session that is worth a second look (`second_look` would be `nothing-matched`, `looks-unsure` or `trimmed-to-fit` for the envelope about to be sent, see "The scrub state and `second_look`"). That one is held for a person under `second-look-review-required` and never moves on its own. |
 | `manual` | nothing is sent without a person. The watcher approves nothing on anyone's behalf, and an approval made before the switch is held under `scrub-check-manual` when the uploader reaches it. |
 
 **Where the Automatic hold happens.** The watcher approves an armed session
@@ -3728,15 +3727,15 @@ reply then carries `scrub_check_returned_to_waiting`, the count moved
 key is **absent** on any call that did not switch to Manual, including one
 that sets Manual when it was already Manual.
 
-**The default is `null`: today's behaviour, no hold.** A settings file written
-before this key existed loads that way, and every existing armed folder keeps
-sending what it sent before. The second-look hold is opt-in -- a shell's
-Customize path sets `automatic` -- pending a product decision on whether it
-should become the default. Holding by default would change, on upgrade, what
-every armed folder does with a session where nothing matched or one trimmed to
-fit, and that is not a change this setting makes on its own. `null` cannot be
-set: once chosen, the Scrub check is `automatic` or `manual`, each of which
-holds at least as much as the default. A shell renders the choice with
+**The default is `automatic`** (decided on #1139). A fresh install holds a
+session worth a second look in an armed folder without anyone choosing
+anything. An upgraded install does too: a settings file written before this
+key existed, or one holding the `null` an earlier build wrote for "never
+chosen", loads as `automatic`, so on upgrade an armed folder starts holding
+the sessions where nothing matched, something looks unsure, or it was trimmed
+to fit. An explicit `"manual"` is kept across restarts and upgrades; only an
+unset value becomes `automatic`. `null` cannot be set: it is not a mode, and
+a caller that means the default sends `"automatic"`. A shell renders the choice with
 `consent_copy::SCRUB_CHECK_*` (DRAFT, NEEDS APPROVAL), whose Automatic
 sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the

@@ -205,11 +205,12 @@ impl std::fmt::Debug for NearAiSession {
 }
 
 /// See [`DaemonSettings::scrub_check`]. On the wire: `"automatic"` or
-/// `"manual"`, and nothing else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `"manual"`, and nothing else. The default is `Automatic`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScrubCheck {
     /// Unsure sessions wait; the rest of an armed folder sends on its own.
+    #[default]
     Automatic,
     /// Everything waits for a person.
     Manual,
@@ -255,6 +256,18 @@ pub enum CloudStorageFailure {
     /// startup is not a moment the contributor chose -- so the move is
     /// offered, and the move does the one read.
     LegacyOnly,
+}
+
+/// `scrub_check` as it is read from a settings file: absent (a file written
+/// before the key existed) and `null` (what the build before the Automatic
+/// default wrote for "never chosen") both load as the default, Automatic, so
+/// an upgraded install gets the hold as a fresh one does. A chosen value
+/// loads as itself; anything else fails the load, as a mistyped mode must.
+fn scrub_check_or_default<'de, D>(deserializer: D) -> std::result::Result<ScrubCheck, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<ScrubCheck>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -464,16 +477,19 @@ pub struct DaemonSettings {
     ///   folders included. The watcher approves nothing on anyone's behalf,
     ///   and the uploader holds anything already approved that way.
     ///
-    /// `None` -- **never chosen, the default** -- is the behaviour from
-    /// before this setting existed: armed folders send every session, with
-    /// no second-look hold. A settings file written before this key existed
-    /// loads as `None`, and the watcher and uploader do exactly what they did.
-    /// The hold is opt-in, by choosing Automatic (the design's Customize path
-    /// sets it); holding by default would change what every existing armed
-    /// folder does on upgrade, which is a product decision this setting does
-    /// not take on its own. `get_settings` reports `null` for it.
-    #[serde(default)]
-    pub scrub_check: Option<ScrubCheck>,
+    /// **The default is Automatic** (Zaki's decision on #1139): the
+    /// protection is on unless the contributor chooses Manual, which holds
+    /// more. There is no "never chosen" state. A settings file written before
+    /// this key existed, or by the build that wrote `null` for "never
+    /// chosen", loads as Automatic (`scrub_check_or_default`), so an
+    /// upgraded install gets the hold as a fresh one does; an explicit
+    /// `"manual"` loads as Manual. `get_settings` always reports the string.
+    ///
+    /// The field is not an `Option` resolved at each use on purpose: every
+    /// reader compares the one stored value, so no reader can mistake an
+    /// unset value for "no hold".
+    #[serde(default, deserialize_with = "scrub_check_or_default")]
+    pub scrub_check: ScrubCheck,
 
     /// Legacy spellings, read on load and never written.
     ///
@@ -910,7 +926,7 @@ impl Default for DaemonSettings {
             token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
-            scrub_check: None,
+            scrub_check: ScrubCheck::Automatic,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -1306,16 +1322,14 @@ pub fn apply_settings_object(
             // The Scrub check: `automatic` or `manual`. Anything else is
             // refused rather than read as either, because a typo read as
             // `automatic` would send what the contributor meant to hold.
-            // `null` is refused too: never-chosen is where a daemon starts,
-            // not a choice, and returning to it would drop the hold either
-            // chosen value gives.
+            // `null` is refused too: it is not a mode, and a caller meaning
+            // "the default" says `automatic`. Accepting it would let a shell
+            // that dropped the field clear a Manual choice by accident.
             "scrub_check" => {
-                settings.scrub_check = Some(
-                    value
-                        .as_str()
-                        .and_then(ScrubCheck::parse)
-                        .ok_or(ERR_SETTINGS_INVALID_VALUE)?,
-                );
+                settings.scrub_check = value
+                    .as_str()
+                    .and_then(ScrubCheck::parse)
+                    .ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -1827,23 +1841,22 @@ mod tests {
         assert!(!s.private_inference_offer_seen);
     }
 
-    /// The Scrub check starts never chosen (today's behaviour, no hold), a
-    /// file written before it existed loads that way, and only the two wire
-    /// values are accepted.
+    /// The Scrub check starts Automatic and is written as the string, and
+    /// only the two wire values are accepted; `null` is not a mode. (Files
+    /// that never chose are
+    /// `a_settings_file_that_never_chose_a_scrub_check_loads_as_automatic`.)
     #[test]
-    fn the_scrub_check_starts_unchosen_and_takes_only_its_two_values() {
-        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
-        assert_eq!(v["scrub_check"], serde_json::Value::Null);
-        v.as_object_mut().unwrap().remove("scrub_check");
-        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
-        assert_eq!(settings.scrub_check, None);
+    fn the_scrub_check_starts_automatic_and_takes_only_its_two_values() {
+        let v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["scrub_check"], "automatic");
+        assert_eq!(DaemonSettings::default().scrub_check, ScrubCheck::Automatic);
 
         let mut s = DaemonSettings::default();
         assert_eq!(
             apply_settings_object(&mut s, &serde_json::json!({"scrub_check": "manual"})),
             Ok(true)
         );
-        assert_eq!(s.scrub_check, Some(ScrubCheck::Manual));
+        assert_eq!(s.scrub_check, ScrubCheck::Manual);
         for bad in [
             serde_json::json!("Manual"),
             serde_json::json!("auto"),
@@ -1856,7 +1869,7 @@ mod tests {
             );
             assert_eq!(
                 s.scrub_check,
-                Some(ScrubCheck::Manual),
+                ScrubCheck::Manual,
                 "a refusal changes nothing"
             );
         }
@@ -1864,7 +1877,56 @@ mod tests {
             apply_settings_object(&mut s, &serde_json::json!({"scrub_check": "automatic"})),
             Ok(true)
         );
-        assert_eq!(s.scrub_check, Some(ScrubCheck::Automatic));
+        assert_eq!(s.scrub_check, ScrubCheck::Automatic);
+    }
+
+    /// Zaki's decision on #1139: an install upgraded from before the
+    /// default changed gets the protection. A settings file without the key,
+    /// or with the `null` the previous build wrote for "never chosen", loads
+    /// as Automatic.
+    #[test]
+    fn a_settings_file_that_never_chose_a_scrub_check_loads_as_automatic() {
+        for unset in [None, Some(serde_json::Value::Null)] {
+            let (_d, store) = temp_store();
+            let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+            let object = v.as_object_mut().unwrap();
+            object.remove("scrub_check");
+            if let Some(null) = unset.clone() {
+                object.insert("scrub_check".to_string(), null);
+            }
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+                .unwrap();
+            let loaded = DaemonSettings::load(&store).expect("an older file still loads");
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap()["scrub_check"],
+                "automatic",
+                "unset ({unset:?}) resolves to Automatic"
+            );
+        }
+    }
+
+    /// An explicit Manual choice is kept across a load and the daemon's own
+    /// save: only an unset value becomes Automatic.
+    #[test]
+    fn an_explicit_manual_scrub_check_survives_a_load() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["scrub_check"] = serde_json::json!("manual");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["scrub_check"],
+            "manual"
+        );
+        loaded.save(&store).unwrap();
+        let reloaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reloaded).unwrap()["scrub_check"],
+            "manual"
+        );
     }
 
     // --- the discovery pointer -----------------------------------------

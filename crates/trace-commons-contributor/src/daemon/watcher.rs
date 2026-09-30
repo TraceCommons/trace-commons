@@ -864,7 +864,7 @@ impl PassContext {
             (
                 s.near_ai.clone(),
                 s.ironwire_attested_bodies,
-                s.scrub_check == Some(super::settings::ScrubCheck::Manual),
+                s.scrub_check == super::settings::ScrubCheck::Manual,
             )
         };
         let approval_inputs = cfg.as_ref().map(|c| {
@@ -2306,8 +2306,7 @@ mod tests {
     #[tokio::test]
     async fn the_manual_scrub_check_approves_nothing_on_anyones_behalf() {
         let f = WatcherFixture::new();
-        f.shared.settings.lock().unwrap().scrub_check =
-            Some(super::super::settings::ScrubCheck::Manual);
+        f.shared.settings.lock().unwrap().scrub_check = super::super::settings::ScrubCheck::Manual;
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.set_mode("proj", ProjectMode::AutoUpload);
         let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
@@ -2319,7 +2318,7 @@ mod tests {
         assert!(!f.shared.queue.lock().unwrap().all()[0].approved_unattended);
 
         f.shared.settings.lock().unwrap().scrub_check =
-            Some(super::super::settings::ScrubCheck::Automatic);
+            super::super::settings::ScrubCheck::Automatic;
         f.settle(Utc::now() + chrono::Duration::hours(32)).await;
         assert_eq!(f.states(), vec![QueueState::Approved], "armed again");
     }

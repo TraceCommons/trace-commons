@@ -608,8 +608,8 @@ pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is 
 pub const SCRUB_CHECK_TITLE: &str = "Scrub check";
 
 /// **DRAFT, NEEDS APPROVAL.** The Automatic choice (`scrub_check:
-/// "automatic"`). Opt-in: a daemon where nothing was chosen reports `null`
-/// and holds nothing, so a shell must not render that state as this one.
+/// "automatic"`). The default: a daemon where nothing was chosen reports
+/// `"automatic"` and holds as this says, so a shell renders it selected.
 pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
 
 /// **DRAFT, NEEDS APPROVAL.** What Automatic does. Names both second-look

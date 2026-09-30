@@ -3933,7 +3933,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // the save so a declaration that takes effect is always
             // one that survives a restart too.
             shared.rebuild_effective_routing(&settings);
-            let manual = Some(super::settings::ScrubCheck::Manual);
+            let manual = super::settings::ScrubCheck::Manual;
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             drop(settings);
@@ -12272,9 +12272,8 @@ mod tests {
             .result
             .expect("get_settings answers");
         assert_eq!(
-            before["scrub_check"],
-            serde_json::Value::Null,
-            "never chosen, the default"
+            before["scrub_check"], "automatic",
+            "the default, reported as the string"
         );
 
         let r = handle_request(
@@ -12289,7 +12288,7 @@ mod tests {
         let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
         assert_eq!(
             reloaded.scrub_check,
-            Some(super::super::settings::ScrubCheck::Manual),
+            super::super::settings::ScrubCheck::Manual,
             "a restart keeps it"
         );
 

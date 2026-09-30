@@ -506,7 +506,7 @@ impl Uploader<'_, '_> {
         // is set; this catches an approval made before the switch, and
         // holds it before anything is read, built or sent.
         if entry.approved_unattended
-            && self.settings.scrub_check == Some(super::settings::ScrubCheck::Manual)
+            && self.settings.scrub_check == super::settings::ScrubCheck::Manual
         {
             return Ok(UploadDecision::HeldForSecondLook {
                 reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
@@ -690,10 +690,11 @@ impl Uploader<'_, '_> {
         // the envelope it builds, before the send. A person's approval is
         // never held here: they are the second look.
         //
-        // Only when Automatic was chosen. Never chosen (`None`, the default)
-        // is the behaviour from before the setting existed: no hold.
+        // Automatic is the default, and a settings file that never chose
+        // loads as it. Manual has already held above, before anything was
+        // read or built.
         if entry.approved_unattended
-            && self.settings.scrub_check == Some(super::settings::ScrubCheck::Automatic)
+            && self.settings.scrub_check == super::settings::ScrubCheck::Automatic
         {
             self.ctx.hold_unless_scrub_is_clear(entry.subagents_dropped);
         }
@@ -1499,30 +1500,36 @@ mod tests {
 
     fn manual() -> DaemonSettings {
         DaemonSettings {
-            scrub_check: Some(crate::daemon::settings::ScrubCheck::Manual),
+            scrub_check: crate::daemon::settings::ScrubCheck::Manual,
             ..DaemonSettings::default()
         }
     }
 
-    /// Automatic, chosen explicitly: the hold is opt-in.
+    /// Automatic, stated explicitly. It is also the default
+    /// (`the_default_scrub_check_holds_a_path_only_armed_session`).
     fn automatic() -> DaemonSettings {
         DaemonSettings {
-            scrub_check: Some(crate::daemon::settings::ScrubCheck::Automatic),
+            scrub_check: crate::daemon::settings::ScrubCheck::Automatic,
             ..DaemonSettings::default()
         }
     }
 
-    /// Never chosen, the default: an armed session the scrubber removed
-    /// nothing from is sent, exactly as before the setting existed.
+    /// Zaki's decision on #1139: the Scrub check defaults to Automatic. A
+    /// fresh install that never chose, with the project armed, holds a
+    /// session whose only marks are paths for a second look instead of
+    /// sending it.
     #[tokio::test]
-    async fn an_unchosen_scrub_check_sends_as_before_with_no_hold() {
-        let session = session_saying(NOTHING_TO_MARK);
+    async fn the_default_scrub_check_holds_a_path_only_armed_session() {
+        let session =
+            session_saying("open /Users/alice/code/orchard-api/src/main.rs and fix the parser");
         let (decision, state) = upload_under(&session, armed, DaemonSettings::default()).await;
-        assert!(
-            matches!(decision, UploadDecision::Uploaded { .. }),
-            "{decision:?}"
+        let pin = assert_held(
+            &decision,
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            &[REASON_NOTHING_MATCHED],
         );
-        assert_eq!(state.uploads_today, 1);
+        assert!(pin.is_some(), "the built envelope is pinned");
+        assert_eq!(state.uploads_today, 0, "nothing was sent");
     }
 
     /// A hold under `reason`, decided on `expected` second-look labels.
@@ -1841,7 +1848,9 @@ mod tests {
     async fn upload_entry_records_the_entrys_own_provenance_on_the_receipt() {
         let issuer = spawn_stub(stub_claim_issuer()).await;
         let ingest = spawn_stub(stub_ingest_accepts()).await;
-        let session = GrowingSession::new();
+        // An address the scrubber removes, so the default (Automatic) Scrub
+        // check lets this armed session through to the receipt.
+        let session = session_saying(ONE_EMAIL);
         let (_d, store) = temp_store();
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {

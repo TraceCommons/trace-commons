@@ -174,6 +174,9 @@ impl Harness {
         }
     }
 
+    /// The session carries an address the scrubber removes, so the default
+    /// (Automatic) Scrub check lets an armed session through: a session it
+    /// removes nothing from would be held for a second look instead.
     fn write_session(&self, project: &str, id: &str) {
         self.write_session_started(project, id, "2026-08-08T10:00:00Z");
     }
@@ -188,7 +191,7 @@ impl Harness {
         std::fs::write(
             project_dir.join(format!("{id}.jsonl")),
             format!(
-                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"fix the parser\"}},\
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"fix the parser, then mail alice.smith@example.org\"}},\
                  \"cwd\":\"/Users/testuser/code/{project}\",\
                  \"timestamp\":\"{timestamp}\",\"version\":\"2.0.1\",\
                  \"sessionId\":\"{id}\",\"uuid\":\"a1\"}}\n"
@@ -496,7 +499,7 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(
         project_dir.join("99999999-9999-9999-9999-999999999999.jsonl"),
-        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fix the parser\"},\
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fix the parser, then mail alice.smith@example.org\"},\
          \"cwd\":\"/Users/testuser/code/myproj\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
          \"version\":\"2.0.1\",\"sessionId\":\"99999999-9999-9999-9999-999999999999\",\
          \"uuid\":\"a1\"}\n",
