@@ -814,6 +814,98 @@ pub fn attested_keys_for_receipt(
     }
 }
 
+/// The raw `intel_quote` bytes of every model-attestation entry naming
+/// `model` -- the quotes [`model_ed25519_keys`]' keys came out of, in the same
+/// container lookup.
+///
+/// An entry for this model with no readable quote is refused, not skipped:
+/// skipping it would leave a caller verifying some other entry's quote and
+/// trusting a key it never checked.
+///
+/// # Errors
+///
+/// [`AttestedKeyError::Malformed`] for a report that is not JSON, carries no
+/// model-attestation container, or has an entry for this model whose quote is
+/// missing or not hex; [`AttestedKeyError::ModelNotAttested`] when no entry
+/// names the model.
+pub fn model_entry_quotes(
+    report_json: &str,
+    model: &str,
+) -> Result<Vec<Vec<u8>>, AttestedKeyError> {
+    let document: serde_json::Value =
+        serde_json::from_str(report_json).map_err(|_| AttestedKeyError::Malformed)?;
+    let entries = model_attestation_entries(&document).ok_or(AttestedKeyError::Malformed)?;
+    let mut quotes = Vec::new();
+    for entry in entries {
+        if entry.get("model_name").and_then(serde_json::Value::as_str) != Some(model) {
+            continue;
+        }
+        let hex_quote = entry
+            .get("intel_quote")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(AttestedKeyError::Malformed)?;
+        quotes.push(hex::decode(hex_quote).map_err(|_| AttestedKeyError::Malformed)?);
+    }
+    if quotes.is_empty() {
+        return Err(AttestedKeyError::ModelNotAttested);
+    }
+    Ok(quotes)
+}
+
+/// Where an ed25519 attestation's key and nonce sit inside a verified quote's
+/// 64-byte `report_data`.
+const REPORT_DATA_KEY: std::ops::Range<usize> = 0..32;
+const REPORT_DATA_NONCE: std::ops::Range<usize> = 32..64;
+
+/// The keys a set of **verified** quotes commits to, cross-checked against the
+/// keys the report's JSON claimed.
+///
+/// `verified_report_data` is `report_data` read out of each quote *after*
+/// DCAP verification (`crate::quote::VerifiedQuote::report_data`), never out
+/// of the JSON. Three conditions must all hold:
+///
+/// 1. every verified quote's `report_data[32..64]` is `expected_nonce`;
+/// 2. every verified quote's `report_data[0..32]` is a key the JSON claimed;
+/// 3. every key the JSON claimed appears in some verified quote.
+///
+/// (3) stops a report from mixing one entry over a verifiable quote with a
+/// second entry whose key nothing verified. The comparison is over sets, not a
+/// positional zip, because two separate walks of the report produced the two
+/// lists. What comes back is the verified set, lowercase hex.
+///
+/// # Errors
+///
+/// [`AttestedKeyError::NonceMismatch`] when a verified quote commits to
+/// another nonce; [`AttestedKeyError::ReportDataMismatch`] when a verified
+/// quote is too short, or the verified and claimed key sets differ.
+pub fn quote_bound_keys(
+    claimed: &[String],
+    verified_report_data: &[&[u8]],
+    expected_nonce: &str,
+) -> Result<Vec<String>, AttestedKeyError> {
+    let expected_nonce = expected_nonce.to_ascii_lowercase();
+    let mut derived = Vec::with_capacity(verified_report_data.len());
+    for report_data in verified_report_data {
+        let key = report_data
+            .get(REPORT_DATA_KEY)
+            .ok_or(AttestedKeyError::ReportDataMismatch)?;
+        let nonce = report_data
+            .get(REPORT_DATA_NONCE)
+            .ok_or(AttestedKeyError::ReportDataMismatch)?;
+        if hex::encode(nonce) != expected_nonce {
+            return Err(AttestedKeyError::NonceMismatch);
+        }
+        derived.push(hex::encode(key));
+    }
+    let claimed: Vec<String> = claimed.iter().map(|k| k.to_ascii_lowercase()).collect();
+    if derived.iter().any(|key| !claimed.contains(key))
+        || claimed.iter().any(|key| !derived.contains(key))
+    {
+        return Err(AttestedKeyError::ReportDataMismatch);
+    }
+    Ok(derived)
+}
+
 /// Whether a verified receipt's signer is one of a model's attested keys.
 ///
 /// The set form of [`signer_is_attested`], with the same guard against an
@@ -2366,6 +2458,85 @@ mod tests {
             model_ed25519_keys(&document.to_string(), &nonce, MODEL_B),
             Ok(vec![MODEL_B_KEY.to_string()]),
             "the live container must win over the legacy one"
+        );
+    }
+
+    // ---- model_entry_quotes / quote_bound_keys ----
+
+    #[test]
+    fn the_quotes_for_a_model_are_the_entries_that_name_it() {
+        let quotes = model_entry_quotes(LIVE_REPORT_A, MODEL_A).expect("the live report names it");
+        assert!(!quotes.is_empty());
+        // Each is a real v4 TDX quote whose report_data leads with a key
+        // model_ed25519_keys also returns.
+        let keys =
+            model_ed25519_keys(LIVE_REPORT_A, &live_nonce(LIVE_REPORT_A), MODEL_A).expect("keys");
+        for quote in &quotes {
+            let key = hex::encode(&quote[568..600]);
+            assert!(keys.contains(&key));
+        }
+        assert_eq!(
+            model_entry_quotes(LIVE_REPORT_A, "Qwen/Qwen3.9-Nonexistent").unwrap_err(),
+            AttestedKeyError::ModelNotAttested
+        );
+        assert_eq!(
+            model_entry_quotes("{}", MODEL_A).unwrap_err(),
+            AttestedKeyError::Malformed,
+            "a report with no model container is the wrong report, not an empty one"
+        );
+    }
+
+    #[test]
+    fn an_entry_for_the_model_without_a_quote_is_refused_not_skipped() {
+        let report = format!(
+            r#"{{"model_attestations":[{{"model_name":"{MODEL_A}","signing_algo":"ed25519"}}]}}"#
+        );
+        assert_eq!(
+            model_entry_quotes(&report, MODEL_A).unwrap_err(),
+            AttestedKeyError::Malformed
+        );
+    }
+
+    fn report_data(key: &str, nonce: &str) -> Vec<u8> {
+        let mut bytes = hex::decode(key).unwrap();
+        bytes.extend(hex::decode(nonce).unwrap());
+        bytes
+    }
+
+    #[test]
+    fn verified_keys_must_equal_the_claimed_set_under_our_nonce() {
+        let nonce = "ab".repeat(32);
+        let a = report_data(MODEL_A_KEY, &nonce);
+        let b = report_data(MODEL_B_KEY, &nonce);
+        assert_eq!(
+            quote_bound_keys(&[MODEL_A_KEY.to_ascii_uppercase()], &[&a], &nonce).unwrap(),
+            vec![MODEL_A_KEY.to_string()]
+        );
+        // A claimed key no verified quote carries.
+        assert_eq!(
+            quote_bound_keys(
+                &[MODEL_A_KEY.to_string(), MODEL_B_KEY.to_string()],
+                &[&a],
+                &nonce
+            )
+            .unwrap_err(),
+            AttestedKeyError::ReportDataMismatch
+        );
+        // A verified key the JSON never claimed.
+        assert_eq!(
+            quote_bound_keys(&[MODEL_A_KEY.to_string()], &[&a, &b], &nonce).unwrap_err(),
+            AttestedKeyError::ReportDataMismatch
+        );
+        // Somebody else's nonce.
+        let stale = report_data(MODEL_A_KEY, &"00".repeat(32));
+        assert_eq!(
+            quote_bound_keys(&[MODEL_A_KEY.to_string()], &[&stale], &nonce).unwrap_err(),
+            AttestedKeyError::NonceMismatch
+        );
+        // Too short to hold a key and a nonce.
+        assert_eq!(
+            quote_bound_keys(&[MODEL_A_KEY.to_string()], &[&a[..40]], &nonce).unwrap_err(),
+            AttestedKeyError::ReportDataMismatch
         );
     }
 }

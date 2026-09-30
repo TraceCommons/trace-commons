@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::config::{ConfigStore, DAEMON_QUEUE_FILE};
 use crate::daemon::approved_envelope::WITNESS_PIN_PREFIX;
+use crate::daemon::policy::{ProjectMode, ProjectPolicy};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1924,6 +1925,66 @@ impl Queue {
     }
 }
 
+/// The menu-bar badge (K6): `Pending` entries that need a decision from a
+/// person. Never `queue_depth` -- see `status.decisions_owed`.
+///
+/// An armed folder's `Pending` entries are excluded by default: they will go
+/// out unattended once they settle or the automatic-contribution gate clears,
+/// so the design never asks about them (`arming_rewordings`, `gate_held`,
+/// `automatic_contribution_held` are the notices for that path, not this
+/// count). This holds whether the entry is merely unsettled
+/// (`armed_not_settled`) or held by the gate (`TickReport::gate_blocked`,
+/// `automatic_gate`): both are "armed means no decision", so neither counts,
+/// exactly like the design rule "armed folders never move it".
+///
+/// Two exceptions inside an armed folder DO need a person, so they count:
+///
+/// - [`QueueEntry::held_for_review`] -- revoked for a reason in
+///   [`REASONS_NEEDING_A_PERSON`] that no unattended re-approval can satisfy
+///   (`watcher::visit_session` already refuses to auto-approve these).
+/// - [`ProjectPolicy::holds_back_unattended`] -- a pre-grant session: it was
+///   already on disk when the automatic grant armed the folder, so the grant
+///   deliberately leaves it for a person rather than sweeping it in.
+///
+/// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
+/// that is the ordinary Ask-me case the badge exists for.
+///
+/// An `Ignore`d folder counts nothing but a `held_for_review` entry. Setting
+/// `Ignore` refuses what was waiting (`refuse_pending_for_project`), so a
+/// `Pending` entry there is only a transient (a failed queue save, say), and
+/// the contributor has already said "never offer these": the badge must not
+/// ask them to decide about it. The check is therefore `== NotifyOnly`, not
+/// `!= AutoUpload`.
+///
+/// Deliberately one small function, with one predicate
+/// ([`needs_a_person`]), so a state that must also count or must not --
+/// K5's returned-from-keep entries and from-now backlog (#1134), and a
+/// `scrub_check` manual hold (#1139), once those land -- has exactly one
+/// place to add its rule, rather than a second badge-counting path drifting
+/// from this one. Extend `needs_a_person`, not `status_value`.
+pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy) -> usize {
+    queue
+        .pending()
+        .into_iter()
+        .filter(|entry| needs_a_person(entry, policy))
+        .count()
+}
+
+/// Whether one `Pending` entry is a decision owed to a person. See
+/// [`decisions_owed`] for each rule and why.
+fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy) -> bool {
+    if entry.held_for_review() {
+        return true;
+    }
+    match policy.resolve(&entry.project_key) {
+        ProjectMode::NotifyOnly => true,
+        ProjectMode::AutoUpload => {
+            policy.holds_back_unattended(&entry.project_key, &entry.path.to_string_lossy())
+        }
+        ProjectMode::Ignore => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3688,5 +3749,169 @@ mod tests {
         value.as_object_mut().unwrap().remove("session_cwd");
         let loaded: QueueEntry = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.session_cwd, None);
+    }
+
+    // -- `decisions_owed` (K6): the badge's exact count -----------------
+
+    /// An Ask-me folder is the ordinary case the badge exists for: every
+    /// `Pending` entry in it needs a person, so it counts.
+    #[test]
+    fn decisions_owed_counts_an_ask_me_pending() {
+        let policy = ProjectPolicy::new(); // unset project keys resolve NotifyOnly ("Ask me")
+        let q = queue_of(vec![entry_in("/w/ask-me", QueueState::Pending)]);
+        assert_eq!(decisions_owed(&q, &policy), 1);
+    }
+
+    /// A mixed queue, each entry a different reason to count or not: an
+    /// Ask-me `Pending` (counts), an Ask-me entry already `Approved` (no
+    /// decision left), an armed `Pending` that is settling (goes out
+    /// unattended), and an armed `Pending` held for review (needs a person).
+    /// Replaces a single-entry case that could not fail: an `Approved` entry
+    /// is never in `pending()` whatever the filter says.
+    #[test]
+    fn decisions_owed_counts_only_the_owed_entries_of_a_mixed_queue() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut decided = entry_in("/w/ask-me", QueueState::Approved);
+        decided.session_hash = "sha256:decided".into();
+        decided.path = PathBuf::from("/w/ask-me/decided.jsonl");
+        let mut settling = entry_in("/w/armed", QueueState::Pending);
+        settling.session_hash = "sha256:settling".into();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.session_hash = "sha256:held".into();
+        held.path = PathBuf::from("/w/armed/held.jsonl");
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        let q = queue_of(vec![ask_me, decided, settling, held]);
+        assert_eq!(q.pending().len(), 3);
+        assert_eq!(
+            decisions_owed(&q, &policy),
+            2,
+            "the Ask-me pending and the held-for-review one"
+        );
+    }
+
+    /// `Ignore` asks nobody: a `Pending` entry left in an ignored folder
+    /// (setting `Ignore` normally refuses them, so this is a transient) is
+    /// not a decision the contributor owes. Pins the `== NotifyOnly` rule.
+    #[test]
+    fn decisions_owed_does_not_count_a_pending_entry_in_an_ignored_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/ignored",
+                ProjectMode::Ignore,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/ignored", QueueState::Pending)]);
+        assert_eq!(q.pending().len(), 1);
+        assert_eq!(decisions_owed(&q, &policy), 0);
+    }
+
+    /// A fresh session in an armed folder stays `Pending` while it is
+    /// unsettled, or while the automatic-contribution gate blocks it
+    /// (`TickReport::gate_blocked`) -- queue and policy alone cannot tell
+    /// those two apart, and they must not be told apart here: both are
+    /// "armed means no decision" ("armed folders never move it"), and the
+    /// design would not ask about either. It goes out unattended once
+    /// settled or ungated, so it must not inflate the badge meanwhile.
+    #[test]
+    fn decisions_owed_excludes_a_gate_held_armed_pending() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/gated",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let q = queue_of(vec![entry_in("/w/gated", QueueState::Pending)]);
+        assert_eq!(
+            decisions_owed(&q, &policy),
+            0,
+            "an armed pending session, gate-held or merely unsettled, asks nobody yet"
+        );
+    }
+
+    /// `held_for_review` entries -- revoked for a reason in
+    /// `REASONS_NEEDING_A_PERSON` -- need a person even inside an armed
+    /// folder: the watcher already refuses to re-approve these unattended,
+    /// so the badge must not disagree with it.
+    #[test]
+    fn decisions_owed_counts_a_held_for_review_entry() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut held = entry_in("/w/armed", QueueState::Pending);
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        assert!(held.held_for_review());
+        let q = queue_of(vec![held]);
+        assert_eq!(decisions_owed(&q, &policy), 1);
+    }
+
+    /// A session already on disk when the automatic grant armed a folder is
+    /// deliberately held back from unattended approval
+    /// (`holds_back_unattended`) -- the grant arms nothing already on disk.
+    /// It still needs a person, so it counts even though its folder is
+    /// armed.
+    #[test]
+    fn decisions_owed_counts_a_grant_held_back_pre_grant_session() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/grant-armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        policy.armed_by_grant.insert("/w/grant-armed".to_string());
+        let pre_grant = entry_in("/w/grant-armed", QueueState::Pending);
+        policy
+            .sessions_on_disk_at_grant
+            .insert(pre_grant.path.to_string_lossy().to_string());
+        assert!(policy.holds_back_unattended("/w/grant-armed", &pre_grant.path.to_string_lossy()));
+        let q = queue_of(vec![pre_grant]);
+        assert_eq!(decisions_owed(&q, &policy), 1);
+    }
+
+    /// The whole point: `decisions_owed` is not `queue_depth`. A queue
+    /// mixing an Ask-me pending, an armed-and-settled-away entry, and a
+    /// gate-held armed pending reports only the one decision actually
+    /// owed, while `queue_depth` (still `pending().len()`, unchanged for
+    /// compatibility) would have counted the gate-held one too.
+    #[test]
+    fn decisions_owed_differs_from_queue_depth_when_a_gate_holds_an_armed_entry() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/gated",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut ask_me = entry_in("/w/ask-me", QueueState::Pending);
+        ask_me.session_hash = "sha256:ask-me".into();
+        let mut gated = entry_in("/w/gated", QueueState::Pending);
+        gated.session_hash = "sha256:gated".into();
+        let q = queue_of(vec![ask_me, gated]);
+        assert_eq!(q.pending().len(), 2, "queue_depth counts both");
+        assert_eq!(
+            decisions_owed(&q, &policy),
+            1,
+            "decisions_owed excludes the gate-held armed one"
+        );
     }
 }

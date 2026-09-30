@@ -8195,6 +8195,10 @@ fn app(state: Arc<AppState>) -> Router {
             get(settlement_posture_handler),
         )
         .route(
+            trace_commons_protocol::near_ai_measurements::NEAR_AI_MEASUREMENTS_PATH,
+            get(near_ai_measurements_handler),
+        )
+        .route(
             "/v1/contributors/me/credit-events",
             get(credit_events_handler),
         )
@@ -16203,6 +16207,30 @@ async fn settlement_posture_handler(
         state.near_settlement_mode_label(),
         false,
     )))
+}
+
+/// `GET /v1/contributors/me/near-ai-measurements`
+///
+/// The NEAR AI image measurements this deployment pins, for a caller holding
+/// a device credential. A contributor's IronWire ties a NEAR AI receipt's
+/// signer to a DCAP-verified quote and pins that quote's image against these
+/// sets, so the device and ingest agree on which image counts.
+///
+/// Read through `expected_measurements_from_env`, the loader the attestation
+/// drills enforce with, and published by `measurements::published_pins`: pins
+/// only, no URL or secret. Nothing configured is `unconfigured` with no sets,
+/// so a client verifies nothing rather than everything. Deployment-wide, so
+/// any authenticated caller may read it, as with the settlement posture.
+async fn near_ai_measurements_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<trace_commons_protocol::near_ai_measurements::NearAiMeasurementPins>> {
+    let _tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    Ok(Json(
+        trace_commons_server::near_attestation::measurements::published_pins(
+            expected_measurements_from_env(),
+        ),
+    ))
 }
 
 async fn credit_events_handler(

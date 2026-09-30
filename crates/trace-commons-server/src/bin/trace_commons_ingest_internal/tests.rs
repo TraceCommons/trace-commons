@@ -104975,3 +104975,58 @@ async fn replay_export_refuses_the_reserved_pipeline_export_purpose() {
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0].purpose, "trace_commons_worker_replay_dataset");
 }
+
+// -- Device-authenticated NEAR AI measurement pins (#1118 Z4b) --------------
+
+/// `GET /v1/contributors/me/near-ai-measurements` gives a device bearer the
+/// pins this deployment enforces. The test environment configures none, and
+/// that must read as `unconfigured` with no sets -- never as an empty set a
+/// client could take for "no constraint". What a configured deployment
+/// publishes is pinned against the loader in `near_attestation::measurements`.
+#[tokio::test]
+async fn near_ai_measurements_handler_reports_unconfigured_to_a_device_bearer() {
+    use trace_commons_protocol::near_ai_measurements::PinState;
+    assert!(
+        std::env::var_os(
+            trace_commons_server::near_attestation::measurements::EXPECTED_MEASUREMENTS_ENV
+        )
+        .is_none(),
+        "the premise: this test process pins nothing"
+    );
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let Json(pins) = near_ai_measurements_handler(State(state), auth_headers("token-a"))
+        .await
+        .expect("device bearer reads the pins");
+
+    assert_eq!(pins.state, PinState::Unconfigured);
+    assert!(pins.sets.is_empty());
+    assert!(pins.usable_sets().is_empty());
+    assert_eq!(
+        pins,
+        trace_commons_server::near_attestation::measurements::published_pins(Ok(None)),
+        "the route publishes through the same builder the loader feeds"
+    );
+    let body = serde_json::to_string(&pins).expect("pins serialize");
+    assert!(
+        !body.contains("://"),
+        "pins only: no URL in the body {body}"
+    );
+}
+
+#[tokio::test]
+async fn near_ai_measurements_handler_refuses_without_a_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let err = near_ai_measurements_handler(State(state.clone()), HeaderMap::new())
+        .await
+        .expect_err("no bearer is refused");
+    assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+    let err = near_ai_measurements_handler(State(state), auth_headers("not-a-token"))
+        .await
+        .expect_err("an unknown bearer is refused");
+    assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
