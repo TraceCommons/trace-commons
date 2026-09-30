@@ -3074,6 +3074,183 @@ async fn the_worker_drains_a_tenant_on_the_drain_list() {
     join_within(server, 20, "the drain app").await;
 }
 
+/// Controller ruling R2-2: every object a complete pipeline run stored is an
+/// object ref of its submission -- the receipt's source envelope, Review's
+/// approved revision, and Score's index command and neighbour set -- so
+/// once the owner withdraws the submission, one pass of `main`'s
+/// revocation-propagation worker deletes all four from the service-owned
+/// store and marks each ref deleted. The pipeline's own attempt sweep
+/// (`sweep_attempt_artifacts`) never runs here and is not needed: it sweeps
+/// only attempts that never committed (ruling R2-1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-complete-objects-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-complete-objects-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let configured_store = || {
+        ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifacts.clone(),
+        )
+    };
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &configured_store(),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(owner.clone() as Arc<dyn Database>),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).artifact_store = Some(configured_store());
+
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    for _ in 0..3 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let settled = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(settled.state, PipelineRunState::Complete);
+    assert!(
+        settled.index_command_ref.is_some() && settled.score_neighbor_ref.is_some(),
+        "Score stored both of its objects"
+    );
+
+    let object_refs = owner
+        .list_trace_object_refs(&tenant, settled.submission_id)
+        .await
+        .unwrap();
+    let mut kinds: Vec<StorageTraceObjectArtifactKind> = object_refs
+        .iter()
+        .map(|object_ref| object_ref.artifact_kind)
+        .collect();
+    kinds.sort_by_key(|kind| format!("{kind:?}"));
+    assert_eq!(
+        kinds,
+        vec![
+            StorageTraceObjectArtifactKind::ReviewSnapshot,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope,
+            StorageTraceObjectArtifactKind::WorkerIntermediate,
+            StorageTraceObjectArtifactKind::WorkerIntermediate,
+        ],
+        "the source, the approved revision, and the two Score objects are object refs"
+    );
+    let tenant_ref = tenant_storage_ref(&tenant);
+    // The local store answers presence from the object key alone.
+    let present = |object_key: &str| {
+        artifacts
+            .artifact_present_by_object_key(
+                &tenant_ref,
+                TraceArtifactKind::VectorPayload,
+                object_key,
+                "",
+            )
+            .expect("the store answers")
+    };
+    for object_ref in &object_refs {
+        assert_eq!(
+            present(&object_ref.object_key),
+            Some(true),
+            "{:?} is stored before the withdrawal",
+            object_ref.artifact_kind
+        );
+    }
+
+    let outcome = service
+        .withdraw_submission(&tenant, settled.submission_id, &principal, None)
+        .await
+        .expect("the owner withdraws the submission");
+    assert_eq!(
+        outcome.revocation_propagation,
+        PipelineWithdrawalFollowUpState::Pending
+    );
+    let auth = revocation_worker_tenant_auth(&tenant);
+    let pass = run_revocation_propagation_worker(
+        state.as_ref(),
+        &auth,
+        TraceRevocationPropagationWorkerRequest {
+            purpose: Some("complete run object deletion".to_string()),
+            dry_run: false,
+            limit: 100,
+        },
+    )
+    .await
+    .expect("the worker runs");
+    assert_eq!(
+        (pass.checked, pass.completed, pass.failed, pass.skipped),
+        (4, 4, 0, 0),
+        "one completed deletion per object"
+    );
+
+    let after = owner
+        .list_trace_object_refs(&tenant, settled.submission_id)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), object_refs.len());
+    for object_ref in &after {
+        assert_eq!(
+            present(&object_ref.object_key),
+            Some(false),
+            "{:?} is deleted from the store",
+            object_ref.artifact_kind
+        );
+        assert!(
+            object_ref.deleted_at.is_some(),
+            "{:?} is marked deleted",
+            object_ref.artifact_kind
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline product routes through the router: the status block, the score
 // attestation, exports, and the administrator reads, with the product store

@@ -1669,9 +1669,10 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     // V104 (PR 4) adds the table that tracks each pipeline phase attempt's
     // objects, staged before they are published and committed with the
     // phase commit, so the worker can sweep the objects of an attempt that
-    // crashed, lost its lease, or had its commit refused, and the Score
-    // objects of a withdrawn submission. No cross-tenant claim function,
-    // same as V101/V102/V103.
+    // crashed, lost its lease, or had its commit refused. A committed
+    // attempt's objects are object refs of the submission, which the
+    // withdrawal and main's revocation-propagation worker delete. No
+    // cross-tenant claim function, same as V101/V102/V103.
     (
         104,
         "versioned_pipeline_attempt_artifacts",
@@ -8043,7 +8044,7 @@ mod tests {
             "CREATE TABLE pipeline_attempt_artifacts",
             "artifact IN ('approved', 'index-command', 'score-neighbors')",
             "ciphertext_sha256 TEXT NOT NULL CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
-            "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed', 'deleted'))",
+            "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed'))",
             "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
             "UNIQUE (tenant_id, object_key)",
             "ON DELETE CASCADE",
@@ -8051,14 +8052,24 @@ mod tests {
             "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
             "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
             "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
-            "GRANT UPDATE (state, committed_at, deleted_at) ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+            "GRANT UPDATE (state, committed_at) ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
         ] {
             assert!(
                 attempt_artifacts.contains(required),
                 "V104 is missing `{required}`"
             );
         }
-        for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
+        // Controller ruling R2-1: a committed attempt's objects are object
+        // refs of the submission, which the withdrawal and main's
+        // revocation-propagation worker delete, so V104 has no `deleted`
+        // state for the sweep to record a second deletion in.
+        for forbidden in [
+            "SECURITY DEFINER",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "'deleted'",
+            "deleted_at",
+        ] {
             assert!(
                 !attempt_artifacts.contains(forbidden),
                 "V104 must not contain `{forbidden}`"

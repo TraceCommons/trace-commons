@@ -8832,15 +8832,187 @@ async fn attempt_artifact_rows(
         .collect()
 }
 
-/// Step 2's first test: a Score commit refused because the submission was
-/// withdrawn between the attempt's object writes and its commit leaves both
-/// staged rows behind -- the seam
-/// `score_commit_refuses_a_submission_withdrawn_after_the_read` uses, at the
-/// store level. `sweep_attempt_artifacts` must not touch either row before
-/// `cleanup_after`, and must remove both objects and both rows once it has
-/// passed.
+/// Step 2's first test, through the service: a Score attempt whose
+/// submission is withdrawn after the attempt stored its last object (the
+/// neighbour set) and before `commit_score`, the seam
+/// `a_refused_score_commit_deletes_the_objects_its_attempt_wrote` uses. The
+/// commit refuses, and the refused attempt deletes both objects it wrote
+/// itself (PR 3), so they are gone at once. Its two `staged` rows stay:
+/// the commit that would have committed them rolled back. The sweep leaves
+/// them alone before `cleanup_after`; once it has passed, the sweep finds
+/// each object absent and drops both rows. The withdrawal queued no
+/// deletion for these objects: no object ref names a `staged` row's object
+/// (controller ruling R2-1).
 #[tokio::test]
 async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner_url =
+        std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").expect("guarded by runtime_backend");
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let tenant = format!("score-refused-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let submission_id = uuid::Uuid::new_v4();
+    let wrapper = Arc::new(WithdrawOnApprovedWriteStore {
+        inner: artifacts.clone(),
+        runtime_url: runtime_role_url(&owner_url),
+        tenant_id: tenant.clone(),
+        submission_id,
+        triggered: AtomicBool::new(false),
+        trigger_object_id_prefix: "pipeline-score-neighbors-",
+        preparing_trigger: AtomicBool::new(false),
+    });
+    let service = compatibility_test_service(
+        backend.clone(),
+        wrapper as Arc<dyn TraceArtifactStore>,
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await;
+    let env = large_envelope(submission_id).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+
+    let refused = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score attempt runs");
+    assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+
+    let staged_rows = || async {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let rows: Vec<(String, String, String)> = tx
+            .query(
+                "SELECT artifact, object_key, ciphertext_sha256 FROM pipeline_attempt_artifacts
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'staged'
+                  ORDER BY artifact",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get("artifact"),
+                    row.get("object_key"),
+                    row.get("ciphertext_sha256"),
+                )
+            })
+            .collect();
+        tx.commit().await.unwrap();
+        rows
+    };
+    let score_objects = staged_rows().await;
+    assert_eq!(
+        score_objects
+            .iter()
+            .map(|(artifact, ..)| artifact.as_str())
+            .collect::<Vec<_>>(),
+        vec!["index-command", "score-neighbors"],
+        "both Score objects are staged, under the refused attempt's lease"
+    );
+    let rows_before = attempt_artifact_rows(&backend, &tenant, created.run_id).await;
+    assert_eq!(
+        rows_before,
+        vec![
+            ("approved".to_string(), "committed".to_string()),
+            ("index-command".to_string(), "staged".to_string()),
+            ("score-neighbors".to_string(), "staged".to_string()),
+        ],
+        "the refused commit committed neither Score row; Review's approved row is committed"
+    );
+    let assert_absent = |when: &str| {
+        for (artifact, object_key, ciphertext_sha256) in &score_objects {
+            assert_eq!(
+                artifacts
+                    .artifact_present_by_object_key(
+                        tenant_ref.as_str(),
+                        TraceArtifactKind::VectorPayload,
+                        object_key,
+                        ciphertext_sha256,
+                    )
+                    .unwrap(),
+                Some(false),
+                "{artifact} is absent {when}"
+            );
+        }
+    };
+    assert_absent("once the refused attempt deleted it");
+
+    // Before cleanup_after: the sweep removes nothing.
+    let removed_before = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(removed_before, 0, "neither row is due yet");
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, created.run_id).await,
+        rows_before,
+        "the sweep left both rows untouched"
+    );
+
+    // Move cleanup_after into the past. `cleanup_after` is not a column the
+    // runtime role may UPDATE (V104's grant is `state, committed_at` only),
+    // so this test-only backdate runs as the database owner.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_attempt_artifacts SET cleanup_after = NOW() - INTERVAL '1 second'
+          WHERE tenant_id = $1 AND run_id = $2 AND state = 'staged'",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let removed_after = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
+    assert_eq!(
+        removed_after, 2,
+        "both due staged rows are removed, their objects already absent"
+    );
+    assert_eq!(
+        attempt_artifact_rows(&backend, &tenant, created.run_id).await,
+        vec![("approved".to_string(), "committed".to_string())],
+        "both staged rows are gone; the committed approved row is untouched"
+    );
+    assert_absent("after the sweep");
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_orphan_sweep",
+        Some(service.default_package()),
+        serde_json::json!({
+            "removed_before_due": removed_before,
+            "removed_after_due": removed_after,
+        }),
+    );
+}
+
+/// The store-level counterpart of
+/// `a_refused_score_commit_leaves_staged_rows_the_sweep_removes`: a Score
+/// commit refused because the submission was withdrawn between the
+/// attempt's object writes and its commit, driven through
+/// `PgPipelineStore::commit_score` directly, so the service's own
+/// best-effort delete of the refused attempt's objects never runs -- the
+/// shape a refusal leaves when that delete fails, or the process stops
+/// between the refusal and the delete. Both objects are still stored and
+/// both rows stay `staged`. `sweep_attempt_artifacts` must not touch either
+/// row before `cleanup_after`, and must delete both objects and both rows
+/// once it has passed.
+#[tokio::test]
+async fn the_sweep_deletes_the_objects_a_refused_score_commit_left_stored() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -9027,7 +9199,7 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
     // Move cleanup_after into the past: a direct SQL update, the same time
     // shortcut `force_due` uses for `pipeline_runs.next_attempt_at`.
     // `cleanup_after` is not a column the runtime role may UPDATE (V104's
-    // grant is `state, committed_at, deleted_at` only), so this backdate --
+    // grant is `state, committed_at` only), so this backdate --
     // a test-only time shortcut, not something production code ever does --
     // runs as the database owner, the same way `owner_client` backdates
     // other columns the runtime role cannot touch elsewhere in this file.
@@ -9072,15 +9244,6 @@ async fn a_refused_score_commit_leaves_staged_rows_the_sweep_removes() {
             .unwrap(),
         Some(false),
         "the score-neighbors object is deleted"
-    );
-
-    PipelineCheckEmitter::emit_pass_from_env(
-        "pipeline_orphan_sweep",
-        Some(service.default_package()),
-        serde_json::json!({
-            "removed_before_due": removed_before,
-            "removed_after_due": removed_after,
-        }),
     );
 }
 
@@ -9241,7 +9404,7 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
 
     // Move the stale attempt's row into the past; worker B's stays alone.
     // `cleanup_after` is not runtime-role-writable (V104 grants only
-    // `state, committed_at, deleted_at`), so this test-only backdate runs as
+    // `state, committed_at`), so this test-only backdate runs as
     // the database owner.
     let mut owner = owner_client().await;
     let tx = owner_tenant_tx(&mut owner, &tenant).await;
@@ -9285,163 +9448,6 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
             .unwrap(),
         Some(true),
         "the committed object is untouched"
-    );
-}
-
-/// Step 2's third test: a complete, indexed run whose submission is
-/// withdrawn afterward. The Score objects stay while the queued index
-/// invalidation is pending, and are swept only once the invalidation
-/// completes -- plan decision P4-D10's ordering rule, not because
-/// `process_index_invalidations` needs to read the stored `index-command`
-/// (it invalidates by registry revision id). Runs a compatibility bundle
-/// (`CompatibilityBundleConfig::local_reference`), whose `CompatibilityScorePolicy`
-/// -- unlike the minimal reference bundle's `FixedScorePolicy` -- proposes a
-/// real `score-neighbors` artifact too, so both committed Score objects are
-/// covered. The approved object, per the brief, is checked for readability
-/// rather than deleted here: if the existing withdrawal path
-/// (`PgPipelineStore::withdraw_submission`) ever starts leaving it readable,
-/// that is a PR 3 finding, not something this task fixes.
-#[tokio::test]
-async fn withdrawal_deletes_committed_score_objects_after_the_run_ends() {
-    let Some(backend) = runtime_backend(4).await else {
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let artifacts = artifact_store(&dir);
-    let service = compatibility_test_service(
-        backend.clone(),
-        artifacts.clone(),
-        CompatibilityBundleConfig::local_reference(),
-    )
-    .await;
-    let tenant = format!("withdrawn-score-sweep-{}", uuid::Uuid::new_v4());
-    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
-    let settled = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
-    assert_eq!(settled.state, PipelineRunState::Complete);
-    assert_eq!(settled.index_write_state, "complete");
-
-    // `CompatibilityScorePolicy` -- unlike the minimal reference bundle's
-    // `FixedScorePolicy` -- always proposes a `score-neighbors` artifact
-    // (`ScoreOutput::new(result, command, Some(neighbor_bytes))`, never
-    // `None`), so both committed Score objects are covered here.
-    let committed_before = attempt_artifact_rows(&backend, &tenant, settled.run_id).await;
-    assert_eq!(
-        committed_before,
-        vec![
-            ("approved".to_string(), "committed".to_string()),
-            ("index-command".to_string(), "committed".to_string()),
-            ("score-neighbors".to_string(), "committed".to_string()),
-        ],
-        "the approved, index-command, and score-neighbors attempt objects are all committed"
-    );
-    let mut client = backend.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, &tenant).await;
-    let score_objects: Vec<(String, String, String)> = tx
-        .query(
-            "SELECT artifact, object_key, ciphertext_sha256 FROM pipeline_attempt_artifacts
-              WHERE tenant_id = $1 AND run_id = $2
-                AND artifact IN ('index-command', 'score-neighbors')
-              ORDER BY artifact",
-            &[&tenant, &settled.run_id],
-        )
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| {
-            (
-                row.get("artifact"),
-                row.get("object_key"),
-                row.get("ciphertext_sha256"),
-            )
-        })
-        .collect();
-    tx.commit().await.unwrap();
-    assert_eq!(
-        score_objects.len(),
-        2,
-        "both index-command and score-neighbors are committed here"
-    );
-
-    let outcome = withdraw(&service, &tenant, settled.submission_id).await;
-    assert_eq!(
-        outcome.index_invalidation,
-        PipelineWithdrawalFollowUpState::Pending
-    );
-    let (_, pending_run_state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
-    assert_eq!(pending_run_state, "pending");
-
-    // While the invalidation is pending, the sweep keeps the Score objects.
-    let removed_while_pending = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
-    assert_eq!(
-        removed_while_pending, 0,
-        "the sweep waits for the invalidation to settle"
-    );
-    for (artifact, object_key, ciphertext_sha256) in &score_objects {
-        assert_eq!(
-            artifacts
-                .artifact_present_by_object_key(
-                    tenant_ref.as_str(),
-                    TraceArtifactKind::VectorPayload,
-                    object_key,
-                    ciphertext_sha256,
-                )
-                .unwrap(),
-            Some(true),
-            "{artifact} is kept while the invalidation is pending"
-        );
-    }
-
-    // Once the invalidation completes, the sweep deletes the committed
-    // Score object(s) and marks their row(s) deleted.
-    assert_eq!(
-        service
-            .process_index_invalidations(&tenant, 32)
-            .await
-            .unwrap(),
-        1
-    );
-    let (_, completed_run_state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
-    assert_eq!(completed_run_state, "complete");
-
-    let removed_after_complete = service.sweep_attempt_artifacts(&tenant, 10).await.unwrap();
-    assert_eq!(
-        removed_after_complete,
-        score_objects.len(),
-        "every committed Score object is swept once the invalidation completes"
-    );
-    for (artifact, object_key, ciphertext_sha256) in &score_objects {
-        assert_eq!(
-            artifacts
-                .artifact_present_by_object_key(
-                    tenant_ref.as_str(),
-                    TraceArtifactKind::VectorPayload,
-                    object_key,
-                    ciphertext_sha256,
-                )
-                .unwrap(),
-            Some(false),
-            "{artifact} is deleted once the invalidation has completed"
-        );
-    }
-    assert_eq!(
-        attempt_artifact_rows(&backend, &tenant, settled.run_id).await,
-        vec![
-            ("approved".to_string(), "committed".to_string()),
-            ("index-command".to_string(), "deleted".to_string()),
-            ("score-neighbors".to_string(), "deleted".to_string()),
-        ]
-    );
-
-    // The approved object, per the brief: checked for readability, not
-    // deleted here. The existing withdrawal path never touches it, and
-    // every read of it (`load_approved_bytes`) shares the same operability
-    // guard `load_object_bytes` applies to every pipeline object read, so it
-    // is expected to refuse once the submission is withdrawn.
-    let approved_read = service.load_approved_bytes(&settled).await;
-    assert!(
-        approved_read.is_err(),
-        "approved bytes must not be readable through the service once withdrawn -- if this \
-         starts succeeding, PR 3's withdrawal path has changed and that is a PR 3 finding"
     );
 }
 

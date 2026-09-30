@@ -241,7 +241,7 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     (
         "pipeline_attempt_artifacts",
         "UPDATE",
-        &["state", "committed_at", "deleted_at"],
+        &["state", "committed_at"],
     ),
 ];
 

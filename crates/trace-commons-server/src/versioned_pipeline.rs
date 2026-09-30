@@ -1681,7 +1681,9 @@ impl PgPipelineStore {
         let updated = pipeline_run_from_row(&row)?;
         // PR 4: the attempt's staged object -- the approved content, when
         // this commit approved one -- moves to `committed` in this same
-        // transaction. A refused commit above already returned without
+        // transaction, the one that records it as an object ref of the
+        // submission; from here on the withdrawal, not the attempt sweep,
+        // owns its deletion. A refused commit above already returned without
         // reaching here, so this never runs for one; nothing to move when a
         // rejection staged no object (the `UPDATE` then matches zero rows).
         tx.execute(
@@ -2318,8 +2320,10 @@ impl PgPipelineStore {
         let updated = pipeline_run_from_row(&row)?;
         // PR 4: the attempt's staged objects -- `index-command` and/or
         // `score-neighbors`, whichever this commit wrote -- move to
-        // `committed` in this same transaction. A refused commit above
-        // already returned without reaching here.
+        // `committed` in this same transaction, the one that records each as
+        // an object ref of the submission (above); from here on the
+        // withdrawal, not the attempt sweep, owns their deletion. A refused
+        // commit above already returned without reaching here.
         tx.execute(
             "UPDATE pipeline_attempt_artifacts
                 SET state = 'committed', committed_at = NOW()
@@ -7515,33 +7519,35 @@ impl PipelineService {
         )
     }
 
-    /// Deletes the objects of pipeline phase attempts this run's commits
-    /// never claimed (PR 4): a `staged` row whose `cleanup_after` has
-    /// passed -- an attempt that crashed, lost its lease, or had its commit
-    /// refused -- and the Score objects (`index-command`, `score-neighbors`)
-    /// of a run that finished (`complete` or `failed`) whose submission was
-    /// withdrawn, by either signal (`trace_withdrawals` or
-    /// `trace_submissions.withdrawn_at` -- the review-time tombstone-only
-    /// test helper sets only the latter, the real withdrawal path sets
-    /// both), once that run's own index invalidation has settled (`none` or
-    /// `complete`, never `pending`). Plan decision P4-D10: the `pending`
-    /// exclusion is an ordering rule, not a dependency on the object's
-    /// content -- `process_index_invalidations` invalidates by registry
-    /// revision id, never by reading the stored `index-command` -- so a
-    /// Score object is never removed while its run's own withdrawal
-    /// follow-up is still in flight.
+    /// Deletes the objects of pipeline phase attempts that never committed
+    /// (PR 4): each `staged` row whose `cleanup_after` has passed -- an
+    /// attempt that crashed, lost its lease, failed between two of its
+    /// writes, or had its commit refused -- loses its object and then the
+    /// row itself.
     ///
-    /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, up to `limit` rows
-    /// across both selections combined. For each row, the object is deleted
-    /// only when the store still reports it present -- a store whose delete
-    /// errors on an absent object never fails the sweep for a row another
-    /// pass, or the write site's own best-effort delete, already cleared.
-    /// A delete failure (or a presence check that itself errors) logs
-    /// `pipeline_attempt_sweep_delete_failed` and keeps the row for the next
-    /// pass; otherwise a `staged` row is deleted outright, and a withdrawn
-    /// run's `committed` row moves to `deleted` -- the run's own
-    /// `pipeline_runs` row, and its other objects, are never touched here.
-    /// Returns how many rows it removed.
+    /// Who owns which deletion (controller ruling R2-1): a `staged` row's
+    /// object is named by no object ref, so no withdrawal ever deletes it;
+    /// this sweep owns it. A `committed` row's object is an object ref of
+    /// the submission, recorded by the same phase commit that committed the
+    /// row (Review's approved revision, Score's index command and neighbour
+    /// set), so deleting it belongs to the withdrawal: the withdrawal
+    /// invalidates the ref and queues its payload deletion in the same
+    /// transaction as the tombstone, and `main`'s revocation-propagation
+    /// worker deletes it. This sweep never touches a `committed` row. A
+    /// phase attempt whose commit is refused as inoperable deletes the
+    /// objects it wrote itself, best effort (Review its approved object,
+    /// Score its index command and neighbour set); its `staged` rows stay,
+    /// and this sweep later finds each object absent and drops the row, or
+    /// deletes an object that refusal path failed to delete.
+    ///
+    /// One tenant transaction, `FOR UPDATE SKIP LOCKED`, up to `limit`
+    /// rows. For each row, a store that confirms the object absent
+    /// (`Some(false)`) needs no delete; a store that reports it present, or
+    /// cannot tell (`None`), gets one. A delete failure (or a presence
+    /// check that itself errors) logs `pipeline_attempt_sweep_delete_failed`
+    /// and keeps the row for the next pass; otherwise the row is deleted.
+    /// The run's own `pipeline_runs` row, and its committed objects, are
+    /// never touched here. Returns how many rows it removed.
     pub async fn sweep_attempt_artifacts(
         &self,
         tenant_id: &str,
@@ -7552,7 +7558,7 @@ impl PipelineService {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, tenant_id).await?;
 
-        let staged_rows = tx
+        let rows = tx
             .query(
                 "SELECT run_id, lease_token, artifact, object_key, ciphertext_sha256
                    FROM pipeline_attempt_artifacts
@@ -7563,44 +7569,9 @@ impl PipelineService {
                 &[&tenant_id, &limit],
             )
             .await?;
-        let mut rows: Vec<(bool, Row)> = staged_rows.into_iter().map(|row| (true, row)).collect();
-
-        let remaining = limit.saturating_sub(rows.len() as i64);
-        if remaining > 0 {
-            let withdrawn_rows = tx
-                .query(
-                    "SELECT paa.run_id, paa.lease_token, paa.artifact, paa.object_key,
-                            paa.ciphertext_sha256
-                       FROM pipeline_attempt_artifacts paa
-                       JOIN pipeline_runs pr
-                         ON pr.tenant_id = paa.tenant_id AND pr.run_id = paa.run_id
-                      WHERE paa.tenant_id = $1
-                        AND paa.state = 'committed'
-                        AND paa.artifact IN ('index-command', 'score-neighbors')
-                        AND pr.state IN ('complete', 'failed')
-                        AND pr.index_invalidation_state IN ('none', 'complete')
-                        AND (
-                          EXISTS (
-                            SELECT 1 FROM trace_withdrawals w
-                             WHERE w.tenant_id = pr.tenant_id AND w.submission_id = pr.submission_id
-                          )
-                          OR EXISTS (
-                            SELECT 1 FROM trace_submissions s
-                             WHERE s.tenant_id = pr.tenant_id AND s.submission_id = pr.submission_id
-                               AND s.withdrawn_at IS NOT NULL
-                          )
-                        )
-                      ORDER BY paa.staged_at
-                      LIMIT $2
-                      FOR UPDATE OF paa SKIP LOCKED",
-                    &[&tenant_id, &remaining],
-                )
-                .await?;
-            rows.extend(withdrawn_rows.into_iter().map(|row| (false, row)));
-        }
 
         let mut removed = 0usize;
-        for (staged, row) in &rows {
+        for row in &rows {
             let run_id: Uuid = row.get("run_id");
             let lease_token: Uuid = row.get("lease_token");
             let artifact: String = row.get("artifact");
@@ -7653,24 +7624,13 @@ impl PipelineService {
                 );
                 continue;
             }
-            if *staged {
-                tx.execute(
-                    "DELETE FROM pipeline_attempt_artifacts
-                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
-                        AND state = 'staged'",
-                    &[&tenant_id, &run_id, &lease_token, &artifact],
-                )
-                .await?;
-            } else {
-                tx.execute(
-                    "UPDATE pipeline_attempt_artifacts
-                        SET state = 'deleted', deleted_at = NOW()
-                      WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
-                        AND state = 'committed'",
-                    &[&tenant_id, &run_id, &lease_token, &artifact],
-                )
-                .await?;
-            }
+            tx.execute(
+                "DELETE FROM pipeline_attempt_artifacts
+                  WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3 AND artifact = $4
+                    AND state = 'staged'",
+                &[&tenant_id, &run_id, &lease_token, &artifact],
+            )
+            .await?;
             removed += 1;
         }
         tx.commit().await?;

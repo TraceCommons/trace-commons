@@ -548,10 +548,12 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// pipeline phase attempt objects
 /// (`PipelineService::sweep_attempt_artifacts`): the same shape, for the
 /// Review and Score objects a phase attempt writes under its own lease
-/// token, plus the Score objects of a run whose submission was withdrawn
-/// after it finished. An invalidation, payout, or sweep failure is logged
-/// the same way, and the drain goes on to the next step. All of it runs in
-/// the pass's supervised task for the tenant (`run_pipeline_worker_pass`).
+/// token and never commits. A committed attempt's objects are object refs
+/// of the submission, which a withdrawal queues for `main`'s
+/// revocation-propagation worker to delete. An invalidation, payout, or
+/// sweep failure is logged the same way, and the drain goes on to the next
+/// step. All of it runs in the pass's supervised task for the tenant
+/// (`run_pipeline_worker_pass`).
 pub(crate) async fn drain_pipeline_tenant(
     service: Arc<PipelineService>,
     tenant_id: String,
