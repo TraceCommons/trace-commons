@@ -8064,6 +8064,14 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/passkey/login/finish",
             post(account_passkey_login_finish_handler),
         )
+        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
+        // beside the login it drives: a plain page whose one script calls the
+        // routes above and the authenticated passkey and payout routes, so a
+        // weak native session's owner can get a strong cookie session.
+        .route(
+            step_up_page::STEP_UP_PATH,
+            get(step_up_page::step_up_page_handler),
+        )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
         // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
         // IS the credential. No RPC at login — the signature is verified offline.
@@ -16443,7 +16451,7 @@ async fn account_auth_middleware(
             request.extensions_mut().insert(binding);
             next.run(request).await
         };
-        if let Some(token) = rotated_secret_value {
+        if let Some((token, _)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
@@ -16465,7 +16473,7 @@ async fn account_auth_middleware(
         next.run(request).await
     };
 
-    if let Some(cookie_value) = rotated_secret_value {
+    if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
         // SameSite=Strict / Path=/, 7d. A malformed header value is impossible in
         // practice (the value is b64url(tenant) + '.' + b64url(secret)); if it ever
@@ -16476,7 +16484,7 @@ async fn account_auth_middleware(
             .http_only(true)
             .same_site(cookie::SameSite::Strict)
             .path("/")
-            .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+            .max_age(rotated_cookie_max_age(expires_at, Utc::now()))
             .build();
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
             // APPEND, not insert: a handler may have already set its OWN Set-Cookie
@@ -16498,6 +16506,19 @@ async fn account_auth_middleware(
     }
 
     response
+}
+
+/// Max-Age for a rotated session cookie: the usual lifetime, capped at what
+/// is left of the session's absolute `expires_at`, so rotation can never make
+/// the cookie outlive its row. That matters for a step-up session
+/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
+/// seven-day cookie would.
+fn rotated_cookie_max_age(
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> cookie::time::Duration {
+    let remaining = (expires_at - now).num_seconds().max(0);
+    cookie::time::Duration::seconds(remaining.min(ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60))
 }
 
 #[cfg(test)]
@@ -16565,6 +16586,10 @@ async fn account_binding_handler(
     response
 }
 
+/// A session that rotated on this request: the new credential value (cookie
+/// value or native token) and the session's unchanged absolute expiry.
+type RotatedSession = (String, chrono::DateTime<Utc>);
+
 /// Same dispatch as [`resolve_account_ctx`], but additionally surfaces any
 /// rotated session secret (cookie path only) so the auth middleware can attach a
 /// fresh `Set-Cookie` on EVERY authenticated response. The bearer / both-creds /
@@ -16574,7 +16599,7 @@ async fn resolve_account_ctx_with_rotation(
     headers: &HeaderMap,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let bearer = headers
@@ -16638,7 +16663,7 @@ async fn resolve_account_ctx_native(
     bearer: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -16674,9 +16699,10 @@ async fn resolve_account_ctx_native(
     // middleware hands the new secret back in a response header (the bearer
     // analogue of `Set-Cookie`) so the client can swap before the short
     // prev-token grace lapses.
+    let expires_at = session.expires_at;
     let rotated = session
         .rotated_secret
-        .map(|new_secret| native_token_value(&tenant_id, &new_secret));
+        .map(|new_secret| (native_token_value(&tenant_id, &new_secret), expires_at));
 
     Ok((
         AccountCtx {
@@ -16707,7 +16733,7 @@ async fn resolve_account_ctx_cookie(
     cookie: &str,
 ) -> ApiResult<(
     AccountCtx,
-    Option<String>,
+    Option<RotatedSession>,
     trace_commons_server::account_binding::AccountBindingState,
 )> {
     let invalid = || {
@@ -16736,11 +16762,15 @@ async fn resolve_account_ctx_cookie(
     // (`{b64url(tenant)}.{new_secret}`) so the middleware can attach a fresh
     // `Set-Cookie`. The browser still holds the old secret until that header lands;
     // `validate_session` already parked the old hash as the within-grace prev token.
+    let expires_at = session.expires_at;
     let rotated_cookie_value = session.rotated_secret.map(|new_secret| {
-        format!(
-            "{}.{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
-            new_secret,
+        (
+            format!(
+                "{}.{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant_id.as_bytes()),
+                new_secret,
+            ),
+            expires_at,
         )
     });
 
@@ -18241,6 +18271,9 @@ use native_passkey::{
     native_passkey_login_finish_handler, native_passkey_login_start_handler,
 };
 
+#[path = "trace_commons_ingest_internal/step_up_page.rs"]
+mod step_up_page;
+
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
@@ -18443,6 +18476,12 @@ where
 
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
+
+/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
+/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
+/// every session's `expires_at`: activity and rotation-on-use never move it.
+/// A constant, as the other session lifetimes are.
+const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
 
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
@@ -20576,6 +20615,34 @@ where
     }
 }
 
+/// What a browser passkey sign-in is for, fixed at `login/start` and carried
+/// in the ceremony to `finish`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasskeyLoginPurpose {
+    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
+    Session,
+    /// The step-up page's sign-in (Z2 S7): a session of
+    /// `STEP_UP_SESSION_TTL_MINUTES`.
+    StepUp,
+}
+
+/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
+/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
+/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
+/// which the handler answers with the uniform deny. The value is compared, not
+/// decoded, and never logged.
+fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
+    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "purpose").then_some(value)
+    });
+    match (purposes.next(), purposes.next()) {
+        (None, _) => Some(PasskeyLoginPurpose::Session),
+        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
+        _ => None,
+    }
+}
+
 /// `POST /account/passkey/login/start` — begin a discoverable passkey login
 /// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
 /// relying party is unconfigured. Rate-limited per-IP + global. Issues a
@@ -20587,7 +20654,13 @@ where
 async fn account_passkey_login_start_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
+    // The one optional input: `purpose=step_up` from the step-up page. Checked
+    // before anything else so a refused purpose costs nothing.
+    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
+        return passkey_login_generic_deny();
+    };
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
     // lookup — it only mints a fresh discoverable-auth challenge — so there is no
@@ -20620,7 +20693,10 @@ async fn account_passkey_login_start_handler(
     let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
-        CeremonyState::DiscoverableAuthentication(auth_state),
+        match purpose {
+            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
+            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
+        },
     );
 
     // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
@@ -20796,14 +20872,21 @@ async fn account_passkey_login_finish_inner(
 
     // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
     //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny.
-    let auth_state = match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-        Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-            Some(CeremonyState::DiscoverableAuthentication(auth_state)) => auth_state,
-            Some(_) | None => return passkey_login_generic_deny(),
-        },
-        None => return passkey_login_generic_deny(),
-    };
+    //    wrong-variant all collapse to the uniform deny. The purpose was bound
+    //    into the ceremony at `start`; nothing here can change it.
+    let (auth_state, purpose) =
+        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
+            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
+                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::Session)
+                }
+                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
+                    (auth_state, PasskeyLoginPurpose::StepUp)
+                }
+                Some(_) | None => return passkey_login_generic_deny(),
+            },
+            None => return passkey_login_generic_deny(),
+        };
 
     // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
     //    the advanced sign counter: the verification core shared with native
@@ -20823,9 +20906,22 @@ async fn account_passkey_login_finish_inner(
     //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
     //    ensure_trace_tenant: the credential is verified, so the tenant provably
     //    exists via its FK.
+    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
+    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
-    let expires_at = Utc::now() + Duration::days(ACCOUNT_SESSION_TTL_DAYS);
+    let (lifetime, metadata) = match purpose {
+        PasskeyLoginPurpose::Session => (
+            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
+            // Hash-only / label-only: never the credential id or key material.
+            serde_json::json!({ "client_kind": "passkey" }),
+        ),
+        PasskeyLoginPurpose::StepUp => (
+            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
+            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
+        ),
+    };
+    let expires_at = Utc::now() + lifetime;
     if db
         .issue_passkey_session(
             &tenant,
@@ -20839,8 +20935,7 @@ async fn account_passkey_login_finish_inner(
             trace_commons_server::db::RedeemAudit {
                 action: "account_passkey_login".to_string(),
                 outcome: "success".to_string(),
-                // Hash-only / label-only: never the credential id or key material.
-                metadata: serde_json::json!({ "client_kind": "passkey" }),
+                metadata,
             },
         )
         .await
@@ -20862,7 +20957,7 @@ async fn account_passkey_login_finish_inner(
         .http_only(true)
         .same_site(cookie::SameSite::Strict)
         .path("/")
-        .max_age(cookie::time::Duration::days(ACCOUNT_SESSION_TTL_DAYS))
+        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
         .build();
     // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
     let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))

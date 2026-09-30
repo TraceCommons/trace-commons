@@ -3836,6 +3836,7 @@ impl Database for PgBackend {
         let row = tx
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
+                        s.expires_at,
                         (s.token_hash = $1) AS matched_current,
                         (s.token_issued_at < now() - make_interval(secs => $2)) AS needs_rotate,
                         b.state AS binding_state
@@ -3885,6 +3886,7 @@ impl Database for PgBackend {
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
         let client_kind: String = row.get("client_kind");
+        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
         let needs_rotate: bool = row.get("needs_rotate");
@@ -3959,6 +3961,7 @@ impl Database for PgBackend {
             client_kind,
             rotated_secret,
             binding,
+            expires_at,
         }))
     }
 

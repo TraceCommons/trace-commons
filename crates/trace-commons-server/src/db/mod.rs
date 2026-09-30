@@ -1997,6 +1997,10 @@ pub struct ValidatedSession {
     /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
     /// which is never gated.
     pub binding: crate::account_binding::AccountBindingState,
+    /// The session's absolute expiry, as stored. Rotation-on-use never moves
+    /// it; the auth middleware caps a rotated cookie's Max-Age at what is left
+    /// of it, so a rotated cookie never outlives its row.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A registered passkey resolved for the LOGIN (assertion) path. Carries only

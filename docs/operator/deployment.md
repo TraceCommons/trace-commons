@@ -305,6 +305,18 @@ is refused: the passkey account is closed (its sessions and passkey revoked)
 and the response carries the existing account's session. Nothing moves between
 the two accounts; folding the passkey into the existing account is not built.
 
+### Browser passkey step-up page (Z2 S7)
+
+`GET /account/step-up` is where the native app sends a person to add or remove
+a passkey or change the payout, which a weak native session cannot do. It runs
+the browser passkey sign-in on the ingest origin, so that origin must be on the
+origin list above, e.g.
+`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://tracecommons.ai,https://ingest.tracecommons.ai`.
+Without it the page loads but every sign-in is refused. There is no other
+setting; with the relying party or the account database unset, the page is a
+scriptless 503. The URL contract, headers and log labels are in
+[`native-step-up-page.md`](./native-step-up-page.md).
+
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
 NEAR enrollment and login require the NEAR configuration. All **three** of these

@@ -19,6 +19,8 @@ mod public_run_lifecycle_tests;
 mod public_run_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
+#[path = "tests/step_up_page_tests.rs"]
+mod step_up_page_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
@@ -83338,8 +83340,12 @@ fn softpasskey_authenticate_discoverable(
 
 /// Call `login/start` and return `(challenge_json, ceremony_cookie_pair)`.
 async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, String) {
-    let response =
-        account_passkey_login_start_handler(State(state.clone()), HeaderMap::new()).await;
+    let response = account_passkey_login_start_handler(
+        State(state.clone()),
+        HeaderMap::new(),
+        axum::extract::RawQuery(None),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -94357,6 +94363,7 @@ impl Database for NativeAuthTestDb {
                 client_kind: s.client_kind.clone(),
                 rotated_secret: rotated_secret.clone(),
                 binding,
+                expires_at: s.expires_at,
             });
         // The binding state is read in the same query as the session, so a
         // failure is a failure of the whole validation.
