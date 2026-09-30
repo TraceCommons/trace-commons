@@ -591,10 +591,10 @@ pub struct PipelineReviewClaim {
 }
 
 /// A worker's exclusive, time-boxed claim on one queued index invalidation
-/// (`PgPipelineStore::claim_index_invalidation`). The claim moves the row's
-/// `next_attempt_at` to `lease_expires_at`, so no other claim gets the row
-/// before then. `attempt_count` is the number of attempts charged before
-/// this one.
+/// (`PgPipelineStore::claim_due_index_invalidations`). The claim moves the
+/// row's `next_attempt_at` to `lease_expires_at`, so no other claim gets the
+/// row before then. `attempt_count` is the number of attempts charged
+/// before this one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineIndexInvalidationClaim {
     pub tenant_id: String,
@@ -602,6 +602,18 @@ pub struct PipelineIndexInvalidationClaim {
     pub registry_revision_id: Uuid,
     pub attempt_count: u32,
     pub lease_expires_at: DateTime<Utc>,
+}
+
+/// The follow-up steps the worker runs for a tenant after draining its runs:
+/// the index invalidation pass (`PipelineService::process_index_invalidations`)
+/// and the payout pass (`PipelineService::process_payouts`). As
+/// `PipelineService::take_follow_ups` returns it, the steps this service
+/// queued work for since the worker last took them (Zaki review 1, round 2,
+/// item 4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelineFollowUps {
+    pub index_invalidations: bool,
+    pub payouts: bool,
 }
 
 /// Where one follow-up of a withdrawal stands.
@@ -2272,81 +2284,71 @@ impl PgPipelineStore {
         Ok(requeued)
     }
 
-    /// Up to `limit` (clamped to 1..=500) of `tenant_id`'s index
-    /// invalidations that are due: `pending`, not held by a claim's lease
-    /// or waiting out a retry's backoff, and with an attempt left. Oldest
-    /// due first.
-    pub async fn list_due_index_invalidations(
-        &self,
-        tenant_id: &str,
-        limit: usize,
-    ) -> Result<Vec<Uuid>, DatabaseError> {
-        let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let rows = tx
-            .query(
-                "SELECT run_id FROM pipeline_index_invalidations
-                  WHERE tenant_id = $1 AND state = 'pending'
-                    AND next_attempt_at <= NOW() AND attempt_count < max_attempts
-                  ORDER BY next_attempt_at, run_id
-                  LIMIT $2",
-                &[&tenant_id, &limit],
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(rows.iter().map(|row| row.get("run_id")).collect())
-    }
-
-    /// Claims `run_id`'s index invalidation for one attempt, if it is due
-    /// (as `list_due_index_invalidations` defines it), and holds it for
-    /// `lease`: the claim moves `next_attempt_at` to the lease's end in the
-    /// same statement that checks the row is due. Two claims at once
-    /// serialize on the row lock, and the second then finds the row no
-    /// longer due, so only one gets it. `None` when the row is not due,
-    /// not `pending`, out of attempts, or not `tenant_id`'s.
+    /// Claims up to `limit` (clamped to 1..=500) of `tenant_id`'s index
+    /// invalidations that are due -- `pending`, not held by a claim's lease
+    /// or waiting out a retry's backoff, and with an attempt left, oldest due
+    /// first -- each for one attempt, and holds them for `lease`. Listing and
+    /// claiming are one statement (Zaki review 1, round 2, item 4): it
+    /// selects the due rows `FOR UPDATE SKIP LOCKED` and moves their
+    /// `next_attempt_at` to the lease's end. A row another claim has locked
+    /// is skipped, and a row it claimed is no longer due, so two claims at
+    /// once never get the same row. Only `tenant_id`'s own queue is read.
     ///
     /// The claim charges no attempt: only `fail_index_invalidation` charges
     /// one, for a failure that waiting cannot heal. An index outage
     /// (`retry_index_invalidation`) is not charged, and neither is an
     /// attempt that never reports back (the worker died): the row is due
     /// again once the lease has passed, the way a run's expired lease is.
-    pub async fn claim_index_invalidation(
+    ///
+    /// The claims come back in run id order.
+    pub async fn claim_due_index_invalidations(
         &self,
         tenant_id: &str,
-        run_id: Uuid,
+        limit: usize,
         lease: Duration,
-    ) -> Result<Option<PipelineIndexInvalidationClaim>, DatabaseError> {
+    ) -> Result<Vec<PipelineIndexInvalidationClaim>, DatabaseError> {
+        let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
         let lease_milliseconds = lease.num_milliseconds().max(1);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let row = tx
-            .query_opt(
+        let rows = tx
+            .query(
                 "UPDATE pipeline_index_invalidations
                     SET next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 millisecond')
-                  WHERE tenant_id = $1 AND run_id = $2
-                    AND state = 'pending'
-                    AND next_attempt_at <= NOW()
-                    AND attempt_count < max_attempts
-                  RETURNING registry_revision_id, attempt_count, next_attempt_at",
-                &[&tenant_id, &run_id, &lease_milliseconds],
+                  WHERE tenant_id = $1
+                    AND (tenant_id, run_id) IN (
+                        SELECT tenant_id, run_id FROM pipeline_index_invalidations
+                         WHERE tenant_id = $1 AND state = 'pending'
+                           AND next_attempt_at <= NOW() AND attempt_count < max_attempts
+                         ORDER BY next_attempt_at, run_id
+                         LIMIT $2
+                         FOR UPDATE SKIP LOCKED
+                    )
+                  RETURNING run_id, registry_revision_id, attempt_count, next_attempt_at",
+                &[&tenant_id, &limit, &lease_milliseconds],
             )
             .await?;
         tx.commit().await?;
-        row.map(|row| {
-            Ok(PipelineIndexInvalidationClaim {
-                tenant_id: tenant_id.to_string(),
-                run_id,
-                registry_revision_id: row.get("registry_revision_id"),
-                attempt_count: u32::try_from(row.get::<_, i32>("attempt_count")).map_err(|_| {
-                    DatabaseError::Serialization(
-                        "invalid index invalidation attempt count".to_string(),
-                    )
-                })?,
-                lease_expires_at: row.get("next_attempt_at"),
+        let mut claims = rows
+            .iter()
+            .map(|row| {
+                Ok(PipelineIndexInvalidationClaim {
+                    tenant_id: tenant_id.to_string(),
+                    run_id: row.get("run_id"),
+                    registry_revision_id: row.get("registry_revision_id"),
+                    attempt_count: u32::try_from(row.get::<_, i32>("attempt_count")).map_err(
+                        |_| {
+                            DatabaseError::Serialization(
+                                "invalid index invalidation attempt count".to_string(),
+                            )
+                        },
+                    )?,
+                    lease_expires_at: row.get("next_attempt_at"),
+                })
             })
-        })
-        .transpose()
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        claims.sort_by_key(|claim| claim.run_id);
+        Ok(claims)
     }
 
     /// Locks the claimed invalidation's run row, on the caller's
@@ -5071,6 +5073,7 @@ impl PipelineServiceBuilder {
             privacy: self.privacy,
             payout: self.payout,
             novelty_utility_checks: self.novelty_utility_checks,
+            follow_ups: std::sync::Mutex::new(BTreeMap::new()),
         };
         service
             .construct(service.default_package.clone())
@@ -5100,6 +5103,9 @@ pub struct PipelineService {
     privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     payout: Option<(Arc<dyn NearPayoutAdapter>, PipelinePayoutConfig)>,
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
+    /// The follow-up steps this service queued work for, per tenant, since
+    /// the worker last took them (`take_follow_ups`).
+    follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
 }
 
 impl PipelineService {
@@ -5170,6 +5176,34 @@ impl PipelineService {
             .as_ref()
             .filter(|(_, config)| config.enabled)
             .map(|(_, config)| config.confirmation_interval)
+    }
+
+    /// Takes the follow-up steps this service queued work for on
+    /// `tenant_id` since the last call, and clears them: the index
+    /// invalidation step once a withdrawal, a cancelled index write, or a
+    /// requeue queued an invalidation, and the payout step once Settle
+    /// completed a Trace Credit leg. The worker runs a woken step at once,
+    /// instead of waiting out its interval (Zaki review 1, round 2, item 4).
+    /// Only this process's own work wakes a step; another replica's waits
+    /// for the interval.
+    pub fn take_follow_ups(&self, tenant_id: &str) -> PipelineFollowUps {
+        self.follow_ups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(tenant_id)
+            .unwrap_or_default()
+    }
+
+    /// Marks `wake`'s steps as having work for `tenant_id`
+    /// (`take_follow_ups`).
+    fn wake_follow_ups(&self, tenant_id: &str, wake: PipelineFollowUps) {
+        let mut follow_ups = self
+            .follow_ups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let woken = follow_ups.entry(tenant_id.to_string()).or_default();
+        woken.index_invalidations |= wake.index_invalidations;
+        woken.payouts |= wake.payouts;
     }
 
     /// The configuration of `main`'s `NoveltyUtility` credit checks this
@@ -5246,16 +5280,50 @@ impl PipelineService {
         actor_principal_ref: &str,
         account_id: Option<Uuid>,
     ) -> anyhow::Result<PipelineWithdrawalOutcome> {
-        Ok(self
+        let outcome = self
             .store
             .withdraw_submission(tenant_id, submission_id, actor_principal_ref, account_id)
-            .await?)
+            .await?;
+        if outcome.index_invalidation == PipelineWithdrawalFollowUpState::Pending {
+            self.wake_follow_ups(
+                tenant_id,
+                PipelineFollowUps {
+                    index_invalidations: true,
+                    payouts: false,
+                },
+            );
+        }
+        Ok(outcome)
     }
 
-    /// Processes up to `limit` of `tenant_id`'s due index invalidations
-    /// (`process_index_invalidation` each) and returns how many it recorded
-    /// a result for. Only `tenant_id`'s own queue is read. A database error
-    /// ends the pass; the invalidation it was on waits out its claim's
+    /// Re-enqueues every `failed` index invalidation of `tenant_id`
+    /// (`PgPipelineStore::requeue_failed_index_invalidations`) and returns
+    /// how many; when there were any, the worker's next pass takes them up.
+    pub async fn requeue_failed_index_invalidations(&self, tenant_id: &str) -> anyhow::Result<u64> {
+        let requeued = self
+            .store
+            .requeue_failed_index_invalidations(tenant_id)
+            .await?;
+        if requeued > 0 {
+            self.wake_follow_ups(
+                tenant_id,
+                PipelineFollowUps {
+                    index_invalidations: true,
+                    payouts: false,
+                },
+            );
+        }
+        Ok(requeued)
+    }
+
+    /// Processes up to `limit` of `tenant_id`'s due index invalidations and
+    /// returns how many it recorded a result for. Only `tenant_id`'s own
+    /// queue is read. One statement claims them all
+    /// (`PgPipelineStore::claim_due_index_invalidations`, leased for the
+    /// Settle phase's lease, since Settle is the phase that writes the
+    /// index), and each claim is then processed in turn
+    /// (`process_claimed_index_invalidation`). A database error ends the
+    /// pass; each claim it had not recorded a result for waits out its
     /// lease, uncharged.
     pub async fn process_index_invalidations(
         &self,
@@ -5263,13 +5331,13 @@ impl PipelineService {
         limit: usize,
     ) -> anyhow::Result<usize> {
         let mut processed = 0;
-        for run_id in self
+        for claim in self
             .store
-            .list_due_index_invalidations(tenant_id, limit)
+            .claim_due_index_invalidations(tenant_id, limit, self.lease_config.settle())
             .await?
         {
             if self
-                .process_index_invalidation(tenant_id, run_id)
+                .process_claimed_index_invalidation(&claim)
                 .await?
                 .is_some()
             {
@@ -5279,39 +5347,30 @@ impl PipelineService {
         Ok(processed)
     }
 
-    /// One attempt at `run_id`'s queued index invalidation: claims it
-    /// (`PgPipelineStore::claim_index_invalidation`, leased for the Settle
-    /// phase's lease, since Settle is the phase that writes the index),
-    /// removes the queued revision from the index under the tenant's
-    /// storage reference and the index id of the run's committed Score
-    /// evidence, and records the result. `Ok(true)` or `Ok(false)` from the
-    /// index completes the invalidation. An index outage (`Failed` or
-    /// `Uncertain`) is an uncharged retry with backoff
-    /// (`retry_index_invalidation`, Ruling T8-2), so an outage never ends
-    /// the invalidation. Only a failure waiting cannot heal is charged
-    /// (`fail_index_invalidation`), and ends `failed` once the attempts run
-    /// out: Score evidence that names no index, or a `ContentConflict`,
-    /// which the `invalidate_revision` contract rules out.
+    /// One attempt at a claimed index invalidation: removes the queued
+    /// revision from the index under the tenant's storage reference and the
+    /// index id of the run's committed Score evidence, and records the
+    /// result. `Ok(true)` or `Ok(false)` from the index completes the
+    /// invalidation. An index outage (`Failed` or `Uncertain`) is an
+    /// uncharged retry with backoff (`retry_index_invalidation`, Ruling
+    /// T8-2), so an outage never ends the invalidation. Only a failure
+    /// waiting cannot heal is charged (`fail_index_invalidation`), and ends
+    /// `failed` once the attempts run out: Score evidence that names no
+    /// index, or a `ContentConflict`, which the `invalidate_revision`
+    /// contract rules out.
     ///
     /// Returns the run as the recorded result left it, or `None` when this
-    /// call recorded nothing: the invalidation was not due or not claimed,
-    /// or another claim recorded a result first. Each step checks out its
-    /// own pooled connection and returns it before the next, and none is
+    /// call recorded nothing: another claim recorded a result first, or took
+    /// the row over once this claim's lease had passed. Each step checks out
+    /// its own pooled connection and returns it before the next, and none is
     /// held across the index call.
-    pub async fn process_index_invalidation(
+    async fn process_claimed_index_invalidation(
         &self,
-        tenant_id: &str,
-        run_id: Uuid,
+        claim: &PipelineIndexInvalidationClaim,
     ) -> anyhow::Result<Option<PipelineRunRecord>> {
-        let Some(claim) = self
-            .store
-            .claim_index_invalidation(tenant_id, run_id, self.lease_config.settle())
-            .await?
-        else {
-            return Ok(None);
-        };
-        let Some(index_id) = self.committed_index_id(tenant_id, run_id).await? else {
-            return Ok(self.store.fail_index_invalidation(&claim).await?);
+        let tenant_id = claim.tenant_id.as_str();
+        let Some(index_id) = self.committed_index_id(tenant_id, claim.run_id).await? else {
+            return Ok(self.store.fail_index_invalidation(claim).await?);
         };
         let result = self.index_writer.invalidate_revision(
             &pipeline_tenant_storage_ref(tenant_id),
@@ -5319,12 +5378,12 @@ impl PipelineService {
             claim.registry_revision_id,
         );
         Ok(match result {
-            Ok(_) => self.store.complete_index_invalidation(&claim).await?,
+            Ok(_) => self.store.complete_index_invalidation(claim).await?,
             Err(IndexWriteError::Failed | IndexWriteError::Uncertain) => {
-                self.store.retry_index_invalidation(&claim).await?
+                self.store.retry_index_invalidation(claim).await?
             }
             Err(IndexWriteError::ContentConflict) => {
-                self.store.fail_index_invalidation(&claim).await?
+                self.store.fail_index_invalidation(claim).await?
             }
         })
     }
@@ -7326,7 +7385,8 @@ impl PipelineService {
             // submission row (the guard).
             ensure_current_lease(&tx, &run, required_lease_token(&run)?).await?;
             let guard = PgPipelineStore::submission_guard_on_tx(&tx, &run).await?;
-            if !guard.operable {
+            let cancelled = !guard.operable;
+            if cancelled {
                 // `pending` may be partly written: an earlier attempt can
                 // have applied entries and then rolled back. So the cancel
                 // queues an invalidation of the revision in the same
@@ -7381,6 +7441,15 @@ impl PipelineService {
                 run = PgPipelineStore::set_index_write_state_on_tx(&tx, &run, "complete").await?;
             }
             tx.commit().await?;
+            if cancelled {
+                self.wake_follow_ups(
+                    &run.tenant_id,
+                    PipelineFollowUps {
+                        index_invalidations: true,
+                        payouts: false,
+                    },
+                );
+            }
         }
 
         // Step 6: each settlement row Score seeded settles as an independent
@@ -7658,7 +7727,17 @@ impl PipelineService {
                         )
                         .await
                     {
-                        Ok(InternalCreditResult::Complete) => {}
+                        // The completed leg's batch is the payout step's
+                        // work: wake it (Zaki review 1, round 2, item 4).
+                        Ok(InternalCreditResult::Complete) => {
+                            self.wake_follow_ups(
+                                &run.tenant_id,
+                                PipelineFollowUps {
+                                    index_invalidations: false,
+                                    payouts: true,
+                                },
+                            );
+                        }
                         Ok(InternalCreditResult::Held) => {
                             self.store
                                 .update_settlement(

@@ -400,9 +400,12 @@ withdrawal forfeits a Trace Credit leg that was not `complete`, or when
 completed leg is never clawed back, and its NEAR payout is still made (see
 "NEAR payout").
 
-The worker processes the invalidations. On each pass, after a tenant's runs,
-it takes up to 32 of the tenant's due invalidations and removes every index
-entry of the withdrawn revision. An index outage (the index answers `Failed`
+The worker processes the invalidations. After a tenant's runs, at most every
+10 seconds, it claims up to 32 of the tenant's due invalidations and removes
+every index entry of the withdrawn revision. A withdrawal, a cancelled index
+write, or a requeue on this ingest process runs that step on the worker's
+next pass instead; one queued on another replica waits up to 10 seconds. A
+step that claimed 32 runs again on the next pass. An index outage (the index answers `Failed`
 or `Uncertain`) does not charge an attempt: the invalidation stays `pending`
 and is retried after a delay that grows from 1 second to at most 1 hour,
 measured from when it was queued. There is no retry limit, so an
@@ -417,7 +420,7 @@ index. A `failed` invalidation is not final. Once the fault is fixed,
 credential; the tenant is the credential's) moves every `failed`
 invalidation of the tenant back to `pending`, with no attempt charged and
 due at once, and answers `{"requeued": <count>}`; the worker's next pass
-tries each again. Each call appends a `vector_index` audit row with the
+on the same ingest process tries each again. Each call appends a `vector_index` audit row with the
 count (`pipeline_index_invalidations_requeued`) and nothing else. Queuing the same revision's invalidation again (a repeated
 withdrawal, for example) resets it in the same way.
 
@@ -483,10 +486,16 @@ to NEAR.
   only the legs Settle has not completed. A completed leg keeps its credit,
   and its payout line is submitted and confirmed after the withdrawal, as
   `main`'s NEAR submitter pays finalized credit.
+- The worker runs a tenant's payout pass once per confirmation interval
+  (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`), and on
+  its next pass after Settle on the same ingest process completes a Trace
+  Credit leg of the tenant. A pass that processed 32 runs goes again on the
+  next worker pass. A leg completed on another replica is paid within one
+  interval.
 - The payout uses `main`'s per-tenant NEAR submit lock, so a payout pass,
   a second ingest replica, and `main`'s NEAR submitter never submit for one
   tenant at once. When the lock is held, the pass skips the tenant's
-  submits until the next pass, and a direct `process_payout` is refused
+  submits until its next run, and a direct `process_payout` is refused
   with `payout_lock_held`. `main`'s NEAR worker never submits or confirms a
   pipeline outbox row.
 - `main`'s admin outbox routes do not reach a pipeline outbox row (one with

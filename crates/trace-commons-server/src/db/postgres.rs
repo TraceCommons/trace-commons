@@ -7825,6 +7825,8 @@ mod tests {
             "max_attempts INTEGER NOT NULL DEFAULT 5",
             "next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             "pipeline_index_invalidation_attempt_limit",
+            // The worker's claim is per tenant and reads pending rows only.
+            "ON pipeline_index_invalidations (tenant_id, next_attempt_at, run_id)\n    WHERE state = 'pending';",
             "ALTER TABLE pipeline_review_claims FORCE ROW LEVEL SECURITY;",
             "ALTER TABLE pipeline_review_assessments FORCE ROW LEVEL SECURITY;",
             "ALTER TABLE pipeline_index_invalidations FORCE ROW LEVEL SECURITY;",

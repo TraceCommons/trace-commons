@@ -8169,7 +8169,9 @@ async fn index_invalidation_rows(
 /// inoperable and records `cancelled`, and in the same transaction it
 /// queues an invalidation of the revision (due at once); queueing it again
 /// changes nothing. `process_index_invalidations` then removes the entry the
-/// earlier attempt wrote, so it does not stay visible.
+/// earlier attempt wrote, so it does not stay visible. The cancel wakes the
+/// worker's invalidation step (Zaki review 1, round 2, item 4); the
+/// withdrawal here, written straight to the database, woke nothing.
 #[tokio::test]
 async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8208,6 +8210,10 @@ async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
 
     withdraw_submission(&backend, &tenant, run.submission_id).await;
     force_due(&backend, &tenant, run.run_id).await;
+    assert_eq!(
+        service.take_follow_ups(&tenant),
+        PipelineFollowUps::default()
+    );
     let settled = service
         .process_run(&tenant, run.run_id)
         .await
@@ -8216,6 +8222,10 @@ async fn a_cancelled_dispatch_after_a_partial_write_queues_an_invalidation() {
     assert_eq!(settled.state, PipelineRunState::Complete);
     assert_eq!(settled.index_write_state, "cancelled");
     assert_eq!(settled.index_membership, "excluded");
+    assert!(
+        service.take_follow_ups(&tenant).index_invalidations,
+        "the cancel woke the invalidation step"
+    );
 
     let (rows, run_state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
     assert_eq!(
@@ -17259,19 +17269,11 @@ async fn invalidation_is_tenant_scoped() {
     assert_eq!(
         service
             .store()
-            .list_due_index_invalidations(&tenant_b, 32)
+            .claim_due_index_invalidations(&tenant_b, 32, chrono::Duration::minutes(5))
             .await
             .unwrap(),
-        Vec::<uuid::Uuid>::new()
-    );
-    assert_eq!(
-        service
-            .store()
-            .claim_index_invalidation(&tenant_b, run.run_id, chrono::Duration::minutes(5))
-            .await
-            .unwrap(),
-        None,
-        "tenant B cannot claim tenant A's invalidation by its run id"
+        Vec::<PipelineIndexInvalidationClaim>::new(),
+        "tenant B's claim never reaches tenant A's invalidation"
     );
     assert_eq!(
         invalidation_detail(&backend, &tenant_a, run.run_id).await,
@@ -17297,7 +17299,8 @@ async fn invalidation_is_tenant_scoped() {
 /// claims at once, get it only once. Once the lease has passed, another
 /// worker can claim it; the first claim can then no longer record a
 /// failure or an outage (it no longer holds the lease), while the new one
-/// can.
+/// can. Listing and claiming are one statement
+/// (`claim_due_index_invalidations`, Zaki review 1, round 2, item 4).
 #[tokio::test]
 async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
     let Some(backend) = runtime_backend(4).await else {
@@ -17319,8 +17322,8 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
 
     // Two claims at once: exactly one gets it.
     let (left, right) = tokio::join!(
-        store.claim_index_invalidation(&tenant, run.run_id, lease),
-        store.claim_index_invalidation(&tenant, run.run_id, lease),
+        store.claim_due_index_invalidations(&tenant, 32, lease),
+        store.claim_due_index_invalidations(&tenant, 32, lease),
     );
     let claims: Vec<PipelineIndexInvalidationClaim> = [left.unwrap(), right.unwrap()]
         .into_iter()
@@ -17339,27 +17342,21 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
     assert_eq!(held.next_attempt_at, first.lease_expires_at);
     assert!(
         store
-            .list_due_index_invalidations(&tenant, 32)
+            .claim_due_index_invalidations(&tenant, 32, lease)
             .await
             .unwrap()
             .is_empty(),
-        "a claimed invalidation is not due"
-    );
-    assert_eq!(
-        store
-            .claim_index_invalidation(&tenant, run.run_id, lease)
-            .await
-            .unwrap(),
-        None,
-        "a later claim within the lease gets nothing"
+        "a claimed invalidation is not due, so a later claim within the lease gets nothing"
     );
 
     // The lease passes; another worker claims it.
     make_invalidation_due(&tenant, run.run_id).await;
     let second = store
-        .claim_index_invalidation(&tenant, run.run_id, lease)
+        .claim_due_index_invalidations(&tenant, 32, lease)
         .await
         .unwrap()
+        .into_iter()
+        .next()
         .expect("a claim after the lease gets it");
     assert_ne!(second.lease_expires_at, first.lease_expires_at);
     let reclaimed = invalidation_detail(&backend, &tenant, run.run_id).await;
@@ -17393,6 +17390,114 @@ async fn an_invalidation_claim_is_exclusive_until_its_lease_passes() {
         None,
         "one claim records one result"
     );
+}
+
+/// Zaki review 1, round 2, item 4: one statement lists and claims, so one
+/// claim takes up to its limit of the tenant's due invalidations at once,
+/// the next claim takes the rest, and a claim with nothing due takes none.
+/// Each withdrawal that queued an invalidation woke this service's
+/// invalidation step, which the worker takes once. A pass then processes
+/// every claimed invalidation.
+#[tokio::test]
+async fn one_claim_takes_the_tenants_due_invalidations_up_to_its_limit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidate-batch-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let mut run_ids = BTreeSet::new();
+    for _ in 0..3 {
+        let (run, _) = complete_indexed_run(&service, &tenant).await;
+        run_ids.insert(run.run_id);
+    }
+    assert!(
+        !service.take_follow_ups(&tenant).index_invalidations,
+        "nothing queued an invalidation yet"
+    );
+    for run_id in &run_ids {
+        let run = service
+            .store()
+            .get_run(&tenant, *run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        withdraw(&service, &tenant, run.submission_id).await;
+    }
+    assert_eq!(
+        service.take_follow_ups(&tenant),
+        PipelineFollowUps {
+            index_invalidations: true,
+            payouts: false,
+        },
+        "the withdrawals woke the invalidation step"
+    );
+    assert_eq!(
+        service.take_follow_ups(&tenant),
+        PipelineFollowUps::default(),
+        "the worker takes a wakeup once"
+    );
+
+    let store = service.store();
+    let lease = chrono::Duration::minutes(5);
+    let first = store
+        .claim_due_index_invalidations(&tenant, 2, lease)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 2, "one claim takes up to its limit");
+    assert!(
+        first.windows(2).all(|pair| pair[0].run_id < pair[1].run_id),
+        "in run id order"
+    );
+    let rest = store
+        .claim_due_index_invalidations(&tenant, 2, lease)
+        .await
+        .unwrap();
+    assert_eq!(rest.len(), 1, "the next claim takes the rest");
+    let claimed: BTreeSet<uuid::Uuid> = first
+        .iter()
+        .chain(&rest)
+        .map(|claim| claim.run_id)
+        .collect();
+    assert_eq!(claimed, run_ids, "every invalidation was claimed once");
+    for claim in first.iter().chain(&rest) {
+        let detail = invalidation_detail(&backend, &tenant, claim.run_id).await;
+        assert_eq!(detail.next_attempt_at, claim.lease_expires_at);
+        assert_eq!(detail.attempt_count, 0, "a claim charges no attempt");
+    }
+    assert!(
+        store
+            .claim_due_index_invalidations(&tenant, 2, lease)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is due while the claims hold their leases"
+    );
+
+    for run_id in &run_ids {
+        make_invalidation_due(&tenant, *run_id).await;
+    }
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        3
+    );
+    for run_id in &run_ids {
+        assert_eq!(
+            invalidation_detail(&backend, &tenant, *run_id).await.state,
+            "complete"
+        );
+    }
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }
 
 /// The pass never holds two pooled connections at once: on a pool of one,
@@ -18703,6 +18808,8 @@ async fn an_enabled_payout_is_refused_when_mains_allowlists_leave_the_pipeline_o
 /// again only once the confirmation interval has passed, as a `submitted`
 /// one is: within the interval the pass does not resolve the account again,
 /// and after it the pass does -- and pays once the account has a target.
+/// The completed Trace Credit leg woke the worker's payout step (Zaki review
+/// 1, round 2, item 4).
 #[tokio::test]
 async fn a_held_payout_is_resolved_again_only_after_the_confirmation_interval() {
     let Some(backend) = runtime_backend(4).await else {
@@ -18727,6 +18834,10 @@ async fn a_held_payout_is_resolved_again_only_after_the_confirmation_interval() 
     service.register_default_bundle(&tenant).await.unwrap();
     let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
     let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert!(
+        service.take_follow_ups(&tenant).payouts,
+        "the completed Trace Credit leg woke the payout step"
+    );
     assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
     let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(

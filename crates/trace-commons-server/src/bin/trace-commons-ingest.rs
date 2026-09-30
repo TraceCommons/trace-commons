@@ -261,10 +261,10 @@ use trace_commons_server::trace_score_attestation::{
 };
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-    PipelineAdmissionLimits, PipelineLeaseConfig, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineReviewClaim,
-    PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome,
-    is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNoveltyUtilityChecks,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
+    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -17126,7 +17126,7 @@ struct PipelineInvalidationRequeueResponse {
 
 /// `POST /v1/admin/pipeline/index-invalidations/requeue-failed`: re-enqueues
 /// every `failed` index invalidation of the caller's tenant
-/// (`PgPipelineStore::requeue_failed_index_invalidations`), for an operator
+/// (`PipelineService::requeue_failed_index_invalidations`), for an operator
 /// who has fixed the fault that failed them, and answers how many. It needs
 /// `main`'s admin credential, as the other pipeline admin routes do; the
 /// tenant is the credential's. Without a pipeline runtime it is `404`. The
@@ -17140,7 +17140,6 @@ async fn pipeline_requeue_failed_index_invalidations_handler(
     require_admin(tenant.auth())?;
     let pipeline = require_pipeline_service(state.as_ref())?;
     let requeued = pipeline
-        .store()
         .requeue_failed_index_invalidations(tenant.tenant_id())
         .await
         .map_err(internal_error)?;

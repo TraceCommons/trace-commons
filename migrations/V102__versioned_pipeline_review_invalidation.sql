@@ -89,10 +89,12 @@ CREATE TABLE pipeline_index_invalidations (
         ON DELETE CASCADE
 );
 
+-- The worker claims per tenant (`claim_due_index_invalidations` filters
+-- `tenant_id = $1 AND state = 'pending'` and takes the oldest due first),
+-- so the work index leads with the tenant and holds only pending rows.
 CREATE INDEX idx_pipeline_index_invalidations_work
-    ON pipeline_index_invalidations (
-        state, next_attempt_at, requested_at, run_id
-    );
+    ON pipeline_index_invalidations (tenant_id, next_attempt_at, run_id)
+    WHERE state = 'pending';
 
 -- The NEAR payout pass's work list (PgPipelineStore::
 -- list_runs_with_pending_payout): a tenant's batched Trace Credit legs on

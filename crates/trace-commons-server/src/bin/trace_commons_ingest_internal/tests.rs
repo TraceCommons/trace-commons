@@ -11936,6 +11936,101 @@ async fn a_panicking_tenant_batch_marks_the_worker_not_ready_and_the_pass_contin
     );
 }
 
+/// Zaki review 1, round 2, item 4: the worker runs a tenant's index
+/// invalidation step at most every 10 seconds and its payout step at the
+/// confirmation interval, each at once when this process woke it (it queued
+/// an invalidation, or completed a Trace Credit leg), and on a tenant's
+/// first pass. Each step's interval counts from its own last run, each
+/// tenant has its own, a batch that used its whole limit leaves the step due
+/// on the next pass, and a disabled payout never runs.
+#[test]
+fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed() {
+    use super::pipeline_runtime::{PipelineFollowUpCadence, PipelineFollowUpStep};
+    use trace_commons_server::versioned_pipeline::PipelineFollowUps;
+
+    let start = std::time::Instant::now();
+    let at = |seconds: u64| start + StdDuration::from_secs(seconds);
+    let payout_interval = Some(StdDuration::from_secs(60));
+    let steps = |index_invalidations: bool, payouts: bool| PipelineFollowUps {
+        index_invalidations,
+        payouts,
+    };
+    let unwoken = PipelineFollowUps::default();
+    let mut cadence = PipelineFollowUpCadence::default();
+
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(0)),
+        steps(true, true),
+        "a tenant's first pass runs both steps"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(9)),
+        steps(false, false),
+        "within both intervals, nothing woken, neither runs"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(10)),
+        steps(true, false),
+        "the invalidation step runs every 10 seconds"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", steps(true, false), payout_interval, at(11)),
+        steps(true, false),
+        "a queued invalidation wakes the invalidation step at once"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(20)),
+        steps(false, false),
+        "the interval counts from the woken run"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(21)),
+        steps(true, false)
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", steps(false, true), payout_interval, at(22)),
+        steps(false, true),
+        "a completed Trace Credit leg wakes the payout step at once"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(81)),
+        steps(true, false),
+        "the payout step waits out the confirmation interval from its last run"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(82)),
+        steps(false, true)
+    );
+
+    cadence.run_again("tenant-a", PipelineFollowUpStep::Payouts);
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(83)),
+        steps(false, true),
+        "a full payout batch leaves the step due on the next pass"
+    );
+    cadence.run_again("tenant-a", PipelineFollowUpStep::IndexInvalidations);
+    assert_eq!(
+        cadence.due_steps("tenant-a", unwoken, payout_interval, at(84)),
+        steps(true, false),
+        "and so does a full invalidation batch"
+    );
+
+    assert_eq!(
+        cadence.due_steps("tenant-b", unwoken, payout_interval, at(84)),
+        steps(true, true),
+        "each tenant has its own clock"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-c", steps(true, true), None, at(0)),
+        steps(true, false),
+        "a disabled payout never runs, woken or not"
+    );
+    assert_eq!(
+        cadence.due_steps("tenant-c", unwoken, None, at(1_000)),
+        steps(true, false)
+    );
+}
+
 #[tokio::test]
 async fn source_stays_public_on_the_pipeline_app() {
     use super::pipeline_runtime::build_pipeline_app;

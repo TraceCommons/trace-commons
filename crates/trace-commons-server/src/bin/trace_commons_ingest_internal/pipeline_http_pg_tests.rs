@@ -2712,6 +2712,9 @@ async fn mains_admin_outbox_routes_leave_pipeline_payout_lines_alone() {
 /// (`drain_pipeline_tenant`, one tenant's share of a worker pass) processes
 /// the index invalidation a withdrawal queued, with no direct call into the
 /// invalidation pass, so the withdrawn revision's entries leave the index.
+/// The drain before the withdrawal ran the tenant's invalidation step, so
+/// its 10-second interval has not passed: the withdrawal's wakeup is what
+/// runs it again at once (Zaki review 1, round 2, item 4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
     let Some(runtime) = runtime_backend(4).await else {
@@ -2739,6 +2742,10 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
         index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0,
         "Settle wrote the revision's entries"
     );
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone(), cadence.clone()).await;
     service
         .withdraw_submission(&tenant, run.submission_id, &principal, None)
         .await
@@ -2748,7 +2755,7 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
         (1, "pending".to_string())
     );
 
-    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone()).await;
+    pipeline_runtime::drain_pipeline_tenant(service.clone(), tenant.clone(), cadence).await;
 
     assert_eq!(
         index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),

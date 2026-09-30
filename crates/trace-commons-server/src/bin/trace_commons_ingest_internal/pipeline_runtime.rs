@@ -280,14 +280,104 @@ const PIPELINE_WORKER_MAX_RUNS_PER_TENANT: usize = 32;
 const PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT: usize = 32;
 
 /// How many of one tenant's due index invalidations the worker processes
-/// per pass (`PipelineService::process_index_invalidations`), right after
-/// draining its runs. The rest wait for the next pass.
+/// each time it runs the tenant's invalidation step
+/// (`PipelineService::process_index_invalidations`), right after draining
+/// its runs. A step that used the whole limit runs again on the next pass
+/// (`PipelineFollowUpCadence::run_again`).
 const PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT: usize = 32;
 
-/// How many of one tenant's complete runs the worker pays out per pass
-/// (`PipelineService::process_payouts`), after its index invalidations. The
-/// rest wait for the next pass.
+/// How many of one tenant's complete runs the worker pays out each time it
+/// runs the tenant's payout step (`PipelineService::process_payouts`), after
+/// its index invalidations. A step that used the whole limit runs again on
+/// the next pass.
 const PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT: usize = 32;
+
+/// How often the worker runs a tenant's index invalidation step when nothing
+/// woke it (Zaki review 1, round 2, item 4). Invalidations are queued only
+/// by a withdrawal, a cancelled index write, or a requeue, and each of those
+/// wakes the step at once in the process that queued it; the interval
+/// bounds the wait for one another replica queued, a retry's backoff, and a
+/// claim whose lease passed.
+const PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL: StdDuration = StdDuration::from_secs(10);
+
+/// A follow-up step of a tenant's drain, after its runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PipelineFollowUpStep {
+    IndexInvalidations,
+    Payouts,
+}
+
+/// When the worker last ran each tenant's follow-up steps, so an idle
+/// tenant costs no invalidation or payout query on most passes (Zaki review
+/// 1, round 2, item 4). One per worker loop; the run drain and the
+/// staged-receipt sweep are not scheduled here and run on every pass.
+#[derive(Debug, Default)]
+pub(crate) struct PipelineFollowUpCadence {
+    last_run: HashMap<(String, PipelineFollowUpStep), std::time::Instant>,
+}
+
+impl PipelineFollowUpCadence {
+    /// The follow-up steps that run for `tenant_id` on the pass at `now`,
+    /// each recorded as run at `now`. A step runs when `woken` names it
+    /// (this process queued work for it: `PipelineService::take_follow_ups`),
+    /// on the tenant's first pass, and once its interval has passed since it
+    /// last ran: `PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL` for the
+    /// invalidation step, and `payout_interval` -- the payout's confirmation
+    /// interval, `main`'s NEAR cadence -- for the payout step, which never
+    /// runs while `payout_interval` is `None` (payout disabled).
+    pub(crate) fn due_steps(
+        &mut self,
+        tenant_id: &str,
+        woken: PipelineFollowUps,
+        payout_interval: Option<StdDuration>,
+        now: std::time::Instant,
+    ) -> PipelineFollowUps {
+        PipelineFollowUps {
+            index_invalidations: self.take_due(
+                tenant_id,
+                PipelineFollowUpStep::IndexInvalidations,
+                woken.index_invalidations,
+                PIPELINE_WORKER_INDEX_INVALIDATION_INTERVAL,
+                now,
+            ),
+            payouts: payout_interval.is_some_and(|interval| {
+                self.take_due(
+                    tenant_id,
+                    PipelineFollowUpStep::Payouts,
+                    woken.payouts,
+                    interval,
+                    now,
+                )
+            }),
+        }
+    }
+
+    fn take_due(
+        &mut self,
+        tenant_id: &str,
+        step: PipelineFollowUpStep,
+        woken: bool,
+        interval: StdDuration,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = (tenant_id.to_string(), step);
+        let due = woken
+            || self
+                .last_run
+                .get(&key)
+                .is_none_or(|last_run| now.saturating_duration_since(*last_run) >= interval);
+        if due {
+            self.last_run.insert(key, now);
+        }
+        due
+    }
+
+    /// `step` ran for `tenant_id` and used its whole limit, so work may be
+    /// left: it runs again on the next pass.
+    pub(crate) fn run_again(&mut self, tenant_id: &str, step: PipelineFollowUpStep) {
+        self.last_run.remove(&(tenant_id.to_string(), step));
+    }
+}
 
 /// How long the worker sleeps between iterations when `stop` does not fire
 /// first.
@@ -375,21 +465,26 @@ fn pipeline_worker_task_failure_class(join_error: &tokio::task::JoinError) -> &'
 /// never the tenant id or the error's own text -- and ends this tenant's
 /// batch for the pass.
 ///
-/// Then, whatever the runs did, it processes up to
+/// Then, whatever the runs did, it runs the follow-up steps `cadence` finds
+/// due (`PipelineFollowUpCadence::due_steps`, with the steps this service
+/// woke): it processes up to
 /// `PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT` of the tenant's due
 /// index invalidations (`process_index_invalidations`, which removes a
-/// withdrawn or cancelled revision from the index), pays out up to
+/// withdrawn or cancelled revision from the index), and pays out up to
 /// `PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT` of the tenant's complete runs
-/// (`process_payouts`, which does nothing unless payout is enabled; Ruling
-/// S7 puts the invalidations right after the runs and the payouts after
-/// them), and sweeps up to
+/// (`process_payouts`; Ruling S7 puts the invalidations right after the runs
+/// and the payouts after them). Last, on every pass, it sweeps up to
 /// `PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT` of the tenant's receipt
 /// attempts that never committed: each staged object whose
 /// row's `cleanup_after` has passed is deleted with its row. An
 /// invalidation, payout, or sweep failure is logged the same way, and the
 /// drain goes on to the next step. All of it runs in the pass's supervised
 /// task for the tenant (`run_pipeline_worker_pass`).
-pub(crate) async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_id: String) {
+pub(crate) async fn drain_pipeline_tenant(
+    service: Arc<PipelineService>,
+    tenant_id: String,
+    cadence: Arc<std::sync::Mutex<PipelineFollowUpCadence>>,
+) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
         match service.process_one(&tenant_id).await {
             Ok(Some(_)) => {}
@@ -405,30 +500,59 @@ pub(crate) async fn drain_pipeline_tenant(service: Arc<PipelineService>, tenant_
             }
         }
     }
-    if let Err(error) = service
-        .process_index_invalidations(
-            &tenant_id,
-            PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT,
-        )
-        .await
-    {
-        tracing::warn!(
-            error_class = "pipeline_worker_index_invalidation_failed",
-            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-            error_hash = %safe_display_error_hash(&error),
-            "pipeline worker index invalidation failed"
-        );
+    let lock_cadence = || {
+        cadence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let due = lock_cadence().due_steps(
+        &tenant_id,
+        service.take_follow_ups(&tenant_id),
+        service.payout_confirmation_interval(),
+        std::time::Instant::now(),
+    );
+    if due.index_invalidations {
+        match service
+            .process_index_invalidations(
+                &tenant_id,
+                PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT,
+            )
+            .await
+        {
+            Ok(processed) => {
+                if processed >= PIPELINE_WORKER_MAX_INDEX_INVALIDATIONS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::IndexInvalidations);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_index_invalidation_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker index invalidation failed"
+                );
+            }
+        }
     }
-    if let Err(error) = service
-        .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
-        .await
-    {
-        tracing::warn!(
-            error_class = "pipeline_worker_payout_failed",
-            tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-            error_hash = %safe_display_error_hash(&error),
-            "pipeline worker payout failed"
-        );
+    if due.payouts {
+        match service
+            .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
+            .await
+        {
+            Ok(processed) => {
+                if processed >= PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::Payouts);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_payout_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker payout failed"
+                );
+            }
+        }
     }
     if let Err(error) = service
         .sweep_staged_receipts(&tenant_id, PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT)
@@ -469,6 +593,7 @@ pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
 fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
     let tenant_ids = pipeline_worker_tenant_ids(&state);
+    let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
     let ready = state.pipeline_worker_ready.clone();
     let worker_ready = ready.clone();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
@@ -479,7 +604,9 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
             run_pipeline_worker_pass(
                 async move { probe_service.readiness().await },
                 tenant_ids.clone(),
-                |tenant_id| drain_pipeline_tenant(drain_service.clone(), tenant_id),
+                |tenant_id| {
+                    drain_pipeline_tenant(drain_service.clone(), tenant_id, cadence.clone())
+                },
                 &worker_ready,
                 &stop_rx,
             )
