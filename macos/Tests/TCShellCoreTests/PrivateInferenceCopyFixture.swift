@@ -78,6 +78,7 @@ enum PrivateInferenceCopyFixture {
          "credential_wallet_notice":"WALLET-NOTICE",
          "credential_cancel":"C-CANCEL","credential_forget":"C-FORGET",
          "credential_forget_explains":"C-FORGET-EXPLAINS",
+         "credential_migrate":"C-MIGRATE","credential_migrate_explains":"C-MIGRATE-EXPLAINS",
          "credential_absent":"C-ABSENT","credential_obtaining":"C-OBTAINING",
          "credential_failed":"C-FAILED","credential_cancelled":"C-CANCELLED",
          "credential_present":"C-PRESENT","credential_unknown":"C-UNKNOWN",

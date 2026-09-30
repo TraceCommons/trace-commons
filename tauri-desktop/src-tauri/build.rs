@@ -97,6 +97,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "quit_confirmation_copy",
     "cancel_private_ai_credential",
     "forget_private_ai_credential",
+    "migrate_private_ai_credential",
     "native_wallet_flow",
     "contributor_disclosure_copy",
     "witness_review_copy",

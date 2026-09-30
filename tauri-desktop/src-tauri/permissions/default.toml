@@ -88,6 +88,7 @@ permissions = [
   "allow-quit-confirmation-copy",
   "allow-cancel-private-ai-credential",
   "allow-forget-private-ai-credential",
+  "allow-migrate-private-ai-credential",
   "allow-native-wallet-flow",
   "allow-near-ai-account-enroll",
   "allow-prepare-admission-session",
