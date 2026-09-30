@@ -1560,7 +1560,43 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "unbound_account_reaper",
         include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
     ),
+    // #1135 review: closed-but-not-yet-reaped passkey accounts count against
+    // the unbound ceiling. Supersedes V101's note that closed rows fall
+    // outside V98's count. Depends only on V97 and V98.
+    (
+        102,
+        "passkey_ceiling_counts_closed",
+        include_str!("../../../../migrations/V102__passkey_ceiling_counts_closed.sql"),
+    ),
 ];
+
+/// One account's active strong authenticators (unrevoked passkeys plus
+/// unrevoked NEAR identities), inside a transaction already scoped to its
+/// tenant. The single definition of the count: `count_active_strong_
+/// authenticators` and bind's existing-account branch both read it here.
+pub(super) async fn active_strong_authenticator_count(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: &Uuid,
+) -> Result<i64, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT (
+                SELECT count(*) FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) + (
+                SELECT count(*) FROM trace_near_identities
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND revoked_at IS NULL
+              ) AS strong_count",
+            &[account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.get("strong_count"))
+}
 
 #[async_trait]
 impl Database for PgBackend {
@@ -4673,25 +4709,9 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let row = tx
-            .query_one(
-                "SELECT (
-                    SELECT count(*) FROM trace_webauthn_credentials
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) + (
-                    SELECT count(*) FROM trace_near_identities
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND revoked_at IS NULL
-                  ) AS strong_count",
-                &[&account_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let strong = active_strong_authenticator_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(row.get("strong_count"))
+        Ok(strong)
     }
 
     async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {

@@ -187,6 +187,14 @@ struct Unbound {
 }
 
 async fn unbound_account(backend: &PgBackend) -> Unbound {
+    unbound_account_under(backend, i64::MAX)
+        .await
+        .expect("create an unbound account")
+}
+
+/// [`unbound_account`] under an explicit ceiling: `None` when S2's creator
+/// refused at the ceiling, which writes nothing.
+async fn unbound_account_under(backend: &PgBackend, ceiling: i64) -> Option<Unbound> {
     let tenant = trace_commons_server::near_account_identity::random_near_ai_tenant_id();
     let account_id = Uuid::new_v4();
     let secret = generate_session_secret();
@@ -202,19 +210,22 @@ async fn unbound_account(backend: &PgBackend) -> Unbound {
                 client_kind: NATIVE_SESSION_CLIENT_KIND,
                 expires_at: Utc::now() + Duration::hours(1),
             },
-            ceiling: i64::MAX,
+            ceiling,
         })
         .await
         .expect("create an unbound account");
+    if outcome == trace_commons_server::db::PasskeyOriginAccountOutcome::CeilingReached {
+        return None;
+    }
     assert_eq!(
         outcome,
         trace_commons_server::db::PasskeyOriginAccountOutcome::Created
     );
-    Unbound {
+    Some(Unbound {
         token: native_token_value(&tenant, &secret),
         tenant,
         account_id,
-    }
+    })
 }
 
 /// A daemon's device key.
@@ -1804,4 +1815,417 @@ async fn pg_bind_shares_the_near_ai_provisioning_rate_budget() {
 
     reset_account_rate_limiter_for_test();
     drop_tenants(&admin, &[&account.tenant]).await;
+}
+
+// --- #1135 review follow-ups -------------------------------------------------
+
+/// The wire label a bind answers with when its device key is already
+/// registered to another account.
+const DEVICE_KEY_REGISTERED_ELSEWHERE_WIRE: &str = "device_key_registered_elsewhere";
+
+/// The daemon's device key already belongs to another tenant (this Mac ran
+/// provisioning for someone else first). Bind refuses **by name**, with a
+/// status the client can tell apart from a generic failure, rather than the
+/// uniform deny; P stays unbound with nothing linked, no key is minted for
+/// it, and the tenant that holds the key is untouched and never named.
+#[tokio::test]
+async fn pg_a_device_key_registered_elsewhere_is_refused_by_name() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let Some(other) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let device = Device::new();
+    // Y: an ordinary NEAR AI provisioning, under a different subject, that
+    // registered this device first.
+    let y = provision(&other, &device).await;
+    let y_tenant = y["tenant_id"].as_str().expect("tenant").to_string();
+    let y_rows = linked_rows(&admin, &y_tenant).await;
+
+    let p = unbound_account(&h.backend).await;
+    let reply = bind(&h, &p, &device).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.json());
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({ "error": DEVICE_KEY_REGISTERED_ELSEWHERE_WIRE }),
+        "the refusal is named, and names nothing but itself"
+    );
+    assert!(
+        !String::from_utf8_lossy(&reply.bytes).contains(&y_tenant),
+        "the holding tenant is not disclosed"
+    );
+    assert_eq!(h.hits(), 1, "the refusal comes after introspection");
+    assert_eq!(
+        binding_row(&admin, &p.tenant, p.account_id).await,
+        ("unbound".to_string(), false)
+    );
+    assert_eq!(linked_rows(&admin, &p.tenant).await, [0; 4]);
+    assert!(
+        anchors_for(&admin, &h.anchor_hash()).await.is_empty(),
+        "the in-place bind rolled back its anchor claim"
+    );
+    assert_eq!(linked_rows(&admin, &y_tenant).await, y_rows, "Y untouched");
+    assert_eq!(
+        audit_metadata(&admin, &p.tenant, "account_binding_failed").await,
+        vec![serde_json::json!({ "stage": DEVICE_KEY_REGISTERED_ELSEWHERE_WIRE })]
+    );
+    // P can still bind from a device nobody holds.
+    let reply = bind(&h, &p, &Device::new()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+    assert_eq!(reply.json()["outcome"], "bound");
+
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&p.tenant, &y_tenant]).await;
+}
+
+/// A finish whose PKCE verifier does not match the challenge the ceremony
+/// committed to is refused before the token is spent, even with a valid
+/// device signature.
+#[tokio::test]
+async fn pg_a_pkce_mismatch_at_bind_finish_is_refused() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let p = unbound_account(&h.backend).await;
+    let device = Device::new();
+    let started = start(&h.state, BIND_START, Some(&p.token), &device).await;
+    let signature = device.sign(&started.signing_bytes);
+    let wrong = Started {
+        verifier: "w".repeat(64),
+        ..started
+    };
+    let reply = finish(
+        &h.state,
+        BIND_FINISH,
+        Some(&p.token),
+        &wrong,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_uniform_deny(&reply, "PKCE mismatch").await;
+    assert_eq!(h.hits(), 0, "the token was never introspected");
+    assert_eq!(
+        binding_row(&admin, &p.tenant, p.account_id).await,
+        ("unbound".to_string(), false)
+    );
+    assert_eq!(linked_rows(&admin, &p.tenant).await, [0; 4]);
+    assert_eq!(
+        audit_metadata(&admin, &p.tenant, "account_binding_failed").await,
+        vec![serde_json::json!({ "stage": "device_proof" })]
+    );
+    drop_tenants(&admin, &[&p.tenant]).await;
+}
+
+/// An expired ceremony is refused at finish even when everything else is
+/// right. Only the stored row's expiry column is moved into the past; the
+/// payload, and so the preimage the device signed, is unchanged, which is
+/// what makes the refusal the expiry check's and not the signature's (the
+/// audit stage says which).
+#[tokio::test]
+async fn pg_an_expired_bind_ceremony_is_refused_at_finish() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let p = unbound_account(&h.backend).await;
+    let device = Device::new();
+    let started = start(&h.state, BIND_START, Some(&p.token), &device).await;
+    let expired = admin
+        .execute(
+            "UPDATE trace_near_provisioning_ceremonies
+                SET expires_at = clock_timestamp() - interval '1 second'
+              WHERE payload->>'account_id' = $1",
+            &[&p.account_id.to_string()],
+        )
+        .await
+        .expect("expire the ceremony");
+    assert_eq!(expired, 1, "exactly P's ceremony");
+    let reply = finish(
+        &h.state,
+        BIND_FINISH,
+        Some(&p.token),
+        &started,
+        &device,
+        &device.sign(&started.signing_bytes),
+    )
+    .await;
+    assert_uniform_deny(&reply, "expired ceremony").await;
+    assert_eq!(h.hits(), 0, "the token was never introspected");
+    assert_eq!(
+        binding_row(&admin, &p.tenant, p.account_id).await,
+        ("unbound".to_string(), false)
+    );
+    assert_eq!(linked_rows(&admin, &p.tenant).await, [0; 4]);
+    assert_eq!(
+        audit_metadata(&admin, &p.tenant, "account_binding_failed").await,
+        vec![serde_json::json!({ "stage": "ceremony" })]
+    );
+    drop_tenants(&admin, &[&p.tenant]).await;
+}
+
+/// What admission reads for one provisioned device, under a fixed policy.
+type AdmissionView = (Uuid, Option<(&'static str, i64, bool, Option<i64>)>, i64);
+
+/// The admission-relevant view of one provisioned device: the account its
+/// principal resolves to, what the admission ledger reports for it, and how
+/// many earned-trust evaluations it has (none means tier 0).
+async fn admission_view(
+    h: &Harness,
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    device_key_id: &str,
+) -> AdmissionView {
+    let row = admin
+        .query_one(
+            "SELECT principal_ref, account_id FROM trace_near_provisioned_devices
+              WHERE tenant_id = $1 AND device_key_id = $2",
+            &[&tenant, &device_key_id],
+        )
+        .await
+        .expect("provisioned device");
+    let principal: String = row.get(0);
+    let account: Uuid = row.get(1);
+    let resolved = trace_commons_server::account_trust::resolve_contribution_account(
+        h.backend.as_ref(),
+        tenant,
+        &principal,
+    )
+    .await
+    .expect("admission resolves the account");
+    assert_eq!(resolved.account_id(), account);
+    assert_eq!(resolved.tenant_id(), tenant);
+    let anchor = h
+        .backend
+        .get_near_provisioned_anchor(tenant, &principal)
+        .await
+        .expect("anchor read")
+        .expect("an admission anchor");
+    assert!(anchor.starts_with("sha256:"), "the stored anchor shape");
+    let policy = trace_commons_server::account_trust::parse_bounded_policy(
+        r#"{"version":"z2-s3-bind-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+        &["z2-s3-bind-fixture"],
+    )
+    .expect("fixture policy");
+    let status = h
+        .backend
+        .account_admission_status(&resolved, &principal, &policy)
+        .await
+        .expect("admission status")
+        .map(|s| (s.authority, s.trust_version, s.ready, s.retry_after_seconds));
+    let evaluations = admin
+        .query_one(
+            "SELECT count(*) FROM trace_account_trust_evaluations
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant, &account],
+        )
+        .await
+        .expect("evaluations")
+        .get(0);
+    (account, status, evaluations)
+}
+
+/// A bound account is, to admission, an ordinary `nearai-` account at tier
+/// 0: its device resolves to it the way an unauthenticated NEAR AI
+/// provisioning's does, it has an admission anchor, the ledger reports what
+/// it reports for a freshly provisioned account, and it has no earned-trust
+/// evaluation. Nothing about having started as a passkey account follows it.
+#[tokio::test]
+async fn pg_admission_sees_a_bound_account_as_an_ordinary_nearai_tier_zero_account() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let Some(other) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+
+    let p = unbound_account(&h.backend).await;
+    let bound = bind(&h, &p, &Device::new()).await;
+    assert_eq!(bound.status, StatusCode::OK, "{:?}", bound.json());
+    let bound = bound.json();
+    assert_eq!(bound["outcome"], "bound");
+    let ordinary = provision(&other, &Device::new()).await;
+    let ordinary_tenant = ordinary["tenant_id"].as_str().expect("tenant").to_string();
+
+    for tenant in [&p.tenant, &ordinary_tenant] {
+        assert!(tenant.starts_with("nearai-"), "{tenant}");
+        assert!(trace_commons_protocol::admission::is_anchored_tenant(
+            tenant
+        ));
+    }
+    let (bound_account, bound_status, bound_evaluations) = admission_view(
+        &h,
+        &admin,
+        &p.tenant,
+        bound["device_key_id"].as_str().expect("device"),
+    )
+    .await;
+    assert_eq!(bound_account, p.account_id);
+    let (_, ordinary_status, ordinary_evaluations) = admission_view(
+        &h,
+        &admin,
+        &ordinary_tenant,
+        ordinary["device_key_id"].as_str().expect("device"),
+    )
+    .await;
+    assert!(bound_status.is_some(), "the ledger reports on the account");
+    assert_eq!(
+        bound_status, ordinary_status,
+        "the ledger treats the bound account as it treats an ordinary one"
+    );
+    assert_eq!(
+        (bound_evaluations, ordinary_evaluations),
+        (0, 0),
+        "no earned-trust evaluation: tier 0"
+    );
+
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&p.tenant, &ordinary_tenant]).await;
+}
+
+/// Closed passkey accounts count against the unbound ceiling until the
+/// reaper removes them, so create-then-close cycles cannot mint accounts past
+/// it. Each close here is the real refuse branch, over the real route.
+#[tokio::test]
+async fn pg_repeated_closes_do_not_escape_the_unbound_ceiling() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    // X holds the subject every bind below uses, so each bind takes the
+    // refuse branch and closes its passkey account.
+    let x = provision(&h, &Device::new()).await;
+    let x_tenant = x["tenant_id"].as_str().expect("tenant").to_string();
+
+    let before = h.backend.count_unbound_passkey_accounts().await.unwrap();
+    let ceiling = before + 2;
+    let mut tenants = vec![x_tenant.clone()];
+    for cycle in 0..2 {
+        let p = unbound_account_under(&h.backend, ceiling)
+            .await
+            .unwrap_or_else(|| panic!("cycle {cycle}: under the ceiling"));
+        tenants.push(p.tenant.clone());
+        let reply = bind(&h, &p, &Device::new()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+        assert_eq!(reply.json()["outcome"], "existing_account");
+        assert_eq!(
+            binding_row(&admin, &p.tenant, p.account_id).await,
+            ("closed".to_string(), false)
+        );
+    }
+    assert_eq!(
+        h.backend.count_unbound_passkey_accounts().await.unwrap(),
+        ceiling,
+        "both closed accounts still count"
+    );
+    let third = unbound_account_under(&h.backend, ceiling).await;
+    if let Some(escaped) = &third {
+        tenants.push(escaped.tenant.clone());
+    }
+    assert!(
+        third.is_none(),
+        "a third account was created past the ceiling by closing the first two"
+    );
+
+    reset_account_rate_limiter_for_test();
+    let refs: Vec<&str> = tenants.iter().map(String::as_str).collect();
+    drop_tenants(&admin, &refs).await;
+}
+
+/// The refuse branch checks P is still unbound **before** it provisions X.
+/// A bind that lost a race (P closed, or bound, after the anchor resolved to
+/// X) must not leave X holding a device and a session that nobody was
+/// handed. Driven through the database call directly, because the route's
+/// precondition refuses a P that is not unbound before this code runs.
+#[tokio::test]
+async fn pg_a_refuse_branch_that_lost_the_race_provisions_nothing_for_x() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let x = provision(&h, &Device::new()).await;
+    let x_tenant = x["tenant_id"].as_str().expect("tenant").to_string();
+    let p = unbound_account(&h.backend).await;
+    // P lost the race: something closed it after the anchor was resolved.
+    admin
+        .execute(
+            "UPDATE trace_account_bindings SET state = 'closed'
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&p.tenant, &p.account_id],
+        )
+        .await
+        .expect("close P");
+    admin
+        .execute(
+            "UPDATE trace_accounts SET closed_at = now()
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&p.tenant, &p.account_id],
+        )
+        .await
+        .expect("close P's account");
+
+    let x_rows = linked_rows(&admin, &x_tenant).await;
+    let x_sessions = count(
+        &admin,
+        "SELECT count(*) FROM trace_sessions WHERE tenant_id = $1",
+        &[&x_tenant],
+    )
+    .await;
+    let login = trace_commons_server::near_ai_login::introspect_login(
+        &h.near_ai_base,
+        &SecretString::from("near-ai-access-token-fixture".to_string()),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("stub introspection");
+    let secret = generate_session_secret();
+    let refused = h
+        .backend
+        .bind_near_ai_login(
+            &p.tenant,
+            p.account_id,
+            &login,
+            &Device::new().public_bytes(),
+            trace_commons_server::db::NewSession {
+                token_hash: &hash_secret(&secret),
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at: Utc::now() + Duration::hours(1),
+            },
+            &identity(),
+        )
+        .await;
+    match refused {
+        Err(trace_commons_server::error::DatabaseError::Pool(label)) => {
+            assert_eq!(label, "near_ai_bind_account_not_unbound")
+        }
+        other => panic!("expected the not-unbound refusal, got {other:?}"),
+    }
+    assert_eq!(
+        linked_rows(&admin, &x_tenant).await,
+        x_rows,
+        "X gained no device, principal or provisioned-device row"
+    );
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_sessions WHERE tenant_id = $1",
+            &[&x_tenant],
+        )
+        .await,
+        x_sessions,
+        "X gained no orphan session"
+    );
+
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&p.tenant, &x_tenant]).await;
 }
