@@ -1572,6 +1572,9 @@ const PHASE_OUTCOME_IMMUTABILITY_TRIGGERS: [&str; 2] = [
     "phase_outcomes_reject_delete",
 ];
 
+/// The function both immutability triggers call (V92).
+const PHASE_OUTCOME_IMMUTABILITY_FUNCTION: &str = "reject_phase_outcome_mutation";
+
 /// The operational summary's two control booleans.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1581,16 +1584,21 @@ pub struct PipelineControlHealth {
 }
 
 /// Reads the operational summary's two controls from the catalog, in `tx`,
-/// failing closed (Ruling F-I4):
+/// failing closed (Ruling F-I4), and checking what makes each control work,
+/// not only its flags (Zaki review 1, round 2, finding 10):
 ///
-/// - Tenant isolation passes only when every table in `rls_tables` is a
-///   table in the current schema, the schema the unqualified pipeline
-///   queries resolve to, and has row-level security enabled and forced. A
-///   name the catalog does not hold there (misspelled, dropped, or in
-///   another schema) fails it, and so does an empty list.
+/// - Tenant isolation is `main`'s own RLS check
+///   (`trace_corpus_rls_catalog_diagnostics`, the catalog half of
+///   `trace_corpus_rls_diagnostics`) over `rls_tables`: each is a table in
+///   the current schema with row-level security enabled and forced and the
+///   tenant policy installed with the expected expression, and the current
+///   role cannot bypass it. A name the catalog does not hold there, a
+///   `USING (true)` policy, a superuser or `BYPASSRLS` role, and an empty
+///   list each fail it.
 /// - Audit immutability passes only when both of `phase_outcomes`'
-///   immutability triggers exist on that table in the current schema and
-///   neither is disabled (`tgenabled = 'D'`).
+///   immutability triggers exist on that table in the current schema, fire
+///   for ordinary sessions (`tgenabled` `O` or `A`: not disabled, not
+///   replica-only), and call `reject_phase_outcome_mutation`.
 ///
 /// Public only so the runtime suite can check it against a catalog it
 /// changed in a transaction it rolls back; `operational_summary` is its one
@@ -1600,37 +1608,29 @@ pub async fn pipeline_control_health(
     tx: &tokio_postgres::Transaction<'_>,
     rls_tables: &[&str],
 ) -> Result<PipelineControlHealth, DatabaseError> {
+    let isolation =
+        crate::db::postgres::trace_corpus_rls_catalog_diagnostics(tx, rls_tables).await?;
     let row = tx
         .query_one(
-            "SELECT
-                (
-                    SELECT COALESCE(
-                               bool_and(
-                                   COALESCE(c.relrowsecurity AND c.relforcerowsecurity, FALSE)
-                               ),
-                               FALSE
-                           )
-                      FROM unnest($1::text[]) AS expected(name)
-                      LEFT JOIN pg_class c
-                        ON c.relname = expected.name
-                       AND c.relnamespace = to_regnamespace(current_schema())
-                       AND c.relkind IN ('r', 'p')
-                ) AS tenant_isolation_passed,
-                (
-                    SELECT COUNT(*) = 2
-                      FROM pg_trigger t
-                      JOIN pg_class c ON c.oid = t.tgrelid
-                     WHERE c.relname = 'phase_outcomes'
-                       AND c.relnamespace = to_regnamespace(current_schema())
-                       AND NOT t.tgisinternal
-                       AND t.tgenabled <> 'D'
-                       AND t.tgname = ANY($2)
-                ) AS audit_immutability_passed",
-            &[&rls_tables, &PHASE_OUTCOME_IMMUTABILITY_TRIGGERS.as_slice()],
+            "SELECT COUNT(*) = 2 AS audit_immutability_passed
+               FROM pg_trigger t
+               JOIN pg_class c ON c.oid = t.tgrelid
+               JOIN pg_proc f ON f.oid = t.tgfoid
+              WHERE c.relname = 'phase_outcomes'
+                AND c.relnamespace = to_regnamespace(current_schema())
+                AND NOT t.tgisinternal
+                AND t.tgenabled IN ('O', 'A')
+                AND t.tgname = ANY($1)
+                AND f.proname = $2
+                AND f.pronamespace = to_regnamespace(current_schema())",
+            &[
+                &PHASE_OUTCOME_IMMUTABILITY_TRIGGERS.as_slice(),
+                &PHASE_OUTCOME_IMMUTABILITY_FUNCTION,
+            ],
         )
         .await?;
     Ok(PipelineControlHealth {
-        tenant_isolation_passed: row.get("tenant_isolation_passed"),
+        tenant_isolation_passed: isolation.tables_isolated(),
         audit_immutability_passed: row.get("audit_immutability_passed"),
     })
 }

@@ -21210,6 +21210,11 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
     tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update")
         .await
         .unwrap();
+    // The rest of the check runs as the runtime login, which cannot bypass
+    // row-level security, so the isolation control can pass.
+    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+        .await
+        .unwrap();
     let disabled = pipeline_control_health(&tx, &["phase_outcomes"])
         .await
         .unwrap();
@@ -21218,6 +21223,77 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
         "a disabled immutability trigger fails the control"
     );
     assert!(disabled.tenant_isolation_passed);
+    tx.rollback().await.unwrap();
+}
+
+/// Finding 10: the controls check what makes them work, not only catalog
+/// flags. Each change is made in a transaction this test rolls back, and
+/// checked as the runtime login unless the case is the role itself:
+///
+/// - an immutability trigger switched to fire only for replica sessions
+///   (`ENABLE REPLICA`) fails the audit control;
+/// - an immutability trigger made to call another function (one that
+///   returns the row) fails it;
+/// - a `USING (true)` tenant policy fails the isolation control;
+/// - a role that bypasses row-level security (the owner superuser here)
+///   fails the isolation control, whatever the tables' flags.
+#[tokio::test]
+async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
+    let Some(_backend) = runtime_backend(2).await else {
+        return;
+    };
+    let tables = ["pipeline_runs", "phase_outcomes"];
+    let mut owner = owner_client().await;
+    for (case, change) in [
+        (
+            "replica-only trigger",
+            "ALTER TABLE phase_outcomes ENABLE REPLICA TRIGGER phase_outcomes_reject_update",
+        ),
+        (
+            "replaced trigger function",
+            "CREATE FUNCTION pipeline_control_test_pass_through() RETURNS trigger
+                 LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+             DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 BEFORE UPDATE ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION pipeline_control_test_pass_through();",
+        ),
+        (
+            "USING (true) policy",
+            "DROP POLICY trace_corpus_tenant_isolation ON pipeline_runs;
+             CREATE POLICY trace_corpus_tenant_isolation ON pipeline_runs
+                 USING (true) WITH CHECK (true);",
+        ),
+    ] {
+        let tx = owner.transaction().await.unwrap();
+        tx.batch_execute(change)
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+            .await
+            .unwrap();
+        let controls = pipeline_control_health(&tx, &tables).await.unwrap();
+        if case == "USING (true) policy" {
+            assert!(!controls.tenant_isolation_passed, "{case}");
+            assert!(controls.audit_immutability_passed, "{case}");
+        } else {
+            assert!(!controls.audit_immutability_passed, "{case}");
+            assert!(controls.tenant_isolation_passed, "{case}");
+        }
+        tx.rollback().await.unwrap();
+    }
+
+    let tx = owner.transaction().await.unwrap();
+    let as_owner = pipeline_control_health(&tx, &tables).await.unwrap();
+    assert!(
+        !as_owner.tenant_isolation_passed,
+        "a role that bypasses row-level security fails the isolation control"
+    );
+    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+        .await
+        .unwrap();
+    let as_runtime = pipeline_control_health(&tx, &tables).await.unwrap();
+    assert!(as_runtime.tenant_isolation_passed && as_runtime.audit_immutability_passed);
     tx.rollback().await.unwrap();
 }
 

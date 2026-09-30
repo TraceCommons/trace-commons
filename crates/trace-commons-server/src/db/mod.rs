@@ -101,6 +101,22 @@ impl TraceCorpusRlsDiagnostics {
             && self.force_rls_enabled_count == self.expected_table_count
     }
 
+    /// `rls_ready` and `force_rls_ready` for the tables checked, without the
+    /// transaction-local tenant-context probe: every table has row-level
+    /// security enabled and forced and the tenant policy with the expected
+    /// expression, and the current role cannot bypass it.
+    pub fn tables_isolated(&self) -> bool {
+        self.expected_table_count > 0
+            && self.missing_policy_tables.is_empty()
+            && self.rls_disabled_tables.is_empty()
+            && self.policy_expression_mismatch_tables.is_empty()
+            && self.policy_installed_count == self.expected_table_count
+            && self.rls_enabled_count == self.expected_table_count
+            && self.force_rls_ready()
+            && !self.current_role_bypasses_rls
+            && !self.current_role_owns_trace_tables
+    }
+
     pub fn production_ready(&self) -> bool {
         self.rls_ready() && self.force_rls_ready()
     }

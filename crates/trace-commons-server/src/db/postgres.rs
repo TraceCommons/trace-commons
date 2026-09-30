@@ -2077,150 +2077,11 @@ impl Database for PgBackend {
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
-        let expected_tables = TRACE_COMMONS_RLS_TABLES
-            .iter()
-            .map(|table| (*table).to_string())
-            .collect::<Vec<_>>();
-        let expected_policy_expressions = TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS
-            .iter()
-            .map(|expression| (*expression).to_string())
-            .collect::<Vec<_>>();
-        let rows = client
-            .query(
-                "SELECT
-                    c.relname,
-                    c.relrowsecurity,
-                    c.relforcerowsecurity,
-                    COALESCE(p.has_policy, false) AS has_policy,
-                    COALESCE(p.expression_matches, false) AS expression_matches
-                 FROM pg_class c
-                 JOIN pg_namespace n ON n.oid = c.relnamespace
-                 LEFT JOIN LATERAL (
-                    SELECT
-                        true AS has_policy,
-                        pol.polcmd = '*'
-                            AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
-                            AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
-                            AS expression_matches
-                        FROM pg_policies p
-                        JOIN pg_policy pol
-                          ON pol.polname = p.policyname
-                         AND pol.polrelid = c.oid
-                        WHERE p.schemaname = n.nspname
-                          AND p.tablename = c.relname
-                          AND p.policyname = 'trace_corpus_tenant_isolation'
-                        LIMIT 1
-                 ) p ON true
-                 WHERE n.nspname = current_schema()
-                   AND c.relkind = 'r'
-                   AND c.relname = ANY($1)",
-                &[&expected_tables, &expected_policy_expressions],
-            )
-            .await?;
-        let current_role = client
-            .query_one(
-                "SELECT
-                    current_user AS current_role_name,
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
-                        WHERE n.nspname = current_schema()
-                          AND c.relkind = 'r'
-                          AND c.relname = ANY($1)
-                          AND r.rolname = current_user
-                    ) AS owns_trace_tables,
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
-                        WHERE n.nspname = current_schema()
-                          AND c.relkind = 'r'
-                          AND c.relname = ANY($1)
-                          AND r.rolname = current_user
-                          AND NOT c.relforcerowsecurity
-                    ) AS owns_unforced_trace_tables,
-                    COALESCE((
-                        SELECT rolsuper OR rolbypassrls
-                        FROM pg_roles
-                        WHERE rolname = current_user
-                    ), false) AS bypass_role",
-                &[&expected_tables],
-            )
-            .await?;
-
-        let mut seen_tables = HashSet::new();
-        let mut rls_enabled_count = 0usize;
-        let mut force_rls_enabled_count = 0usize;
-        let mut policy_installed_count = 0usize;
-        let mut rls_disabled_tables = Vec::new();
-        let mut force_rls_disabled_tables = Vec::new();
-        let mut missing_policy_tables = Vec::new();
-        let mut policy_expression_mismatch_tables = Vec::new();
-        for row in rows {
-            let table: String = row.get("relname");
-            let rls_enabled: bool = row.get("relrowsecurity");
-            let force_rls_enabled: bool = row.get("relforcerowsecurity");
-            let has_policy: bool = row.get("has_policy");
-            let expression_matches: bool = row.get("expression_matches");
-            seen_tables.insert(table.clone());
-            if rls_enabled {
-                rls_enabled_count += 1;
-            } else {
-                rls_disabled_tables.push(table.clone());
-            }
-            if force_rls_enabled {
-                force_rls_enabled_count += 1;
-            } else {
-                force_rls_disabled_tables.push(table.clone());
-            }
-            if has_policy {
-                policy_installed_count += 1;
-                if !expression_matches {
-                    policy_expression_mismatch_tables.push(table.clone());
-                }
-            } else {
-                missing_policy_tables.push(table.clone());
-            }
-        }
-        for table in &expected_tables {
-            if !seen_tables.contains(table) {
-                missing_policy_tables.push(table.clone());
-                rls_disabled_tables.push(table.clone());
-                force_rls_disabled_tables.push(table.clone());
-            }
-        }
-        missing_policy_tables.sort();
-        missing_policy_tables.dedup();
-        rls_disabled_tables.sort();
-        rls_disabled_tables.dedup();
-        force_rls_disabled_tables.sort();
-        force_rls_disabled_tables.dedup();
-        policy_expression_mismatch_tables.sort();
-        policy_expression_mismatch_tables.dedup();
-
-        let current_role_name: String = current_role.get("current_role_name");
-        let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
-        let owns_trace_tables: bool = current_role.get("owns_trace_tables");
-        let bypass_role: bool = current_role.get("bypass_role");
-        let tenant_context_transaction_local =
+        let mut diagnostics =
+            trace_corpus_rls_catalog_diagnostics(&**client, TRACE_COMMONS_RLS_TABLES).await?;
+        diagnostics.tenant_context_transaction_local =
             trace_tenant_context_is_transaction_local(&mut client).await?;
-        Ok(Some(TraceCorpusRlsDiagnostics {
-            expected_table_count: expected_tables.len(),
-            rls_enabled_count,
-            force_rls_enabled_count,
-            policy_installed_count,
-            missing_policy_tables,
-            rls_disabled_tables,
-            force_rls_disabled_tables,
-            policy_expression_mismatch_tables,
-            current_role_hash: sha256_prefixed(&current_role_name),
-            current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
-            current_role_owns_trace_tables: owns_trace_tables,
-            tenant_context_transaction_local,
-        }))
+        Ok(Some(diagnostics))
     }
 
     async fn upsert_contributor_profile(
@@ -6112,6 +5973,167 @@ fn refuse_if_enumeration_is_ambiguous(
     } else {
         Ok(())
     }
+}
+
+/// The catalog half of `Database::trace_corpus_rls_diagnostics`, on `client`
+/// (a pooled connection or an open transaction), for `tables`: whether each
+/// is a table in the current schema with row-level security enabled and
+/// forced and the tenant policy installed with the expected expression, and
+/// whether the current role can bypass it (a superuser, `BYPASSRLS`, or the
+/// owner of a table that does not force it). The versioned pipeline's control
+/// health reads its tables' isolation through the same check (Zaki review 1,
+/// round 2, finding 10). `tenant_context_transaction_local` is left `false`:
+/// that probe opens a transaction of its own, which only the caller holding
+/// a whole connection can run.
+pub async fn trace_corpus_rls_catalog_diagnostics<C>(
+    client: &C,
+    tables: &[&str],
+) -> Result<TraceCorpusRlsDiagnostics, DatabaseError>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    let expected_tables = tables
+        .iter()
+        .map(|table| (*table).to_string())
+        .collect::<Vec<_>>();
+    let expected_policy_expressions = TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS
+        .iter()
+        .map(|expression| (*expression).to_string())
+        .collect::<Vec<_>>();
+    let rows = client
+        .query(
+            "SELECT
+                    c.relname,
+                    c.relrowsecurity,
+                    c.relforcerowsecurity,
+                    COALESCE(p.has_policy, false) AS has_policy,
+                    COALESCE(p.expression_matches, false) AS expression_matches
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 LEFT JOIN LATERAL (
+                    SELECT
+                        true AS has_policy,
+                        pol.polcmd = '*'
+                            AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
+                            AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
+                            AS expression_matches
+                        FROM pg_policies p
+                        JOIN pg_policy pol
+                          ON pol.polname = p.policyname
+                         AND pol.polrelid = c.oid
+                        WHERE p.schemaname = n.nspname
+                          AND p.tablename = c.relname
+                          AND p.policyname = 'trace_corpus_tenant_isolation'
+                        LIMIT 1
+                 ) p ON true
+                 WHERE n.nspname = current_schema()
+                   AND c.relkind = 'r'
+                   AND c.relname = ANY($1)",
+            &[&expected_tables, &expected_policy_expressions],
+        )
+        .await?;
+    let current_role = client
+        .query_one(
+            "SELECT
+                    current_user AS current_role_name,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.oid = c.relowner
+                        WHERE n.nspname = current_schema()
+                          AND c.relkind = 'r'
+                          AND c.relname = ANY($1)
+                          AND r.rolname = current_user
+                    ) AS owns_trace_tables,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.oid = c.relowner
+                        WHERE n.nspname = current_schema()
+                          AND c.relkind = 'r'
+                          AND c.relname = ANY($1)
+                          AND r.rolname = current_user
+                          AND NOT c.relforcerowsecurity
+                    ) AS owns_unforced_trace_tables,
+                    COALESCE((
+                        SELECT rolsuper OR rolbypassrls
+                        FROM pg_roles
+                        WHERE rolname = current_user
+                    ), false) AS bypass_role",
+            &[&expected_tables],
+        )
+        .await?;
+
+    let mut seen_tables = HashSet::new();
+    let mut rls_enabled_count = 0usize;
+    let mut force_rls_enabled_count = 0usize;
+    let mut policy_installed_count = 0usize;
+    let mut rls_disabled_tables = Vec::new();
+    let mut force_rls_disabled_tables = Vec::new();
+    let mut missing_policy_tables = Vec::new();
+    let mut policy_expression_mismatch_tables = Vec::new();
+    for row in rows {
+        let table: String = row.get("relname");
+        let rls_enabled: bool = row.get("relrowsecurity");
+        let force_rls_enabled: bool = row.get("relforcerowsecurity");
+        let has_policy: bool = row.get("has_policy");
+        let expression_matches: bool = row.get("expression_matches");
+        seen_tables.insert(table.clone());
+        if rls_enabled {
+            rls_enabled_count += 1;
+        } else {
+            rls_disabled_tables.push(table.clone());
+        }
+        if force_rls_enabled {
+            force_rls_enabled_count += 1;
+        } else {
+            force_rls_disabled_tables.push(table.clone());
+        }
+        if has_policy {
+            policy_installed_count += 1;
+            if !expression_matches {
+                policy_expression_mismatch_tables.push(table.clone());
+            }
+        } else {
+            missing_policy_tables.push(table.clone());
+        }
+    }
+    for table in &expected_tables {
+        if !seen_tables.contains(table) {
+            missing_policy_tables.push(table.clone());
+            rls_disabled_tables.push(table.clone());
+            force_rls_disabled_tables.push(table.clone());
+        }
+    }
+    missing_policy_tables.sort();
+    missing_policy_tables.dedup();
+    rls_disabled_tables.sort();
+    rls_disabled_tables.dedup();
+    force_rls_disabled_tables.sort();
+    force_rls_disabled_tables.dedup();
+    policy_expression_mismatch_tables.sort();
+    policy_expression_mismatch_tables.dedup();
+
+    let current_role_name: String = current_role.get("current_role_name");
+    let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
+    let owns_trace_tables: bool = current_role.get("owns_trace_tables");
+    let bypass_role: bool = current_role.get("bypass_role");
+    Ok(TraceCorpusRlsDiagnostics {
+        expected_table_count: expected_tables.len(),
+        rls_enabled_count,
+        force_rls_enabled_count,
+        policy_installed_count,
+        missing_policy_tables,
+        rls_disabled_tables,
+        force_rls_disabled_tables,
+        policy_expression_mismatch_tables,
+        current_role_hash: sha256_prefixed(&current_role_name),
+        current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
+        current_role_owns_trace_tables: owns_trace_tables,
+        tenant_context_transaction_local: false,
+    })
 }
 
 async fn trace_tenant_context_is_transaction_local(
