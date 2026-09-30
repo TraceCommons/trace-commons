@@ -235,9 +235,9 @@ fn is_legacy_tenant(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-        && !trace_commons_protocol::admission::is_anchored_tenant(value)
-        && !value.starts_with("near-")
-        && !value.starts_with("nearai-")
+        // Every account namespace, anchored or not, on the one reserved list
+        // fixed invite creation also refuses (#1015).
+        && !crate::trace_invite_registry::fixed_invite_tenant_uses_reserved_namespace(value)
 }
 
 fn now_unix() -> i64 {
@@ -393,6 +393,16 @@ mod tests {
         assert!(is_legacy_tenant("tenant-deepak-jangir"));
         assert!(!is_legacy_tenant(&format!("near-{}", "a".repeat(64))));
         assert!(!is_legacy_tenant("nearai-anything"));
+        // The reserved list is the single source (#1015), matched as fixed
+        // invite creation matches it: ASCII case-insensitively.
+        for prefix in crate::trace_invite_registry::RESERVED_ACCOUNT_TENANT_PREFIXES {
+            assert!(!is_legacy_tenant(&format!("{prefix}anything")));
+            assert!(!is_legacy_tenant(&format!(
+                "{}anything",
+                prefix.to_ascii_uppercase()
+            )));
+        }
+        assert!(!is_legacy_tenant("NearAI-anything"));
         assert!(!is_legacy_tenant(""));
         assert!(!is_legacy_tenant("tenant with space"));
         assert!(!is_legacy_tenant(&"t".repeat(129)));
