@@ -4000,6 +4000,84 @@ async fn pipeline_review_routes_answer_409_422_and_404_for_an_inoperable_run() {
     assert_eq!(refused["error"], "pipeline run is not waiting for review");
 }
 
+/// Zaki review 1, minor item M-a: the pipeline review claim and assessment
+/// routes append `trace_audit_events` rows as `main`'s review routes do: a
+/// `review_lease` claim row with the lease's expiry, and a `review_decision`
+/// row whose reason is the hash of the reviewer's reason and whose metadata
+/// carries only labels (the decision, the resulting status, the reason code).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_review_routes_append_hash_only_audit_rows() {
+    let Some(mut fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let reviewer = format!("token-review-audit-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let principal = "principal_sha256:review-audit";
+    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/claim", run.run_id),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", run.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let rows = tx
+        .query(
+            "SELECT action, reason, metadata_json, actor_role FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY audit_sequence",
+            &[&fixture.tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(rows.len(), 2, "one row per route");
+    let (claim_row, decision_row) = (&rows[0], &rows[1]);
+    assert_eq!(claim_row.get::<_, String>("action"), "review");
+    assert_eq!(claim_row.get::<_, String>("actor_role"), "reviewer");
+    let claim_metadata: serde_json::Value = claim_row.get("metadata_json");
+    assert_eq!(claim_metadata["action"], "claim", "{claim_metadata}");
+    assert_eq!(decision_row.get::<_, String>("action"), "review");
+    assert_eq!(
+        decision_row.get::<_, Option<String>>("reason").as_deref(),
+        Some(format!("reason_hash={}", sha256_prefixed("privacy_review_required")).as_str())
+    );
+    let decision_metadata: serde_json::Value = decision_row.get("metadata_json");
+    assert_eq!(
+        decision_metadata["decision"], "rejected",
+        "the resulting status, as `main` records it: {decision_metadata}"
+    );
+    assert_eq!(
+        decision_metadata["resulting_status"], "rejected",
+        "{decision_metadata}"
+    );
+    assert_eq!(
+        decision_metadata["reason_code"], "privacy_review_required",
+        "{decision_metadata}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `main`'s DB/file reconciliation of a tenant with pipeline rows (Ruling F-M10).
 // ---------------------------------------------------------------------------

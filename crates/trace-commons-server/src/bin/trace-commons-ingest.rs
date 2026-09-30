@@ -41662,10 +41662,49 @@ async fn pipeline_review_claim_handler(
     let Some(claim) = claimed else {
         return pipeline_review_claim_conflict(pipeline_service, &tenant.tenant_id, run_id).await;
     };
+    // Zaki review 1, minor item M-a: the audit row `main`'s review lease
+    // claim appends, hash-only and label-only.
+    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
+        .await
+        .map_err(internal_error)?;
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::review_lease(
+            &tenant,
+            submission_id,
+            StorageTraceReviewLeaseAuditAction::Claim,
+            Some(claim.lease_expires_at),
+            None,
+        ),
+        StorageTraceAuditAction::Review,
+        StorageTraceAuditSafeMetadata::ReviewLease {
+            action: StorageTraceReviewLeaseAuditAction::Claim,
+            lease_expires_at: Some(claim.lease_expires_at),
+            review_due_at: None,
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(PipelineReviewClaimResponse {
         lease_token: claim.lease_token,
         lease_expires_at: claim.lease_expires_at,
     }))
+}
+
+/// The submission a pipeline run belongs to, for the review routes' audit
+/// rows.
+async fn pipeline_run_submission_id(
+    pipeline_service: &PipelineService,
+    tenant_id: &str,
+    run_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    Ok(pipeline_service
+        .store()
+        .get_run(tenant_id, run_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("pipeline_run_missing"))?
+        .submission_id)
 }
 
 /// `claim_review` returning `Ok(None)` covers two cases a caller cannot tell
@@ -41760,6 +41799,7 @@ async fn pipeline_review_assessment_handler(
     };
     let reason = ReasonCode::new(body.reason)
         .map_err(|_| api_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid reason code"))?;
+    let reason_label = reason.as_str().to_string();
     let resolved_quarantine_reasons = body
         .resolved_quarantine_reasons
         .into_iter()
@@ -41776,11 +41816,40 @@ async fn pipeline_review_assessment_handler(
         // stored claim -- not against this field.
         lease_expires_at: Utc::now(),
     };
+    let resulting_status = match recommendation {
+        ReviewRecommendation::Approve => TraceCorpusStatus::Accepted,
+        ReviewRecommendation::Reject => TraceCorpusStatus::Rejected,
+    };
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
         .await
         .map_err(pipeline_review_db_error)?;
+    // Zaki review 1, minor item M-a: the audit row `main`'s review decision
+    // appends: the reason as a hash, and labels only in the metadata. The
+    // status is the one the recommendation leads to once Review runs.
+    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
+        .await
+        .map_err(internal_error)?;
+    let review_status = storage_corpus_status(resulting_status);
+    append_audit_event_with_db_mirror(
+        state.as_ref(),
+        &tenant,
+        TraceCommonsAuditEvent::review_decision(
+            &tenant,
+            submission_id,
+            resulting_status,
+            Some(&trace_free_text_audit_reason(&reason_label)),
+        ),
+        StorageTraceAuditAction::Review,
+        StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: serde_storage_string(&review_status).map_err(internal_error)?,
+            resulting_status: review_status,
+            reason_code: Some(reason_label),
+        },
+    )
+    .await
+    .map_err(internal_error)?;
     Ok(Json(PipelineReviewAssessmentResponse {
         assessment_id: assessment.assessment_id,
     }))
