@@ -302,6 +302,7 @@ pub const METHODS: &[&str] = &[
     "route_disclosure",
     "cancel",
     "clear_public_profile",
+    "commons_credit_summary",
     "consent_options",
     "discover_routing",
     "dismiss",
@@ -2217,6 +2218,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
     (
+        "commons_credit_summary",
+        "commons-credit-summary-requires-async",
+    ),
+    (
         "inference_connection_offers",
         "inference-connection-requires-async",
     ),
@@ -2816,7 +2821,40 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             )
         }))
         .collect();
-    Response::ok(req.id, serde_json::json!({ "projects": projects }))
+    // K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    // folders set to Ask me. None has been decided." Three conditions,
+    // all required:
+    //
+    // - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
+    //   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded`
+    //   entry has already been decided, one way or another.
+    // - The project's mode resolves to `NotifyOnly` ("Ask me"), never
+    //   `AutoUpload` ("armed") or `Ignore`. Armed is excluded on the
+    //   project's resolved mode rather than the entry's own
+    //   `approved_unattended` flag, because a gate-held armed session is
+    //   `Pending` with nothing decided about it yet either -- see
+    //   `policy::resolve` and the design's note that "gate-held armed
+    //   sessions stay Pending". Counting those into this upsell would tell a
+    //   contributor to go decide about a folder they already armed.
+    // - Previewed at least once (`previewed_envelope_digest.is_some()`) --
+    //   "scrubbed", in the design's word. An entry nobody has opened a
+    //   preview for has not been through the redaction pass this count is
+    //   about, and including it would inflate "27" with sessions no
+    //   preview-then-decide flow has touched.
+    //
+    // Deliberately not yet shared with K6's `queue::decisions_owed` (#1132),
+    // which is not on main: once both land, the two should share one
+    // predicate. Tracked as a follow-up on #1129.
+    let unpurposed_traces = queue
+        .pending()
+        .iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| e.previewed_envelope_digest.is_some())
+        .count();
+    Response::ok(
+        req.id,
+        serde_json::json!({ "projects": projects, "unpurposed_traces": unpurposed_traces }),
+    )
 }
 
 /// The arming disclosure for one project (K6, R1), as the grant screens'
@@ -3570,7 +3608,8 @@ async fn handle_set_settings_async(shared: &DaemonShared, req: &Request) -> Resp
 /// `"probe_routed_tools"`,
 /// `"quiesce"`, `"enroll"`, `"near_ai_credential_status"`,
 /// `"near_ai_credential_forget"`,
-/// `"withdraw"`, `"withdraw_bulk"`, `"set_public_profile"`,
+/// `"withdraw"`, `"withdraw_bulk"`, `"commons_credit_summary"`,
+/// `"set_public_profile"`,
 /// `"clear_public_profile"`, `"skill_candidate"`, `"skill_evaluate"`, and the
 /// four `"skill_install_*"` methods) for
 /// real and delegates every other method, unchanged, to the synchronous
@@ -3621,6 +3660,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "enroll" => enroll::handle_enroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
+        "commons_credit_summary" => {
+            super::commons_credit::handle_commons_credit_summary(shared, req).await
+        }
         "inference_connection_offers" => {
             super::inference_connection::handle_offers(shared, req).await
         }
@@ -8408,6 +8450,43 @@ mod tests {
         );
     }
 
+    /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    /// folders set to Ask me. None has been decided." Three entries, each
+    /// failing exactly one of the three conditions the count requires, so a
+    /// broken filter shows up as a wrong number rather than a coincidence:
+    ///
+    /// - one in an Ask-me (unconfigured, `notify_only`) project, previewed
+    ///   -- the only one that must count;
+    /// - one in the same Ask-me project, never previewed -- undecided but
+    ///   unpreviewed, must be excluded;
+    /// - one in an armed (`auto_upload`) project, previewed -- must be
+    ///   excluded even though it is otherwise identical to the first.
+    #[test]
+    fn list_projects_unpurposed_traces_counts_only_previewed_ask_me_pending_entries() {
+        let s = shared();
+        let ask_project = "/tmp/askproj";
+        let armed_project = "/tmp/armedproj";
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode(armed_project, ProjectMode::AutoUpload, Utc::now())
+            .unwrap();
+
+        let scrubbed_and_undecided = seed_entry(&s, ask_project);
+        let _undecided_but_unpreviewed = seed_entry(&s, ask_project);
+        let armed_and_previewed = seed_entry(&s, armed_project);
+        {
+            let mut queue = s.queue.lock().unwrap();
+            assert!(queue.record_previewed_envelope(scrubbed_and_undecided, "sha256:a", None));
+            assert!(queue.record_previewed_envelope(armed_and_previewed, "sha256:b", None));
+        }
+
+        let result = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
     /// Seed one pending queue entry for `project_key`, the way a poll that
     /// discovered a session would, without running the watcher.
     fn seed_entry(s: &DaemonShared, project_key: &str) -> uuid::Uuid {
@@ -10226,6 +10305,8 @@ mod tests {
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(
