@@ -79,6 +79,63 @@ pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 pub const SOURCE_CLINE: &str = "cline";
 pub const SOURCE_OPENCODE: &str = "opencode";
 
+/// The protocol family a native source's own tool answers with by default,
+/// before any Private AI redirection changes where a call actually goes.
+///
+/// `None` covers two different things a contributor should not be told
+/// apart from a label: a tool this build does not recognise, and a tool
+/// recognised but known to have no single default -- Cline and OpenCode both
+/// let a person point at more than one provider from the start, so naming
+/// one here would be a guess dressed as a fact.
+///
+/// This is a fixed fact about the released tool's OWN documented default,
+/// checked once against that tool's docs and pinned here -- never a claim
+/// this daemon probed, verified, or confirmed for the copy actually running
+/// on this machine. A contributor who changed their Claude Code
+/// configuration to answer somewhere else is not contradicted by this
+/// table, because the table never claimed to have looked.
+///
+/// See [`vendor_label`] for the word this turns into, and
+/// [`crate::harness_state::built_in_family`] for the same question asked
+/// about the two tools this daemon can also connect -- kept as a separate
+/// table because its two keys (`"claude"`, `"codex"`) are IronWire's ids,
+/// not these adapter names.
+#[must_use]
+pub fn source_default_family(source: &str) -> Option<&'static str> {
+    match source {
+        SOURCE_CLAUDE_CODE => Some("anthropic"),
+        SOURCE_CODEX => Some("openai"),
+        SOURCE_GEMINI_CLI => Some("google"),
+        _ => None,
+    }
+}
+
+/// The display word for a protocol family, e.g. `"Anthropic"` for
+/// `"anthropic"`.
+///
+/// Fixed English, and the ONLY place either surface below spells a vendor's
+/// name: `discovery::describe` reaches it through [`source_default_family`],
+/// and `daemon::harness::handle_list` reaches it through
+/// [`crate::harness_state::built_in_family`], so the two surfaces cannot
+/// drift into two different words for the same vendor.
+#[must_use]
+pub fn vendor_label(family: &str) -> Option<&'static str> {
+    match family {
+        "anthropic" => Some("Anthropic"),
+        "openai" => Some("OpenAI"),
+        "google" => Some("Google"),
+        _ => None,
+    }
+}
+
+/// The "answers at <vendor>" word for a discovered source, or `None` when
+/// the tool has no fixed default -- see [`source_default_family`], which
+/// decides that and is not a claim this daemon verified.
+#[must_use]
+pub fn source_answers_at(source: &str) -> Option<&'static str> {
+    vendor_label(source_default_family(source)?)
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionRef {
     pub source: &'static str,

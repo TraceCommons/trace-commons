@@ -6,6 +6,7 @@ pub mod inference_connection;
 pub mod insights;
 pub mod insights_cards;
 pub mod insights_pricing;
+pub mod invite_lookup;
 pub mod legacy_invite_link;
 pub mod llm;
 pub mod mission_catalog;

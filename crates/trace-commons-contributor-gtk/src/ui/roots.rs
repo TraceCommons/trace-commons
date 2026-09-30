@@ -457,6 +457,7 @@ mod tests {
             session_count: count,
             most_recent: None,
             relocated_by_env: false,
+            answers_at: None,
         }
     }
 

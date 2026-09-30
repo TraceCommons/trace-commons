@@ -12859,6 +12859,31 @@ mod tests {
         assert!(result["activity"]["last_call_at"].is_null());
     }
 
+    /// `answers_at` names the same vendor `source::discovery` would for the
+    /// same tool, derived through the SAME table (`source::vendor_label`) so
+    /// the two surfaces cannot drift apart.
+    #[test]
+    fn harness_list_names_the_vendor_each_built_in_tool_answers_at() {
+        let shared = shared();
+        let req = Request {
+            id: 1,
+            method: "harness_list".to_string(),
+            params: serde_json::Value::Null,
+        };
+        let result = handle_request(&shared, &req).result.expect("an answer");
+        let harnesses = result["harnesses"].as_array().expect("a list");
+
+        let answers_at = |id: &str| {
+            harnesses
+                .iter()
+                .find(|h| h["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} row"))["answers_at"]
+                .clone()
+        };
+        assert_eq!(answers_at("claude"), serde_json::json!("Anthropic"));
+        assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
+    }
+
     /// With no ledger, the amount is UNKNOWN and not zero, and the wire says
     /// so in a field a shell cannot mistake for a figure.
     ///

@@ -2111,6 +2111,7 @@ end to end rather than reimplementing:
       "config_path": "/Users/x/.claude/settings.json",
       "connect_command": "ironwire connect claude",
       "family": "anthropic",
+      "answers_at": "Anthropic",
       "state": "answering",
       "last_call_at": "2026-09-07T18:04:11+00:00",
       "can_connect": false,
@@ -2148,6 +2149,15 @@ surface must say that the list is what this machine knows about rather than
 implying only two coding tools exist. A harness that is not installed is
 listed with `installed: false`, not omitted: hiding it makes the absence of a
 tool indistinguishable from the app never having heard of it.
+
+`answers_at` names the vendor this row's tool answers at by default --
+`"Anthropic"` for `claude`, `"OpenAI"` for `codex` -- drawn from the SAME
+fixed table `tc_discover_sources` reads its own `answers_at` field from, so
+the two surfaces cannot name a vendor differently for the same tool. `null`
+for a catalog-described tool, which has no `family` and therefore no claimed
+default either. Like `family`, this is a fixed fact about the tool's own
+released default, never something this daemon checked against the copy
+actually installed.
 
 `spend` is what the calls answered **on this computer** have cost since the
 most recent local midnight, in millionths of a dollar. It comes from the
