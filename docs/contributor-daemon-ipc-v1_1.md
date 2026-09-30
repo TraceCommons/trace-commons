@@ -840,14 +840,16 @@ and a count, never a word of what was said, so they are on every row.
 
 | Field | Meaning |
 |---|---|
-| `started_at` | the source's own session start, else the earliest event timestamp; `null` when neither is known |
+| `started_at` | the earlier of the source's own session start and the earliest event timestamp; `null` when neither is known |
 | `ended_at` | the latest event timestamp, or `null` |
 | `duration_secs` | `ended_at - started_at` in whole seconds, or `null` when either end is unknown or they are out of order |
-| `user_turns` | how many prompts the person typed: user messages, not tool calls or results |
+| `user_turns` | how many prompts the person typed: user messages in the parent transcript that name a task (the same test the preview's `opening_prompt` uses), so injected wrappers -- system reminders, command metadata, AGENTS.md and environment preambles -- and a delegated subagent's own prompts are not counted |
 
 `user_turns` is deliberately not `preview_turns`' `turn_count`, which indexes
-every event of the redacted envelope. An entry queued before these fields
-existed has them all `null`.
+every event of the redacted envelope. `ended_at` spans the delegated work
+too, since it is part of the session. An entry queued before these fields
+existed has them all `null`; it is not backfilled, and gains a shape when its
+session is next loaded (it grows, or is re-offered).
 
 `envelope_digest` identifies the redacted envelope this summary describes;
 `input_fingerprint` identifies the configuration that produced it. Both are
@@ -1316,10 +1318,13 @@ render, not from anything the daemon left out.
 ```
 
 `session_count` is how many sessions the watcher has observed in this
-project, whatever their queue state, and `last_session_at` when the latest of
-them was last written (`null` when none has been observed). Both come from the
-daemon's per-session record of each session's project, so answering reads no
-session. A tool's own totals are in `tc_discover_sources` (`session_count`,
+project that were still on this machine at the last full pass, whatever their
+queue state: a session whose file is deleted stops being counted once a full
+pass in which every source listed cleanly has seen it gone. `last_session_at`
+is the latest of those sessions' file modification times -- when it was last
+written, not when it started -- or `null` when none has been observed. Both
+come from the daemon's per-session record of each session's project, recorded
+when the watcher resolves it, so answering reads and canonicalizes nothing. A tool's own totals are in `tc_discover_sources` (`session_count`,
 `most_recent`).
 
 `pending_count` is how many `Pending` entries this project holds.

@@ -1205,7 +1205,7 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
 /// Select display text only, from already-redacted user content. Harnesses
 /// inject setup as user messages; keep it in the envelope but skip known
 /// leading wrappers in the card. Unknown prose remains visible.
-fn task_prompt(mut text: &str) -> Option<&str> {
+pub(crate) fn task_prompt(mut text: &str) -> Option<&str> {
     loop {
         text = text.trim();
         if text.starts_with("# AGENTS.md instructions for ") {
@@ -1254,7 +1254,6 @@ fn task_prompt(mut text: &str) -> Option<&str> {
     }
 }
 
-/// Truncate to at most `max_chars` characters, always on a char boundary.
 /// How long a session title may be, in characters.
 pub const TITLE_MAX_CHARS: usize = 60;
 
@@ -1280,6 +1279,7 @@ fn title_of(opening_prompt: &str) -> Option<String> {
     Some(format!("{}…", at_word.trim_end()))
 }
 
+/// Truncate to at most `max_chars` characters, always on a char boundary.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
@@ -1287,6 +1287,37 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// K1: the title is built from the REDACTED prompt, so a first line that
+    /// names an email address or a local path never reaches it.
+    #[tokio::test]
+    async fn a_redactable_first_line_does_not_survive_into_the_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\
+             \"content\":\"mail alice.smith@example.org about /Users/testuser/code/myproj/secret.txt\"},\
+             \"cwd\":\"/Users/testuser/code/myproj\",\
+             \"timestamp\":\"2026-08-08T10:00:00Z\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"11111111-1111-1111-1111-111111111111\",\
+             \"uuid\":\"a1\"}\n",
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        let title = summary.title.expect("the prompt names a task");
+        assert!(!title.contains("alice.smith@example.org"), "{title}");
+        assert!(!title.contains("/Users/testuser"), "{title}");
+        assert!(title.starts_with("mail "), "{title}");
+    }
 
     /// K1: the title is the first line of the redacted prompt, cut at a word
     /// with an ellipsis, and absent when there is no task.

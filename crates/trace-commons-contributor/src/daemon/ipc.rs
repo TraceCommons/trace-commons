@@ -2702,16 +2702,48 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 // contributor should read. Clients MUST NOT recognise this row by
 // label.
 /// Sessions the watcher has observed per project key, with the latest one's
-/// modification time. Derived from the cwd cache, which holds a project's
-/// recorded cwd per session path, so no session is read to answer it.
+/// modification time, from the cwd cache.
+///
+/// The project key is read from each entry, where the watcher recorded it at
+/// insert, so this canonicalizes nothing under the state lock. An entry
+/// written before that field existed is resolved once, outside the lock, and
+/// the key written back.
+///
+/// What it counts: sessions observed on this machine and still present at
+/// the last full pass (the watcher prunes entries whose file is gone), and
+/// the latest session's file modification time -- when it was last written,
+/// not when it started.
 fn sessions_seen_per_project(
     shared: &DaemonShared,
 ) -> std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> {
+    let unresolved: Vec<(String, Option<String>)> = {
+        let state = shared.state.lock().expect("state lock");
+        state
+            .cwd_cache
+            .iter()
+            .filter(|(_, e)| e.project_key.is_none())
+            .map(|(path, e)| (path.clone(), e.cwd.clone()))
+            .collect()
+    };
+    if !unresolved.is_empty() {
+        let resolved: Vec<(String, String)> = unresolved
+            .into_iter()
+            .map(|(path, cwd)| (path, super::policy::project_for(cwd.as_deref()).0))
+            .collect();
+        let mut state = shared.state.lock().expect("state lock");
+        for (path, key) in resolved {
+            if let Some(entry) = state.cwd_cache.get_mut(&path) {
+                entry.project_key.get_or_insert(key);
+            }
+        }
+    }
     let state = shared.state.lock().expect("state lock");
     let mut seen: std::collections::BTreeMap<String, (usize, chrono::DateTime<Utc>)> =
         std::collections::BTreeMap::new();
     for cached in state.cwd_cache.values() {
-        let (key, _) = super::policy::project_for(cached.cwd.as_deref());
+        let Some(key) = cached.project_key.clone() else {
+            continue;
+        };
         let slot = seen.entry(key).or_insert((0, cached.modified_at));
         slot.0 += 1;
         slot.1 = slot.1.max(cached.modified_at);
