@@ -911,5 +911,560 @@ class HfCorpusTests(unittest.TestCase):
                 shutil.rmtree(run.run_dir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Task 9: `pipeline.py run` and `pipeline.py package`.
+# ---------------------------------------------------------------------------
+
+_ADMIN_URL = "postgres://trace@127.0.0.1:55431/postgres"
+_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
+_PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
+_INGEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
+
+
+def _digest(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _direct_corpus(labels, prefix="1"):
+    return {
+        "schema": corpus.CORPUS_SCHEMA,
+        "fixtures": [
+            {
+                "label": label,
+                "trace_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"trace:{prefix}:{label}")),
+                "submission_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"submission:{prefix}:{label}")),
+                "created_at": "2026-09-11T12:00:00Z",
+                "input": "fixture input text",
+                "secret_probe": f"probe_{label}",
+            }
+            for label in labels
+        ],
+    }
+
+
+def _fixture_report(label, **overrides):
+    """One fixture of a `trace_commons.pipeline_corpus_report.v1` report, in
+    the shape `pipeline_corpus_pg_tests` writes: an admitted, complete run
+    unless `overrides` says otherwise."""
+    item = {
+        "label": label,
+        "run_id_hash": _fake_hash(f"run:{label}"),
+        "submission_id_hash": _fake_hash(f"submission:{label}"),
+        "request_content_hash": _fake_hash(f"request:{label}"),
+        "state": "complete",
+        "admission_decision": "admit",
+        "expected_admission_decision": "admit",
+        "admission_reason": None,
+        "responsible_phase": "settle",
+        "reason_label": None,
+        "phase_count": 4,
+        "expected_outcome_count": 4,
+        "phases": [
+            {
+                "phase": phase,
+                "outcome_id_hash": _fake_hash(f"outcome:{label}:{phase}"),
+                "outcome_schema_id": f"trace_commons.{phase}_outcome",
+                "outcome_schema_version": 1,
+                "decision_hash": _fake_hash(f"decision:{label}:{phase}"),
+                "evidence_hash": _fake_hash(f"evidence:{label}:{phase}"),
+                "evaluation_hash": _fake_hash(f"evaluation:{label}:{phase}"),
+            }
+            for phase in corpus.PHASES
+        ],
+        "index_command_hash": _fake_hash(f"index:{label}"),
+        "index_write_state": "complete",
+        "index_invalidation_state": "none",
+        "credit_write_state": "complete",
+        "payout_state": "none",
+        "instruments": [
+            {
+                "instrument_id": "storage_rebate",
+                "atomic_units": "5",
+                "operation_state": "complete",
+                "internal_settlement_state": "not_applicable",
+                "payout_rail": "none",
+                "payout_state": "disabled",
+            }
+        ],
+        "replay_same_run": True,
+        "changed_content_refused": True,
+        "tenant_isolation": True,
+        "consent_state": "allowed",
+        "expected_consent_state": "allowed",
+        "privacy_state": "low",
+        "expected_privacy_state": "low",
+        "scoring_state": "complete",
+        "expected_scoring_state": "complete",
+        "settlement_state": "complete",
+        "expected_settlement_state": "complete",
+        "instrument_count": 1,
+        "expected_instrument_count": 1,
+        "mismatches": [],
+    }
+    item.update(overrides)
+    return item
+
+
+def _policy_manifest():
+    def policy(phase):
+        return {
+            "policy_id": f"trace_commons.{phase}.minimal",
+            "implementation_id": f"trace_commons.{phase}.minimal.v1",
+            "configuration_hash": _fake_hash("configuration"),
+            "data_artifact_hashes": [],
+            "projection_ids": [],
+        }
+
+    return {
+        "format_version": 1,
+        "admission": policy("admission"),
+        "review": policy("review"),
+        "score": policy("score"),
+        "settle": policy("settle"),
+        "instruments": {},
+    }
+
+
+def _corpus_report(check_id, partitions):
+    """`partitions` is a list of `(name, corpus_digest, [fixture reports])`."""
+    manifest = _policy_manifest()
+    bundle_id = _fake_hash("bundle")
+    sections = []
+    for name, corpus_digest, fixtures in partitions:
+        sections.append(
+            {
+                "partition": name,
+                "bundle_id": bundle_id,
+                "corpus_digest": corpus_digest,
+                "fixture_order": [item["label"] for item in fixtures],
+                "expected_fixture_count": len(fixtures),
+                "completed_fixture_count": sum(item["state"] in ("complete", "rejected") for item in fixtures),
+                "failure_count": sum(bool(item["mismatches"]) for item in fixtures),
+                "fixtures": fixtures,
+            }
+        )
+    every = [item for section in sections for item in section["fixtures"]]
+    report = {
+        "schema": corpus.REPORT_SCHEMA,
+        "scope": "local_test",
+        "production_ready": False,
+        "external_payout_enabled": False,
+        "safe_blockers": list(corpus.LOCAL_BLOCKERS),
+        "check_id": check_id,
+        "bundle_id": bundle_id,
+        "package_hash": _fake_hash("package"),
+        "configuration_digest": _digest(
+            results.canonical({phase: manifest[phase]["configuration_hash"] for phase in corpus.PHASES})
+        ),
+        "dependency_digest": _fake_hash("dependency"),
+        "policy_manifest": manifest,
+        "fixture_count": len(every),
+        "completed_fixture_count": sum(section["completed_fixture_count"] for section in sections),
+        "failure_count": sum(section["failure_count"] for section in sections),
+        "replay_same_run_count": sum(item["replay_same_run"] for item in every),
+        "changed_content_refused_count": sum(item["changed_content_refused"] for item in every),
+        "tenant_isolation": all(item["tenant_isolation"] for item in every),
+        "partitions": sections,
+    }
+    report["report_digest"] = _digest(results.canonical(report))
+    return report
+
+
+def _write_harness_outputs(env, fixtures_by_partition=None, emit=True):
+    """What `pipeline_corpus_run` leaves behind: the report at
+    `TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH` and, when every fixture
+    passed, one check result and its evidence in the result directory."""
+    paths = [("corpus", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"])]
+    if "TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH" in env:
+        paths = [
+            ("bootstrap", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"]),
+            ("holdout", env["TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH"]),
+        ]
+    partitions = []
+    for name, path in paths:
+        data = Path(path).read_bytes()
+        labels = [item["label"] for item in json.loads(data)["fixtures"]]
+        fixtures = (fixtures_by_partition or {}).get(name) or [_fixture_report(label) for label in labels]
+        partitions.append((name, _digest(data), fixtures))
+    check_id = env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"]
+    report = _corpus_report(check_id, partitions)
+    report_bytes = results.canonical(report) + b"\n"
+    Path(env["TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH"]).write_bytes(report_bytes)
+    if not emit:
+        return report
+    evidence = {
+        "fixtures": report["fixture_count"],
+        "completed": report["completed_fixture_count"],
+        "replay_same_run": report["replay_same_run_count"],
+        "changed_content_refused": report["changed_content_refused_count"],
+        "tenant_isolation": report["tenant_isolation"],
+        "report_hash": _digest(report_bytes),
+    }
+    result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+    raw = {
+        "schema": results.SCHEMA,
+        "run_id": env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"],
+        "check_id": check_id,
+        "status": "pass",
+        "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
+        "package_hash": report["package_hash"],
+        "configuration_digest": report["configuration_digest"],
+        "dependency_digest": report["dependency_digest"],
+        "observed_at": _iso(datetime.now(timezone.utc)),
+        "evidence_hash": _digest(results.canonical(evidence)),
+        "safe_blockers": [],
+    }
+    (result_dir / f"{check_id}.result.json").write_text(json.dumps(raw))
+    (result_dir / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
+    return report
+
+
+def _environment_invoke(calls):
+    """Stands in for Docker and psql: every call succeeds, and a committed-
+    transaction query answers 42 (above the xact guard's floor)."""
+
+    def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+        calls.append(("invoke", list(command), input_text))
+        return (0, "42") if capture else (0, None)
+
+    return fake_invoke
+
+
+class _CorpusRunCase(unittest.TestCase):
+    def setUp(self):
+        self.run = _scratch_run("corpus")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.calls = []
+        self.stdout = io.StringIO()
+        self.stderr = io.StringIO()
+
+    def tearDown(self):
+        shutil.rmtree(self.run.run_dir, ignore_errors=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _main(self, argv, cargo=None, export=None):
+        patches = [
+            mock.patch.object(environment, "_invoke", _environment_invoke(self.calls)),
+            mock.patch.object(pipeline, "LOCAL_DIR", self.tmp / "local"),
+            mock.patch.object(pipeline, "Run"),
+        ]
+        if cargo is not None:
+            patches.append(mock.patch.object(pipeline, "cargo_test", cargo))
+        if export is not None:
+            patches.append(mock.patch.object(pipeline, "export_hf_corpus", export))
+        with contextlib.ExitStack() as stack:
+            mocks = [stack.enter_context(patch) for patch in patches]
+            mocks[2].create.return_value = self.run
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            return pipeline.main(argv)
+
+    def _fake_cargo(self, **harness):
+        def fake_cargo_test(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            if test_filter == _HARNESS:
+                _write_harness_outputs(env, **harness)
+
+        return fake_cargo_test
+
+    def _cargo_calls(self):
+        return [call for call in self.calls if call[0] == "cargo"]
+
+
+class CorpusRunTests(_CorpusRunCase):
+    def test_run_passes_only_the_expected_variables(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture", "beta_fixture"])))
+
+        code = self._main(
+            ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL],
+            cargo=self._fake_cargo(),
+        )
+
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        cargo_calls = self._cargo_calls()
+        self.assertEqual(len(cargo_calls), 1)
+        _, step, cargo_args, test_filter, env, exact, ignored = cargo_calls[0]
+        self.assertEqual(step, "corpus_run")
+        self.assertEqual(cargo_args, _INGEST_ARGS)
+        self.assertEqual(test_filter, _HARNESS)
+        self.assertTrue(exact)
+        self.assertTrue(ignored)
+        self.assertEqual(
+            {key for key in env if key.startswith("TRACE_COMMONS_")},
+            {
+                "TRACE_COMMONS_PG_TEST_DATABASE_URL",
+                "TRACE_COMMONS_PIPELINE_CORPUS_PATH",
+                "TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID",
+                "TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE",
+                "TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH",
+                "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT",
+                "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX",
+                "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR",
+                "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID",
+                "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH",
+            },
+        )
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"], "pipeline_http_corpus_minimal")
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE"], "minimal")
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"], str(corpus_path.resolve()))
+        self.assertIn("/admission_test_", env["TRACE_COMMONS_PG_TEST_DATABASE_URL"])
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"], self.run.run_id)
+        master_key = env["TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX"]
+        self.assertRegex(master_key, r"^[0-9a-f]{64}$")
+
+        output = self.stdout.getvalue() + self.stderr.getvalue()
+        self.assertNotIn(master_key, output)
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(lines, [f"PipelineRunOK: bundle={_fake_hash('bundle')} fixtures=2"])
+        local_report = self.tmp / "local" / "pipeline-minimal-corpus-report.json"
+        self.assertTrue(local_report.is_file())
+        self.assertTrue(local_report.with_suffix(".md").is_file())
+        self.assertFalse((self.tmp / "local" / "pipeline-lab-catalog.json").exists())
+
+    def test_run_refuses_package_and_bundle_together(self):
+        package = self.tmp / "package.json"
+        key = self.tmp / "key.json"
+        cases = (
+            (["--bundle", "minimal", "--package", str(package), "--trusted-key", str(key)],
+             "corpus_package_and_bundle_conflict"),
+            (["--package", str(package)], "corpus_package_and_key_required"),
+            (["--trusted-key", str(key)], "corpus_package_and_key_required"),
+            ([], "corpus_bundle_or_package_required"),
+        )
+        for extra, label in cases:
+            with self.subTest(label=label, extra=extra):
+                self.calls.clear()
+                self.stderr = io.StringIO()
+                code = self._main(["run", *extra], cargo=self._fake_cargo())
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+                self.assertEqual(self.calls, [], "refused before any environment or cargo call")
+
+    def test_hf_pin_runs_bootstrap_then_holdout(self):
+        pin_path = self.tmp / "pin.json"
+        pin_path.write_text(
+            json.dumps(
+                {
+                    "schema": corpus.PIN_SCHEMA,
+                    "repository": "jedisct1/security-audits",
+                    "revision": "deadbeef",
+                    "split": "train",
+                    "translator": "swival",
+                    "bootstrap_count": 1,
+                    "holdout_count": 1,
+                    "min_words": 1,
+                    "max_words": 2000,
+                    "expected_instrument_count": 1,
+                    "source_digest": _fake_hash("source"),
+                    "order_digest": _fake_hash("order"),
+                    "local_jsonl_dir": "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl",
+                }
+            )
+        )
+
+        def fake_export(run, path, env, *, local_dir=None):
+            self.calls.append(("export", Path(path), local_dir))
+            output = run.run_dir / "hf"
+            output.mkdir(parents=True, exist_ok=True)
+            bootstrap = output / "bootstrap-corpus.json"
+            holdout = output / "holdout-corpus.json"
+            bootstrap.write_text(json.dumps(_direct_corpus(["hf_bootstrap_0000"], prefix="b")))
+            holdout.write_text(json.dumps(_direct_corpus(["hf_holdout_0000"], prefix="h")))
+            return [bootstrap, holdout]
+
+        code = self._main(
+            ["run", "--bundle", "compatibility", "--corpus", str(pin_path), "--postgres-admin-url", _ADMIN_URL],
+            cargo=self._fake_cargo(),
+            export=fake_export,
+        )
+
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        order = [call[0] for call in self.calls if call[0] in ("export", "cargo")]
+        self.assertEqual(order, ["export", "cargo"], "export first, then one harness run")
+        export_call = next(call for call in self.calls if call[0] == "export")
+        self.assertEqual(export_call[1], pin_path.resolve())
+        self.assertEqual(
+            Path(export_call[2]),
+            environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl",
+        )
+        _, _, _, test_filter, env, exact, ignored = self._cargo_calls()[0]
+        self.assertEqual(test_filter, _HARNESS)
+        self.assertTrue(exact and ignored)
+        hf_dir = self.run.run_dir / "hf"
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"], str(hf_dir / "bootstrap-corpus.json"))
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH"], str(hf_dir / "holdout-corpus.json"))
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"], "pipeline_http_corpus_hf_local")
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE"], "compatibility")
+        self.assertIn("PipelineRunOK:", self.stdout.getvalue())
+        self.assertIn("fixtures=2", self.stdout.getvalue())
+
+    def test_run_keeps_the_report_when_the_harness_fails(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture", "beta_fixture"])))
+        mismatched = _fixture_report(
+            "beta_fixture", expected_admission_decision="reject", mismatches=["admission_decision"]
+        )
+        log_path = self.run.log_path("corpus_run")
+
+        def failing_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            _write_harness_outputs(
+                env,
+                fixtures_by_partition={"corpus": [_fixture_report("alpha_fixture"), mismatched]},
+                emit=False,
+            )
+            raise errors.StepFailed(step, 101, log_path)
+
+        code = self._main(
+            ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL],
+            cargo=failing_cargo,
+        )
+
+        self.assertEqual(code, 101)
+        self.assertIn("PipelineFailure: step_failed:corpus_run exit=101", self.stderr.getvalue())
+        local_report = self.tmp / "local" / "pipeline-minimal-corpus-report.json"
+        report = json.loads(local_report.read_text())
+        self.assertEqual(report["failure_count"], 1)
+        self.assertEqual(report["partitions"][0]["fixtures"][1]["mismatches"], ["admission_decision"])
+        self.assertIn("admission_decision", local_report.with_suffix(".md").read_text())
+        self.assertNotIn("PipelineRunOK", self.stdout.getvalue())
+
+    def test_run_archives_only_with_archive(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        catalog_path = self.tmp / "local" / "pipeline-lab-catalog.json"
+        argv = ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL]
+
+        self.assertEqual(self._main(argv, cargo=self._fake_cargo()), 0, self.stderr.getvalue())
+        self.assertFalse(catalog_path.exists(), "a routine run writes no catalog")
+
+        shutil.rmtree(self.run.run_dir)
+        self.run = _scratch_run("corpus")
+        self.assertEqual(self._main([*argv, "--archive"], cargo=self._fake_cargo()), 0, self.stderr.getvalue())
+        catalog_value = json.loads(catalog_path.read_text())
+        self.assertEqual(catalog_value["schema"], "trace_commons.pipeline_lab_catalog.v1")
+        entry = catalog_value["bundles"][0]
+        self.assertEqual(entry["bundle_id"], _fake_hash("bundle"))
+        record = entry["reports"][0]
+        self.assertEqual(record["status"], "pass")
+        self.assertTrue((catalog_path.parent / record["report"]).is_file())
+
+    def test_run_refuses_a_report_that_does_not_match_its_evidence(self):
+        corpus_path = self.tmp / "corpus.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+
+        def tampering_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step))
+            _write_harness_outputs(env)
+            report_path = Path(env["TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH"])
+            report_path.write_bytes(report_path.read_bytes() + b" ")
+
+        code = self._main(
+            ["run", "--bundle", "minimal", "--corpus", str(corpus_path), "--postgres-admin-url", _ADMIN_URL],
+            cargo=tampering_cargo,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stderr.getvalue().strip(), "PipelineFailure: corpus_evidence_mismatch")
+
+
+class CorpusReportValidationTests(unittest.TestCase):
+    def test_corpus_report_validation_refuses_unsafe_or_inconsistent_reports(self):
+        base = _corpus_report(
+            "pipeline_http_corpus_minimal",
+            [("corpus", _fake_hash("corpus"), [_fixture_report("alpha_fixture")])],
+        )
+        corpus.validate_report(base)  # must not raise
+
+        def resign(report):
+            report = dict(report)
+            report.pop("report_digest")
+            report["report_digest"] = _digest(results.canonical(report))
+            return report
+
+        def with_fixture(**overrides):
+            report = json.loads(json.dumps(base))
+            report["partitions"][0]["fixtures"][0].update(overrides)
+            return resign(report)
+
+        cases = {
+            # A raw run id would be hashed by `safe_report_value`: the report
+            # must already carry only its hash.
+            "unsafe_report": with_fixture(reason_label=str(uuid.uuid4())),
+            "unsafe_report_value": with_fixture(reason_label="free text with spaces"),
+            "private_report_field": with_fixture(secret_probe="x"),
+            "report_digest_mismatch": dict(base, report_digest=_fake_hash("other")),
+            "qualification_mismatch_not_failed": with_fixture(admission_decision="reject"),
+            "invalid_report_scope": resign(dict(base, production_ready=True)),
+            "unsupported_report_schema": resign(dict(base, schema="trace_commons.pipeline_corpus_report.v5")),
+        }
+        for label, report in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    corpus.validate_report(report)
+                self.assertEqual(str(ctx.exception), label)
+
+        failed = with_fixture(admission_decision="reject", mismatches=["admission_decision"])
+        failed["partitions"][0]["failure_count"] = 1
+        failed["failure_count"] = 1
+        corpus.validate_report(resign(failed))  # a recorded failure is a valid report
+        self.assertIn("admission_decision", corpus.markdown(resign(failed)))
+
+
+class PackageCommandTests(_CorpusRunCase):
+    def test_package_runs_the_package_writer_with_its_own_variables(self):
+        output = self.tmp / "out" / "package.json"
+        key_output = self.tmp / "out" / "trusted-key.json"
+
+        def fake_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            Path(env["TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT"]).write_text(
+                json.dumps(
+                    {
+                        "package": {"bundle_id": _fake_hash("bundle")},
+                        "signature": {"package_hash": _fake_hash("package"), "key_id": "local_pipeline_ephemeral"},
+                    }
+                )
+            )
+            Path(env["TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT"]).write_text("{}")
+
+        code = self._main(
+            ["package", "--bundle", "minimal", "--output", str(output), "--public-key-output", str(key_output)],
+            cargo=fake_cargo,
+        )
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, step, cargo_args, test_filter, env, exact, ignored)] = self._cargo_calls()
+        self.assertEqual((step, cargo_args, test_filter, exact, ignored),
+                         ("package_write", _INGEST_ARGS, _PACKAGE_WRITER, True, True))
+        self.assertEqual(
+            {key: value for key, value in env.items() if key.startswith("TRACE_COMMONS_")},
+            {
+                "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": "minimal",
+                "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output.resolve()),
+                "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output.resolve()),
+            },
+        )
+        self.assertEqual(
+            self.stdout.getvalue().strip(),
+            f"PipelinePackageOK: bundle={_fake_hash('bundle')} package={_fake_hash('package')}",
+        )
+
+        for extra, label in (
+            (["--signing-key", str(self.tmp / "key.der")], "package_signing_key_and_key_id_required"),
+            (["--key-id", "operator_key"], "package_signing_key_and_key_id_required"),
+        ):
+            with self.subTest(label=label, extra=extra):
+                self.calls.clear()
+                self.stderr = io.StringIO()
+                code = self._main(
+                    ["package", "--bundle", "minimal", "--output", str(output),
+                     "--public-key-output", str(key_output), *extra],
+                    cargo=fake_cargo,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+                self.assertEqual(self._cargo_calls(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

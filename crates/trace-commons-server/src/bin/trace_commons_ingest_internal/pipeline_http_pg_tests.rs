@@ -148,7 +148,7 @@ async fn pipeline_http_database_url() -> Option<String> {
 /// legacy ingest path (`state.db_mirror`, the NEAR admission functions) and
 /// the pipeline as this login, so both are held to what
 /// `trace_ingest_runtime` is granted.
-async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
+pub(super) async fn runtime_backend(pool_size: usize) -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
     let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
     runtime_url
@@ -194,7 +194,7 @@ fn storage_rebate_descriptor() -> InstrumentDescriptor {
 /// `versioned_pipeline_runtime_pg.rs`'s `PassThroughPipelinePrivacyBoundary`
 /// (test doubles live in the test files, so this file holds its own copy
 /// rather than sharing one).
-struct PassThroughPipelinePrivacyBoundary;
+pub(super) struct PassThroughPipelinePrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
@@ -245,19 +245,7 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
     ) -> anyhow::Result<Arc<PipelineService>> {
         let scorer = Arc::new(ReferencePerplexityScorer::new());
         let embedder = Arc::new(ReferenceEmbedder::new());
-        let package = MinimalPolicyBundle::minimal_package(
-            &PipelineBundleConfig {
-                instrument_awards: vec![PipelineInstrumentAwardConfig {
-                    instrument_id: "storage_rebate".into(),
-                    atomic_units: AtomicUnits::from_raw(5),
-                    descriptor: storage_rebate_descriptor(),
-                }],
-                include_index: true,
-                variant: None,
-            },
-            scorer.as_ref(),
-            embedder.as_ref(),
-        )?;
+        let package = minimal_storage_rebate_package(scorer.as_ref(), embedder.as_ref())?;
         let registry = SettlementAdapterRegistry::new(self.adapters.clone())?;
         let caps = PipelineCaps {
             per_instrument_atomic_units: BTreeMap::from([
@@ -293,9 +281,45 @@ impl IngestPipelineRuntimeAssembler for TestAssembler {
     }
 }
 
+/// PR 2's minimal package with the `storage_rebate` award (5 whole units),
+/// naming `scorer` and `embedder`: the package `TestAssembler` serves, and
+/// the `minimal` bundle of `pipeline.py run` (`pipeline_corpus_pg_tests`).
+pub(super) fn minimal_storage_rebate_package(
+    scorer: &ReferencePerplexityScorer,
+    embedder: &ReferenceEmbedder,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        scorer,
+        embedder,
+    )
+}
+
+/// The compatibility package over `CompatibilityBundleConfig::local_reference()`
+/// with the given `NoveltyUtility` delta, naming `scorer` and `embedder`: the
+/// package `CompatibilityTestAssembler` serves, and (with 2_500_000) the
+/// `compatibility` bundle of `pipeline.py run` (`pipeline_corpus_pg_tests`).
+pub(super) fn compatibility_reference_package(
+    novelty_utility_microcredits: u64,
+    scorer: &ReferencePerplexityScorer,
+    embedder: &ReferenceEmbedder,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = novelty_utility_microcredits;
+    MinimalPolicyBundle::compatibility_package(&config, scorer, embedder)
+}
+
 /// The authority every test service in this file holds: each tenant gets
 /// empty allowlists, which restrict nothing, and no tenant policy.
-fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
+pub(super) fn allow_all_test_authority() -> Arc<StaticPipelineAuthorityProvider> {
     Arc::new(StaticPipelineAuthorityProvider::test_only(
         SubmissionAuthority {
             tenant: SubmissionAllowlists::default(),
@@ -458,7 +482,7 @@ async fn wait_for_run_complete(
 /// up to 10 s -- bounded so a broken worker fails the test instead of
 /// hanging it, generous enough to absorb the gap between a freshly spawned
 /// worker task and its first readiness probe.
-async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
+pub(super) async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let response = client
@@ -558,7 +582,7 @@ fn reqwest_headers(headers: axum::http::HeaderMap) -> reqwest::header::HeaderMap
 /// stop-and-join path: `run_pipeline_app` asks the worker to stop only
 /// after HTTP has finished shutting down, and bounds the wait on the same
 /// grace period ingest itself uses.
-async fn serve_pipeline_app(
+pub(super) async fn serve_pipeline_app(
     state: Arc<AppState>,
 ) -> (
     String,
@@ -584,7 +608,7 @@ async fn serve_pipeline_app(
 /// serve future itself returned. Used to assert app 1's join returns `Ok`
 /// within the shutdown grace period after the stop signal, and to shut app
 /// 2 down cleanly at the end of the test.
-async fn join_within(
+pub(super) async fn join_within(
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     timeout_secs: u64,
     label: &str,
@@ -1941,7 +1965,7 @@ async fn mark_admission_completed(
 /// resolver URL the database configuration reads names the configured test
 /// database, so its database is replaced with that one. Panics on any setup
 /// failure once `TRACE_COMMONS_PG_TEST_DATABASE_URL` is set.
-async fn account_owner_backend() -> Option<Arc<PgBackend>> {
+pub(super) async fn account_owner_backend() -> Option<Arc<PgBackend>> {
     let url = pipeline_http_database_url().await?;
     let login_resolver_url = DatabaseConfig::login_resolver_url_from_env().map(|resolver| {
         let mut resolver_url =
@@ -4817,10 +4841,8 @@ impl IngestPipelineRuntimeAssembler for CompatibilityTestAssembler {
     ) -> anyhow::Result<Arc<PipelineService>> {
         let scorer = Arc::new(ReferencePerplexityScorer::new());
         let embedder = Arc::new(ReferenceEmbedder::new());
-        let mut config = CompatibilityBundleConfig::local_reference();
-        config.novelty_utility_microcredits = self.novelty_utility_microcredits;
-        let package = MinimalPolicyBundle::compatibility_package(
-            &config,
+        let package = compatibility_reference_package(
+            self.novelty_utility_microcredits,
             scorer.as_ref(),
             embedder.as_ref(),
         )?;
@@ -5580,7 +5602,7 @@ async fn run_of_submission(
 /// Sends `body` (JSON, when given) to `url` over real HTTP with `headers`,
 /// and returns the status and the response body, parsed as JSON when it is
 /// JSON and as a string otherwise.
-async fn send_http(
+pub(super) async fn send_http(
     client: &reqwest::Client,
     method: reqwest::Method,
     url: String,
@@ -5606,7 +5628,7 @@ async fn send_http(
 }
 
 /// `POST /v1/traces` of `body` with `token`.
-async fn post_trace(
+pub(super) async fn post_trace(
     client: &reqwest::Client,
     base: &str,
     token: &str,
@@ -5628,7 +5650,7 @@ async fn post_trace(
 
 /// `POST /v1/contributors/me/submission-status` for `submission_ids` with
 /// `token`.
-async fn post_submission_status(
+pub(super) async fn post_submission_status(
     client: &reqwest::Client,
     base: &str,
     token: &str,

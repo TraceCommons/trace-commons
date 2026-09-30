@@ -6256,7 +6256,18 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
 
 fn test_artifact_store(root: &Path) -> Arc<LocalEncryptedTraceArtifactStore> {
     let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
-    let crypto = SecretsCrypto::new(SecretString::from(key)).expect("test crypto");
+    test_artifact_store_with_key(root, &key)
+}
+
+/// `test_artifact_store` with a given master key instead of a generated one,
+/// so two processes can read each other's objects: `pipeline.py` passes one
+/// random key per command (`TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX`,
+/// P4-D18). The key never appears in a panic message.
+fn test_artifact_store_with_key(
+    root: &Path,
+    key_hex: &str,
+) -> Arc<LocalEncryptedTraceArtifactStore> {
+    let crypto = SecretsCrypto::new(SecretString::from(key_hex.to_string())).expect("test crypto");
     Arc::new(LocalEncryptedTraceArtifactStore::new(root, crypto))
 }
 
@@ -96255,6 +96266,14 @@ mod wallet_v2_pg_tests;
 /// to `tests`'s descendants.
 #[path = "pipeline_http_pg_tests.rs"]
 mod pipeline_http_pg_tests;
+
+/// `pipeline.py run` and `pipeline.py package` (P4-D3): the ignored
+/// `pipeline_corpus_run` harness drives a corpus through the shared ingest
+/// app over real HTTP, and the ignored `pipeline_package_write` tool writes a
+/// signed bundle package. Nested here beside `pipeline_http_pg_tests`, whose
+/// `pub(super)` helpers it reuses.
+#[path = "pipeline_corpus_pg_tests.rs"]
+mod pipeline_corpus_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

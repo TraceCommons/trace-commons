@@ -24,6 +24,14 @@ export yet). `configuration_digest` is not compared: it is derived from the
 same pin fields the CLI arguments already carry, so a mismatch there is a
 binary or pin defect the corpus-digest checks would already have caught, not
 a separate signal to check.
+
+`safe_report_value`, `validate_report`, and `markdown` port
+`ef97a459:scripts/operator/lab/lab.py` lines 122-216 and 238-251, adapted to
+the `trace_commons.pipeline_corpus_report.v1` report the ignored Rust harness
+`pipeline_corpus_pg_tests::pipeline_corpus_run` writes: one section per corpus
+partition (`corpus`, or `bootstrap` then `holdout` for an HF pin), run ids as
+SHA-256 hashes only, the report digest over its canonical JSON, and each
+fixture's `mismatches` recomputed here from its observed and expected fields.
 """
 
 from __future__ import annotations
@@ -36,9 +44,55 @@ from pathlib import Path
 
 from .environment import ROOT, run_child
 from .errors import require
+from .results import canonical
 
 CORPUS_SCHEMA = "trace_commons.pipeline_corpus.v1"
 PIN_SCHEMA = "trace_commons.pipeline_hf_corpus_pin.v1"
+REPORT_SCHEMA = "trace_commons.pipeline_corpus_report.v1"
+
+# The corpus `pipeline.py run` uses when `--corpus` is not given: `main`'s
+# #971 text, unchanged (P4-D16 derives the expectations it leaves out).
+DEFAULT_CORPUS = ROOT / "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json"
+
+PHASES = ("admission", "review", "score", "settle")
+
+# The check ids the harness may emit (`pipeline_corpus_pg_tests`'s
+# `CORPUS_CHECK_IDS`). `pipeline_http_corpus_package` is not a required check
+# (controller ruling PF-1).
+CORPUS_CHECK_IDS = frozenset(
+    {
+        "pipeline_http_corpus_minimal",
+        "pipeline_http_corpus_compatibility",
+        "pipeline_http_corpus_hf_local",
+        "pipeline_http_corpus_package",
+    }
+)
+
+# Port `lab.py` `BLOCKERS`: every corpus report is local test evidence.
+LOCAL_BLOCKERS = (
+    "local_test_only",
+    "local_reference_scorer",
+    "local_reference_embedder",
+    "synthetic_index",
+    "synthetic_settlement",
+    "static_bearer_authentication",
+)
+
+_REPORT_HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
+_REPORT_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
+_REPORT_UUID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\Z")
+_VOLATILE = frozenset({"duration_ms", "time_in_phase_ms", "next_attempt_at"})
+_PRIVATE_REPORT_FIELDS = frozenset(
+    {"input", "text", "trace_text", "secret", "secret_probe", "token", "account_id", "email"}
+)
+_SECRET_PREFIXES = ("ghp_", "github_pat_", "sk-")
+# A run the worker finished: `complete`, or `rejected` (Admission or Review
+# rejected it; its run is complete too).
+_TERMINAL_STATES = ("complete", "rejected")
+# The observed fields compared with their `expected_` counterpart, in the
+# order `pipeline_corpus_pg_tests::fixture_mismatches` names them.
+_COMPARED_STATES = ("consent_state", "privacy_state", "scoring_state", "settlement_state")
+_REQUIRED_FLAGS = ("replay_same_run", "changed_content_refused", "tenant_isolation")
 
 # Every HF download made by `export_hf_corpus` stays inside the worktree:
 # without an explicit `--cache-dir`, hf-hub falls back to `$HF_HOME` or
@@ -177,3 +231,162 @@ def export_hf_corpus(run, pin_path, env, *, local_dir=None):
     require(manifest.get("contains_raw_trace_text") is False, "hf_manifest_contains_raw_trace_text")
 
     return [output_dir / "bootstrap-corpus.json", output_dir / "holdout-corpus.json"]
+
+
+def safe_report_value(value):
+    """Ports `lab.py`'s `safe_report_value`: only structured values, hashes,
+    and labels. A raw UUID is replaced with its hash and a volatile field is
+    dropped, so `validate_report` can require that a report already equals
+    its safe form. Floats are refused (the report has none)."""
+    if isinstance(value, dict):
+        require(all(isinstance(key, str) and _REPORT_LABEL.fullmatch(key) for key in value), "unsafe_report_field")
+        require(not _PRIVATE_REPORT_FIELDS.intersection(value), "private_report_field")
+        return {key: safe_report_value(item) for key, item in value.items() if key not in _VOLATILE}
+    if isinstance(value, list):
+        return [safe_report_value(item) for item in value]
+    if isinstance(value, str):
+        if _REPORT_UUID.fullmatch(value):
+            return _sha256(value.encode())
+        require(_REPORT_LABEL.fullmatch(value) is not None, "unsafe_report_value")
+        require(not value.startswith(_SECRET_PREFIXES), "unsafe_report_value")
+        return value
+    require(value is None or isinstance(value, (bool, int)), "unsafe_report_value")
+    return value
+
+
+def fixture_mismatches(item):
+    """The labels of every expectation `item` misses, in the harness's
+    order: the same rule `pipeline_corpus_pg_tests::fixture_mismatches`
+    applies when it fills `mismatches`."""
+    found = []
+    if item["state"] not in _TERMINAL_STATES:
+        found.append("run_not_terminal")
+    if item["admission_decision"] != item["expected_admission_decision"]:
+        found.append("admission_decision")
+    if item["phase_count"] != item["expected_outcome_count"]:
+        found.append("outcome_count")
+    for field in _COMPARED_STATES:
+        if item[field] != item[f"expected_{field}"]:
+            found.append(field)
+    if item["instrument_count"] != item["expected_instrument_count"]:
+        found.append("instrument_count")
+    for flag in _REQUIRED_FLAGS:
+        if item[flag] is not True:
+            found.append(flag)
+    return found
+
+
+def validate_report(report):
+    """Ports `lab.py`'s `validate_report` to the v1 corpus report. A report
+    with recorded fixture failures is valid; one whose failures do not match
+    its own fields, whose digests do not verify, or that carries anything
+    but labels, hashes, counts, and booleans is not."""
+    require(isinstance(report, dict) and report.get("schema") == REPORT_SCHEMA, "unsupported_report_schema")
+    require(report.get("scope") == "local_test" and report.get("production_ready") is False, "invalid_report_scope")
+    require(report.get("external_payout_enabled") is False, "payout_enabled")
+    require(set(LOCAL_BLOCKERS).issubset(report.get("safe_blockers") or ()), "missing_local_blockers")
+    require(safe_report_value(report) == report, "unsafe_report")
+    require(report.get("check_id") in CORPUS_CHECK_IDS, "invalid_report_check_id")
+    for field in ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "report_digest"):
+        require(isinstance(report.get(field), str) and _REPORT_HASH.fullmatch(report[field]), "invalid_report_hash")
+    unsigned = {key: value for key, value in report.items() if key != "report_digest"}
+    require(_sha256(canonical(unsigned)) == report["report_digest"], "report_digest_mismatch")
+    manifest = report.get("policy_manifest")
+    require(
+        isinstance(manifest, dict) and all(isinstance(manifest.get(phase), dict) for phase in PHASES),
+        "report_manifest_invalid",
+    )
+    configuration = {phase: manifest[phase].get("configuration_hash") for phase in PHASES}
+    require(_sha256(canonical(configuration)) == report["configuration_digest"], "configuration_digest_mismatch")
+
+    sections = report.get("partitions")
+    require(isinstance(sections, list), "report_partitions_invalid")
+    require(
+        [section.get("partition") for section in sections] in (["corpus"], ["bootstrap", "holdout"]),
+        "report_partitions_invalid",
+    )
+    every = []
+    for section in sections:
+        require(section.get("bundle_id") == report["bundle_id"], "bundle_mismatch")
+        require(_REPORT_HASH.fullmatch(section.get("corpus_digest") or "") is not None, "invalid_report_hash")
+        fixtures = section.get("fixtures")
+        require(isinstance(fixtures, list), "fixture_count_mismatch")
+        require(section.get("fixture_order") == [item.get("label") for item in fixtures], "fixture_order_mismatch")
+        require(len(fixtures) == section.get("expected_fixture_count") and len(fixtures) > 0, "fixture_count_mismatch")
+        require(
+            sum(item["state"] in _TERMINAL_STATES for item in fixtures) == section.get("completed_fixture_count"),
+            "completion_count_mismatch",
+        )
+        for item in fixtures:
+            require(item.get("mismatches") == fixture_mismatches(item), "qualification_mismatch_not_failed")
+        require(
+            sum(bool(item["mismatches"]) for item in fixtures) == section.get("failure_count"),
+            "failure_count_invalid",
+        )
+        every.extend(fixtures)
+    require(len({item["label"] for item in every}) == len(every), "duplicate_fixture_label")
+    require(report.get("fixture_count") == len(every), "fixture_count_mismatch")
+    require(
+        report.get("completed_fixture_count") == sum(section["completed_fixture_count"] for section in sections),
+        "completion_count_mismatch",
+    )
+    require(
+        report.get("failure_count") == sum(section["failure_count"] for section in sections),
+        "failure_count_invalid",
+    )
+    require(
+        report.get("replay_same_run_count") == sum(item["replay_same_run"] is True for item in every),
+        "replay_count_mismatch",
+    )
+    require(
+        report.get("changed_content_refused_count") == sum(item["changed_content_refused"] is True for item in every),
+        "changed_content_count_mismatch",
+    )
+    require(
+        report.get("tenant_isolation") is all(item["tenant_isolation"] is True for item in every),
+        "tenant_isolation_mismatch",
+    )
+
+
+def markdown(report):
+    """Ports `lab.py`'s `markdown` to the v1 report: the bundle, the phase
+    policies, and one fixture table for each partition, with its
+    mismatches."""
+    lines = [
+        "# Pipeline corpus report",
+        "",
+        f"Check: `{report['check_id']}`",
+        "",
+        f"Bundle: `{report['bundle_id']}`",
+        "",
+        f"Package: `{report['package_hash']}`",
+        "",
+        f"Completed: {report['completed_fixture_count']}/{report['fixture_count']}. "
+        f"Failures: {report['failure_count']}.",
+        "",
+        "External payout: disabled.",
+        "",
+        "| Phase | Implementation | Configuration hash |",
+        "| --- | --- | --- |",
+    ]
+    for phase in PHASES:
+        policy = report["policy_manifest"][phase]
+        lines.append(f"| {phase} | `{policy['implementation_id']}` | `{policy['configuration_hash']}` |")
+    for section in report["partitions"]:
+        lines += [
+            "",
+            f"## Partition `{section['partition']}`",
+            "",
+            f"Corpus: `{section['corpus_digest']}`",
+            "",
+            "| Fixture | Admission | Expected | State | Outcomes | Mismatches |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for item in section["fixtures"]:
+            mismatches = ", ".join(item["mismatches"]) or "none"
+            lines.append(
+                f"| {item['label']} | {item['admission_decision']} | {item['expected_admission_decision']} "
+                f"| {item['state']} | {item['phase_count']} | {mismatches} |"
+            )
+    lines += ["", "Production blockers: " + ", ".join(report["safe_blockers"]) + ".", ""]
+    return "\n".join(lines)

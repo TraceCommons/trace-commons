@@ -9,5 +9,7 @@ global constraints). Submodules:
 - `cargo`    -- `cargo_test`, the zero-match-filter guard.
 - `results`  -- `PipelineCheckResult` loading and validation.
 - `checks`   -- check definitions (`CheckSpec`, `TEST_CHECKS`).
-- `corpus`   -- `load_direct_corpus`, `load_pin`, `export_hf_corpus`.
+- `corpus`   -- `load_direct_corpus`, `load_pin`, `export_hf_corpus`, and the
+  corpus report checks (`validate_report`, `markdown`).
+- `catalog`  -- `archive`, `update_catalog` (only `--archive` writes it).
 """
