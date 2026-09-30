@@ -1199,6 +1199,11 @@ whatever shell arms it. Only `include_backlog: true` sends the backlog too:
   is approved unattended in the folder, so a harness connected or re-rooted
   after the arming has its history recorded before it can send anything. A
   session created between the arming and that pass waits too: fail closed.
+  A source whose listing cannot be read -- its root, or any directory under
+  it, unreadable for a reason other than not existing -- reports a failed
+  discovery rather than an empty one, so it stays unrecorded for that pass
+  and holds everything. The automatic grant's recording follows the same
+  rule.
 - **Defence in depth for content at a new path.** The record is by path, so a
   conversation older than the arming that turns up in a new file -- a resume
   into a fresh file, a restore, a sync -- is also held when its first event,

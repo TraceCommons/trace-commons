@@ -3957,6 +3957,73 @@ mod tests {
         assert_eq!(state_at(&f, &resumed), (QueueState::Pending, false));
     }
 
+    /// Make the Claude Code root unreadable for the duration of `during`, and
+    /// report whether permission bits bind for this user at all (they do not
+    /// for root, where the probe proves nothing).
+    #[cfg(unix)]
+    async fn with_unreadable_claude_root<F: std::future::Future<Output = ()>>(
+        f: &WatcherFixture,
+        during: impl FnOnce() -> F,
+    ) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let root = f.claude_root.clone();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let binds = std::fs::read_dir(&root).is_err();
+        during().await;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        binds
+    }
+
+    /// Zaki's probe on #1134: a pending session, the folder armed from now,
+    /// then the Claude root unreadable during the pass that would record it.
+    /// The source must stay unrecorded, so once the root is readable again
+    /// the session is recorded as on disk and still waits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_root_at_the_recording_pass_does_not_release_the_backlog() {
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        let binds = with_unreadable_claude_root(&f, || async {
+            f.settle(at("2030-01-02T00:00:00Z")).await;
+        })
+        .await;
+        if !binds {
+            eprintln!("permission bits do not bind for this user; probe skipped");
+            return;
+        }
+        f.settle(at("2030-01-03T00:00:00Z")).await;
+        f.settle(at("2030-01-04T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &path), (QueueState::Pending, false));
+    }
+
+    /// The same flaw in the automatic grant's recording: an unreadable root
+    /// at the grant's first pass recorded the source as empty, so a project
+    /// already on disk read as new once the root came back, and was armed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_root_at_the_grants_record_arms_nothing_on_disk() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let path = f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        grant_automatic(&f);
+        let binds = with_unreadable_claude_root(&f, || async {
+            f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        })
+        .await;
+        if !binds {
+            eprintln!("permission bits do not bind for this user; probe skipped");
+            return;
+        }
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(mode_of(&f, "old"), (ProjectMode::NotifyOnly, false));
+        assert_eq!(state_at(&f, &path), (QueueState::Pending, false));
+    }
+
     /// A keep pressed on a card the watcher approved on the folder's behalf
     /// revokes that approval and keeps it, rather than losing the race.
     #[tokio::test]

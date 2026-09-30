@@ -55,6 +55,27 @@ pub struct SessionTooLarge {
 /// cannot resolve a home. Joining a conventional suffix to that fallback
 /// produces a relative path; this helper does not claim that such a path is
 /// absent or replace the source-declaration and consent checks.
+/// `read_dir` for `TraceSource::discover`: `Ok(None)` when the directory does
+/// not exist, and an error for every other failure.
+///
+/// A listing that could not be read is not an empty one. Discovery used to
+/// answer `Ok(empty)` for an unreadable root, and a pass that records what is
+/// on disk -- for the automatic grant or an arming from now (K5) -- then
+/// recorded that source as holding nothing, so every session already there
+/// read as new and was approved unattended once the root came back. An error
+/// leaves the source unrecorded for that pass, which holds everything from it:
+/// fail closed. The message is a fixed label and the error kind, never a path.
+pub(crate) fn read_dir_for_discovery(path: &Path) -> anyhow::Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!(
+            "discovery-listing-unreadable ({:?})",
+            e.kind()
+        )),
+    }
+}
+
 pub(crate) fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_default()
 }
@@ -912,6 +933,48 @@ mod tests {
                 hasher.finish(),
                 session_hash(&body),
                 "chunking at {chunk} bytes changed the digest"
+            );
+        }
+    }
+
+    /// K5: every directory-backed source reports an unreadable root as a
+    /// failed discovery, not as an empty one, and a missing root as empty.
+    /// See `read_dir_for_discovery`.
+    #[test]
+    #[cfg(unix)]
+    fn every_source_fails_discovery_on_an_unreadable_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let makers: Vec<(&str, fn(PathBuf) -> Box<dyn TraceSource>)> = vec![
+            ("cline", |r| Box::new(cline::ClineSource::new(r))),
+            ("gemini-cli", |r| {
+                Box::new(gemini_cli::GeminiCliSource::new(r))
+            }),
+            ("opencode", |r| Box::new(opencode::OpenCodeSource::new(r))),
+            ("codex", |r| Box::new(codex::CodexSource::new(r))),
+        ];
+        for (name, make) in makers {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(
+                make(dir.path().join("absent"))
+                    .discover()
+                    .unwrap()
+                    .is_empty(),
+                "{name}: a missing root is empty"
+            );
+            let root = dir.path().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let bound = std::fs::read_dir(&root).is_err();
+            let result = make(root.clone()).discover();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if !bound {
+                eprintln!("permission bits do not bind for this user; probe skipped");
+                return;
+            }
+            assert!(
+                result.is_err(),
+                "{name}: an unreadable root must fail discovery, got {:?}",
+                result.map(|r| r.len())
             );
         }
     }
