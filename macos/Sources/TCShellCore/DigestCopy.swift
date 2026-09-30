@@ -12,8 +12,11 @@ import Foundation
 /// `contributionLine` is the half that says what went without them. The
 /// daemon composes the same sentence for its own local notifier
 /// (`crates/trace-commons-contributor/src/daemon/notify.rs`,
-/// `contribution_text`) and the two must not drift; both are tested against
-/// the same rules.
+/// `contribution_text`), as do Windows (`DigestText.ContributionLine`) and
+/// Linux (`notify::contribution_body`); the four must not drift. All name a
+/// project only when exactly one distinct, non-blank label is present (the
+/// WYSIWYG design's evening-digest examples, K9 #1118), and each pins the
+/// design's two example sentences verbatim.
 public enum DigestCopy {
     /// Nil when nothing was contributed -- the caller then has only the
     /// waiting half, or nothing to say at all. A line reading "0 sessions
@@ -28,9 +31,9 @@ public enum DigestCopy {
         var line = "\(count) \(noun) contributed"
         // Labels only, never a path: a notification is rendered by the
         // desktop environment and may be logged by it.
-        let named = projects.filter { !$0.isEmpty }
-        if !named.isEmpty {
-            line += " from \(Self.joined(named))"
+        let named = Set(projects.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+        if named.count == 1, let only = named.first {
+            line += " from \(only)"
         }
         line += "."
         // Stated only when there is some. "0 credit pending" reads as a
@@ -49,21 +52,5 @@ public enum DigestCopy {
             line += String(format: " %.1f credit pending.", rounded)
         }
         return line
-    }
-
-    /// Three names, then a count. The same summarising rule the daemon's
-    /// `contribution_text` and `digest_text` use -- a contributor with
-    /// fifteen active projects wants a digest, not a manifest.
-    private static func joined(_ labels: [String]) -> String {
-        let named = Array(labels.prefix(3))
-        let more = labels.count - named.count
-        if more > 0 {
-            return named.joined(separator: ", ") + " and \(more) more"
-        }
-        switch named.count {
-        case 1: return named[0]
-        case 2: return "\(named[0]) and \(named[1])"
-        default: return named.dropLast().joined(separator: ", ") + " and " + named[named.count - 1]
-        }
     }
 }

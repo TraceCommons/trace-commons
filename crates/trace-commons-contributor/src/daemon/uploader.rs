@@ -697,6 +697,13 @@ impl Uploader<'_, '_> {
         {
             self.ctx.hold_unless_scrub_is_clear(entry.subagents_dropped);
         }
+        // K7: the entry's own provenance -- whether a person approved it or
+        // an armed folder sent it without asking, and the verdict if any --
+        // travels onto the receipt this call produces, and from there onto
+        // the history row. Set immediately before the call so it cannot
+        // apply to a submission this context runs later.
+        self.ctx
+            .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
         let outcome = match self.ctx.submit_loaded(transcript).await {
             Ok(o) => o,
             Err(e) => {
@@ -1785,6 +1792,126 @@ mod tests {
             "{decision:?}"
         );
         assert_eq!(state.uploads_today, 1);
+    }
+
+    async fn spawn_stub(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn stub_claim_issuer() -> axum::Router {
+        axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "stub-claim-jwt",
+                    "token_type": "Bearer",
+                    "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
+                    "expires_in": 300,
+                    "consent_scopes": ["debugging_evaluation", "model_training"],
+                    "allowed_uses": ["debugging", "evaluation", "model_training", "aggregate_analytics"],
+                }))
+            }),
+        )
+    }
+
+    fn stub_ingest_accepts() -> axum::Router {
+        axum::Router::new().route(
+            "/v1/traces",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "status": "accepted",
+                    "credit_points_pending": 0.0,
+                    "explanation": []
+                }))
+            }),
+        )
+    }
+
+    /// K7: `upload_entry` must hand the queue entry's own provenance to the
+    /// submit pipeline before it uploads, so the receipt this real (not
+    /// dry-run) upload writes -- and from it, the history row -- can say
+    /// whether a person approved this session or an armed folder sent it
+    /// without asking. Removing the `set_upload_provenance` call in
+    /// `upload_entry` makes this fail: the receipt would read the default
+    /// `(false, None)` for an entry that was, in fact, sent unattended.
+    #[tokio::test]
+    async fn upload_entry_records_the_entrys_own_provenance_on_the_receipt() {
+        let issuer = spawn_stub(stub_claim_issuer()).await;
+        let ingest = spawn_stub(stub_ingest_accepts()).await;
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = crate::config::ContributorConfig {
+            inference_receipt_endpoint: None,
+            consent_scopes_chosen: false,
+            witness_origin: None,
+            inference_receipt_check_attestation: false,
+            schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+            issuer_url: issuer,
+            ingest_url: ingest,
+            audience: "trace-commons-upload".into(),
+            tenant_id: "tenant-abc".into(),
+            instance_id: "instance-1".into(),
+            user_subject: "alice".into(),
+            device_key_id: device.device_key_id.clone(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            pii_filter: None,
+            allowed_hosts: None,
+            display_handle: None,
+            public_bio: None,
+            public_since: None,
+            witness: None,
+        };
+        store.save_config(&cfg).unwrap();
+
+        let mut entry = session.entry_for(&session.current_hash(), &cfg);
+        entry.approved_unattended = true;
+
+        let opts = crate::submit::SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+
+        let receipts = store.load_receipts().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].approved_unattended,
+            Some(true),
+            "the entry was sent by an armed folder, not a person"
+        );
     }
 
     /// The config the fixture sessions above are approved and uploaded
