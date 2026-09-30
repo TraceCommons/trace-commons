@@ -1627,6 +1627,12 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "invite_public_face",
         include_str!("../../../../migrations/V103__invite_public_face.sql"),
     ),
+    // V104 replaces V91's function body and depends only on V81 and V91.
+    (
+        104,
+        "legacy_invite_link_device_guards",
+        include_str!("../../../../migrations/V104__legacy_invite_link_device_guards.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
