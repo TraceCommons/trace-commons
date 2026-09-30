@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Tag } from "../../../design-system";
 import {
   createPasskey,
   signInWithPasskey,
@@ -19,7 +20,7 @@ import {
   PasskeyIcon,
   Spinner,
   WarningIcon,
-} from "./glass";
+} from "./icons";
 
 export type PasskeyResult = { name: string; store: PasskeyStore };
 
@@ -65,15 +66,13 @@ function Overlay({
       for (const sibling of madeInert) sibling.removeAttribute("inert");
       if (opener?.isConnected) opener.focus();
       else
-        layer.parentElement
-          ?.querySelector<HTMLElement>(".ftux-window")
-          ?.focus();
+        layer.parentElement?.querySelector<HTMLElement>(".ftux-pane")?.focus();
     };
   }, []);
   return (
     <div
       ref={ref}
-      className="ftux-overlay"
+      className="tc-scrim ftux-scrim"
       role="dialog"
       aria-modal="true"
       aria-label={label}
@@ -116,7 +115,7 @@ function CornerButton({
   return (
     <button
       type="button"
-      className="ftux-icon-btn"
+      className="tc-btn tc-btn--round tc-btn--small ftux-corner"
       data-side={side}
       data-skip-focus
       aria-label={label}
@@ -132,16 +131,16 @@ function CornerButton({
 function SimulatedMark() {
   return (
     <span className="ftux-simulated">
-      Simulated · the real sheet is drawn by macOS
+      <Tag tone="ask">Simulated · the real sheet is drawn by macOS</Tag>
     </span>
   );
 }
 
 function ErrorLine({ error }: { error: string | null }) {
   return error ? (
-    <span className="ftux-status" data-tone="error" role="alert">
+    <p className="tc-alert m-0" role="alert">
       {error}
-    </span>
+    </p>
   ) : null;
 }
 
@@ -155,7 +154,7 @@ type StepProps = {
 // P-1
 function ChoosePopup({ send }: StepProps) {
   return (
-    <div className="ftux-popup">
+    <div className="tc-modal tc-modal--narrow ftux-popup">
       <CornerButton
         side="right"
         label="Close"
@@ -165,23 +164,23 @@ function ChoosePopup({ send }: StepProps) {
         <PasskeyIcon />
       </span>
       <div className="ftux-popup-heading">
-        <h2 className="ftux-popup-title">Continue with passkey</h2>
+        <h2 className="tc-heading m-0">Continue with passkey</h2>
       </div>
       <button
         type="button"
-        className="ftux-btn ftux-btn-primary ftux-btn-block"
+        className="tc-btn tc-btn--primary ftux-block-btn"
         onClick={() => send({ type: "use-existing" })}
       >
         Use existing passkey
       </button>
       <button
         type="button"
-        className="ftux-btn ftux-btn-block"
+        className="tc-btn tc-btn--glass ftux-block-btn"
         onClick={() => send({ type: "create-new" })}
       >
         Create new passkey
       </button>
-      <p className="ftux-popup-note">
+      <p className="m-0 tc-caption tc-text-tertiary ftux-center">
         A passkey is your sign-in for Trace Commons and near.ai. Nothing about
         your sessions is sent by signing in.
       </p>
@@ -200,7 +199,7 @@ function NamePopup({
   const showError = touched && nameError !== null;
   return (
     <form
-      className="ftux-popup"
+      className="tc-modal tc-modal--narrow ftux-popup"
       onSubmit={(event) => {
         event.preventDefault();
         setTouched(true);
@@ -221,7 +220,7 @@ function NamePopup({
         <PasskeyIcon />
       </span>
       <div className="ftux-popup-heading">
-        <h2 className="ftux-popup-title">Create new passkey</h2>
+        <h2 className="tc-heading m-0">Create new passkey</h2>
       </div>
       <div className="ftux-name-field">
         <input
@@ -249,12 +248,12 @@ function NamePopup({
       <ErrorLine error={showError ? nameError : null} />
       <button
         type="submit"
-        className="ftux-btn ftux-btn-primary ftux-btn-block"
+        className="tc-btn tc-btn--primary ftux-block-btn"
         disabled={showError}
       >
         Create new passkey
       </button>
-      <div className="ftux-warning">
+      <div className="tc-alert tc-alert--ask m-0 ftux-warning">
         <WarningIcon />
         Store your passkey securely. Losing it means losing access to your
         account and any credit in it.
@@ -374,13 +373,13 @@ function SaveSheet({
 // P-5. Binds the passkey to the near.ai account.
 function VerifyPopup({ send, run, busy, error }: StepProps) {
   return (
-    <div className="ftux-popup">
+    <div className="tc-modal tc-modal--narrow ftux-popup">
       <span className="ftux-popup-icon">
         <LockIcon />
       </span>
       <div className="ftux-popup-heading">
-        <h2 className="ftux-popup-title">Verify your passkey</h2>
-        <p className="ftux-lede">
+        <h2 className="tc-heading m-0">Verify your passkey</h2>
+        <p className="m-0 tc-text-secondary">
           Sign a message to prove the passkey is yours and unlock contributing
           and credit.
         </p>
@@ -388,7 +387,7 @@ function VerifyPopup({ send, run, busy, error }: StepProps) {
       <ErrorLine error={error} />
       <button
         type="button"
-        className="ftux-btn ftux-btn-outline ftux-btn-block"
+        className="tc-btn tc-btn--glass ftux-block-btn ftux-btn-outline"
         disabled={busy}
         onClick={() =>
           run(async () => {
@@ -402,13 +401,15 @@ function VerifyPopup({ send, run, busy, error }: StepProps) {
       </button>
       <button
         type="button"
-        className="ftux-btn ftux-btn-block"
+        className="tc-btn tc-btn--glass ftux-block-btn"
         disabled={busy}
         onClick={() => send({ type: "cancel" })}
       >
         Cancel
       </button>
-      <p className="ftux-popup-note">Cancelling signs you out.</p>
+      <p className="m-0 tc-caption tc-text-tertiary ftux-center">
+        Cancelling signs you out.
+      </p>
     </div>
   );
 }
@@ -438,7 +439,7 @@ function SignInSheet({
           className="ftux-sheet-group ftux-card-row"
           style={{ flexDirection: "row", padding: "10px 14px", fontSize: 13 }}
         >
-          <span className="ftux-muted">Passkey from</span>
+          <span className="tc-text-tertiary">Passkey from</span>
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
           >
@@ -607,13 +608,13 @@ export function WelcomeBack({
 }) {
   return (
     <Overlay label="Welcome back" onEscape={onOtherOptions}>
-      <div className="ftux-popup ftux-popup-wide">
+      <div className="tc-modal tc-modal--narrow ftux-popup">
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <h2 className="ftux-title">Welcome back</h2>
-          <p className="ftux-lede">Sign in with your passkey.</p>
+          <h2 className="tc-display m-0">Welcome back</h2>
+          <p className="m-0 tc-text-secondary">Sign in with your passkey.</p>
         </div>
         <div
-          className="ftux-card"
+          className="tc-card ftux-welcome-card"
           style={{ alignItems: "center", gap: 14, padding: "20px 16px" }}
         >
           <span className="ftux-popup-icon" data-tone="green">
@@ -622,7 +623,7 @@ export function WelcomeBack({
           <span style={{ fontSize: 16, fontWeight: 600 }}>{passkeyName}</span>
           <button
             type="button"
-            className="ftux-btn ftux-btn-primary ftux-btn-block"
+            className="tc-btn tc-btn--primary ftux-block-btn"
             onClick={onSignIn}
           >
             Sign in with passkey
@@ -630,7 +631,7 @@ export function WelcomeBack({
         </div>
         <button
           type="button"
-          className="ftux-link"
+          className="tc-link ftux-self-center"
           style={{ alignSelf: "center", fontSize: 13 }}
           onClick={onOtherOptions}
         >

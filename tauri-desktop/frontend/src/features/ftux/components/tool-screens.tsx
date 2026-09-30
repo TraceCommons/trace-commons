@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { ButtonPrimary, TertiaryLink } from "../../../design-system";
 import type { WatchAnswer } from "../ftux-model";
 import type { DetectedTool } from "../types";
-import { ScreenTitle, Spinner } from "./glass";
+import { ScreenBody, ScreenFooter, ScreenTitle } from "./ftux-frame";
+import { Spinner } from "./icons";
 import { ToolRow } from "./tool-row";
 
 type ToolListProps = {
@@ -26,7 +28,7 @@ function ToolList({
 }: ToolListProps & { compactMeta?: boolean }) {
   if (tools === null) {
     return (
-      <p className="ftux-status" role="status">
+      <p className="tc-status tc-text-secondary m-0" role="status">
         <Spinner /> Looking for coding tools on this Mac…
       </p>
     );
@@ -57,15 +59,13 @@ function ContinueButton({
   onContinue: () => void;
 }) {
   return (
-    <button
-      type="button"
-      className="ftux-btn ftux-btn-primary"
+    <ButtonPrimary
       disabled={!enabled}
       title={enabled ? undefined : "Answer every tool above to continue"}
       onClick={onContinue}
     >
       Continue
-    </button>
+    </ButtonPrimary>
   );
 }
 
@@ -74,23 +74,26 @@ export function FoldersScreen(props: ToolListProps & { onCustom: () => void }) {
   return (
     <>
       <ScreenTitle light="Which folders may this " bold="app watch?" />
-      <p className="ftux-lede">
+      <p className="m-0 tc-text-secondary">
         We've found the following tools on your device. Traces work by reading
         coding-session transcripts from locations you specify. Select an option
         from each of the tools below to continue.
       </p>
-      <div className="ftux-scroll">
+      <ScreenBody>
         <ToolList {...props} />
-      </div>
-      <div className="ftux-footer ftux-footer-split">
-        <button type="button" className="ftux-link" onClick={props.onCustom}>
-          Custom setup instead
-        </button>
+      </ScreenBody>
+      <ScreenFooter
+        note={
+          <TertiaryLink onClick={props.onCustom}>
+            Custom setup instead
+          </TertiaryLink>
+        }
+      >
         <ContinueButton
           enabled={props.canContinue}
           onContinue={props.onContinue}
         />
-      </div>
+      </ScreenFooter>
     </>
   );
 }
@@ -101,7 +104,7 @@ export function ToolsScreen(props: ToolListProps & { onAddTool: () => void }) {
   return (
     <>
       <ScreenTitle light="Connect your " bold="tools and folders." />
-      <div className="ftux-scroll">
+      <ScreenBody>
         <ToolList {...props} compactMeta />
         {props.tools ? (
           <button
@@ -120,26 +123,26 @@ export function ToolsScreen(props: ToolListProps & { onAddTool: () => void }) {
               props.onAddTool();
             }}
           >
-            <span className="ftux-badge" aria-hidden="true">
+            <span className="tc-tool-tile tc-tool-tile--lg" aria-hidden="true">
               +
             </span>
-            <span style={{ display: "flex", flexDirection: "column" }}>
-              <span className="ftux-card-title">
+            <span className="tc-stack ftux-gap-0">
+              <span className="tc-body-strong">
                 Not seeing your tool above? Click to add or drag &amp; drop.
               </span>
-              <span className="ftux-card-text ftux-muted">
+              <span className="tc-caption tc-text-tertiary">
                 OpenCode, Theia IDE, Cursor, or a dev server over SSH
               </span>
             </span>
           </button>
         ) : null}
-      </div>
-      <div className="ftux-footer">
+      </ScreenBody>
+      <ScreenFooter>
         <ContinueButton
           enabled={props.canContinue}
           onContinue={props.onContinue}
         />
-      </div>
+      </ScreenFooter>
     </>
   );
 }

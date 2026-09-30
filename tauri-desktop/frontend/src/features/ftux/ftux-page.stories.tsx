@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { Window } from "../../design-system";
 import { withQueryClient } from "../../lib/query/storybook-provider";
 import { MOCK_STORED_PASSKEY } from "./api/ftux-mock-data";
 import { PasskeyFlow, WelcomeBack } from "./components/passkey-flow";
@@ -38,13 +39,13 @@ export const ReturningUser: Story = {
 
 const passkeyStep = (initialStep: "choose" | "sign-in"): Story => ({
   render: () => (
-    <div className="ftux">
+    <Window className="ftux-scene">
       <PasskeyFlow
         initialStep={initialStep}
         onDone={() => {}}
         onClose={() => {}}
       />
-    </div>
+    </Window>
   ),
 });
 
@@ -52,12 +53,12 @@ export const PasskeyChoose = passkeyStep("choose");
 export const PasskeySystemSignIn = passkeyStep("sign-in");
 export const PasskeyWelcomeBack: Story = {
   render: () => (
-    <div className="ftux">
+    <Window className="ftux-scene">
       <WelcomeBack
         passkeyName={MOCK_STORED_PASSKEY.name}
         onSignIn={() => {}}
         onOtherOptions={() => {}}
       />
-    </div>
+    </Window>
   ),
 };

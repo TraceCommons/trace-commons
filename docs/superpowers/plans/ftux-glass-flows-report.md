@@ -1,6 +1,6 @@
 # First-run glass flows (FTUX) — implementation report
 
-Date: 2026-09-25 (updated 2026-09-28 and 2026-09-29 after review)
+Date: 2026-09-25 (updated 2026-09-28 and 2026-09-29 after review; 2026-09-30 moved onto the #1146 design system)
 Branch: `ftux`
 Spec: `docs/superpowers/specs/2026-09-25-ftux-glass-flows-design.md`
 Scope: `tauri-desktop/frontend` only. No daemon, server, Rust or CI change.
@@ -40,8 +40,9 @@ All paths are under `tauri-desktop/frontend/`.
 | `src/features/ftux/types.ts` | Shapes for detected tools, repos, sessions, join state and the final settings. |
 | `src/features/ftux/api/ftux-api.ts` | The only doorway to the outside world. Mocks with short delays; header lists the real command for each. |
 | `src/features/ftux/api/ftux-mock-data.ts` | Mock tools, repos and sessions, seeded with the design's own examples. |
-| `src/features/ftux/ftux.css` | The glass style, transcribed from the design and scoped under `.ftux`. |
-| `src/features/ftux/components/glass.tsx` | Window, stepper, title, pill select, checkbox (with mixed state), switch, spinner, and the design's icons. |
+| `src/features/ftux/ftux.css` | Flow layout and the imitation macOS sheets only, on `--tc-*` tokens. Everything else comes from `src/design-system/` (#1146). |
+| `src/features/ftux/components/ftux-frame.tsx` | The window (`Window` + `Pane` + `StepProgress`), title, scroll body, footer and status line. |
+| `src/features/ftux/components/icons.tsx` | Icons the design system does not carry, and the spinner. |
 | `src/features/ftux/components/join-screen.tsx` | W-1. |
 | `src/features/ftux/components/tool-row.tsx`, `tool-screens.tsx` | W-2 Folders and W-4 Tools. |
 | `src/features/ftux/components/rules-screen.tsx` | W-5. |
@@ -92,10 +93,11 @@ header lists the real command to swap in for each. The mocked parts are:
 - **Separate route, not a replacement.** Replacing the onboarding gate with a
   mocked flow would let someone finish setup without enrolling. `#/ftux` sits
   outside the gate until `finishSetup` is real.
-- **One scoped stylesheet** rather than Tailwind utilities. The design's
-  layered gradients, inset shadows and backdrop filters are long and repeated;
-  `.ftux-*` classes keep the components readable and cannot leak into the rest
-  of the app.
+- **The #1146 design system, not a private copy.** The first version carried
+  its own glass stylesheet transcribed from the design. Since #1146 lands the
+  same design as `src/design-system/`, the screens now use its components and
+  tokens; `ftux.css` keeps only layout and the imitation macOS sheets. See the
+  spec's "Design system" table.
 - **System font** (`-apple-system`, SF Pro) inside `.ftux`, as the design uses,
   rather than the app's IBM Plex.
 - **Passkey steps as a table** (`PASSKEY_TABLE` in the model): each step lists
@@ -143,6 +145,21 @@ rev 8. Applied here:
 | 4 | Uses are the scope and come first; the floor use is required, unticked | `baseUse` starts unticked; Start disabled until ticked; `finishSetup` refuses without it |
 | 5 | Private AI is a consent event | Deferred to the stacked PR |
 | 6 | near.ai is the account; Skip leads to watching only; passkey card may be hidden | *Skip: watch only* with a note; passkey card hidden behind `showPasskey` (story `JoinWithPasskeyCard` shows it) |
+
+## Moving onto the design system (2026-09-30)
+
+`ftux` merged #1146's branch (`claude/tc-monitor-frontend-refactor-8ecf22`)
+and #1030 is stacked on it, so the diff against that branch is the FTUX alone.
+`components/glass.tsx` is gone. Every screen now uses the design system's
+components. `ftux.css` went from about 1,100 lines to about 400.
+
+Checked in the browser against the previous screens:
+- Join, Folders, Rules and Uses on Quick and Custom setup.
+- The returning-user card, the Sign In sheet with its Simulated mark, and Create new passkey.
+
+Fixed during that check:
+- The design system's `.tc-root h2` rule was shrinking the popup headings.
+- `.tc-alert` was stacking the loss warning's icon above its text.
 
 ## Verification
 

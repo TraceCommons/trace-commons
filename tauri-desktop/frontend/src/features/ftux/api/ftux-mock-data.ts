@@ -10,6 +10,7 @@ export const MOCK_INVITE_PLACEHOLDER =
 export const MOCK_TOOLS: DetectedTool[] = [
   {
     id: "claude",
+    logo: "claude",
     badge: "CC",
     name: "Claude Code",
     folder: "~/.claude/projects",
@@ -19,6 +20,7 @@ export const MOCK_TOOLS: DetectedTool[] = [
   },
   {
     id: "codex",
+    logo: "codex",
     badge: "Cx",
     name: "Codex",
     folder: "~/.codex/sessions",
@@ -29,6 +31,7 @@ export const MOCK_TOOLS: DetectedTool[] = [
   },
   {
     id: "antigravity",
+    logo: "anti",
     badge: "Ag",
     name: "Antigravity",
     folder: "~/.gemini/tmp",

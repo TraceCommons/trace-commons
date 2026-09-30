@@ -1,15 +1,18 @@
+import {
+  ButtonSecondary,
+  Card,
+  FolderButton,
+  Picker,
+  type PickerOption,
+  ToolTile,
+} from "../../../design-system";
 import type { WatchAnswer } from "../ftux-model";
 import type { DetectedTool } from "../types";
-import {
-  DownloadIcon,
-  FolderIcon,
-  PillSelect,
-  type SelectOption,
-} from "./glass";
+import { DownloadIcon } from "./icons";
 
-const WATCH_OPTIONS: SelectOption<Exclude<WatchAnswer, "unanswered">>[] = [
-  { value: "watch", label: "Watch this folder", tone: "green" },
-  { value: "ignore", label: "I don’t use it", tone: "grey" },
+const WATCH_OPTIONS: PickerOption<Exclude<WatchAnswer, "unanswered">>[] = [
+  { value: "watch", label: "Watch this folder", dot: "var(--tc-status-on)" },
+  { value: "ignore", label: "I don’t use it", dot: "var(--tc-status-off)" },
 ];
 
 export function ToolRow({
@@ -36,57 +39,56 @@ export function ToolRow({
       ? `${tool.sessionCount} sessions`
       : tool.detail;
   return (
-    <div className="ftux-card ftux-card-tight">
-      <div className="ftux-tool-head">
-        <span className="ftux-badge" aria-hidden="true">
-          {tool.badge}
-        </span>
-        <span className="ftux-tool-name">
-          <span className="ftux-card-title">{tool.name}</span>
-          <span className="ftux-tool-path" title={folder}>
+    <Card className="tc-stack tc-stack--tight">
+      <div className="ftux-row">
+        <ToolTile
+          tool={tool.logo ?? null}
+          kind={tool.logo ? "tool" : "folder"}
+          large
+        />
+        <span className="ftux-grow ftux-min-0 tc-stack ftux-gap-0">
+          <span className="tc-body-strong">{tool.name}</span>
+          <span
+            className="tc-mono tc-text-tertiary ftux-ellipsis"
+            title={folder}
+          >
             {folder}
           </span>
         </span>
-        <span className="ftux-tool-meta">{meta}</span>
+        <span className="tc-caption tc-text-tertiary ftux-nowrap">{meta}</span>
       </div>
-      <div className="ftux-tool-actions">
+      <div className="ftux-row ftux-row--end">
         {found ? (
           <>
-            <PillSelect
+            <Picker
               label={`${tool.name}: watch this folder?`}
               value={answer === "unanswered" ? null : answer}
               options={WATCH_OPTIONS}
               onChange={onAnswer}
             />
-            <button
-              type="button"
-              className="ftux-btn ftux-btn-small"
-              title="Choose a different folder…"
-              aria-label={`Choose a different folder for ${tool.name}`}
+            <FolderButton
+              label={`Choose a different folder for ${tool.name}`}
               onClick={onChooseFolder}
-            >
-              <FolderIcon />…
-            </button>
+            />
           </>
         ) : (
           <>
-            <span className="ftux-tool-hint">
+            <span className="ftux-grow tc-caption tc-text-tertiary">
               Install it, then this row asks again.
             </span>
             {tool.installUrl ? (
-              <button
-                type="button"
-                className="ftux-btn ftux-btn-install"
+              <ButtonSecondary
+                size="sm"
                 title={`Download ${tool.name}`}
                 onClick={() => tool.installUrl && onInstall(tool.installUrl)}
               >
                 <DownloadIcon />
                 Get {tool.name}
-              </button>
+              </ButtonSecondary>
             ) : null}
           </>
         )}
       </div>
-    </div>
+    </Card>
   );
 }

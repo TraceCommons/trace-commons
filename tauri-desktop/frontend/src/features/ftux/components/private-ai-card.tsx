@@ -1,5 +1,5 @@
+import { Card, Toggle } from "../../../design-system";
 import { useContributorDisclosureCopy } from "../../../lib/tauri/use-contributor-copy";
-import { GlassSwitch } from "./glass";
 
 // Every word on this card comes from the contributor core's shared copy, the
 // same source the Private AI offer on the Waiting screen renders. The switch
@@ -15,33 +15,40 @@ export function PrivateAiCard({
   const disclosure = useContributorDisclosureCopy();
   const copy = disclosure.data?.private_inference;
   return (
-    <div className="ftux-card">
-      <div className="ftux-card-row" style={{ alignItems: "flex-start" }}>
-        <span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span className="ftux-card-title">
+    <Card>
+      <div className="ftux-row ftux-row--between ftux-row--top">
+        <span className="tc-stack ftux-gap-2">
+          <span className="tc-body-strong">
             {copy ? copy.destination : " "}
           </span>
           {copy ? (
             <>
-              <span className="ftux-card-text">{copy.offer_what}</span>
-              <span className="ftux-card-text">{copy.offer_exposure}</span>
-              <span className="ftux-card-text">{copy.offer_no_repoint}</span>
+              <span className="tc-label tc-text-secondary">
+                {copy.offer_what}
+              </span>
+              <span className="tc-label tc-text-secondary">
+                {copy.offer_exposure}
+              </span>
+              <span className="tc-label tc-text-secondary">
+                {copy.offer_no_repoint}
+              </span>
             </>
           ) : (
-            <span className="ftux-card-text">
+            <span className="tc-label tc-text-secondary">
               {disclosure.isError
                 ? "Disclosure unavailable. Enabling is disabled."
                 : "Loading disclosure…"}
             </span>
           )}
         </span>
-        <GlassSwitch
+        <Toggle
+          settings
           checked={checked && copy !== undefined}
           label={copy?.offer_title ?? "Loading disclosure"}
           disabled={!copy}
-          onToggle={onToggle}
+          onChange={() => onToggle()}
         />
       </div>
-    </div>
+    </Card>
   );
 }

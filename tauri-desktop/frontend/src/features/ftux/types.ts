@@ -1,3 +1,4 @@
+import type { ToolLogoId } from "../../design-system";
 import type {
   FtuxPath,
   RepoRule,
@@ -8,6 +9,8 @@ import type {
 
 export type DetectedTool = {
   id: string;
+  // The design system's tool logo; absent for a tool the person added.
+  logo?: ToolLogoId;
   badge: string;
   name: string;
   folder: string;

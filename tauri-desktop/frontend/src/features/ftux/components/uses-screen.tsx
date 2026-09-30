@@ -1,20 +1,28 @@
+import { useId, useState } from "react";
+import {
+  ButtonPrimary,
+  Card,
+  Checkbox,
+  Expander,
+  Picker,
+  type PickerOption,
+} from "../../../design-system";
 import { useAutomaticGrantCopy } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { groupState, OPTIONAL_USES, optionalUsesLabel } from "../ftux-model";
 import type { SharingMode } from "../types";
 import {
-  ChevronIcon,
-  GlassCheckbox,
-  PillSelect,
+  ScreenBody,
+  ScreenFooter,
   ScreenTitle,
-  type SelectOption,
-  Spinner,
-} from "./glass";
+  StatusLine,
+} from "./ftux-frame";
+import { Spinner } from "./icons";
 import { PrivateAiCard } from "./private-ai-card";
 
-const SHARING_OPTIONS: SelectOption<SharingMode>[] = [
-  { value: "auto", label: "Share automatically", tone: "green" },
-  { value: "ask", label: "Ask me each time", tone: "yellow" },
+const SHARING_OPTIONS: PickerOption<SharingMode>[] = [
+  { value: "auto", label: "Share automatically", dot: "var(--tc-status-on)" },
+  { value: "ask", label: "Ask me each time", dot: "var(--tc-status-ask)" },
 ];
 
 // W-3 (Quick setup) and W-6 (Custom setup, which adds the Private AI
@@ -54,7 +62,6 @@ export function UsesScreen({
   onTogglePrivateAi: () => void;
   onStart: () => void;
 }) {
-  const usesState = groupState(optionalUses);
   // The sharing words are the core's: which scrub runs, and what leaves the
   // machine, depend on the configuration, so this screen never states them.
   const core = useCoreStatus();
@@ -64,84 +71,21 @@ export function UsesScreen({
   return (
     <>
       <ScreenTitle light="How your data is " bold="used & permissioned." />
-      <div className="ftux-scroll">
-        <div className="ftux-card">
-          <span className="ftux-section-label">
-            How your traces may be used
-          </span>
-          <div className="ftux-check-row">
-            <GlassCheckbox
-              checked={baseUse}
-              label="Finding bugs and measuring agents, required"
-              onToggle={onToggleBaseUse}
-            />
-            <span style={{ flex: 1 }}>
-              <strong>Finding bugs and measuring agents</strong>
-              <span className="ftux-always-on">required</span>
-              <br />
-              <span className="ftux-muted">
-                Researchers read traces to see where coding agents fail and to
-                score agents against each other.
-              </span>
-            </span>
-          </div>
-          <div className="ftux-check-row">
-            <GlassCheckbox
-              checked={
-                usesState === "all"
-                  ? true
-                  : usesState === "some"
-                    ? "mixed"
-                    : false
-              }
-              label="All optional uses"
-              onToggle={onToggleUses}
-            />
-            <details className="ftux-disclosure">
-              <summary>
-                <strong style={{ flex: 1 }}>
-                  {optionalUsesLabel(optionalUses)}
-                </strong>
-                <ChevronIcon size={12} />
-              </summary>
-              <div
-                className="ftux-disclosure-body"
-                style={{ gap: 8, paddingTop: 8 }}
-              >
-                {OPTIONAL_USES.map((use, index) => (
-                  <div key={use} className="ftux-check-row">
-                    <GlassCheckbox
-                      checked={optionalUses[index] === true}
-                      label={use}
-                      onToggle={() => onToggleUse(index)}
-                    />
-                    <strong style={{ flex: 1 }}>{use}</strong>
-                  </div>
-                ))}
-              </div>
-            </details>
-          </div>
-          <div className="ftux-check-row">
-            <GlassCheckbox
-              checked={listHandle}
-              label="List my handle publicly as a contributor"
-              onToggle={onToggleHandle}
-            />
-            <span style={{ flex: 1 }}>
-              <strong>List my handle publicly as a contributor</strong>
-              <br />
-              <span className="ftux-muted">
-                Credit only. It does not change how any trace is used.
-              </span>
-            </span>
-          </div>
-        </div>
-
-        <div className="ftux-card">
-          <div className="ftux-card-row">
-            <span style={{ display: "flex", flexDirection: "column" }}>
-              <span className="ftux-card-title">Sharing</span>
-              <span className="ftux-card-text">
+      <ScreenBody>
+        <UsesCard
+          baseUse={baseUse}
+          optionalUses={optionalUses}
+          listHandle={listHandle}
+          onToggleBaseUse={onToggleBaseUse}
+          onToggleUses={onToggleUses}
+          onToggleUse={onToggleUse}
+          onToggleHandle={onToggleHandle}
+        />
+        <Card>
+          <div className="ftux-row ftux-row--between ftux-row--top">
+            <span className="tc-stack ftux-gap-2">
+              <span className="tc-body-strong">Sharing</span>
+              <span className="tc-label tc-text-secondary">
                 {copy
                   ? sharing === "auto"
                     ? `${copy.path_automatic} ${copy.scrub.scope} ${copy.scrub.limit}`
@@ -151,43 +95,123 @@ export function UsesScreen({
                     : "Loading sharing copy…"}
               </span>
             </span>
-            <PillSelect
+            <Picker
               label="Sharing"
-              disabled={!copy}
               value={sharing}
               options={SHARING_OPTIONS}
+              disabled={!copy}
               onChange={onSharing}
             />
           </div>
-        </div>
-
+        </Card>
         {privateAi === null ? null : (
           <PrivateAiCard checked={privateAi} onToggle={onTogglePrivateAi} />
         )}
-
-        {error ? (
-          <p className="ftux-well" role="alert" style={{ color: "#ff8a80" }}>
-            {error}
-          </p>
-        ) : null}
-      </div>
-      <div className={`ftux-footer${baseUse ? "" : " ftux-footer-split"}`}>
-        {baseUse ? null : (
-          <span className="ftux-card-text ftux-muted" id="ftux-scope-note">
-            Tick the first use to contribute. Without it nothing is shared.
-          </span>
-        )}
-        <button
-          type="button"
-          className="ftux-btn ftux-btn-primary"
+        {error ? <StatusLine tone="error">{error}</StatusLine> : null}
+      </ScreenBody>
+      <ScreenFooter
+        noteId="ftux-scope-note"
+        note={
+          baseUse
+            ? undefined
+            : "Tick the first use to contribute. Without it nothing is shared."
+        }
+      >
+        <ButtonPrimary
           disabled={!canStart}
           aria-describedby={baseUse ? undefined : "ftux-scope-note"}
           onClick={onStart}
         >
           {submitting ? <Spinner /> : null}
           Start sharing
-        </button>
-      </div>
+        </ButtonPrimary>
+      </ScreenFooter>
     </>
+  );
+}
+
+function UsesCard({
+  baseUse,
+  optionalUses,
+  listHandle,
+  onToggleBaseUse,
+  onToggleUses,
+  onToggleUse,
+  onToggleHandle,
+}: {
+  baseUse: boolean;
+  optionalUses: boolean[];
+  listHandle: boolean;
+  onToggleBaseUse: () => void;
+  onToggleUses: () => void;
+  onToggleUse: (index: number) => void;
+  onToggleHandle: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const listId = useId();
+  const usesState = groupState(optionalUses);
+  return (
+    <Card className="tc-stack tc-stack--tight">
+      <span className="tc-eyebrow">How your traces may be used</span>
+      <div className="tc-check-row">
+        <Checkbox
+          checked={baseUse}
+          label="Finding bugs and measuring agents, required"
+          onChange={onToggleBaseUse}
+        />
+        <span>
+          <span className="tc-body-strong">
+            Finding bugs and measuring agents
+          </span>{" "}
+          <span className="tc-mono tc-text-on">required</span>
+          <span className="tc-caption tc-text-tertiary ftux-block">
+            Researchers read traces to see where coding agents fail and to score
+            agents against each other.
+          </span>
+        </span>
+      </div>
+      <div className="tc-check-row">
+        <Checkbox
+          checked={usesState === "all"}
+          indeterminate={usesState === "some"}
+          label="All optional uses"
+          onChange={onToggleUses}
+        />
+        <Expander open={open} onToggle={() => setOpen(!open)} controls={listId}>
+          <span className="tc-body-strong">
+            {optionalUsesLabel(optionalUses)}
+          </span>
+        </Expander>
+      </div>
+      {open ? (
+        <div id={listId} className="tc-stack tc-stack--tight ftux-indent">
+          {OPTIONAL_USES.map((use, index) => (
+            <div key={use} className="tc-check-row">
+              <Checkbox
+                checked={optionalUses[index] === true}
+                label={use}
+                onChange={() => onToggleUse(index)}
+              />
+              <span className="tc-body-strong">{use}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="tc-check-row">
+        <Checkbox
+          checked={listHandle}
+          label="List my handle publicly as a contributor"
+          onChange={onToggleHandle}
+        />
+        <span>
+          <span className="tc-body-strong">
+            List my handle publicly as a contributor
+          </span>
+          <span className="tc-caption tc-text-tertiary ftux-block">
+            Credit only. It does not change how any trace is used.
+          </span>
+        </span>
+      </div>
+    </Card>
   );
 }

@@ -1,6 +1,19 @@
+import type { ReactNode } from "react";
+import {
+  ButtonPrimary,
+  Card,
+  GlassButton,
+  StatusLabel,
+} from "../../../design-system";
 import { MOCK_INVITE_PLACEHOLDER } from "../api/ftux-mock-data";
 import type { JoinState } from "../types";
-import { CheckIcon, ExternalIcon, ScreenTitle, Spinner } from "./glass";
+import {
+  ScreenBody,
+  ScreenFooter,
+  ScreenTitle,
+  StatusLine,
+} from "./ftux-frame";
+import { ExternalIcon, Spinner } from "./icons";
 
 export type AsyncState = { status: "idle" | "busy" | "error"; error?: string };
 
@@ -36,93 +49,136 @@ export function JoinScreen({
   return (
     <>
       <ScreenTitle light="Get started on " bold="your terms" />
-      <p className="ftux-lede">
+      <p className="m-0 tc-text-secondary">
         Start with an invite link, sign-up or sign-in with an existing account,
         or just click "Skip".{" "}
-        <b>
+        <b className="tc-text-primary">
           You'll be able to setup or connect your account later to receive
           credits and manage access to the near.ai ecosystem.
         </b>
       </p>
-      <div className="ftux-scroll">
-        <form
-          className="ftux-card"
-          data-done={join.invite !== null}
-          onSubmit={(event) => {
-            event.preventDefault();
-            onLookup();
-          }}
-        >
-          <label className="ftux-section-label" htmlFor="ftux-invite">
-            Invite link
-          </label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              id="ftux-invite"
-              className="ftux-input"
-              value={inviteDraft}
-              placeholder={`${MOCK_INVITE_PLACEHOLDER}…`}
-              spellCheck={false}
-              autoComplete="off"
-              onChange={(event) => onInviteDraft(event.target.value)}
-            />
-            <button
-              type="submit"
-              className="ftux-btn"
-              disabled={lookup.status === "busy" || !inviteDraft.trim()}
-            >
-              {lookup.status === "busy" ? <Spinner /> : null}
-              Look up
-            </button>
-          </div>
-          {join.invite ? (
-            <span className="ftux-status" data-tone="ok" role="status">
-              <CheckIcon size={10} />
-              Joined {join.invite.host} · {join.invite.payRange}
-            </span>
-          ) : lookup.status === "error" ? (
-            <span className="ftux-status" data-tone="error" role="alert">
-              {lookup.error}
-            </span>
-          ) : null}
-        </form>
-
+      <ScreenBody>
+        <InviteCard
+          invite={join.invite}
+          draft={inviteDraft}
+          state={lookup}
+          onDraft={onInviteDraft}
+          onLookup={onLookup}
+        />
         {showPasskey ? (
           <PasskeyCard passkey={join.passkey} onCreate={onCreatePasskey} />
         ) : null}
-
         <NearAiCard
           signedIn={join.nearAi}
           state={nearAi}
           onSignIn={onSignInNearAi}
         />
-
         {notice ? (
-          <p className="ftux-well" role="status">
+          <p className="tc-alert tc-alert--ask m-0" role="status">
             {notice}
           </p>
         ) : null}
-        <p className="ftux-well">
+        <Card quiet className="tc-text-secondary">
           Connecting or creating an account doesn't authorize any data sharing.
-        </p>
-      </div>
-      <div className={`ftux-footer${hasAccount ? "" : " ftux-footer-split"}`}>
-        {hasAccount ? null : (
-          <span className="ftux-card-text ftux-muted" id="ftux-skip-note">
-            Skipping sets up watching only. Contributing needs a near.ai
-            account; sign in any time.
-          </span>
-        )}
-        <button
-          type="button"
-          className="ftux-btn ftux-btn-primary"
+        </Card>
+      </ScreenBody>
+      <ScreenFooter
+        noteId="ftux-skip-note"
+        note={
+          hasAccount
+            ? undefined
+            : "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time."
+        }
+      >
+        <ButtonPrimary
           aria-describedby={hasAccount ? undefined : "ftux-skip-note"}
           onClick={onNext}
         >
           {hasAccount ? "Continue" : "Skip: watch only"}
-        </button>
-      </div>
+        </ButtonPrimary>
+      </ScreenFooter>
     </>
+  );
+}
+
+function InviteCard({
+  invite,
+  draft,
+  state,
+  onDraft,
+  onLookup,
+}: {
+  invite: JoinState["invite"];
+  draft: string;
+  state: AsyncState;
+  onDraft: (value: string) => void;
+  onLookup: () => void;
+}) {
+  return (
+    <Card className="tc-stack tc-stack--tight">
+      <form
+        className="tc-field"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onLookup();
+        }}
+      >
+        <label className="tc-eyebrow" htmlFor="ftux-invite">
+          Invite link
+        </label>
+        <div className="ftux-row">
+          <input
+            id="ftux-invite"
+            className="tc-input tc-mono ftux-grow"
+            value={draft}
+            placeholder={`${MOCK_INVITE_PLACEHOLDER}…`}
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(event) => onDraft(event.target.value)}
+          />
+          <GlassButton
+            type="submit"
+            disabled={state.status === "busy" || !draft.trim()}
+          >
+            {state.status === "busy" ? <Spinner /> : null}
+            Look up
+          </GlassButton>
+        </div>
+      </form>
+      {invite ? (
+        <StatusLine tone="ok">
+          Joined {invite.host} · {invite.payRange}
+        </StatusLine>
+      ) : state.status === "error" ? (
+        <StatusLine tone="error">{state.error}</StatusLine>
+      ) : null}
+    </Card>
+  );
+}
+
+function AccountCard({
+  eyebrow,
+  text,
+  done,
+  doneLabel,
+  children,
+}: {
+  eyebrow: string;
+  text: string;
+  done: boolean;
+  doneLabel: string;
+  children: ReactNode;
+}) {
+  return (
+    <Card>
+      <div className="ftux-row ftux-row--between">
+        <span className="tc-stack tc-stack--tight ftux-gap-2">
+          <span className="tc-eyebrow">{eyebrow}</span>
+          <span className="tc-label tc-text-secondary">{text}</span>
+        </span>
+        {done ? <StatusLabel tone="on">{doneLabel}</StatusLabel> : children}
+      </div>
+    </Card>
   );
 }
 
@@ -134,28 +190,18 @@ function PasskeyCard({
   onCreate: () => void;
 }) {
   return (
-    <div className="ftux-card" data-done={passkey !== null}>
-      <div className="ftux-card-row">
-        <span style={{ display: "flex", flexDirection: "column" }}>
-          <span className="ftux-section-label">Sign in with a passkey</span>
-          <span className="ftux-card-text">
-            {passkey
-              ? `“${passkey.name}” is ready. Connect it to near.ai any time.`
-              : "Create a passkey that can be connected later."}
-          </span>
-        </span>
-        {passkey ? (
-          <span className="ftux-status" data-tone="ok">
-            <CheckIcon size={10} />
-            Done
-          </span>
-        ) : (
-          <button type="button" className="ftux-btn" onClick={onCreate}>
-            Create passkey
-          </button>
-        )}
-      </div>
-    </div>
+    <AccountCard
+      eyebrow="Sign in with a passkey"
+      text={
+        passkey
+          ? `“${passkey.name}” is ready. Connect it to near.ai any time.`
+          : "Create a passkey that can be connected later."
+      }
+      done={passkey !== null}
+      doneLabel="Done"
+    >
+      <GlassButton onClick={onCreate}>Create passkey</GlassButton>
+    </AccountCard>
   );
 }
 
@@ -169,36 +215,21 @@ function NearAiCard({
   onSignIn: () => void;
 }) {
   return (
-    <div className="ftux-card" data-done={signedIn}>
-      <div className="ftux-card-row">
-        <span style={{ display: "flex", flexDirection: "column" }}>
-          <span className="ftux-section-label">Sign in with near.ai</span>
-          <span className="ftux-card-text">
-            Use the login you already have. Credits land in that account.
-          </span>
-        </span>
-        {signedIn ? (
-          <span className="ftux-status" data-tone="ok">
-            <CheckIcon size={10} />
-            Signed in
-          </span>
-        ) : (
-          <button
-            type="button"
-            className="ftux-btn"
-            disabled={state.status === "busy"}
-            onClick={onSignIn}
-          >
-            {state.status === "busy" ? <Spinner /> : null}
-            Sign in <ExternalIcon />
-          </button>
-        )}
-      </div>
+    <>
+      <AccountCard
+        eyebrow="Sign in with near.ai"
+        text="Use the login you already have. Credits land in that account."
+        done={signedIn}
+        doneLabel="Signed in"
+      >
+        <GlassButton disabled={state.status === "busy"} onClick={onSignIn}>
+          {state.status === "busy" ? <Spinner /> : null}
+          Sign in <ExternalIcon />
+        </GlassButton>
+      </AccountCard>
       {state.status === "error" ? (
-        <span className="ftux-status" data-tone="error" role="alert">
-          {state.error}
-        </span>
+        <StatusLine tone="error">{state.error}</StatusLine>
       ) : null}
-    </div>
+    </>
   );
 }

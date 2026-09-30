@@ -1,7 +1,7 @@
 # First-Run Flows in the Glass Style (FTUX) — Design
 
 Date: 2026-09-25
-Status: front end implemented on mock data; backend wiring open (rev 3, 2026-09-29, after review on #1030 and the consent-spec decisions in its thread)
+Status: front end implemented on mock data; backend wiring open (rev 4, 2026-09-30: built on the glass design system from #1146)
 Source design: claude.ai/design project `0935cc40-8e63-454f-848f-7f4bf5995b26`,
 file `WYSIWYG.dc.html` (Flow 1 · First run, and "f1 · passkey"). Built from a
 local export of that file dated 2026-09-25.
@@ -9,6 +9,7 @@ Related: [`2026-09-23-connect-and-forget-consent-design.md`](2026-09-23-connect-
 [`2026-08-31-contributor-trust-by-default-design.md`](2026-08-31-contributor-trust-by-default-design.md) (#507),
 [`2026-06-22-contributor-account-passkeys-slice2-design.md`](2026-06-22-contributor-account-passkeys-slice2-design.md)
 Scope: `tauri-desktop/frontend` only. No daemon, server or Rust change.
+Depends on: #1146 (the WYSIWYG glass design system, `src/design-system/`); #1030 is stacked on it.
 Implementation report: [`../plans/ftux-glass-flows-report.md`](../plans/ftux-glass-flows-report.md)
 
 ## What this is
@@ -91,6 +92,32 @@ the screens enforce, and what is still mocked.
 12. **The passkey card is hidden** (`showPasskey`, default off). A passkey
     is either a way to sign in to the near.ai account or waits until the
     account model defines it.
+
+## Design system
+
+The flows are built on the Trace Commons WYSIWYG glass design system from
+#1146 (`src/design-system/`), not on styles of their own:
+
+| FTUX element | Design-system piece |
+|---|---|
+| Scene and window | `Window`, one padded `Pane` at the FTUX width (450px) |
+| Stepper | `StepProgress` |
+| Cards, notes | `Card`, `Card quiet`, `tc-alert` / `tc-alert--ask` |
+| Invite field | `tc-field`, `tc-input` |
+| Per-tool, per-repo and sharing choices | `Picker`, with `--tc-status-on/ask/off` dots |
+| Tool badges | `ToolTile` with the tinted tool logos |
+| Folder chooser, Get Codex | `FolderButton`, `ButtonSecondary` |
+| Uses and past sessions | `Checkbox` (with its mixed state), `Expander` |
+| Private AI | `Toggle` (settings variant) |
+| Actions | `ButtonPrimary`, `GlassButton`, `TertiaryLink` |
+| Status | `StatusLabel`, `Tag` |
+| Passkey popups | `tc-scrim` and `tc-modal tc-modal--narrow` |
+
+`src/features/ftux/ftux.css` keeps only the flow's layout (frame, scroll,
+footer, a few flex helpers) and the imitation macOS sheets, which the design
+system does not carry. It reads `--tc-*` tokens throughout. The popups keep
+their own focus trap and `inert` background rather than the design system's
+`Modal`, which does not trap focus.
 
 ## Screens
 

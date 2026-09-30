@@ -1,4 +1,13 @@
-import { useState } from "react";
+import { useId, useState } from "react";
+import {
+  ButtonPrimary,
+  Card,
+  Checkbox,
+  Expander,
+  Picker,
+  type PickerOption,
+  TertiaryLink,
+} from "../../../design-system";
 import {
   formatDuration,
   formatSessionDate,
@@ -9,27 +18,21 @@ import {
   type RepoSelection,
 } from "../ftux-model";
 import type { PastSession, RepoCandidate } from "../types";
-import {
-  ChevronIcon,
-  GlassCheckbox,
-  PillSelect,
-  ScreenTitle,
-  type SelectOption,
-  Spinner,
-} from "./glass";
+import { ScreenBody, ScreenFooter, ScreenTitle } from "./ftux-frame";
+import { Spinner } from "./icons";
 
-const RULE_TONES: Record<RepoRule, SelectOption<RepoRule>["tone"]> = {
-  ask: "yellow",
-  auto: "green",
-  never: "grey",
+const RULE_DOTS: Record<RepoRule, string> = {
+  ask: "var(--tc-status-ask)",
+  auto: "var(--tc-status-on)",
+  never: "var(--tc-status-off)",
 };
 
-const RULE_OPTIONS: SelectOption<RepoRule>[] = (
+const RULE_OPTIONS: PickerOption<RepoRule>[] = (
   ["ask", "auto", "never"] as const
 ).map((rule) => ({
   value: rule,
   label: REPO_RULE_LABELS[rule],
-  tone: RULE_TONES[rule],
+  dot: RULE_DOTS[rule],
 }));
 
 const COLLAPSED_SESSIONS = 2;
@@ -59,25 +62,22 @@ function PastSessionFolder({
   onToggleAll: () => void;
   onToggleSession: (index: number) => void;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
   const [showAll, setShowAll] = useState(false);
+  const listId = useId();
   const count = candidate.sessions.length;
   const on = selection.selected.filter(Boolean).length;
 
   if (selection.rule === "never") {
     return (
-      <div
-        className="ftux-check-row ftux-muted"
-        style={{ alignItems: "center", opacity: 0.7 }}
-      >
-        <GlassCheckbox
+      <div className="tc-check-row ftux-muted-row">
+        <Checkbox
           checked={false}
           disabled
           label={`${candidate.folder}: rule is Never`}
         />
-        <span className="ftux-mono" style={{ flex: 1 }}>
-          {candidate.folder}
-        </span>
-        <span>{count} · rule is Never</span>
+        <span className="tc-mono ftux-grow">{candidate.folder}</span>
+        <span className="tc-caption">{count} · rule is Never</span>
       </div>
     );
   }
@@ -87,45 +87,49 @@ function PastSessionFolder({
     ? candidate.sessions
     : candidate.sessions.slice(0, COLLAPSED_SESSIONS);
   return (
-    <div className="ftux-check-row">
-      <GlassCheckbox
-        checked={state === "all" ? true : state === "some" ? "mixed" : false}
-        label={`Include every past session in ${candidate.folder}`}
-        onToggle={onToggleAll}
-      />
-      <details className="ftux-disclosure" open={defaultOpen}>
-        <summary>
-          <span className="ftux-mono" style={{ flex: 1, color: "#f2f2f4" }}>
-            {candidate.folder}
-          </span>
-          <span className="ftux-muted">
-            {on} of {count}
-          </span>
-          <ChevronIcon size={12} />
-        </summary>
-        <div className="ftux-disclosure-body">
+    <div className="tc-stack tc-stack--tight">
+      <div className="tc-check-row">
+        <Checkbox
+          checked={state === "all"}
+          indeterminate={state === "some"}
+          label={`Include every past session in ${candidate.folder}`}
+          onChange={onToggleAll}
+        />
+        <span className="ftux-grow">
+          <Expander
+            open={open}
+            onToggle={() => setOpen(!open)}
+            controls={listId}
+          >
+            <span className="tc-mono">{candidate.folder}</span>
+          </Expander>
+        </span>
+        <span className="tc-caption tc-text-tertiary">
+          {on} of {count}
+        </span>
+      </div>
+      {open ? (
+        <div id={listId} className="tc-stack tc-stack--tight ftux-indent">
           {visible.map((session, index) => (
-            <div key={session.id} className="ftux-session-row">
-              <GlassCheckbox
+            <div key={session.id} className="tc-check-row">
+              <Checkbox
                 checked={selection.selected[index] === true}
                 label={sessionLabel(session)}
-                onToggle={() => onToggleSession(index)}
+                onChange={() => onToggleSession(index)}
               />
-              <span style={{ flex: 1 }}>{sessionLabel(session)}</span>
+              <span className="tc-label">{sessionLabel(session)}</span>
             </div>
           ))}
           {count > COLLAPSED_SESSIONS ? (
-            <button
-              type="button"
-              className="ftux-link"
-              style={{ alignSelf: "flex-start", marginLeft: 25 }}
+            <TertiaryLink
+              className="ftux-self-start"
               onClick={() => setShowAll(!showAll)}
             >
               {showAll ? "Show fewer" : `Show all ${count}`}
-            </button>
+            </TertiaryLink>
           ) : null}
         </div>
-      </details>
+      ) : null}
     </div>
   );
 }
@@ -153,35 +157,40 @@ export function RulesScreen({
   return (
     <>
       <ScreenTitle light="Set your " bold="rules and permissions." />
-      <div className="ftux-scroll">
+      <ScreenBody>
         {candidates === null ? (
-          <p className="ftux-status" role="status">
+          <p className="tc-status tc-text-secondary m-0" role="status">
             <Spinner /> Reading repos from your sessions…
           </p>
         ) : candidates.length === 0 ? (
-          <p className="ftux-well">
+          <Card quiet className="tc-text-secondary">
             No repos to set rules for yet. Rules appear for repos found in the
             sessions of a tool you watch.
-          </p>
+          </Card>
         ) : (
           <>
-            <div className="ftux-card">
-              <span className="ftux-section-label">
+            <Card className="tc-stack tc-stack--tight">
+              <span className="tc-eyebrow">
                 Repos found in {sourceName} sessions
               </span>
               {candidates.map((candidate) => {
                 const selection = byFolder.get(candidate.folder);
                 if (!selection) return null;
                 return (
-                  <div key={candidate.folder} className="ftux-repo-row">
-                    <span className="ftux-repo-name">
-                      <span title={candidate.folder}>{candidate.folder}</span>
-                      <span className="ftux-tool-meta">
+                  <div
+                    key={candidate.folder}
+                    className="ftux-row ftux-row--between tc-hairline-top ftux-repo-row"
+                  >
+                    <span className="tc-stack ftux-gap-0 ftux-min-0">
+                      <span className="tc-mono tc-text-primary ftux-ellipsis">
+                        {candidate.folder}
+                      </span>
+                      <span className="tc-caption tc-text-tertiary">
                         {candidate.sessions.length} sessions
                         {candidate.note ? ` · ${candidate.note}` : ""}
                       </span>
                     </span>
-                    <PillSelect
+                    <Picker
                       label={`Rule for ${candidate.folder}`}
                       value={selection.rule}
                       options={RULE_OPTIONS}
@@ -190,13 +199,11 @@ export function RulesScreen({
                   </div>
                 );
               })}
-            </div>
-            <div className="ftux-card" style={{ gap: 10 }}>
-              <div className="ftux-card-row">
-                <span className="ftux-card-title">
-                  Past sessions, by folder
-                </span>
-                <span className="ftux-card-text ftux-muted">
+            </Card>
+            <Card className="tc-stack">
+              <div className="ftux-row ftux-row--between">
+                <span className="tc-body-strong">Past sessions, by folder</span>
+                <span className="tc-caption tc-text-tertiary">
                   {summary.label}
                 </span>
               </div>
@@ -216,20 +223,15 @@ export function RulesScreen({
                   />
                 );
               })}
-            </div>
+            </Card>
           </>
         )}
-      </div>
-      <div className="ftux-footer">
-        <button
-          type="button"
-          className="ftux-btn ftux-btn-primary"
-          disabled={candidates === null}
-          onClick={onContinue}
-        >
+      </ScreenBody>
+      <ScreenFooter>
+        <ButtonPrimary disabled={candidates === null} onClick={onContinue}>
           Continue
-        </button>
-      </div>
+        </ButtonPrimary>
+      </ScreenFooter>
     </>
   );
 }

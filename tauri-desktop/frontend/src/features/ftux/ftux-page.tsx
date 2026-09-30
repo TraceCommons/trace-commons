@@ -9,7 +9,7 @@ import {
   openExternal,
   signInWithNearAi,
 } from "./api/ftux-api";
-import { GlassWindow } from "./components/glass";
+import { FtuxFrame } from "./components/ftux-frame";
 import type { AsyncState } from "./components/join-screen";
 import { JoinScreen } from "./components/join-screen";
 import {
@@ -260,88 +260,8 @@ export function FtuxPage({
     onContinue: advance,
   };
 
-  return (
-    <div className="ftux">
-      <span className="ftux-preview-tag" title="Backend calls are mocked">
-        PREVIEW · MOCK DATA
-      </span>
-      <GlassWindow
-        eyebrow={path === "quick" ? "Quick setup" : "Custom setup"}
-        steps={steps}
-        current={stepIndex(path, screen)}
-      >
-        {screen === "join" ? (
-          <JoinScreen
-            join={join}
-            inviteDraft={inviteDraft}
-            lookup={lookup}
-            nearAi={nearAi}
-            notice={notice}
-            onInviteDraft={(value) => {
-              setInviteDraft(value);
-              if (lookup.status === "error") setLookup({ status: "idle" });
-            }}
-            onLookup={() => void handleLookup()}
-            onCreatePasskey={() => {
-              setNotice(null);
-              setPasskeyOpen("choose");
-            }}
-            onSignInNearAi={() => void handleNearAi()}
-            onNext={advance}
-            showPasskey={showPasskey}
-          />
-        ) : null}
-        {screen === "folders" ? (
-          <FoldersScreen {...toolProps} onCustom={() => changePath("custom")} />
-        ) : null}
-        {screen === "tools" ? (
-          <ToolsScreen {...toolProps} onAddTool={() => void handleAddTool()} />
-        ) : null}
-        {screen === "rules" ? (
-          <RulesScreen
-            candidates={offer.candidates}
-            selections={offer.repos}
-            sourceName={offer.sourceName}
-            onRule={(folder, rule) =>
-              updateRepo(folder, (repo) => applyRule(repo, rule))
-            }
-            onToggleAll={(folder) =>
-              updateRepo(folder, (repo) => ({
-                ...repo,
-                selected: toggleGroup(repo.selected),
-              }))
-            }
-            onToggleSession={(folder, index) =>
-              updateRepo(folder, (repo) => ({
-                ...repo,
-                selected: toggleAt(repo.selected, index),
-              }))
-            }
-            onContinue={advance}
-          />
-        ) : null}
-        {screen === "uses" ? (
-          <UsesScreen
-            baseUse={baseUse}
-            optionalUses={optionalUses}
-            listHandle={listHandle}
-            sharing={sharing}
-            privateAi={path === "custom" ? privateAi : null}
-            submitting={submitting}
-            error={submitError}
-            onToggleBaseUse={() => setBaseUse(!baseUse)}
-            onToggleUses={() => setOptionalUses(toggleGroup(optionalUses))}
-            onToggleUse={(index) =>
-              setOptionalUses(toggleAt(optionalUses, index))
-            }
-            onToggleHandle={() => setListHandle(!listHandle)}
-            onSharing={setSharing}
-            onTogglePrivateAi={() => setPrivateAi(!privateAi)}
-            onStart={() => void handleStart()}
-          />
-        ) : null}
-      </GlassWindow>
-
+  const overlays = (
+    <>
       {welcomeBack && returningPasskey ? (
         <WelcomeBack
           passkeyName={returningPasskey.name}
@@ -375,6 +295,86 @@ export function FtuxPage({
           }}
         />
       ) : null}
-    </div>
+    </>
+  );
+
+  return (
+    <FtuxFrame
+      eyebrow={path === "quick" ? "Quick setup" : "Custom setup"}
+      steps={steps}
+      current={stepIndex(path, screen)}
+      overlays={overlays}
+    >
+      {screen === "join" ? (
+        <JoinScreen
+          join={join}
+          inviteDraft={inviteDraft}
+          lookup={lookup}
+          nearAi={nearAi}
+          notice={notice}
+          onInviteDraft={(value) => {
+            setInviteDraft(value);
+            if (lookup.status === "error") setLookup({ status: "idle" });
+          }}
+          onLookup={() => void handleLookup()}
+          onCreatePasskey={() => {
+            setNotice(null);
+            setPasskeyOpen("choose");
+          }}
+          onSignInNearAi={() => void handleNearAi()}
+          onNext={advance}
+          showPasskey={showPasskey}
+        />
+      ) : null}
+      {screen === "folders" ? (
+        <FoldersScreen {...toolProps} onCustom={() => changePath("custom")} />
+      ) : null}
+      {screen === "tools" ? (
+        <ToolsScreen {...toolProps} onAddTool={() => void handleAddTool()} />
+      ) : null}
+      {screen === "rules" ? (
+        <RulesScreen
+          candidates={offer.candidates}
+          selections={offer.repos}
+          sourceName={offer.sourceName}
+          onRule={(folder, rule) =>
+            updateRepo(folder, (repo) => applyRule(repo, rule))
+          }
+          onToggleAll={(folder) =>
+            updateRepo(folder, (repo) => ({
+              ...repo,
+              selected: toggleGroup(repo.selected),
+            }))
+          }
+          onToggleSession={(folder, index) =>
+            updateRepo(folder, (repo) => ({
+              ...repo,
+              selected: toggleAt(repo.selected, index),
+            }))
+          }
+          onContinue={advance}
+        />
+      ) : null}
+      {screen === "uses" ? (
+        <UsesScreen
+          baseUse={baseUse}
+          optionalUses={optionalUses}
+          listHandle={listHandle}
+          sharing={sharing}
+          privateAi={path === "custom" ? privateAi : null}
+          submitting={submitting}
+          error={submitError}
+          onToggleBaseUse={() => setBaseUse(!baseUse)}
+          onToggleUses={() => setOptionalUses(toggleGroup(optionalUses))}
+          onToggleUse={(index) =>
+            setOptionalUses(toggleAt(optionalUses, index))
+          }
+          onToggleHandle={() => setListHandle(!listHandle)}
+          onSharing={setSharing}
+          onTogglePrivateAi={() => setPrivateAi(!privateAi)}
+          onStart={() => void handleStart()}
+        />
+      ) : null}
+    </FtuxFrame>
   );
 }
