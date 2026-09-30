@@ -765,11 +765,26 @@ fn missing_os_entry_starts_without_authority_and_offers_explicit_removal() {
     let status = crate::daemon::nearai_credential::handle_status(&shared, &request)
         .result
         .unwrap();
-    assert_eq!(status["state"], "storage_unavailable");
-    assert_eq!(status["session_state"], "storage_unavailable");
+    // On macOS a store that answers "nothing here" is what an upgrade from
+    // the legacy keychain leaves, so the offer is the move, whose
+    // nothing-to-move outcome is the same explicit removal. Elsewhere there
+    // is no other store, and the answer is still "could not be read".
+    let (expected, action) = if cfg!(target_os = "macos") {
+        (
+            "migration_available",
+            crate::private_inference_copy::CredentialAction::Migrate,
+        )
+    } else {
+        (
+            "storage_unavailable",
+            crate::private_inference_copy::CredentialAction::Forget,
+        )
+    };
+    assert_eq!(status["state"], expected);
+    assert_eq!(status["session_state"], expected);
     assert_eq!(
-        crate::private_inference_copy::credential_action("storage_unavailable"),
-        crate::private_inference_copy::CredentialAction::Forget
+        crate::private_inference_copy::credential_action(expected),
+        action
     );
     assert!(
         crate::private_inference_copy::credential_state_line("storage_unavailable")

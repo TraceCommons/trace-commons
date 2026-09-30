@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import TCBridge
 
 /// Drives the typed layer against the live in-process daemon and writes what
 /// came back to `TRACE_COMMONS_SELFTEST_OUT`.
@@ -39,6 +40,24 @@ enum SelfTest {
         }
         runOnboardingSelfTestIfRequested(model: model)
         runResumeCheckIfRequested(model: model)
+        runCredentialStoreCheckIfRequested()
+    }
+
+    /// Writes whether this bundle can reach the Cloud credential store.
+    ///
+    /// The release pipeline runs this against the *signed* app. A build whose
+    /// provisioning profile went missing is killed at exec and never writes
+    /// the file at all, which is itself the failure signal CI checks for.
+    @MainActor
+    private static func runCredentialStoreCheckIfRequested() {
+        guard let path = ProcessInfo.processInfo.environment["TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT"],
+              !path.isEmpty
+        else { return }
+        let code = TCCredentialStore.selfCheck()
+        let report = code == 0 ? "reachable\n" : "unreachable code=\(code)\n"
+        try? report.write(toFile: path, atomically: true, encoding: .utf8)
+        NSLog("trace-commons: credential store check wrote \(path)")
+        NSApp.terminate(nil)
     }
 
     /// Reports the exact two predicates `MainWindowView` branches on

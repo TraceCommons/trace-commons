@@ -208,6 +208,11 @@ fn tick_over(
             visit_session(shared, &ctx, *source, session_ref, &mut out);
         }
     }
+    // Only when every source listed cleanly: a source whose discovery failed
+    // would otherwise lose its sessions from the count until it recovers.
+    if discovered.len() == sources.len() {
+        prune_cwd_cache(shared, &discovered);
+    }
 
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
     let report = finish_pass(shared, out, true)?;
@@ -1197,6 +1202,7 @@ fn visit_session(
         approved_at: None,
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
+        shape: Some(super::queue::SessionShape::of(&transcript)),
         // The observation this entry is made of, so the next poll
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
@@ -1469,6 +1475,19 @@ fn relabel_queue(shared: &DaemonShared) -> bool {
     super::ipc::relabel_queue_entries(&policy, &mut queue)
 }
 
+/// Drop cached cwds for sessions no full pass can find any more, so the
+/// per-project `session_count` counts sessions still on this machine rather
+/// than every session ever observed.
+fn prune_cwd_cache(shared: &DaemonShared, discovered: &[(&dyn TraceSource, Vec<SessionRef>)]) {
+    let present: std::collections::HashSet<String> = discovered
+        .iter()
+        .flat_map(|(_, refs)| refs.iter())
+        .map(|r| r.path.to_string_lossy().to_string())
+        .collect();
+    let mut state = shared.state.lock().expect("state lock");
+    state.cwd_cache.retain(|path, _| present.contains(path));
+}
+
 /// The session's working directory, from cache when the file has not changed.
 fn resolve_cwd(
     shared: &DaemonShared,
@@ -1490,6 +1509,8 @@ fn resolve_cwd(
         .cwd
         .clone()
         .or_else(|| source.load(session_ref).ok().and_then(|t| t.cwd));
+    // Resolved before the lock: it canonicalizes the path on disk.
+    let project_key = project_for(cwd.as_deref()).0;
     let mut state = shared.state.lock().expect("state lock");
     state.cwd_cache.insert(
         key,
@@ -1497,6 +1518,7 @@ fn resolve_cwd(
             size_bytes: obs.size_bytes,
             modified_at: obs.modified_at,
             cwd: cwd.clone(),
+            project_key: Some(project_key),
         },
     );
     cwd
@@ -3113,6 +3135,141 @@ mod tests {
                 .is_empty(),
             "a scoped pass records nothing"
         );
+    }
+
+    fn claude_line(
+        cwd: &str,
+        session: &str,
+        uuid: &str,
+        at: &str,
+        role: &str,
+        text: &str,
+    ) -> String {
+        format!(
+            "{{\"type\":\"{role}\",\"message\":{{\"role\":\"{role}\",\"content\":\"{text}\"}},\
+             \"cwd\":\"{cwd}\",\"timestamp\":\"{at}\",\"version\":\"2.0.1\",\
+             \"sessionId\":\"{session}\",\"uuid\":\"{uuid}\"}}\n"
+        )
+    }
+
+    /// K1: a watched session reaches `list_pending` with its shape -- the
+    /// span across its delegated work, and only the person's own prompts --
+    /// and its project's row in `list_projects` counts the sessions still on
+    /// this machine.
+    #[tokio::test]
+    async fn a_watched_session_carries_its_shape_to_the_queue_and_its_project() {
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        let project_dir = f.claude_root.join("-Users-testuser-code-proj");
+        std::fs::create_dir_all(project_dir.join(session).join("subagents")).unwrap();
+        let cwd = abs_json("Users/testuser/code/proj");
+        let parent = [
+            claude_line(
+                &cwd,
+                session,
+                "a1",
+                "2026-08-08T10:00:00Z",
+                "user",
+                "add a rate limiter",
+            ),
+            claude_line(
+                &cwd,
+                session,
+                "a2",
+                "2026-08-08T10:05:00Z",
+                "assistant",
+                "done",
+            ),
+            claude_line(
+                &cwd,
+                session,
+                "a3",
+                "2026-08-08T10:20:00Z",
+                "user",
+                "now add a test",
+            ),
+        ]
+        .concat();
+        std::fs::write(project_dir.join(format!("{session}.jsonl")), parent).unwrap();
+        std::fs::write(
+            project_dir
+                .join(session)
+                .join("subagents")
+                .join("agent-a.jsonl"),
+            [
+                claude_line(
+                    &cwd,
+                    session,
+                    "s1",
+                    "2026-08-08T10:21:00Z",
+                    "user",
+                    "search for callers",
+                ),
+                claude_line(
+                    &cwd,
+                    session,
+                    "s2",
+                    "2026-08-08T10:29:00Z",
+                    "user",
+                    "and the tests",
+                ),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let other = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        let call = |method: &str| {
+            super::super::ipc::handle_request(
+                &f.shared,
+                &super::super::ipc::Request {
+                    id: 1,
+                    method: method.to_string(),
+                    params: serde_json::json!({}),
+                },
+            )
+            .result
+            .unwrap()
+        };
+        let pending = call("list_pending");
+        let entries = pending["pending"].as_array().expect("pending");
+        let grouped = entries
+            .iter()
+            .find(|e| e["user_turns"] == 2)
+            .unwrap_or_else(|| panic!("the parent's two prompts, not the subagent's: {entries:?}"));
+        assert_eq!(grouped["started_at"], "2026-08-08T10:00:00Z", "{grouped}");
+        assert_eq!(grouped["ended_at"], "2026-08-08T10:29:00Z", "{grouped}");
+        assert_eq!(grouped["duration_secs"], 29 * 60, "{grouped}");
+
+        let count = |f: &WatcherFixture| {
+            let projects = super::super::ipc::handle_request(
+                &f.shared,
+                &super::super::ipc::Request {
+                    id: 1,
+                    method: "list_projects".to_string(),
+                    params: serde_json::json!({}),
+                },
+            )
+            .result
+            .unwrap();
+            projects["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["project_label"] == "proj")
+                .expect("the project is listed")
+                .clone()
+        };
+        let row = count(&f);
+        assert_eq!(row["session_count"], 2, "{row}");
+        assert!(row["last_session_at"].is_string(), "{row}");
+
+        // A session deleted from disk stops being counted once a full pass
+        // has seen it gone.
+        std::fs::remove_file(&other).unwrap();
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(count(&f)["session_count"], 1);
     }
 
     #[tokio::test]

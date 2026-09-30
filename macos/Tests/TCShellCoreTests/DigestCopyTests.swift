@@ -20,11 +20,31 @@ final class DigestCopyTests: XCTestCase {
         XCTAssertEqual(line, "1 session contributed from api.")
     }
 
-    func testPluralNamesTheProjects() {
+    func testMoreThanOneProjectNamesNone() {
         let line = DigestCopy.contributionLine(
             count: 4, projects: ["api", "web"], creditPending: 0
         )
-        XCTAssertEqual(line, "4 sessions contributed from api and web.")
+        XCTAssertEqual(line, "4 sessions contributed.")
+        // Duplicates and blanks do not make a second project.
+        XCTAssertEqual(
+            DigestCopy.contributionLine(count: 2, projects: ["api", "api", ""], creditPending: 0),
+            "2 sessions contributed from api."
+        )
+    }
+
+    /// The design's Flow 2 and Flow 3 evening-digest examples, verbatim --
+    /// the same two the daemon, Linux and Windows pin.
+    func testMatchesTheDesignExamples() {
+        XCTAssertEqual(
+            DigestCopy.contributionLine(count: 1, projects: ["orchard-api"], creditPending: 6.0),
+            "1 session contributed from orchard-api. 6.0 credit pending."
+        )
+        XCTAssertEqual(
+            DigestCopy.contributionLine(
+                count: 2, projects: ["orchard-api", "portfolio"], creditPending: 10.5
+            ),
+            "2 sessions contributed. 10.5 credit pending."
+        )
     }
 
     /// A notification is rendered by the desktop environment and may be
@@ -36,11 +56,11 @@ final class DigestCopyTests: XCTestCase {
         XCTAssertFalse(line?.contains("/") ?? false, line ?? "")
     }
 
-    func testManyProjectsAreSummarised() {
+    func testManyProjectsNameNoneRatherThanAPartialList() {
         let line = DigestCopy.contributionLine(
             count: 9, projects: ["a", "b", "c", "d", "e"], creditPending: 0
         )
-        XCTAssertTrue(line?.contains("and 2 more") ?? false, line ?? "")
+        XCTAssertEqual(line, "9 sessions contributed.")
     }
 
     func testBlankProjectListStillCounts() {

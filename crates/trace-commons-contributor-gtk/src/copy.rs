@@ -2102,8 +2102,9 @@ pub use trace_commons_contributor::private_inference_copy::{
 // connecting a tool they could connect right now.
 pub use trace_commons_contributor::private_inference_copy::{
     CREDENTIAL_CANCEL, CREDENTIAL_COST, CREDENTIAL_FORGET, CREDENTIAL_FORGET_EXPLAINS,
-    CREDENTIAL_OBTAIN, CREDENTIAL_TITLE, CREDENTIAL_WHAT, CredentialAction, credential_action,
-    credential_state_line, credential_state_tone, harness_credential_notice,
+    CREDENTIAL_MIGRATE, CREDENTIAL_MIGRATE_EXPLAINS, CREDENTIAL_OBTAIN, CREDENTIAL_TITLE,
+    CREDENTIAL_WHAT, CredentialAction, credential_action, credential_state_line,
+    credential_state_tone, harness_credential_notice,
 };
 
 // --- What is left in the account ---------------------------------------

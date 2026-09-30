@@ -180,6 +180,11 @@ if [ "${TC_SKIP_ADHOC_SIGN:-0}" != "1" ]; then
   codesign --force --sign - --timestamp=none \
     "$SPARKLE_FRAMEWORK" >/dev/null
   codesign --force --sign - --timestamp=none "$APP/Contents/Frameworks/$DYLIB_NAME" >/dev/null 2>&1 || true
+  # Deliberately no --entitlements here. This script ad-hoc signs, and an ad-hoc
+  # binary carrying `keychain-access-groups` is killed at exec. A locally built
+  # app therefore runs unentitled and cannot reach Cloud credentials; work on the
+  # sign-in ceremony needs a Developer ID-signed build. See the data-protection
+  # keychain spec.
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
 fi
 

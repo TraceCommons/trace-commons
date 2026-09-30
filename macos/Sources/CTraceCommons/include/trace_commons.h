@@ -746,6 +746,10 @@ int32_t     tc_private_inference_state_tone(const char* state);
 #define TC_CREDENTIAL_ACTION_OBTAIN 31
 #define TC_CREDENTIAL_ACTION_CANCEL 32
 #define TC_CREDENTIAL_ACTION_FORGET 33
+/* Copy a sign-in an earlier build kept in the macOS login keychain into the
+ * store this build uses (near_ai_credential_migrate). Offered only for
+ * "migration_available", which only macOS produces. */
+#define TC_CREDENTIAL_ACTION_MIGRATE 34
 
 /* Why a connect control is not on offer, or the EMPTY STRING.
  *
@@ -1060,6 +1064,19 @@ int32_t     tc_contribution_group_control(int64_t pending, int64_t contributable
  * panic.
  */
 char*       tc_contribution_withheld_line(int64_t withheld);
+
+/* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
+ * limit X of Y", the WYSIWYG design's Flow 2/3 example.
+ *
+ * uploads_today and max_uploads_per_day are status.daily_budget's fields of
+ * the same names; decisions_owed is status.decisions_owed (K6, a separate
+ * branch). All three are clamped to 0 on a negative value, which no honest
+ * caller sends.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a
+ * caught panic.
+ */
+char*       tc_toast_sent_text(int64_t uploads_today, int64_t max_uploads_per_day, int64_t decisions_owed);
 
 /* The sentence for one near_ai_balance state.
  *
@@ -1579,6 +1596,17 @@ char*       tc_route_disclosure_copy(const char* facts_json);
  * tc_string_free. NULL only on a caught panic.
  */
 char*       tc_certificate_detail_copy(void);
+
+/* K9 (#1118): the per-session notification's words -- the design's
+ * "Notification. Body is the consent sentence; one action, 'Look, then
+ * decide'."
+ *
+ * Needs no handle, like tc_consent_copy: it describes the build, not a
+ * running daemon. Returns an owned JSON object with body (the same sentence
+ * tc_consent_copy's gate_statement carries) and action; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_session_notification_copy(void);
 
 /* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
  * title, panel and session. Owned JSON; free it with tc_string_free. NULL only on a
@@ -2203,6 +2231,21 @@ void        tc_string_free(char*);
  * the returned pointer.
  */
 const char* tc_last_error(void);
+
+/*
+ * Can this process reach the Cloud credential store?
+ *
+ * 0 reachable, 1 unentitled, 2 otherwise. Reads and writes nothing. Exists so
+ * a release pipeline can ask a signed bundle a question no unit test can
+ * answer.
+ *
+ * "Reachable" means the store answered -- with nothing stored, which is the
+ * expected answer for a probe of a reference that was never written. Any
+ * other read failure is 2, not 0: this gates a release, so a store that is
+ * broken for a reason other than entitlement must not report PASS. The
+ * daemon's own sign-in guard maps the same probe more leniently on purpose.
+ */
+int32_t     tc_credential_store_self_check(void);
 
 #ifdef __cplusplus
 }

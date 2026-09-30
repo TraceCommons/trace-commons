@@ -3224,6 +3224,23 @@ pub extern "C" fn tc_certificate_detail_copy() -> *mut c_char {
     })
 }
 
+/// K9 (#1118): the per-session notification's words -- the design's
+/// "Notification. Body is the consent sentence; one action, 'Look, then
+/// decide'."
+///
+/// Needs no handle, like [`tc_consent_copy`]: it describes the build, not a
+/// running daemon. Returns an owned JSON object with `body` (the same
+/// sentence [`tc_consent_copy`]'s `gate_statement` carries) and `action`;
+/// free it with [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_session_notification_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::session_notification_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Parse `arg` as JSON and hand it to `build`, returning its answer as an
 /// owned JSON string, or NULL for a NULL, non-UTF-8 or unparseable argument
 /// and whenever `build` answers `None`.
@@ -3380,6 +3397,10 @@ pub const TC_CREDENTIAL_ACTION_NONE: i32 = 30;
 pub const TC_CREDENTIAL_ACTION_OBTAIN: i32 = 31;
 pub const TC_CREDENTIAL_ACTION_CANCEL: i32 = 32;
 pub const TC_CREDENTIAL_ACTION_FORGET: i32 = 33;
+/// Copy a sign-in an earlier build kept in the macOS login keychain into the
+/// store this build uses: the `near_ai_credential_migrate` method. Offered
+/// only for `migration_available`, which only macOS produces.
+pub const TC_CREDENTIAL_ACTION_MIGRATE: i32 = 34;
 
 /// Why a connect control is not on offer, or the empty string.
 ///
@@ -3503,6 +3524,7 @@ pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i
                 CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
                 CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
                 CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
             },
         )
     })
@@ -4007,6 +4029,33 @@ pub extern "C" fn tc_contribution_withheld_line(withheld: i64) -> *mut c_char {
     })
 }
 
+/// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
+/// limit X of Y", the WYSIWYG design's Flow 2/3 example.
+///
+/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
+/// fields of the same names; `decisions_owed` is `status.decisions_owed`
+/// (K6, a separate branch). All three are clamped to 0 on a negative value,
+/// which no honest caller sends.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_toast_sent_text(
+    uploads_today: i64,
+    max_uploads_per_day: i64,
+    decisions_owed: i64,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::consent_copy::toast_sent_text(
+                u64::try_from(uploads_today).unwrap_or(0),
+                u64::try_from(max_uploads_per_day).unwrap_or(0),
+                u64::try_from(decisions_owed).unwrap_or(0),
+            ),
+        ))
+    })
+}
+
 /// The sentence for one `near_ai_balance` `state`.
 ///
 /// `state` is the `state` field of a `near_ai_balance` answer. A NULL or
@@ -4104,6 +4153,7 @@ pub unsafe extern "C" fn tc_near_ai_balance_action(state: *const c_char) -> i32 
                 CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
                 CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
                 CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
             },
         )
     })
@@ -5004,6 +5054,17 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
         let copy = trace_commons_contributor::onboarding_copy::onboarding_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
+}
+
+/// Can this process reach the Cloud credential store?
+///
+/// Exists so a release pipeline can ask a *signed bundle* the question, which
+/// no unit test can answer: entitlements are a property of the code signature
+/// and `cargo test` never has one. Returns 0 reachable, 1 unentitled, 2
+/// otherwise. Reads nothing and writes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credential_store_self_check() -> i32 {
+    trace_commons_contributor::daemon::credential_store_self_check()
 }
 
 #[cfg(test)]
