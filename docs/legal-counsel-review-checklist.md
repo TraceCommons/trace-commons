@@ -23,6 +23,7 @@ should not have made it alone.
 | A.11 Governing law | California, Santa Clara County | Follows the entity's operating location. |
 | B.4 Sub-processors | Named in the document, changes published by amendment | Confirm whether a DPA is required with either processor before contributors in the EU or UK are onboarded. |
 | C Scope definitions | The five scopes as the enum defines them | Confirm the plain-language descriptions do not narrow or widen what the clause permits. |
+| Invite lookup pre-join credit range (`POST /v1/invite/lookup`) | An unauthenticated invite-code holder sees an operator-set credit range (min to max points per accepted trace) before joining, and clients are required to label it "estimated credit per accepted trace, not yet settled" | Settlement is disabled and grading is shadow-mode, and the ledger does not enforce the range, so this is a pre-contract statement about what contributing may earn. Confirm the label is enough to avoid it reading as a payment promise or inducement, and that it is consistent with A.6 (no entitlement, no value). Only someone holding the code sees it; the route is rate-limited. |
 
 ## Facts, each traceable — flag any that read wrongly and I will correct the text
 

@@ -578,6 +578,10 @@ final class AppModel: ObservableObject {
         submitNearAiCredential { try $0.nearAiCredentialForget() }
     }
 
+    func migrateNearAiCredential() {
+        submitNearAiCredential { try $0.nearAiCredentialMigrate() }
+    }
+
     /// One write, then a re-read of everything the key is behind.
     ///
     /// The listener and the tool list are re-read as well as the card: the

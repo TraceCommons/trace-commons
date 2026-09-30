@@ -166,6 +166,8 @@ pub(crate) async fn exchange(
                 memory.near_ai_session = stored.near_ai_session.clone();
                 memory.cloud_credentials = stored.cloud_credentials.clone();
                 memory.cloud_storage_unavailable = false;
+                memory.cloud_storage_failure =
+                    crate::daemon::settings::CloudStorageFailure::default();
                 Ok(())
             },
         )

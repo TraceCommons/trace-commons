@@ -712,6 +712,8 @@ async fn claim_handler(
         // The only record of which address claimed. The raw address is not stored.
         credential_binding_hash: Some(credential_binding_hash(&address)),
         note_label: None,
+        issuer_display_name: None,
+        credit_range: None,
     };
 
     match state.sink.insert(write).await {
@@ -734,6 +736,8 @@ async fn claim_handler(
                     issued_by_label: Some(ISSUED_BY_LABEL.to_string()),
                     credential_binding_hash: Some(credential_binding_hash(&address)),
                     note_label: None,
+                    issuer_display_name: None,
+                    credit_range: None,
                     revoked_at: None,
                 });
             }
@@ -1672,6 +1676,8 @@ mod router_tests {
                             "cosmos1other{i}"
                         ))),
                         note_label: None,
+                        issuer_display_name: None,
+                        credit_range: None,
                     });
             }
             let h = harness_with(cap, Answer::Yes, Vec::new(), sink);
@@ -1868,6 +1874,8 @@ mod router_tests {
                     issued_by_label: None,
                     credential_binding_hash: Some(credential_binding_hash(&format!("cosmos1a{i}"))),
                     note_label: None,
+                    issuer_display_name: None,
+                    credit_range: None,
                 });
         }
         let h = harness_with(1, Answer::Yes, Vec::new(), sink);
