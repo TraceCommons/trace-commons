@@ -2339,6 +2339,39 @@ async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
     );
 }
 
+/// Enrols `near_account_id` as the designated NEAR payout account of the
+/// account `principal` is linked to, through an owner connection (a fixture
+/// write, as `main`'s NEAR enrolment makes).
+async fn designate_near_account(
+    owner: &Arc<PgBackend>,
+    tenant: &str,
+    principal: &str,
+    near_account_id: &str,
+) {
+    let account_id = *owner
+        .resolve_principals_to_accounts(tenant, &[principal.to_string()])
+        .await
+        .unwrap()
+        .get(principal)
+        .expect("the principal is linked to an account");
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    tx.execute(
+        "INSERT INTO trace_near_identities (
+            tenant_id, public_key, near_account_id, account_id, payout_designated_at
+         ) VALUES ($1, $2, $3, $4, NOW())",
+        &[
+            &tenant,
+            &format!("ed25519:{}", Uuid::new_v4().simple()),
+            &near_account_id,
+            &account_id,
+        ],
+    )
+    .await
+    .expect("enrol the NEAR account");
+    tx.commit().await.unwrap();
+}
+
 /// Owner decision (Zaki review 1, item S), through the route: a withdrawal
 /// after Settle completed the Trace Credit leg keeps that credit, so the
 /// response says `credit_retained` (with `main`'s reviewer reads on the
@@ -2362,6 +2395,9 @@ async fn a_withdrawal_after_settle_keeps_and_pays_the_settled_trace_credit() {
     let tenant = fixture.tenant.as_str();
     let principal = static_token_principal_ref(&fixture.token);
     let session = account_session_headers(state, &fixture.token).await;
+    // The session links the principal to an account; the account's payout
+    // goes to its NEAR account (item 4), so it enrols one.
+    designate_near_account(&fixture.owner, tenant, &principal, "contributor.testnet").await;
     let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
 
     let mut request = axum::http::Request::builder()

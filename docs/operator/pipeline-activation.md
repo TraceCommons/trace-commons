@@ -423,6 +423,18 @@ to NEAR.
     a complete profile sets
     `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`, so an enabled
     payout is refused as above.
+- A contributor is paid as `main` pays them. A principal linked to an
+  account settles under the account (`account:{account_id}`), so its batch
+  line has the same credit-account hash as the account's legacy credit, and
+  its payout goes to the account's designated NEAR account, or to its only
+  active one. When the account has no active NEAR account (`none_enrolled`)
+  or several with none designated (`ambiguous_no_designation`), the line is
+  held as `main` holds it: the batch line records the label, no outbox row
+  is written, and the payout stays `pending` under the label. Each payout
+  pass resolves the account again, so the line is paid once the contributor
+  enrols or designates a NEAR account. A principal with no account is paid
+  with no NEAR account, as on `main`. Holds (`credit_holds`) still apply per
+  principal, as on `main`.
 - A withdrawal does not stop a payout. A leg is `complete` only when Settle
   completed it while the submission was operable, and a withdrawal forfeits
   only the legs Settle has not completed. A completed leg keeps its credit,

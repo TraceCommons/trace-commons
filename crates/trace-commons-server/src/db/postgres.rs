@@ -4798,40 +4798,9 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let rows = tx
-            .query(
-                "SELECT near_account_id, payout_designated_at
-                   FROM trace_near_identities
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND account_id = $1
-                    AND revoked_at IS NULL",
-                &[&account_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let resolution = resolve_payout_near_account_id_on_tx(&tx, account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-
-        // A designated active identity wins outright.
-        if let Some(row) = rows.iter().find(|row| {
-            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("payout_designated_at")
-                .is_some()
-        }) {
-            return Ok(crate::db::PayoutResolution::Designated(
-                row.get("near_account_id"),
-            ));
-        }
-        // No designation: a single active identity is unambiguous; otherwise hold.
-        match rows.len() {
-            0 => Ok(crate::db::PayoutResolution::Hold(
-                crate::db::PayoutHoldReason::NoneEnrolled,
-            )),
-            1 => Ok(crate::db::PayoutResolution::SoleActive(
-                rows[0].get("near_account_id"),
-            )),
-            _ => Ok(crate::db::PayoutResolution::Hold(
-                crate::db::PayoutHoldReason::AmbiguousNoDesignation,
-            )),
-        }
+        Ok(resolution)
     }
 
     async fn stage_merge_proposal(
@@ -6128,6 +6097,49 @@ async fn trace_tenant_context_is_transaction_local(
         .await?
         .get::<_, Option<String>>("tenant_context");
     Ok(inside.as_deref() == Some(probe_tenant) && after.as_deref().is_none_or(str::is_empty))
+}
+
+/// `Database::resolve_payout_near_account_id` on `tx`, a tenant-scoped
+/// transaction the caller already holds: the versioned pipeline's payout
+/// resolves on the connection that holds its NEAR submit lock, and never
+/// takes a second pooled connection.
+pub(crate) async fn resolve_payout_near_account_id_on_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: Uuid,
+) -> Result<crate::db::PayoutResolution, DatabaseError> {
+    let rows = tx
+        .query(
+            "SELECT near_account_id, payout_designated_at
+               FROM trace_near_identities
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND revoked_at IS NULL",
+            &[&account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+    // A designated active identity wins outright.
+    if let Some(row) = rows.iter().find(|row| {
+        row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("payout_designated_at")
+            .is_some()
+    }) {
+        return Ok(crate::db::PayoutResolution::Designated(
+            row.get("near_account_id"),
+        ));
+    }
+    // No designation: a single active identity is unambiguous; otherwise hold.
+    match rows.len() {
+        0 => Ok(crate::db::PayoutResolution::Hold(
+            crate::db::PayoutHoldReason::NoneEnrolled,
+        )),
+        1 => Ok(crate::db::PayoutResolution::SoleActive(
+            rows[0].get("near_account_id"),
+        )),
+        _ => Ok(crate::db::PayoutResolution::Hold(
+            crate::db::PayoutHoldReason::AmbiguousNoDesignation,
+        )),
+    }
 }
 
 #[cfg(test)]

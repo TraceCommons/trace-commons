@@ -102,8 +102,8 @@ use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
-    CreditSettlementAdvisoryLock, Database, PayoutHoldReason, PayoutResolution,
-    TraceCorpusRlsDiagnostics,
+    ACCOUNT_SETTLEMENT_KEY_PREFIX, CreditSettlementAdvisoryLock, Database, PayoutHoldReason,
+    PayoutResolution, TraceCorpusRlsDiagnostics, settlement_group_key,
 };
 use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
@@ -826,11 +826,6 @@ const TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN: &str =
 const TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE: &str =
     "TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE";
 const TRACE_COMMONS_NEAR_SETTLEMENT_MODE: &str = "TRACE_COMMONS_NEAR_SETTLEMENT_MODE";
-/// Settlement-group key prefix for credit groups re-keyed onto a durable account
-/// (`account:{uuid}`). Shared by the account-group build site, the payout parse
-/// site, and the hold-recovery repair path; drift between literals would misroute
-/// on-chain payout, so they all reference this one const.
-const ACCOUNT_SETTLEMENT_KEY_PREFIX: &str = "account:";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL: &str =
     "TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_URL";
 const TRACE_COMMONS_BENCHMARK_REGISTRY_SUBMITTER_BEARER_TOKEN: &str =
@@ -27794,13 +27789,7 @@ async fn run_credit_settlement_unlocked(
                 PayoutResolution::Designated(near) | PayoutResolution::SoleActive(near) => {
                     (Some(near), None)
                 }
-                PayoutResolution::Hold(reason) => {
-                    let label = match reason {
-                        PayoutHoldReason::NoneEnrolled => "none_enrolled",
-                        PayoutHoldReason::AmbiguousNoDesignation => "ambiguous_no_designation",
-                    };
-                    (None, Some(label.to_string()))
-                }
+                PayoutResolution::Hold(reason) => (None, Some(reason.label().to_string())),
             }
         } else {
             (None, None)
@@ -27986,16 +27975,6 @@ fn validate_credit_risk_summary_account_limit(limit: Option<usize>) -> ApiResult
 /// while the payout groups by account, a contributor holding several
 /// principals under one account is capped once per principal and paid once
 /// per account.
-fn settlement_group_key(
-    auth_principal_ref: &str,
-    principal_to_account: &HashMap<String, Uuid>,
-) -> String {
-    principal_to_account
-        .get(auth_principal_ref)
-        .map(|account_id| format!("{ACCOUNT_SETTLEMENT_KEY_PREFIX}{account_id}"))
-        .unwrap_or_else(|| auth_principal_ref.to_string())
-}
-
 fn apply_credit_settlement_account_cap(
     events: Vec<TraceCommonsCreditLedgerRecord>,
     max_micros_per_account: Option<i64>,

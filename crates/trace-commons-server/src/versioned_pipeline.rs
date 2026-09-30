@@ -7749,6 +7749,40 @@ impl PipelineService {
             .auth_principal_ref)
     }
 
+    /// `main`'s settlement key for `principal_ref`'s credit
+    /// (`settlement_group_key`: its account when it is linked to one) and,
+    /// for an account key, the hold `main` records when the account has no
+    /// unambiguous NEAR payout target (`resolve_payout_near_account_id`), as
+    /// `main`'s credit settlement does when it finalizes a batch.
+    async fn settlement_key_and_hold(
+        &self,
+        tenant_id: &str,
+        principal_ref: &str,
+    ) -> anyhow::Result<(String, Option<&'static str>)> {
+        let principal_to_account = crate::db::Database::resolve_principals_to_accounts(
+            self.backend.as_ref(),
+            tenant_id,
+            &[principal_ref.to_string()],
+        )
+        .await?;
+        let settlement_key = crate::db::settlement_group_key(principal_ref, &principal_to_account);
+        let hold = match crate::db::settlement_key_account_id(&settlement_key) {
+            Some(account_id) => match crate::db::Database::resolve_payout_near_account_id(
+                self.backend.as_ref(),
+                tenant_id,
+                account_id,
+            )
+            .await?
+            {
+                crate::db::PayoutResolution::Hold(reason) => Some(reason.label()),
+                crate::db::PayoutResolution::Designated(_)
+                | crate::db::PayoutResolution::SoleActive(_) => None,
+            },
+            None => None,
+        };
+        Ok((settlement_key, hold))
+    }
+
     /// Whether an unreleased hold names `account_ref` (ruling FR2, step 1:
     /// read before any external effect).
     async fn credit_account_is_held(
@@ -7852,6 +7886,19 @@ impl PipelineService {
             ),
         };
         let ledger_event_type_label = enum_string(&ledger_event_type)?;
+        // Zaki review 1, item 4 (owner: as `main`): a batched leg's line
+        // settles under `main`'s settlement key -- the principal's account,
+        // `account:{account_id}`, when it is linked to one -- and records the
+        // hold `main` would record when that account has no unambiguous
+        // NEAR payout target. Both reads use their own pooled connection and
+        // finish before the credit transaction takes one.
+        let (settlement_key, payout_hold_reason) = match trace_credit_event {
+            PipelineTraceCreditEvent::NoveltyUtility => (account_ref.to_string(), None),
+            PipelineTraceCreditEvent::PipelineScore => {
+                self.settlement_key_and_hold(&run.tenant_id, account_ref)
+                    .await?
+            }
+        };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -8010,7 +8057,8 @@ impl PipelineService {
                     run,
                     &settlement.instrument_id,
                     account_ref,
-                    &account_hash,
+                    &settlement_key,
+                    payout_hold_reason,
                     event_id,
                     &ledger_event_type_label,
                 )
@@ -8145,6 +8193,10 @@ impl PipelineService {
     /// since `main` never pays that event (Review Focus 3). Ruling T15-2
     /// writes that row `final`, so the state predicate leaves it out as
     /// well; the event-type predicate does not depend on that.
+    ///
+    /// The events are the principal's (`account_ref`), as `main`'s events
+    /// are; the batch line is `settlement_key`'s, `main`'s settlement key
+    /// (`settlement_key_and_hold`), and records `payout_hold_reason`.
     #[allow(clippy::too_many_arguments)]
     async fn finalize_pending_credit_batch(
         &self,
@@ -8152,7 +8204,8 @@ impl PipelineService {
         run: &PipelineRunRecord,
         instrument_id: &str,
         account_ref: &str,
-        account_hash: &str,
+        settlement_key: &str,
+        payout_hold_reason: Option<&'static str>,
         event_id: Uuid,
         event_type: &str,
     ) -> anyhow::Result<Uuid> {
@@ -8196,15 +8249,15 @@ impl PipelineService {
         })?;
         let batch_id = pipeline_settlement_batch_id(&run.tenant_id, &list_hash);
         let line_item = TraceCreditAccountSettlementLineItem {
-            credit_account_ref: account_ref.to_string(),
-            credit_account_hash: account_hash.to_string(),
+            credit_account_ref: settlement_key.to_string(),
+            credit_account_hash: credit_account_hash(settlement_key),
             settled_credit_delta_micros: settled_micros,
             source_credit_event_ids: event_ids.clone(),
             source_submission_ids: submission_ids.clone(),
             source_list_hash: list_hash.clone(),
             near_status: TraceCreditSettlementNearStatus::Disabled,
             near_outbox_id: None,
-            near_payout_hold_reason: None,
+            near_payout_hold_reason: payout_hold_reason.map(str::to_string),
         };
         let batch = TraceCreditSettlementBatchWrite {
             tenant_id: run.tenant_id.clone(),
@@ -8591,6 +8644,7 @@ impl PipelineService {
 
             let mut contract_changed = false;
             let mut refused_by_control = None;
+            let mut held_payout = None;
             for (line, call, outbox_id, status) in &work {
                 let outbox_id = *outbox_id;
                 match status.as_deref() {
@@ -8610,6 +8664,19 @@ impl PipelineService {
                             continue;
                         }
                         if status.is_none() {
+                            // Zaki review 1, item 4: an account's line is
+                            // paid to the account's NEAR payout target,
+                            // resolved again now, as `main`'s held-line
+                            // repair does; a line `main` would hold writes
+                            // no outbox row and waits for a later pass.
+                            let payout_near_account_id =
+                                match payout_target_for_line(client, run, line).await? {
+                                    Ok(target) => target,
+                                    Err(hold_label) => {
+                                        held_payout = Some(hold_label);
+                                        continue;
+                                    }
+                                };
                             insert_near_outbox_line(
                                 client,
                                 run,
@@ -8617,6 +8684,7 @@ impl PipelineService {
                                 batch_id,
                                 outbox_id,
                                 &line.credit_account_hash,
+                                payout_near_account_id.as_deref(),
                                 call,
                             )
                             .await?;
@@ -8697,6 +8765,17 @@ impl PipelineService {
                     &run.tenant_id,
                     run.run_id,
                     TraceCreditSettlementNearStatus::Failed,
+                    Some(label),
+                )
+                .await?;
+            } else if let Some(label) = held_payout {
+                // Held, as `main` holds it: still `pending`, under the hold
+                // label, so the next pass resolves the account again.
+                set_payout_state_on(
+                    client,
+                    &run.tenant_id,
+                    run.run_id,
+                    TraceCreditSettlementNearStatus::Pending,
                     Some(label),
                 )
                 .await?;
@@ -8815,6 +8894,7 @@ async fn near_outbox_line(
 
 /// Writes one outbox line `pending`, for `instrument_id = 'trace_credit'`;
 /// a line that already exists is left as it is.
+#[allow(clippy::too_many_arguments)]
 async fn insert_near_outbox_line(
     client: &mut deadpool_postgres::Client,
     run: &PipelineRunRecord,
@@ -8822,6 +8902,7 @@ async fn insert_near_outbox_line(
     batch_id: Uuid,
     outbox_id: Uuid,
     credit_account_hash: &str,
+    payout_near_account_id: Option<&str>,
     call: &crate::near_credit::NearCreditReceiptCall,
 ) -> anyhow::Result<()> {
     let call_json = serde_json::to_value(call)
@@ -8831,7 +8912,7 @@ async fn insert_near_outbox_line(
         "INSERT INTO trace_near_credit_outbox (
             tenant_id, near_outbox_id, settlement_batch_id, credit_account_hash,
             near_call_json, status, payout_near_account_id, instrument_id
-         ) VALUES ($1,$2,$3,$4,$5,'pending',NULL,$6)
+         ) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
          ON CONFLICT (tenant_id, near_outbox_id) DO NOTHING",
         &[
             &run.tenant_id,
@@ -8839,12 +8920,38 @@ async fn insert_near_outbox_line(
             &batch_id,
             &credit_account_hash,
             &call_json,
+            &payout_near_account_id,
             &settlement.instrument_id,
         ],
     )
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// The NEAR account a batch line is paid to, as `main`'s credit settlement
+/// resolves it: `Ok(None)` for a principal's line (`main` pays it with no
+/// target), the account's designated or sole active NEAR account for an
+/// account's line, and `Err` with `main`'s hold label when the account has
+/// none or several with none designated. Resolved on `client`, the
+/// connection the payout already holds.
+async fn payout_target_for_line(
+    client: &mut deadpool_postgres::Client,
+    run: &PipelineRunRecord,
+    line: &TraceCreditAccountSettlementLineItem,
+) -> anyhow::Result<Result<Option<String>, &'static str>> {
+    let Some(account_id) = crate::db::settlement_key_account_id(&line.credit_account_ref) else {
+        return Ok(Ok(None));
+    };
+    let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
+    let resolution =
+        crate::db::postgres::resolve_payout_near_account_id_on_tx(&tx, account_id).await?;
+    tx.commit().await?;
+    Ok(match resolution {
+        crate::db::PayoutResolution::Designated(near)
+        | crate::db::PayoutResolution::SoleActive(near) => Ok(Some(near)),
+        crate::db::PayoutResolution::Hold(reason) => Err(reason.label()),
+    })
 }
 
 /// Records a line's submit: `submitted`, with the hash of the adapter's

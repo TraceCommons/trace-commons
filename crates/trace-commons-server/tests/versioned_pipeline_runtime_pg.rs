@@ -18303,6 +18303,229 @@ async fn the_paid_leg_applies_mains_central_issuer_allowlist() {
     }
 }
 
+/// Adds a NEAR identity for `account_id`, designated for payout when
+/// `designated`, through an owner connection (a fixture write, as `main`'s
+/// NEAR enrolment makes).
+async fn add_near_identity(
+    tenant_id: &str,
+    account_id: uuid::Uuid,
+    near_account_id: &str,
+    designated: bool,
+) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_near_identities (
+            tenant_id, public_key, near_account_id, account_id, payout_designated_at
+         ) VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() END)",
+        &[
+            &tenant_id,
+            &format!("ed25519:{}", uuid::Uuid::new_v4().simple()),
+            &near_account_id,
+            &account_id,
+            &designated,
+        ],
+    )
+    .await
+    .expect("insert the NEAR identity");
+    tx.commit().await.expect("commit the NEAR identity");
+}
+
+/// The one line item of the run's Trace Credit batch.
+async fn trace_credit_batch_line(
+    backend: &Arc<PgBackend>,
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> serde_json::Value {
+    let batch_id = trace_credit_settlement(service, tenant_id, run_id)
+        .await
+        .settlement_batch_id
+        .expect("the leg has a batch");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let lines: serde_json::Value = tx
+        .query_one(
+            "SELECT line_items_json FROM trace_credit_settlement_batches
+              WHERE tenant_id = $1 AND settlement_batch_id = $2",
+            &[&tenant_id, &batch_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(lines.as_array().map(Vec::len), Some(1), "{lines}");
+    lines[0].clone()
+}
+
+/// The `credit_account_ref` of the run's one ledger row.
+async fn credit_ledger_account_ref(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> String {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let account_ref: String = tx
+        .query_one(
+            "SELECT credit_account_ref FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    account_ref
+}
+
+/// `(payout_near_account_id, credit_account_hash in the NEAR call)` of each
+/// of the tenant's NEAR outbox rows.
+async fn near_outbox_payout_targets(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+) -> Vec<(Option<String>, String)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT payout_near_account_id,
+                    near_call_json -> 'args' ->> 'credit_account_hash'
+               FROM trace_near_credit_outbox
+              WHERE tenant_id = $1
+              ORDER BY created_at",
+            &[&tenant_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows.iter().map(|row| (row.get(0), row.get(1))).collect()
+}
+
+/// Zaki review 1, item 4 (owner: as `main`): an account-linked contributor's
+/// pipeline credit settles under `main`'s account key, `account:{account_id}`
+/// (`settlement_group_key`), so its line carries the same credit-account hash
+/// as the contributor's legacy credit, and the payout goes to the account's
+/// designated NEAR account (`resolve_payout_near_account_id`: a designated
+/// identity wins over another active one). The ledger row stays the
+/// principal's, as `main`'s event does.
+#[tokio::test]
+async fn an_account_linked_contributor_is_paid_under_the_account_and_its_near_account() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-account-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    add_near_identity(&tenant, account_id, "other.testnet", false).await;
+    add_near_identity(&tenant, account_id, "designated.testnet", true).await;
+
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let account_key = format!("account:{account_id}");
+    let line = trace_credit_batch_line(&backend, &service, &tenant, run.run_id).await;
+    assert_eq!(line["credit_account_ref"], account_key);
+    assert_eq!(
+        line["credit_account_hash"],
+        credit_account_hash(&account_key)
+    );
+    assert!(line.get("near_payout_hold_reason").is_none(), "{line}");
+    assert_eq!(
+        credit_ledger_account_ref(&backend, &tenant, run.run_id).await,
+        RECEIPT_PRINCIPAL,
+        "the event stays the principal's"
+    );
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    assert_eq!(near.requests().len(), 1);
+    assert_eq!(
+        near_outbox_payout_targets(&backend, &tenant).await,
+        vec![(
+            Some("designated.testnet".to_string()),
+            credit_account_hash(&account_key)
+        )]
+    );
+}
+
+/// Zaki review 1, item 4 (owner: as `main`): where `main` holds an account's
+/// payout -- no active NEAR identity (`none_enrolled`), or several with none
+/// designated (`ambiguous_no_designation`) -- the pipeline holds it the same
+/// way: the batch line records the label, no outbox line is written and
+/// nothing is sent, and the payout stays `pending` under the label. Like
+/// `main`'s held-line repair, a later pass resolves the account again: once
+/// the account has one active identity, the line is paid to it.
+#[tokio::test]
+async fn the_pipeline_holds_an_account_payout_as_main_does() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for (identities, label) in [
+        (vec![], "none_enrolled"),
+        (
+            vec!["first.testnet", "second.testnet"],
+            "ambiguous_no_designation",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Arc::new(RecordingNearAdapter::new());
+        let service = payout_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near.clone(),
+            None,
+        )
+        .await;
+        let tenant = format!("payout-held-{}", uuid::Uuid::new_v4());
+        service.register_default_bundle(&tenant).await.unwrap();
+        let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+        for identity in &identities {
+            add_near_identity(&tenant, account_id, identity, false).await;
+        }
+
+        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+        let line = trace_credit_batch_line(&backend, &service, &tenant, run.run_id).await;
+        assert_eq!(line["near_payout_hold_reason"], label, "{line}");
+        assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+        assert!(near.requests().is_empty(), "nothing is sent ({label})");
+        assert!(
+            near_outbox_payout_targets(&backend, &tenant)
+                .await
+                .is_empty()
+        );
+        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+        assert_eq!(leg.payout_state, "pending");
+        assert_eq!(leg.last_error_label.as_deref(), Some(label));
+
+        if identities.is_empty() {
+            add_near_identity(&tenant, account_id, "enrolled.testnet", false).await;
+            assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+            assert_eq!(
+                near.requests().len(),
+                1,
+                "the held line is paid once resolved"
+            );
+            assert_eq!(
+                near_outbox_payout_targets(&backend, &tenant).await[0]
+                    .0
+                    .as_deref(),
+                Some("enrolled.testnet")
+            );
+        }
+    }
+}
+
 /// Zaki review 1, item 2: the pipeline's batch records no issuer approval it
 /// did not get. It used to carry a hash derived from its own source list;
 /// it now carries none, as `main`'s batch does when no approval evidence was
