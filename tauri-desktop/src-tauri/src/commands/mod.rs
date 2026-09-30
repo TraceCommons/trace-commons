@@ -55,6 +55,7 @@ pub(crate) fn handler<R: tauri::Runtime>()
         witness::clear_witness,
         witness::route_disclosure,
         witness::certificate_detail,
+        witness::route_disclosure_unreadable_copy,
         routing::discover_routing,
         routing::configure_routing,
         routing::probe_routing,

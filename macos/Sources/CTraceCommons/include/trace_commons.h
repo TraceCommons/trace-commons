@@ -1585,7 +1585,7 @@ char*       tc_route_disclosure_copy(const char* facts_json);
 char*       tc_certificate_detail_copy(void);
 
 /* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
- * panel and session. Owned JSON; free it with tc_string_free. NULL only on a
+ * title, panel and session. Owned JSON; free it with tc_string_free. NULL only on a
  * caught panic.
  */
 char*       tc_route_disclosure_unreadable_copy(void);

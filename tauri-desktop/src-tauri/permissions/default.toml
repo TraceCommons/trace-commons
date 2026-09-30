@@ -32,6 +32,7 @@ permissions = [
   "allow-clear-witness",
   "allow-route-disclosure",
   "allow-certificate-detail",
+  "allow-route-disclosure-unreadable-copy",
   "allow-discover-routing",
   "allow-configure-routing",
   "allow-probe-routing",
