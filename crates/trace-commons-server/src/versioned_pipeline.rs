@@ -60,7 +60,7 @@ use crate::versioned_pipeline_bundle::{
 use crate::versioned_pipeline_credit::{
     NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
     PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
-    SettlementAdapterRegistry, credit_account_hash, disabled_near_call, issuer_approval_hash,
+    SettlementAdapterRegistry, credit_account_hash, disabled_near_call,
     microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
     pipeline_settlement_batch_id, source_list_hash,
@@ -106,6 +106,17 @@ pub const PIPELINE_PAYOUT_LOCK_HELD_LABEL: &str = "payout_lock_held";
 /// a usable NEAR contract (Ruling T10-4).
 pub const PIPELINE_PAYOUT_NEAR_CONTRACT_MISSING_LABEL: &str = "payout_near_contract_missing";
 pub const PIPELINE_PAYOUT_NEAR_CONTRACT_INVALID_LABEL: &str = "payout_near_contract_invalid";
+/// `main`'s labels for its settlement controls (Zaki review 1, item 2), as
+/// its credit settlement drill reports them: an enabled payout is refused
+/// while `main` requires issuer approval, and a payout line is not sent when
+/// its batch's policy version is not on `main`'s allowed list. A paid leg
+/// whose issuer is not on `main`'s central-issuer allowlist records
+/// `PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL`, as the
+/// `NoveltyUtility` leg does.
+pub const PIPELINE_PAYOUT_ISSUER_APPROVAL_MISSING_LABEL: &str =
+    "issuer_approval_evidence_hash_missing";
+pub const PIPELINE_PAYOUT_POLICY_VERSION_NOT_ALLOWED_LABEL: &str =
+    "credit_settlement_policy_version_not_allowed";
 pub const PIPELINE_TOMBSTONE_LABEL: &str = "content_tombstoned";
 /// The reason code of an index invalidation a withdrawal queues.
 const PIPELINE_WITHDRAWAL_INVALIDATION_REASON: &str = "withdrawn";
@@ -4566,24 +4577,33 @@ pub struct PipelinePayoutConfig {
 
 /// Ruling T15-6: the configuration `main`'s `NoveltyUtility` credit checks
 /// read, which a compatibility run's Trace Credit leg applies before it
-/// writes its ledger row. Ingest hands it to the assembly
-/// (`IngestPipelineRuntimeContext`) and refuses a runtime that does not hold
-/// the same value.
+/// writes its ledger row, and (Zaki review 1, item 2) `main`'s settlement
+/// controls, which the paid Trace Credit leg applies before its NEAR payout.
+/// Ingest hands it to the assembly (`IngestPipelineRuntimeContext`) and
+/// refuses a runtime that does not hold the same value.
 ///
 /// - `central_issuer_principal_refs` is `main`'s
 ///   `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`, as
 ///   `main` parses it. Empty allows, as on `main`.
 /// - `issuer_principal_ref` is the principal the pipeline issues credit as
 ///   (Ruling T15-10), checked against that list in place of `main`'s calling
-///   gate worker. With a non-empty list and no issuer, every positive award
-///   is withheld.
+///   gate worker, and in place of the principal that runs `main`'s live
+///   settlement for a paid leg. With a non-empty list and no issuer, every
+///   positive award is withheld and no payout is made.
 /// - `require_production_gate` is `main`'s
 ///   `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` (Ruling T15-11).
+/// - `settlement_allowed_policy_versions` is `main`'s
+///   `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`. Empty allows,
+///   as on `main`.
+/// - `settlement_require_issuer_approval` is `main`'s
+///   `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineNoveltyUtilityChecks {
     pub central_issuer_principal_refs: std::collections::BTreeSet<String>,
     pub issuer_principal_ref: Option<String>,
     pub require_production_gate: bool,
+    pub settlement_allowed_policy_versions: std::collections::BTreeSet<String>,
+    pub settlement_require_issuer_approval: bool,
 }
 
 /// `main`'s withheld-reason labels for a `NoveltyUtility` credit its checks
@@ -4831,6 +4851,20 @@ impl PipelineServiceBuilder {
             let probe = sha256_prefixed(b"pipeline_payout_near_contract_probe");
             disabled_near_call(near_contract_id, Uuid::nil(), &probe, &probe, 1)
                 .map_err(|_| anyhow::anyhow!(PIPELINE_PAYOUT_NEAR_CONTRACT_INVALID_LABEL))?;
+            // Zaki review 1, item 2: `main` finalizes a live settlement under
+            // `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL` only
+            // with approval evidence an operator recorded for that batch's
+            // source list and named in the request. Settle finalizes a
+            // pipeline batch with no request to name it in, so there is no
+            // equivalent check to make: an enabled payout is refused, as
+            // `main` refuses its own automated live settlement under the
+            // flag, under `main`'s label for missing approval evidence.
+            anyhow::ensure!(
+                !self
+                    .novelty_utility_checks
+                    .settlement_require_issuer_approval,
+                PIPELINE_PAYOUT_ISSUER_APPROVAL_MISSING_LABEL
+            );
         }
         let service = PipelineService {
             store: PgPipelineStore::new(self.backend.clone()),
@@ -8178,7 +8212,11 @@ impl PipelineService {
             policy_version: PIPELINE_SETTLEMENT_POLICY_VERSION.to_string(),
             status: TraceCreditSettlementBatchStatus::Finalized,
             reason_hash: list_hash.clone(),
-            issuer_approval_evidence_hash: Some(issuer_approval_hash(&list_hash)),
+            // `main` records the issuer approval evidence its settlement
+            // request named, and none when it named none. Settle names none,
+            // and a payout is refused while `main` requires one
+            // (`PipelineServiceBuilder::build`).
+            issuer_approval_evidence_hash: None,
             source_credit_event_ids: event_ids.clone(),
             source_submission_ids: submission_ids,
             source_list_hash: list_hash,
@@ -8512,8 +8550,11 @@ impl PipelineService {
             let Some(batch_id) = settlement.settlement_batch_id else {
                 continue;
             };
-            let (batch_source_list_hash, lines) =
+            let (batch_source_list_hash, batch_policy_version, lines) =
                 load_payout_batch(client, run, &settlement, batch_id).await?;
+            // Zaki review 1, item 2: `main`'s settlement controls, applied
+            // before anything is sent. `None` lets the line go.
+            let control_refusal = self.payout_control_refusal(&batch_policy_version);
             let mut work = Vec::new();
             for line in lines
                 .iter()
@@ -8549,6 +8590,7 @@ impl PipelineService {
             }
 
             let mut contract_changed = false;
+            let mut refused_by_control = None;
             for (line, call, outbox_id, status) in &work {
                 let outbox_id = *outbox_id;
                 match status.as_deref() {
@@ -8561,6 +8603,10 @@ impl PipelineService {
                         }
                         if call.contract_id != near_contract_id {
                             contract_changed = true;
+                            continue;
+                        }
+                        if let Some(label) = control_refusal {
+                            refused_by_control = Some(label);
                             continue;
                         }
                         if status.is_none() {
@@ -8645,11 +8691,49 @@ impl PipelineService {
                     Some(PIPELINE_NEAR_CONTRACT_CHANGED_LABEL),
                 )
                 .await?;
+            } else if let Some(label) = refused_by_control {
+                set_payout_state_on(
+                    client,
+                    &run.tenant_id,
+                    run.run_id,
+                    TraceCreditSettlementNearStatus::Failed,
+                    Some(label),
+                )
+                .await?;
             } else {
                 record_payout_state_on(client, run, batch_id).await?;
             }
         }
         Ok(())
+    }
+
+    /// `main`'s settlement controls a payout line must pass before it is
+    /// sent (Zaki review 1, item 2), from `main`'s configuration as ingest
+    /// hands it over (`PipelineNoveltyUtilityChecks`): the batch's policy
+    /// version on `main`'s allowed list (an empty list allows any), and,
+    /// with `main`'s central-issuer allowlist set, the pipeline's issuer on
+    /// it, where `main` needs the principal that runs its live settlement.
+    /// `Some` is the label of the first control that refuses. `main`'s
+    /// issuer-approval requirement has no per-line check: an enabled payout
+    /// is refused at build while it is set.
+    fn payout_control_refusal(&self, batch_policy_version: &str) -> Option<&'static str> {
+        let checks = &self.novelty_utility_checks;
+        if !checks.settlement_allowed_policy_versions.is_empty()
+            && !checks
+                .settlement_allowed_policy_versions
+                .contains(batch_policy_version)
+        {
+            return Some(PIPELINE_PAYOUT_POLICY_VERSION_NOT_ALLOWED_LABEL);
+        }
+        if !checks.central_issuer_principal_refs.is_empty()
+            && !checks
+                .issuer_principal_ref
+                .as_ref()
+                .is_some_and(|issuer| checks.central_issuer_principal_refs.contains(issuer))
+        {
+            return Some(PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL);
+        }
+        None
     }
 }
 
@@ -8687,11 +8771,11 @@ async fn load_payout_batch(
     run: &PipelineRunRecord,
     settlement: &PipelineSettlementRecord,
     batch_id: Uuid,
-) -> anyhow::Result<(String, Vec<TraceCreditAccountSettlementLineItem>)> {
+) -> anyhow::Result<(String, String, Vec<TraceCreditAccountSettlementLineItem>)> {
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
     let row = tx
         .query_opt(
-            "SELECT source_list_hash, line_items_json
+            "SELECT source_list_hash, policy_version, line_items_json
                FROM trace_credit_settlement_batches
               WHERE tenant_id = $1 AND settlement_batch_id = $2
                 AND instrument_id = $3 AND status = 'finalized'",
@@ -8702,7 +8786,11 @@ async fn load_payout_batch(
     tx.commit().await?;
     let lines = serde_json::from_value(row.get("line_items_json"))
         .map_err(|_| anyhow::anyhow!(PIPELINE_PAYOUT_BATCH_MISSING_LABEL))?;
-    Ok((row.get("source_list_hash"), lines))
+    Ok((
+        row.get("source_list_hash"),
+        row.get("policy_version"),
+        lines,
+    ))
 }
 
 /// The status and stored call of one outbox line, or `None` when it has no

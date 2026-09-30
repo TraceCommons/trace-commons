@@ -129,7 +129,10 @@ use trace_commons_server::near_attestation::key_drift::{
 use trace_commons_server::near_attestation::measurements::{
     EXPECTED_MEASUREMENTS_ENV, expected_measurements_from_env,
 };
-use trace_commons_server::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
+use trace_commons_server::near_credit::{
+    NearCreditReceipt, NearCreditReceiptCall, trace_credit_settlement_attestation_hash,
+    trace_credit_settlement_issuer_signature_hash,
+};
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_kek::{
     KekWrapperStatus, KmsKeyWrapper, LocalMasterKeyWrapper, WrappedDek,
@@ -3848,11 +3851,14 @@ impl AppState {
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
-        // checks, for a compatibility run's Trace Credit leg.
+        // checks, for a compatibility run's Trace Credit leg, and (Zaki
+        // review 1, item 2) `main`'s settlement controls, for the paid leg.
         let pipeline_novelty_utility_checks = PipelineNoveltyUtilityChecks {
             central_issuer_principal_refs: credit_settlement_central_issuer_principal_refs.clone(),
             issuer_principal_ref: parse_pipeline_credit_issuer_principal_ref_from_env()?,
             require_production_gate: novelty_utility_require_production_gate,
+            settlement_allowed_policy_versions: credit_settlement_allowed_policy_versions.clone(),
+            settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
         };
         let pipeline_service = assemble_ingest_pipeline_runtime(
             pipeline_runtime_assembler,
@@ -28198,35 +28204,6 @@ fn near_credit_outbox_item_from_settlement_line_item(
         last_error_hash: None,
         confirmed_at: None,
     })
-}
-
-fn trace_credit_settlement_attestation_hash(
-    source_list_hash: &str,
-    issuer_approval_evidence_hash: Option<&str>,
-) -> String {
-    if let Some(approval_hash) = issuer_approval_evidence_hash {
-        sha256_prefixed(&format!(
-            "trace-credit-attestation:v2:{source_list_hash}:{approval_hash}"
-        ))
-    } else {
-        sha256_prefixed(&format!("trace-credit-attestation:v1:{source_list_hash}"))
-    }
-}
-
-fn trace_credit_settlement_issuer_signature_hash(
-    settlement_batch_id: Uuid,
-    source_list_hash: &str,
-    issuer_approval_evidence_hash: Option<&str>,
-) -> String {
-    if let Some(approval_hash) = issuer_approval_evidence_hash {
-        sha256_prefixed(&format!(
-            "trace-credit-settlement:v2:{settlement_batch_id}:{source_list_hash}:{approval_hash}"
-        ))
-    } else {
-        sha256_prefixed(&format!(
-            "trace-credit-settlement:v1:{settlement_batch_id}:{source_list_hash}"
-        ))
-    }
 }
 
 fn validate_credit_settlement_issuer_approval_evidence_hash(

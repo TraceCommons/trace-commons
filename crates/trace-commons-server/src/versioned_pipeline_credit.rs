@@ -15,7 +15,10 @@ use trace_commons_gate_api::{
 };
 use uuid::Uuid;
 
-use crate::near_credit::{NearCreditReceipt, NearCreditReceiptCall};
+use crate::near_credit::{
+    NearCreditReceipt, NearCreditReceiptCall, trace_credit_settlement_attestation_hash,
+    trace_credit_settlement_issuer_signature_hash,
+};
 use crate::trace_corpus_storage::TraceCreditSettlementNearStatus;
 
 pub const PIPELINE_SETTLEMENT_POLICY_VERSION: &str = "pipeline-internal-v1";
@@ -371,13 +374,6 @@ pub fn source_list_hash(event_ids: &[Uuid]) -> String {
     format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
-pub fn issuer_approval_hash(source_list_hash: &str) -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(format!("pipeline-issuer:{source_list_hash}").as_bytes())
-    )
-}
-
 pub fn settlement_batch_ref_hash(settlement_batch_id: Uuid, source_list_hash: &str) -> String {
     format!(
         "sha256:{:x}",
@@ -392,7 +388,10 @@ pub fn microcredits_to_settled_i64(amount: Microcredits) -> anyhow::Result<i64> 
 /// The NEAR `settle_credit_receipt` call that pays one batch line out, on
 /// `near_contract_id` -- the contract `main`'s legacy NEAR path is
 /// configured with (Ruling T10-4). The contract is part of the call's
-/// idempotency key. (The port's name is kept.)
+/// idempotency key. (The port's name is kept.) The attestation and
+/// signature hashes are `main`'s for a settlement that named no issuer
+/// approval evidence (Zaki review 1, item 2): a pipeline batch has none, and
+/// a payout is refused while `main` requires one.
 pub fn disabled_near_call(
     near_contract_id: &str,
     settlement_batch_id: Uuid,
@@ -407,9 +406,13 @@ pub fn disabled_near_call(
             credit_account_hash: credit_account_hash.to_string(),
             policy_version: PIPELINE_SETTLEMENT_POLICY_VERSION.to_string(),
             source_list_hash: source_list_hash.to_string(),
-            attestation_hash: issuer_approval_hash(source_list_hash),
+            attestation_hash: trace_credit_settlement_attestation_hash(source_list_hash, None),
             amount_micros,
-            issuer_signature_hash: issuer_approval_hash(source_list_hash),
+            issuer_signature_hash: trace_credit_settlement_issuer_signature_hash(
+                settlement_batch_id,
+                source_list_hash,
+                None,
+            ),
         },
     )
 }

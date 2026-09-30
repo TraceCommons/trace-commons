@@ -59,8 +59,9 @@ use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    NearConfirmationEvidence, NearPayoutAdapter, RecordingNearAdapter, RecordingSettlementAdapter,
-    SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
+    NearConfirmationEvidence, NearPayoutAdapter, PIPELINE_SETTLEMENT_POLICY_VERSION,
+    RecordingNearAdapter, RecordingSettlementAdapter, SettlementAdapterRegistry,
+    credit_account_hash, pipeline_near_outbox_line_id,
 };
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
@@ -14922,7 +14923,7 @@ async fn a_compatibility_award_needs_the_pipeline_issuer_on_the_central_issuer_l
             PipelineNoveltyUtilityChecks {
                 central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
                 issuer_principal_ref: issuer,
-                require_production_gate: false,
+                ..PipelineNoveltyUtilityChecks::default()
             },
         )
         .await;
@@ -18059,6 +18060,31 @@ async fn payout_test_service_with_config(
     crash_point: Option<PipelineCrashPoint>,
     payout: PipelinePayoutConfig,
 ) -> Arc<PipelineService> {
+    Arc::new(
+        payout_test_builder(
+            backend,
+            artifact_store,
+            config,
+            adapters,
+            near,
+            crash_point,
+            payout,
+        )
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// The builder `payout_test_service_with_config` builds.
+fn payout_test_builder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    near: Arc<dyn NearPayoutAdapter>,
+    crash_point: Option<PipelineCrashPoint>,
+    payout: PipelinePayoutConfig,
+) -> PipelineServiceBuilder {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
@@ -18083,7 +18109,256 @@ async fn payout_test_service_with_config(
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
-    Arc::new(builder.build().expect("build pipeline service"))
+    builder
+}
+
+/// The enabled payout the payout tests configure, on
+/// `PAYOUT_TEST_NEAR_CONTRACT`, polling a `submitted` payout on every pass.
+fn enabled_test_payout() -> PipelinePayoutConfig {
+    PipelinePayoutConfig {
+        enabled: true,
+        require_confirmation_evidence: true,
+        near_contract_id: Some(PAYOUT_TEST_NEAR_CONTRACT.to_string()),
+        confirmation_interval: std::time::Duration::ZERO,
+    }
+}
+
+/// `payout_test_service` for a Trace Credit only bundle, with `main`'s
+/// credit checks and settlement controls configured as `checks`.
+async fn payout_test_service_with_checks(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    near: Arc<dyn NearPayoutAdapter>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
+    Arc::new(
+        payout_test_builder(
+            backend,
+            artifact_store,
+            trace_credit_only_config(),
+            vec![near_rail_trace_credit_adapter()],
+            near,
+            None,
+            enabled_test_payout(),
+        )
+        .with_novelty_utility_checks(checks)
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// Zaki review 1, item 2: `main`'s issuer approval is evidence an operator
+/// records for one batch's source list and names in the settlement request
+/// that finalizes it (`require_recorded_credit_settlement_issuer_approval_if_configured`).
+/// A pipeline batch is finalized by Settle with no such request, so there is
+/// no evidence to name, and `main`'s own automated settlement refuses to run
+/// live under the same flag. The runtime therefore refuses to build with
+/// NEAR payout enabled while `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`
+/// is set, under `main`'s label for a missing approval. With payout
+/// disabled it builds.
+#[tokio::test]
+async fn an_enabled_payout_is_refused_while_main_requires_issuer_approval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let checks = PipelineNoveltyUtilityChecks {
+        settlement_require_issuer_approval: true,
+        ..PipelineNoveltyUtilityChecks::default()
+    };
+    let near = Arc::new(RecordingNearAdapter::new());
+    let refused = payout_test_builder(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+        enabled_test_payout(),
+    )
+    .with_novelty_utility_checks(checks.clone())
+    .build()
+    .err()
+    .expect("an enabled payout needs recorded issuer approval");
+    assert_eq!(refused.to_string(), "issuer_approval_evidence_hash_missing");
+
+    let disabled = payout_test_builder(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near,
+        None,
+        PipelinePayoutConfig {
+            enabled: false,
+            ..enabled_test_payout()
+        },
+    )
+    .with_novelty_utility_checks(checks)
+    .build();
+    assert!(disabled.is_ok(), "a disabled payout pays nothing");
+}
+
+/// Zaki review 1, item 2: `main` refuses a live settlement whose policy
+/// version is not on `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`
+/// (an empty list allows any). A pipeline batch carries its policy version,
+/// so the payout applies the same list before it submits: a batch whose
+/// version is not listed is not sent, and its payout is `failed` under
+/// `main`'s label. With the version listed, it is paid.
+#[tokio::test]
+async fn the_payout_applies_mains_allowed_policy_versions() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for (allowed, paid) in [
+        (vec!["main-policy-v1"], false),
+        (
+            vec!["main-policy-v1", PIPELINE_SETTLEMENT_POLICY_VERSION],
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Arc::new(RecordingNearAdapter::new());
+        let service = payout_test_service_with_checks(
+            backend.clone(),
+            artifact_store(&dir),
+            near.clone(),
+            PipelineNoveltyUtilityChecks {
+                settlement_allowed_policy_versions: allowed
+                    .iter()
+                    .map(|version| version.to_string())
+                    .collect(),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+        )
+        .await;
+        let tenant = format!("payout-policy-version-{}", uuid::Uuid::new_v4());
+        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+        if paid {
+            assert_eq!(near.requests().len(), 1, "a listed version is paid");
+            assert_eq!(leg.payout_state, "submitted");
+        } else {
+            assert!(near.requests().is_empty(), "nothing is submitted");
+            assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
+            assert_eq!(leg.payout_state, "failed");
+            assert_eq!(
+                leg.last_error_label.as_deref(),
+                Some("credit_settlement_policy_version_not_allowed")
+            );
+        }
+    }
+}
+
+/// Zaki review 1, item 2: with `main`'s central-issuer allowlist set
+/// (`TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`), `main`
+/// settles only for a listed principal. The pipeline settles as its
+/// configured issuer, so the paid leg applies the same list to it before it
+/// submits, as the `NoveltyUtility` leg does: an issuer that is missing or
+/// not listed sends nothing, and the payout is `failed` under
+/// `central_issuer_denied`. A listed issuer is paid.
+#[tokio::test]
+async fn the_paid_leg_applies_mains_central_issuer_allowlist() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let listed = credit_account_hash("pipeline-issuer");
+    for (issuer, paid) in [
+        (None, false),
+        (Some(credit_account_hash("another-issuer")), false),
+        (Some(listed.clone()), true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let near = Arc::new(RecordingNearAdapter::new());
+        let service = payout_test_service_with_checks(
+            backend.clone(),
+            artifact_store(&dir),
+            near.clone(),
+            PipelineNoveltyUtilityChecks {
+                central_issuer_principal_refs: BTreeSet::from([listed.clone()]),
+                issuer_principal_ref: issuer.clone(),
+                ..PipelineNoveltyUtilityChecks::default()
+            },
+        )
+        .await;
+        let tenant = format!("payout-central-issuer-{}", uuid::Uuid::new_v4());
+        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+        let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+        if paid {
+            assert_eq!(near.requests().len(), 1, "a listed issuer is paid");
+            assert_eq!(leg.payout_state, "submitted");
+        } else {
+            assert!(
+                near.requests().is_empty(),
+                "nothing is submitted ({issuer:?})"
+            );
+            assert_eq!(leg.payout_state, "failed");
+            assert_eq!(
+                leg.last_error_label.as_deref(),
+                Some("central_issuer_denied")
+            );
+        }
+    }
+}
+
+/// Zaki review 1, item 2: the pipeline's batch records no issuer approval it
+/// did not get. It used to carry a hash derived from its own source list;
+/// it now carries none, as `main`'s batch does when no approval evidence was
+/// named, and the NEAR call's attestation and signature hashes are `main`'s
+/// for a batch without approval evidence.
+#[tokio::test]
+async fn the_pipeline_batch_records_no_derived_issuer_approval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-no-derived-approval-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let batch_id = trace_credit_settlement(&service, &tenant, run.run_id)
+        .await
+        .settlement_batch_id
+        .expect("the leg has a batch");
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT issuer_approval_evidence_hash, source_list_hash
+               FROM trace_credit_settlement_batches
+              WHERE tenant_id = $1 AND settlement_batch_id = $2",
+            &[&tenant, &batch_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let evidence: Option<String> = row.get(0);
+    let source_list_hash: String = row.get(1);
+    assert_eq!(evidence, None, "no issuer approval was recorded");
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let call = &near_outbox_rows(&backend, &tenant).await[0].near_call_json;
+    let digest = |text: String| format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
+    assert_eq!(
+        call["args"]["attestation_hash"],
+        digest(format!("trace-credit-attestation:v1:{source_list_hash}"))
+    );
+    assert_eq!(
+        call["args"]["issuer_signature_hash"],
+        digest(format!(
+            "trace-credit-settlement:v1:{batch_id}:{source_list_hash}"
+        ))
+    );
 }
 
 /// A NEAR adapter that counts every `submit` call and delegates to a shared

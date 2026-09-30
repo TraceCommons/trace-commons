@@ -11556,6 +11556,10 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
         )]),
         issuer_principal_ref: Some(format!("principal_sha256:{}", "c".repeat(64))),
         require_production_gate: true,
+        // Zaki review 1, item 2: `main`'s settlement controls travel in the
+        // same value, so an assembly that drops them is refused too.
+        settlement_allowed_policy_versions: BTreeSet::from(["main-policy-v1".to_string()]),
+        settlement_require_issuer_approval: true,
     };
     let assemble = |forward: bool| {
         assemble_ingest_pipeline_runtime(

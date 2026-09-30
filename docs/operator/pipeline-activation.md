@@ -397,6 +397,32 @@ to NEAR.
   stored, the call is not sent again (it could pay twice, on two
   contracts): the payout is `failed` with `near_contract_changed`. A call
   already submitted is still confirmed through its stored key.
+- The payout applies `main`'s settlement controls, from `main`'s own
+  configuration:
+  - `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`: ingest refuses
+    to start a runtime whose payout is enabled, with
+    `issuer_approval_evidence_hash_missing`. `main`'s approval is evidence
+    an operator records for one batch's source list and names in the
+    settlement request; Settle finalizes a pipeline batch with no request,
+    and `main`'s own automated settlement does not run live under this flag
+    either. `TRACE_COMMONS_CREDIT_SETTLEMENT_ISSUER_APPROVAL_MAX_AGE_HOURS`
+    needs this flag, so it takes the same case. A pipeline batch records no
+    issuer approval evidence.
+  - `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS`: a batch whose
+    policy version (`pipeline-internal-v1`) is not listed is not sent. Its
+    payout is `failed` with `credit_settlement_policy_version_not_allowed`.
+    An empty list allows any version, as on `main`.
+  - `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS`: the
+    pipeline settles as its issuer,
+    `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`. When the list is
+    set and that issuer is missing or not listed, nothing is sent and the
+    payout is `failed` with `central_issuer_denied`.
+  - `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE`: ingest
+    does not start while the profile is incomplete
+    (`credit_settlement_central_issuer_profile_incomplete` in the drill), and
+    a complete profile sets
+    `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL`, so an enabled
+    payout is refused as above.
 - A withdrawal does not stop a payout. A leg is `complete` only when Settle
   completed it while the submission was operable, and a withdrawal forfeits
   only the legs Settle has not completed. A completed leg keeps its credit,
