@@ -4673,6 +4673,11 @@ pub struct PipelineReceiptRequest<'a> {
     pub server_envelope: &'a TraceContributionEnvelope,
     pub residual_risk_basis: &'a [ResidualRiskCondition],
     pub limits: PipelineAdmissionLimits,
+    /// The source session `main`'s admission claimed for this upload, as
+    /// `(account_id, session_digest)`: the final receipt transaction locks
+    /// it and refuses the receipt when it is withdrawn (Zaki review 1,
+    /// item 5). `None` when admission claimed none.
+    pub source_session: Option<(Uuid, [u8; 32])>,
 }
 
 /// The outcome of a receipt submission.
@@ -4683,6 +4688,10 @@ pub enum PipelineReceiptResult {
     ContentConflict,
     Tombstoned,
     QuotaExceeded(PipelineQuotaScope),
+    /// The upload's source session was withdrawn before the receipt
+    /// committed: nothing is recorded, as `main`'s receipt refuses it
+    /// (`source_session_withdrawn`).
+    SourceSessionWithdrawn,
 }
 
 /// `PipelineService::replay_receipt`'s result: the outcome for the retried
@@ -5415,6 +5424,7 @@ impl PipelineService {
             }
         }
         let request = PipelineReceiptRequest {
+            source_session: request.source_session,
             tenant_id: request.tenant_id,
             actor_principal_ref: request.actor_principal_ref,
             counts_toward_quota: request.counts_toward_quota,
@@ -5830,7 +5840,10 @@ impl PipelineService {
     /// receipt lock again -- its only advisory lock -- so it commits one
     /// attempt for the key at a time: the attempt that comes second finds
     /// the first one's run and returns `Replayed` rather than failing on
-    /// the run's unique key or the submission id. Then it re-checks the
+    /// the run's unique key or the submission id. With a source session
+    /// (`PipelineReceiptRequest::source_session`), it then locks the
+    /// session row and refuses a withdrawn session
+    /// (`SourceSessionWithdrawn`). Then it re-checks the
     /// tombstones (one can arrive while the object is written), locks the
     /// attempt's row, which must still be `staged` and not due
     /// (`lock_committable_receipt_artifact`), and inserts the records and
@@ -5864,6 +5877,30 @@ impl PipelineService {
             )],
         )
         .await?;
+        // Zaki review 1, item 5: the upload's source session, locked before
+        // any row is read or written (the lock order stays session, then
+        // run, then submission, as a withdrawal takes them). A session
+        // withdrawal either committed before this lock -- the receipt sees
+        // it and records nothing, as `main`'s receipt refuses it -- or waits
+        // here until this receipt commits, and then finds the submission
+        // mapped to the session and withdraws it.
+        if let Some((account_id, session_digest)) = request.source_session {
+            let withdrawn = tx
+                .query_opt(
+                    "SELECT withdrawn_at IS NOT NULL FROM trace_source_sessions
+                      WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3
+                      FOR UPDATE",
+                    &[&tenant_id, &account_id, &session_digest.as_slice()],
+                )
+                .await?
+                .is_some_and(|row| row.get::<_, bool>(0));
+            if withdrawn {
+                tx.commit().await?;
+                return Ok(ReceiptCommit::Refused(
+                    PipelineReceiptResult::SourceSessionWithdrawn,
+                ));
+            }
+        }
         if let Some(existing) =
             existing_receipt_run(&tx, tenant_id, &attempt.request_idempotency_key).await?
         {

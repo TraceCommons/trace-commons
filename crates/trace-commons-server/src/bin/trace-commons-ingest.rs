@@ -13885,6 +13885,7 @@ async fn route_pipeline_receipt(
     envelope: &TraceContributionEnvelope,
     raw_body: &[u8],
     residual_risk_basis: &[ResidualRiskCondition],
+    source_claim: Option<(Uuid, [u8; 32])>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
         return Ok(None);
@@ -13892,6 +13893,7 @@ async fn route_pipeline_receipt(
     let idempotency_key = envelope.submission_id.to_string();
     let result = pipeline_service
         .submit(PipelineReceiptRequest {
+            source_session: source_claim,
             tenant_id: tenant.tenant_id(),
             actor_principal_ref: tenant.principal_ref(),
             counts_toward_quota: tenant.role() == TokenRole::Contributor,
@@ -13960,6 +13962,12 @@ async fn route_pipeline_receipt(
             StatusCode::TOO_MANY_REQUESTS,
             "trace contribution principal submission quota exceeded",
         )),
+        // The label `main`'s receipt answers when the upload's source
+        // session was withdrawn before the upload recorded (Zaki review 1,
+        // item 5).
+        PipelineReceiptResult::SourceSessionWithdrawn => {
+            Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"))
+        }
     }
 }
 
@@ -14102,13 +14110,15 @@ async fn submit_trace_handler(
                     // `ContentConflict` result (`replay_result`, over a run
                     // `existing_receipt_run` already found); a read-only
                     // replay lookup neither creates a run, stages an
-                    // attempt, checks a tombstone, nor counts a quota, so
-                    // none of these three variants can come from it. Kept
+                    // attempt, checks a tombstone or a source session, nor
+                    // counts a quota, so none of these variants can come
+                    // from it. Kept
                     // only so this match stays exhaustive against the
                     // shared `PipelineReceiptResult` enum.
                     PipelineReceiptResult::Created(_)
                     | PipelineReceiptResult::Tombstoned
-                    | PipelineReceiptResult::QuotaExceeded(_) => {}
+                    | PipelineReceiptResult::QuotaExceeded(_)
+                    | PipelineReceiptResult::SourceSessionWithdrawn => {}
                 }
             }
             // No run under this key: a submission that completed admission
@@ -14279,6 +14289,7 @@ async fn submit_trace_handler(
             &envelope,
             &raw_body,
             &residual_risk_basis,
+            source_claim,
         )
         .await?
         {

@@ -1975,6 +1975,7 @@ async fn completed_run_of(
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
             counts_toward_quota: true,
@@ -2715,6 +2716,7 @@ async fn the_revocation_worker_deletes_the_score_objects_of_a_withdrawn_run() {
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: &principal,
             counts_toward_quota: true,
@@ -3711,6 +3713,7 @@ async fn quarantined_pipeline_run(
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
             counts_toward_quota: true,

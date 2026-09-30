@@ -2382,6 +2382,7 @@ fn receipt<'a>(
     limits: PipelineAdmissionLimits,
 ) -> PipelineReceiptRequest<'a> {
     PipelineReceiptRequest {
+        source_session: None,
         tenant_id: tenant,
         actor_principal_ref: "principal_sha256:test",
         counts_toward_quota: true,
@@ -13375,6 +13376,7 @@ async fn submit_envelope_and_complete(
     let PipelineReceiptResult::Created(created) = submit_registered(
         service,
         PipelineReceiptRequest {
+            source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
             counts_toward_quota: true,
@@ -13573,6 +13575,7 @@ async fn status_follows_outcomes() {
     let PipelineReceiptResult::Created(created) = submit_registered(
         &service,
         PipelineReceiptRequest {
+            source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: principal,
             counts_toward_quota: true,
@@ -13672,6 +13675,7 @@ async fn status_follows_outcomes() {
     let PipelineReceiptResult::Created(created_pending) = submit_registered(
         &pending_service,
         PipelineReceiptRequest {
+            source_session: None,
             tenant_id: &tenant_pending,
             actor_principal_ref: principal_pending,
             counts_toward_quota: true,
@@ -13785,6 +13789,7 @@ async fn status_follows_outcomes() {
     let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
         &quarantine_service,
         PipelineReceiptRequest {
+            source_session: None,
             tenant_id: &tenant_quarantine,
             actor_principal_ref: principal_quarantine,
             counts_toward_quota: true,
@@ -14008,6 +14013,7 @@ async fn operational_summary_counts_runs_by_state_and_label() {
     let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
         &quarantine_service,
         PipelineReceiptRequest {
+            source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: principal_quarantine,
             counts_toward_quota: true,
@@ -15398,6 +15404,117 @@ async fn withdrawal_blocks_until_the_index_commit_and_then_invalidates() {
         vec![(revision_id, "withdrawn", "complete")]
     );
     assert_eq!(processed_run_state, "complete");
+}
+
+/// Zaki review 1, item 5: the receipt's final transaction takes the upload's
+/// source-session row lock (the lock order stays session, then run, then
+/// submission) and refuses the receipt when the session is withdrawn, as
+/// `main`'s receipt refuses it (`source_session_withdrawn`). A session
+/// withdrawal holds the session row and has recorded the upload's withdrawal
+/// but not committed; the receipt reaches its final transaction and waits
+/// for it (PostgreSQL reports the wait), and once the withdrawal commits,
+/// the receipt records nothing: no submission, no run, no staged attempt,
+/// no stored object. Without the lock the receipt commits a live submission
+/// and run behind the withdrawal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_withdrawal_before_the_final_receipt_transaction_refuses_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("receipt-session-race-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
+        .as_slice()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        owner
+            .claim_trace_source_session(&tenant, account_id, &digest, env.submission_id)
+            .await
+            .unwrap(),
+        TraceSourceSessionStatus::Active
+    );
+
+    // `main`'s session withdrawal, in progress: the session row is locked
+    // and the upload's withdrawal recorded, uncommitted.
+    let mut withdrawal_client = owner_client().await;
+    let withdrawal = owner_tenant_tx(&mut withdrawal_client, &tenant).await;
+    withdrawal
+        .execute(
+            "UPDATE trace_source_sessions SET withdrawn_at = NOW()
+              WHERE tenant_id = $1 AND account_id = $2 AND session_digest = $3",
+            &[&tenant, &account_id, &digest.as_slice()],
+        )
+        .await
+        .unwrap();
+    withdrawal
+        .execute(
+            "INSERT INTO trace_withdrawals (
+                tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+             ) VALUES ($1, $2, NOW(), 'purged', 'commons_not_distributed')",
+            &[&tenant, &env.submission_id],
+        )
+        .await
+        .unwrap();
+    let xid: String = withdrawal
+        .query_one(
+            "SELECT backend_xid::text FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let receipt_task = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let env = env.clone();
+        async move {
+            let raw = serde_json::to_vec(&env).unwrap();
+            let key = env.submission_id.to_string();
+            let mut request = receipt(&tenant, &key, &raw, &env, NO_LIMITS);
+            request.source_session = Some((account_id, digest));
+            service.submit(request).await
+        }
+    });
+    wait_for_a_waiter_on(&backend, &xid, &receipt_task).await;
+    withdrawal.commit().await.unwrap();
+    let result = tokio::time::timeout(HELD_CALL_BOUND, receipt_task)
+        .await
+        .expect("the receipt finishes once the withdrawal commits")
+        .expect("the receipt task did not panic")
+        .expect("the receipt returns a result");
+    assert!(
+        matches!(result, PipelineReceiptResult::SourceSessionWithdrawn),
+        "{result:?}"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_submissions").await,
+        0,
+        "no submission"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_runs").await,
+        0,
+        "no run"
+    );
+    assert_eq!(
+        count_staged_artifacts(&backend, &tenant).await,
+        0,
+        "no staged attempt"
+    );
+    assert_eq!(count_files_under(dir.path()), 0, "no stored object");
 }
 
 /// Ruling T7-2: the withdrawal locks the run rows before the submission

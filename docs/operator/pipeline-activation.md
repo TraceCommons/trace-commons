@@ -328,6 +328,14 @@ Both need an account session, never a device key, and both answer the same
   requested submission, or another submission of its source session, has a
   pipeline run. Otherwise it takes `main`'s path, unchanged.
 
+An upload whose source session is withdrawn while the pipeline receipt is
+still in progress is not recorded. The receipt's final transaction locks the
+session row before it writes anything. A withdrawal that committed first
+makes the receipt answer `409` `source_session_withdrawn`, as `main`'s
+receipt does, and the receipt's staged object is deleted. A withdrawal that
+comes later waits for the receipt, and then withdraws the new submission
+with the rest of the session.
+
 The pipeline withdrawal makes the writes `main`'s session withdrawal makes,
 in one transaction: it withdraws the submission's source session and every
 submission of that session. For each of those submissions that has a run,
