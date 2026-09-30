@@ -54,11 +54,15 @@ To roll a tenant back from the pipeline, move it from
 `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` and restart ingest. Its new
 receipts take the legacy path at once, and its existing pipeline work is
 finished. Keep it on the drain list until the operational summary shows no
-pending runs, invalidations, or payouts for it. A tenant on neither list is
-not processed at all: its in-flight runs stop, a later withdrawal still
-queues an invalidation (the withdrawal needs only a runtime), and queued
-invalidations and payouts wait, unprocessed, until the tenant is listed
-again.
+pending runs, invalidations, or payouts for it, and for as long as its
+contributors need their pipeline submissions' statuses: the status route
+(`POST /v1/contributors/me/submission-status`) reads the pipeline's view
+only for a tenant on either list. A tenant on neither list is not processed
+at all: its in-flight runs stop, a later withdrawal still queues an
+invalidation (the withdrawal needs only a runtime), and queued invalidations
+and payouts wait, unprocessed, until the tenant is listed again. Its status
+answers are `main`'s alone: a submission only the pipeline recorded is not
+described, and a document `main` holds carries no pipeline block.
 
 Activation replaces this list with qualified routing.
 

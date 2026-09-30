@@ -16250,8 +16250,16 @@ async fn submission_status_handler(
         .map_err(internal_error)?;
     // The pipeline's view of the same ids, for the same principals as the
     // credit view above: the account's principal set when the caller is
-    // linked to an account, else the caller's own principal.
-    let pipeline_by_submission = match state.pipeline_product.as_ref() {
+    // linked to an account, else the caller's own principal. Read only for a
+    // tenant on the receipts or the drain list, the tenants whose retried
+    // uploads replay pipeline receipts (`pipeline_runtime_for_replay`); any
+    // other tenant's answer is `main`'s alone, with no pipeline query (Zaki
+    // review 1, round 2, item 6).
+    let pipeline_product = state
+        .pipeline_product
+        .as_ref()
+        .filter(|_| pipeline_runtime_for_replay(state.as_ref(), &tenant).is_some());
+    let pipeline_by_submission = match pipeline_product {
         Some(product) => {
             let principal_refs = account_principals.map_or_else(
                 || vec![tenant.principal_ref().to_string()],

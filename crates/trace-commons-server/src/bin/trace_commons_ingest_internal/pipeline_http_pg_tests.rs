@@ -3069,9 +3069,14 @@ async fn product_fixture() -> Option<ProductFixture> {
         TokenRole::ExportWorker,
     );
     let runtime = base.runtime.clone();
+    let tenant = base.tenant.clone();
     let state = Arc::make_mut(&mut base.state);
     state.tokens = Arc::new(tokens);
     state.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime)));
+    // The status route reads the pipeline's view only for a tenant on the
+    // receipts or the drain list (Zaki review 1, round 2, item 6). The
+    // drain list routes no receipt.
+    state.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant]));
     Some(ProductFixture {
         base,
         export_token,
@@ -4920,6 +4925,7 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
         let (status, documents) = route_request(
             state,
             "POST",
@@ -5086,6 +5092,7 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
         state_mut.tokens = Arc::new(tokens.clone());
         state_mut.pipeline_service = Some(service.clone());
         state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
         let ask = |submission_ids: Vec<Uuid>| {
             let state = state.clone();
             let token = token.clone();
@@ -5121,6 +5128,94 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
             ["accepted", "accepted", "revoked", "quarantined"],
             "database reads {database_reads}"
         );
+    }
+}
+
+/// Zaki review 1, round 2, item 6: the status route reads the pipeline's
+/// view only for a tenant on the receipts or the drain list, the tenants
+/// whose retried uploads replay pipeline receipts
+/// (`pipeline_runtime_for_replay`). With a runtime injected, a tenant on
+/// neither list gets `main`'s answer alone, so its pipeline-only submission
+/// is not described; the same request describes it once the tenant is on
+/// either list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_route_reads_the_pipeline_only_for_a_routed_or_drained_tenant() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-status-lists-{suffix}");
+    let token = format!("token-status-lists-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let principal = static_token_principal_ref(&token);
+    let settled = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+
+    for (receipts, drained, described) in [
+        (false, false, false),
+        (false, true, true),
+        (true, false, true),
+    ] {
+        let mut state = test_state_with_options(
+            dir.path().to_path_buf(),
+            Some(owner.clone() as Arc<dyn Database>),
+            Some(artifacts.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens.clone());
+        state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        if receipts {
+            state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[tenant.as_str()],
+            );
+        }
+        if drained {
+            state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+        }
+        let (status, documents) = route_request(
+            state,
+            "POST",
+            "/v1/contributors/me/submission-status",
+            auth_headers(&token),
+            Some(serde_json::json!({ "submission_ids": [settled.submission_id] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{documents}");
+        let documents = documents.as_array().expect("a document list").clone();
+        if described {
+            assert_eq!(documents.len(), 1, "receipts {receipts}, drained {drained}");
+            assert_eq!(documents[0]["status"], "accepted");
+        } else {
+            assert_eq!(
+                documents,
+                Vec::<serde_json::Value>::new(),
+                "a tenant on neither list gets main's answer alone"
+            );
+        }
     }
 }
 
