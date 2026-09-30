@@ -280,15 +280,29 @@
   cursor: pointer;
 }
 
-.tc-alert.ftux-warning {
+.ftux-notice {
   display: flex;
+  align-items: flex-start;
   gap: var(--tc-space-5);
+  font: var(--tc-text-label);
+  font-weight: 400;
+  line-height: 17px;
+  color: var(--tc-text-primary);
 }
 
-.ftux-warning svg {
+.ftux-notice__glyph {
+  display: inline-flex;
   flex: none;
-  margin-top: 1px;
+  height: 17px;
+  align-items: center;
+}
+
+.ftux-notice[data-tone="ask"] .ftux-notice__glyph {
   color: var(--tc-status-ask);
+}
+
+.ftux-notice[data-tone="outside"] {
+  color: var(--tc-status-outside);
 }
 
 .ftux-welcome-card {

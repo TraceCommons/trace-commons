@@ -1,5 +1,13 @@
 import type { ReactNode } from "react";
-import { Pane, StepProgress, Tag, Window } from "../../../design-system";
+import {
+  Card,
+  Pane,
+  StatusDot,
+  type StatusTone,
+  StepProgress,
+  Tag,
+  Window,
+} from "../../../design-system";
 import type { FtuxStep } from "../ftux-model";
 
 // The first-run window: the design system's scene with one padded pane at
@@ -74,7 +82,30 @@ export function ScreenFooter({
   );
 }
 
-// The design system's alert, as a single status or error line.
+// A notice on the design system's quiet card: status is a glyph and a
+// label, never a coloured edge or fill.
+export function Notice({
+  tone,
+  icon,
+  role,
+  children,
+}: {
+  tone: Extract<StatusTone, "ask" | "outside" | "on">;
+  icon?: ReactNode;
+  role?: "alert" | "status";
+  children: ReactNode;
+}) {
+  return (
+    <Card quiet className="ftux-notice" role={role} data-tone={tone}>
+      <span className="ftux-notice__glyph">
+        {icon ?? <StatusDot tone={tone} />}
+      </span>
+      <span>{children}</span>
+    </Card>
+  );
+}
+
+// A single status or error line.
 export function StatusLine({
   tone,
   children,
@@ -87,8 +118,8 @@ export function StatusLine({
       {children}
     </span>
   ) : (
-    <p className="tc-alert m-0" role="alert">
+    <Notice tone="outside" role="alert">
       {children}
-    </p>
+    </Notice>
   );
 }

@@ -159,7 +159,12 @@ Checked in the browser against the previous screens:
 
 Fixed during that check:
 - The design system's `.tc-root h2` rule was shrinking the popup headings.
-- `.tc-alert` was stacking the loss warning's icon above its text.
+- The loss warning's icon was stacking above its text.
+
+On 2026-09-30 the flow also dropped `tc-alert` and its coloured left edge.
+Notices and errors are now `Notice`: a quiet design-system card with a
+status dot or icon and a label. The same cleanup for the rest of the app is
+being done in #1146.
 
 ## Verification
 

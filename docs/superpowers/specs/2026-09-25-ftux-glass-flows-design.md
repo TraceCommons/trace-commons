@@ -102,7 +102,7 @@ The flows are built on the Trace Commons WYSIWYG glass design system from
 |---|---|
 | Scene and window | `Window`, one padded `Pane` at the FTUX width (450px) |
 | Stepper | `StepProgress` |
-| Cards, notes | `Card`, `Card quiet`, `tc-alert` / `tc-alert--ask` |
+| Cards, notices | `Card`, and `Card quiet` with a `StatusDot` (or icon) and label for notices and errors |
 | Invite field | `tc-field`, `tc-input` |
 | Per-tool, per-repo and sharing choices | `Picker`, with `--tc-status-on/ask/off` dots |
 | Tool badges | `ToolTile` with the tinted tool logos |
@@ -115,7 +115,8 @@ The flows are built on the Trace Commons WYSIWYG glass design system from
 
 `src/features/ftux/ftux.css` keeps only the flow's layout (frame, scroll,
 footer, a few flex helpers) and the imitation macOS sheets, which the design
-system does not carry. It reads `--tc-*` tokens throughout. The popups keep
+system does not carry. It reads `--tc-*` tokens throughout. Notices show status
+as a glyph and a label, never as a coloured left edge. The popups keep
 their own focus trap and `inert` background rather than the design system's
 `Modal`, which does not trap focus.
 
