@@ -4648,9 +4648,22 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
     let client = reqwest::Client::new();
     let mut parity = ParityReport::default();
 
+    // Each case submits its own content. The first case withdraws its legacy
+    // submission, and `main`'s account withdrawal records the withdrawn
+    // content on the file side (#1112), so the same content again is
+    // refused as previously revoked. The tool name is what tells the two
+    // metadata-only envelopes apart; both sides of a case share it.
     let envelope = |model_training: bool| async move {
         let mut envelope = sample_envelope().await;
         make_metadata_only_low_risk(&mut envelope);
+        set_metadata_only_tool_name(
+            &mut envelope,
+            if model_training {
+                "parity_model_training_case"
+            } else {
+                "parity_default_consent_case"
+            },
+        );
         if model_training {
             envelope.consent.scopes = vec![ConsentScope::ModelTraining];
             envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
@@ -4673,6 +4686,12 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
         // ---- Receipt ----
         let (legacy_code, legacy_receipt) =
             post_trace(&client, &base, &legacy_token, &legacy_body).await;
+        // The legacy side is `main`'s path, the reference every comparison
+        // below reads: it must succeed first, or two failures compare equal.
+        assert_eq!(
+            legacy_code, 200,
+            "{case}: main's receipt succeeds: {legacy_receipt}"
+        );
         let (pipeline_code, pipeline_receipt) =
             post_trace(&client, &base, &pipeline_token, &pipeline_body).await;
         parity.compare(
@@ -4801,6 +4820,16 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
                 legacy_envelope.submission_id,
             )
             .await;
+            assert_eq!(
+                legacy_code, 200,
+                "{case}, {reads}: main's status read succeeds: {legacy_documents}"
+            );
+            assert_eq!(
+                legacy_documents.as_array().map(Vec::len),
+                Some(1),
+                "{case}, {reads}: main's status read has the submission's document: \
+                 {legacy_documents}"
+            );
             let (pipeline_code, pipeline_documents) = status_of(
                 pipeline_state,
                 pipeline_token.clone(),
@@ -4983,6 +5012,10 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
             None,
         )
         .await;
+        assert_eq!(
+            legacy_code, 200,
+            "{case}: main's withdrawal succeeds: {legacy_withdrawal}"
+        );
         parity.compare(
             &format!("{case}: withdrawal code"),
             serde_json::json!(legacy_code.as_u16()),
