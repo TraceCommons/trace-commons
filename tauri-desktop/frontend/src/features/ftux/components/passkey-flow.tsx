@@ -12,7 +12,7 @@ import {
   passkeyTransition,
 } from "../ftux-model";
 import type { PasskeyStore } from "../types";
-import { Notice } from "./ftux-frame";
+import { StatusNote } from "./ftux-frame";
 import {
   BackIcon,
   CloseIcon,
@@ -139,9 +139,9 @@ function SimulatedMark() {
 
 function ErrorLine({ error }: { error: string | null }) {
   return error ? (
-    <Notice tone="outside" role="alert">
+    <StatusNote tone="outside" role="alert">
       {error}
-    </Notice>
+    </StatusNote>
   ) : null;
 }
 
@@ -254,10 +254,10 @@ function NamePopup({
       >
         Create new passkey
       </button>
-      <Notice tone="ask" icon={<WarningIcon />}>
+      <StatusNote tone="ask" icon={<WarningIcon />}>
         Store your passkey securely. Losing it means losing access to your
         account and any credit in it.
-      </Notice>
+      </StatusNote>
     </form>
   );
 }

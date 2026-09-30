@@ -8,11 +8,11 @@ import {
 import { MOCK_INVITE_PLACEHOLDER } from "../api/ftux-mock-data";
 import type { JoinState } from "../types";
 import {
-  Notice,
   ScreenBody,
   ScreenFooter,
   ScreenTitle,
   StatusLine,
+  StatusNote,
 } from "./ftux-frame";
 import { ExternalIcon, Spinner } from "./icons";
 
@@ -75,9 +75,9 @@ export function JoinScreen({
           onSignIn={onSignInNearAi}
         />
         {notice ? (
-          <Notice tone="ask" role="status">
+          <StatusNote tone="ask" role="status">
             {notice}
-          </Notice>
+          </StatusNote>
         ) : null}
         <Card quiet className="tc-text-secondary">
           Connecting or creating an account doesn't authorize any data sharing.

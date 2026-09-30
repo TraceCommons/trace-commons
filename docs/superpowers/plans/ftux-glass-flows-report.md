@@ -162,7 +162,7 @@ Fixed during that check:
 - The loss warning's icon was stacking above its text.
 
 On 2026-09-30 the flow also dropped `tc-alert` and its coloured left edge.
-Notices and errors are now `Notice`: a quiet design-system card with a
+Notices and errors are now `StatusNote`: a quiet design-system card with a
 status dot or icon and a label. The same cleanup for the rest of the app is
 being done in #1146.
 

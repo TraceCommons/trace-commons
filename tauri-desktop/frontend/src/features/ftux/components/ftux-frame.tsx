@@ -84,7 +84,7 @@ export function ScreenFooter({
 
 // A notice on the design system's quiet card: status is a glyph and a
 // label, never a coloured edge or fill.
-export function Notice({
+export function StatusNote({
   tone,
   icon,
   role,
@@ -118,8 +118,8 @@ export function StatusLine({
       {children}
     </span>
   ) : (
-    <Notice tone="outside" role="alert">
+    <StatusNote tone="outside" role="alert">
       {children}
-    </Notice>
+    </StatusNote>
   );
 }
