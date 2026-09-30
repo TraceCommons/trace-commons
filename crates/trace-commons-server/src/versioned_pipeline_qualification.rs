@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
@@ -18,7 +19,15 @@ use serde::{Deserialize, Serialize};
 use trace_commons_gate_api::pipeline::BundlePackage;
 use uuid::Uuid;
 
-use crate::versioned_pipeline::sha256_prefixed;
+use crate::db::postgres::PgBackend;
+use crate::error::DatabaseError;
+use crate::versioned_pipeline::{
+    PgPipelineStore, PipelineBundleQualification, PipelineService, sha256_prefixed,
+};
+use crate::versioned_pipeline_compat::{
+    COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
+    COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
+};
 
 pub const PIPELINE_CHECK_RESULT_SCHEMA: &str = "trace_commons.pipeline_check_result.v1";
 const PIPELINE_CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
@@ -28,6 +37,8 @@ const PIPELINE_CHECK_CODE_REVISION_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_COD
 pub const PACKAGE_SIGNATURE_ALGORITHM: &str = "Ed25519";
 pub const PACKAGE_SIGNATURE_INVALID_LABEL: &str = "bundle_package_signature_invalid";
 pub const PACKAGE_SIGNER_UNTRUSTED_LABEL: &str = "bundle_package_signer_untrusted";
+pub const PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL: &str = "bundle_implementation_unknown";
+pub const PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL: &str = "bundle_development_dependency";
 pub const QUALIFICATION_EVIDENCE_STALE_LABEL: &str = "qualification_evidence_stale";
 pub const QUALIFICATION_EVIDENCE_MISSING_LABEL: &str = "qualification_evidence_missing";
 pub const QUALIFICATION_EVIDENCE_FAILED_LABEL: &str = "qualification_evidence_failed";
@@ -521,6 +532,397 @@ pub fn trusted_key_for_pkcs8(key_id: &str, pkcs8: &[u8]) -> anyhow::Result<Trust
     })
 }
 
+/// Which of the four kinds of production infrastructure a runtime holds for
+/// one adapter seam: a genuine production implementation, a development
+/// stand-in, a synthetic test double, or none at all.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionAdapterKind {
+    Production,
+    Development,
+    Synthetic,
+    Missing,
+}
+
+/// The infrastructure a runtime holds outside the bundle's own scorer,
+/// embedder, index, settlement, authority, and privacy dependencies
+/// ([`PipelineBundleQualification`] already reports those). An operator
+/// assembles this by hand from what it actually deployed; nothing in this
+/// tree can derive it from a running service.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProductionInfrastructureProfile {
+    pub authoritative_metadata: ProductionAdapterKind,
+    pub artifact_store: ProductionAdapterKind,
+    pub key_wrapper: ProductionAdapterKind,
+    pub authentication: ProductionAdapterKind,
+    pub plaintext_fallback: bool,
+    pub best_effort_database_mirror: bool,
+    pub static_bearer_authentication: bool,
+    pub hs256_bridge_authentication: bool,
+    pub unversioned_policy_dependencies: bool,
+    pub live_external_payout_enabled: bool,
+}
+
+impl ProductionInfrastructureProfile {
+    /// The infrastructure profile of a local test or CI run: real
+    /// authoritative metadata, but development artifact storage, key
+    /// wrapping, and authentication, plus the static bearer token every
+    /// local run uses.
+    pub fn local_test() -> Self {
+        Self {
+            authoritative_metadata: ProductionAdapterKind::Production,
+            artifact_store: ProductionAdapterKind::Development,
+            key_wrapper: ProductionAdapterKind::Development,
+            authentication: ProductionAdapterKind::Development,
+            plaintext_fallback: false,
+            best_effort_database_mirror: false,
+            static_bearer_authentication: true,
+            hs256_bridge_authentication: false,
+            unversioned_policy_dependencies: false,
+            live_external_payout_enabled: false,
+        }
+    }
+}
+
+/// Whether one bundle is ready for production activation: the bundle's own
+/// dependency qualification ([`PipelineBundleQualification`], scoped to what
+/// the package actually names, decision P4-D7) plus the infrastructure an
+/// operator holds around it. [`Self::blockers`] is the complete list a
+/// caller needs; nothing here re-derives what
+/// [`PipelineBundleQualification::blockers`] already reports.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProductionDependencyProfile {
+    bundle: PipelineBundleQualification,
+    infrastructure: ProductionInfrastructureProfile,
+}
+
+impl ProductionDependencyProfile {
+    pub fn new(
+        bundle: PipelineBundleQualification,
+        infrastructure: ProductionInfrastructureProfile,
+    ) -> Self {
+        Self {
+            bundle,
+            infrastructure,
+        }
+    }
+
+    /// [`PipelineService::bundle_qualification`] scoped to `package`, wrapped
+    /// with `infrastructure`. Fails closed with the same safe label
+    /// `bundle_qualification` itself reports.
+    pub fn for_bundle(
+        service: &PipelineService,
+        package: &BundlePackage,
+        infrastructure: ProductionInfrastructureProfile,
+    ) -> Result<Self, String> {
+        let bundle = service
+            .bundle_qualification(package)
+            .map_err(|label| label.to_string())?;
+        Ok(Self::new(bundle, infrastructure))
+    }
+
+    /// A digest over the bundle qualification's dependency identities (the
+    /// scorer, embedder, index reader, index writer, and every settlement
+    /// adapter this bundle pins) and its own `dependency_digest`. A
+    /// [`BundleQualificationMetadata::runtime_dependency_digest`] the
+    /// qualification store records must equal this value at the moment of
+    /// qualification -- see [`PipelineQualificationStore::qualify_bundle`].
+    pub fn runtime_identity_digest(&self) -> Result<String, String> {
+        let settlement_adapters = self
+            .bundle
+            .settlement_adapters
+            .iter()
+            .map(|(instrument, check)| (instrument.clone(), check.identity.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let value = serde_json::json!({
+            "scorer": self.bundle.scorer.identity,
+            "embedder": self.bundle.embedder.identity,
+            "index_reader": self.bundle.index_reader.identity,
+            "index_writer": self.bundle.index_writer.identity,
+            "settlement_adapters": settlement_adapters,
+            "dependency_digest": self.bundle.dependency_digest,
+        });
+        evidence_hash(&value)
+    }
+
+    /// Every safe label blocking this bundle from production activation: the
+    /// bundle's own blockers first, then the infrastructure this profile
+    /// wraps around it. Empty exactly when every dependency and every piece
+    /// of infrastructure is production-grade.
+    pub fn blockers(&self) -> Vec<String> {
+        let mut blockers: Vec<String> = self
+            .bundle
+            .blockers()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for (kind, name) in [
+            (
+                &self.infrastructure.authoritative_metadata,
+                "authoritative_metadata",
+            ),
+            (&self.infrastructure.artifact_store, "artifact_store"),
+            (&self.infrastructure.key_wrapper, "key_wrapper"),
+            (&self.infrastructure.authentication, "authentication"),
+        ] {
+            if *kind != ProductionAdapterKind::Production {
+                blockers.push(format!("{name}_not_production"));
+            }
+        }
+        for (blocked, label) in [
+            (
+                self.infrastructure.plaintext_fallback,
+                "plaintext_fallback_enabled",
+            ),
+            (
+                self.infrastructure.best_effort_database_mirror,
+                "best_effort_database_mirror_enabled",
+            ),
+            (
+                self.infrastructure.static_bearer_authentication,
+                "static_bearer_authentication_enabled",
+            ),
+            (
+                self.infrastructure.hs256_bridge_authentication,
+                "hs256_bridge_authentication_enabled",
+            ),
+            (
+                self.infrastructure.unversioned_policy_dependencies,
+                "unversioned_policy_dependency",
+            ),
+            (
+                self.infrastructure.live_external_payout_enabled,
+                "live_external_payout_enabled",
+            ),
+        ] {
+            if blocked {
+                blockers.push(label.to_string());
+            }
+        }
+        blockers
+    }
+}
+
+/// Refuses a package whose four phase implementations are not entirely the
+/// compatibility family, or which carries any development or synthetic
+/// dependency marker: a Score or Settle projection id containing `test` or
+/// `reference`, or an artifact whose bytes contain `local_reference`,
+/// `reference_`, `pipeline-test`, `mock_`, or `synthetic`.
+pub fn validate_production_package(package: &BundlePackage) -> Result<(), String> {
+    let known = package.manifest.admission.implementation_id
+        == COMPATIBILITY_ADMISSION_IMPLEMENTATION
+        && package.manifest.review.implementation_id == COMPATIBILITY_REVIEW_IMPLEMENTATION
+        && package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION
+        && package.manifest.settle.implementation_id == COMPATIBILITY_SETTLE_IMPLEMENTATION;
+    if !known {
+        return Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string());
+    }
+    let has_development_dependency = package
+        .manifest
+        .score
+        .projection_ids
+        .iter()
+        .chain(package.manifest.settle.projection_ids.iter())
+        .any(|identity| identity.contains("test") || identity.contains("reference"))
+        || package.artifacts.values().any(|artifact| {
+            let text = String::from_utf8_lossy(artifact).to_ascii_lowercase();
+            [
+                "local_reference",
+                "reference_",
+                "pipeline-test",
+                "mock_",
+                "synthetic",
+            ]
+            .iter()
+            .any(|marker| text.contains(marker))
+        });
+    if has_development_dependency {
+        return Err(PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL.to_string());
+    }
+    Ok(())
+}
+
+/// The immutable digests a qualification records alongside a
+/// [`BundleQualificationRecord`]'s package and signature identity. Every
+/// field must be a `sha256:` digest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleQualificationMetadata {
+    pub corpus_digest: String,
+    pub input_digest: String,
+    pub configuration_digest: String,
+    pub code_revision_hash: String,
+    pub runtime_dependency_digest: String,
+    pub evidence_hash: String,
+}
+
+impl BundleQualificationMetadata {
+    fn validate(&self) -> Result<(), String> {
+        if [
+            &self.corpus_digest,
+            &self.input_digest,
+            &self.configuration_digest,
+            &self.code_revision_hash,
+            &self.runtime_dependency_digest,
+            &self.evidence_hash,
+        ]
+        .into_iter()
+        .all(|value| is_sha256(value))
+        {
+            Ok(())
+        } else {
+            Err("bundle_qualification_metadata_invalid".to_string())
+        }
+    }
+}
+
+/// One bundle's recorded qualification: the row
+/// [`PipelineQualificationStore::qualify_bundle`] inserts (or, on a repeat
+/// call with identical inputs, the row it already inserted).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BundleQualificationRecord {
+    pub bundle_id: String,
+    pub package_hash: String,
+    pub signing_key_id: String,
+    pub signature_hash: String,
+    pub metadata: BundleQualificationMetadata,
+    pub qualified_at: DateTime<Utc>,
+}
+
+/// Records a production package's qualification once per `(tenant_id,
+/// bundle_id)`. `pipeline_bundle_qualifications` is append-only in the
+/// database (V103): a repeat call with the exact same inputs answers the
+/// existing row; a repeat call with different metadata for the same bundle
+/// is refused as a conflict, never silently overwritten.
+pub struct PipelineQualificationStore {
+    backend: Arc<PgBackend>,
+    packages: PgPipelineStore,
+}
+
+impl PipelineQualificationStore {
+    pub fn new(backend: Arc<PgBackend>) -> Self {
+        Self {
+            packages: PgPipelineStore::new(backend.clone()),
+            backend,
+        }
+    }
+
+    /// Verifies `signed`'s trust and production shape, checks `metadata`
+    /// against `dependencies`, and records the qualification. Fails closed
+    /// on: an untrusted or tampered package (`trust.verify`), a
+    /// non-production or development package (`validate_production_package`),
+    /// malformed metadata (`bundle_qualification_metadata_invalid`), a
+    /// metadata dependency digest that does not match `dependencies`
+    /// (`runtime_dependency_identity_mismatch`), any blocked dependency or
+    /// infrastructure control (`dependencies.blockers()`'s first label), or a
+    /// second call for the same bundle with different metadata
+    /// (`bundle_qualification_identity_conflict`). No row is left behind by a
+    /// failed call.
+    pub async fn qualify_bundle(
+        &self,
+        tenant_id: &str,
+        signed: &SignedBundlePackage,
+        trust: &BundlePackageTrustStore,
+        metadata: &BundleQualificationMetadata,
+        dependencies: &ProductionDependencyProfile,
+    ) -> Result<BundleQualificationRecord, DatabaseError> {
+        trust.verify(signed).map_err(DatabaseError::Constraint)?;
+        validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
+        metadata.validate().map_err(DatabaseError::Constraint)?;
+        if metadata.runtime_dependency_digest
+            != dependencies
+                .runtime_identity_digest()
+                .map_err(DatabaseError::Constraint)?
+        {
+            return Err(DatabaseError::Constraint(
+                "runtime_dependency_identity_mismatch".to_string(),
+            ));
+        }
+        let blockers = dependencies.blockers();
+        if !blockers.is_empty() {
+            return Err(DatabaseError::Constraint(blockers[0].clone()));
+        }
+        self.packages
+            .register_bundle(tenant_id, &signed.package)
+            .await?;
+        let package_hash = signed
+            .package
+            .package_hash()
+            .map_err(|_| DatabaseError::Serialization(PACKAGE_SIGNATURE_INVALID_LABEL.into()))?;
+        let signature_hash = sha256_prefixed(signed.signature.signature_base64url.as_bytes());
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        tx.execute(
+            "INSERT INTO pipeline_bundle_qualifications (
+                tenant_id, bundle_id, package_hash, signing_key_id,
+                signature_hash, corpus_digest, input_digest,
+                configuration_digest, code_revision_hash,
+                runtime_dependency_digest, evidence_hash
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (tenant_id, bundle_id) DO NOTHING",
+            &[
+                &tenant_id,
+                &signed.package.bundle_id,
+                &package_hash,
+                &signed.signature.key_id,
+                &signature_hash,
+                &metadata.corpus_digest,
+                &metadata.input_digest,
+                &metadata.configuration_digest,
+                &metadata.code_revision_hash,
+                &metadata.runtime_dependency_digest,
+                &metadata.evidence_hash,
+            ],
+        )
+        .await?;
+        let row = tx
+            .query_one(
+                "SELECT bundle_id, package_hash, signing_key_id, signature_hash,
+                        corpus_digest, input_digest, configuration_digest,
+                        code_revision_hash, runtime_dependency_digest,
+                        evidence_hash, qualified_at
+                   FROM pipeline_bundle_qualifications
+                  WHERE tenant_id = $1 AND bundle_id = $2",
+                &[&tenant_id, &signed.package.bundle_id],
+            )
+            .await?;
+        let record = qualification_from_row(&row);
+        if record.package_hash != package_hash
+            || record.signing_key_id != signed.signature.key_id
+            || record.signature_hash != signature_hash
+            || record.metadata != *metadata
+        {
+            return Err(DatabaseError::Constraint(
+                "bundle_qualification_identity_conflict".to_string(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(record)
+    }
+}
+
+fn qualification_from_row(row: &tokio_postgres::Row) -> BundleQualificationRecord {
+    BundleQualificationRecord {
+        bundle_id: row.get("bundle_id"),
+        package_hash: row.get("package_hash"),
+        signing_key_id: row.get("signing_key_id"),
+        signature_hash: row.get("signature_hash"),
+        metadata: BundleQualificationMetadata {
+            corpus_digest: row.get("corpus_digest"),
+            input_digest: row.get("input_digest"),
+            configuration_digest: row.get("configuration_digest"),
+            code_revision_hash: row.get("code_revision_hash"),
+            runtime_dependency_digest: row.get("runtime_dependency_digest"),
+            evidence_hash: row.get("evidence_hash"),
+        },
+        qualified_at: row.get("qualified_at"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ring::signature::Ed25519KeyPair;
@@ -528,9 +930,11 @@ mod tests {
     use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
 
     use super::*;
+    use crate::versioned_pipeline::PipelineDependencyCheck;
     use crate::versioned_pipeline_bundle::{
         MinimalPolicyBundle, PipelineBundleConfig, PipelineInstrumentAwardConfig,
     };
+    use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
 
     /// The same off-chain credit-account descriptor the PR 2 HTTP test
     /// assembler pins for its minimal bundle (`storage_rebate_descriptor` in
@@ -959,6 +1363,87 @@ mod tests {
         assert_eq!(
             evaluate_promotion(&unknown, now),
             Err("qualification_evidence_invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn production_package_validation_refuses_minimal_unknown_and_reference_packages() {
+        let minimal = minimal_test_package();
+        assert_eq!(
+            validate_production_package(&minimal),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let reference_package = MinimalPolicyBundle::compatibility_package(
+            &CompatibilityBundleConfig::local_reference(),
+            &scorer,
+            &embedder,
+        )
+        .expect("compatibility package builds under the local-reference config");
+        assert_eq!(
+            validate_production_package(&reference_package),
+            Err(PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL.to_string())
+        );
+
+        let mut unknown_score = reference_package;
+        unknown_score.manifest.score.implementation_id =
+            "trace_commons.score.unknown.v1".to_string();
+        assert_eq!(
+            validate_production_package(&unknown_score),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+    }
+
+    #[test]
+    fn production_profile_blocks_on_bundle_and_infrastructure() {
+        fn qualified(identity: &str) -> PipelineDependencyCheck {
+            PipelineDependencyCheck {
+                identity: identity.to_string(),
+                production_qualified: true,
+            }
+        }
+
+        let bundle = PipelineBundleQualification {
+            bundle_id: sha256_prefixed(b"bundle"),
+            scorer: PipelineDependencyCheck {
+                identity: "unqualified_scorer_test_only".to_string(),
+                production_qualified: false,
+            },
+            embedder: qualified("qualified_embedder_test_only"),
+            index_reader: qualified("qualified_index_reader_test_only"),
+            index_writer: qualified("qualified_index_writer_test_only"),
+            settlement_adapters: BTreeMap::new(),
+            authority: true,
+            privacy: true,
+            payout: None,
+            dependency_digest: sha256_prefixed(b"dependency-digest"),
+        };
+        let profile = ProductionDependencyProfile::new(
+            bundle.clone(),
+            ProductionInfrastructureProfile::local_test(),
+        );
+        let blockers = profile.blockers();
+        assert!(blockers.contains(&"runtime_scorer_not_production".to_string()));
+        assert!(blockers.contains(&"artifact_store_not_production".to_string()));
+        assert!(blockers.contains(&"static_bearer_authentication_enabled".to_string()));
+
+        let digest = profile
+            .runtime_identity_digest()
+            .expect("digest computes over a hand-built qualification");
+
+        let mut changed_bundle = bundle;
+        changed_bundle.scorer.identity = "different_scorer_test_only".to_string();
+        let changed_profile = ProductionDependencyProfile::new(
+            changed_bundle,
+            ProductionInfrastructureProfile::local_test(),
+        );
+        assert_ne!(
+            digest,
+            changed_profile
+                .runtime_identity_digest()
+                .expect("digest computes over the changed qualification")
         );
     }
 }

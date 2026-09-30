@@ -260,6 +260,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
+    "pipeline_bundle_qualifications",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1655,6 +1656,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         106,
         "versioned_pipeline_exports",
         include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+    ),
+    // V103 (PR 4) adds the immutable production-qualification table the
+    // qualification store writes once per bundle; PR 5's activation gate
+    // reads it. No cross-tenant claim function, same as V101/V102.
+    (
+        103,
+        "versioned_pipeline_qualification",
+        include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
     ),
 ];
 
@@ -7752,6 +7761,7 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7785,6 +7795,7 @@ mod tests {
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
             include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7870,6 +7881,8 @@ mod tests {
         let review_invalidation =
             include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql");
         let exports = include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql");
+        let qualification =
+            include_str!("../../../../migrations/V103__versioned_pipeline_qualification.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7986,6 +7999,27 @@ mod tests {
             assert!(
                 !exports.contains(forbidden),
                 "V106 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_bundle_qualifications",
+            "reject_pipeline_bundle_qualification_mutation",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_update",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_delete",
+            "ON DELETE CASCADE",
+            "ALTER TABLE pipeline_bundle_qualifications FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_bundle_qualifications",
+            "GRANT SELECT, INSERT ON pipeline_bundle_qualifications TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                qualification.contains(required),
+                "V103 is missing `{required}`"
+            );
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
+            assert!(
+                !qualification.contains(forbidden),
+                "V103 must not contain `{forbidden}`"
             );
         }
     }

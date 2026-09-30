@@ -84,7 +84,7 @@ async fn set_tenant(client: &Client, tenant: &str) {
         .expect("set migration test tenant");
 }
 
-const PIPELINE_TABLES: [&str; 13] = [
+const PIPELINE_TABLES: [&str; 14] = [
     "pipeline_runs",
     "phase_outcomes",
     "pipeline_bundle_packages",
@@ -98,6 +98,7 @@ const PIPELINE_TABLES: [&str; 13] = [
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
+    "pipeline_bundle_qualifications",
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
@@ -229,6 +230,9 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
         "UPDATE",
         &["invalidated_at", "invalidation_reason"],
     ),
+    // V103: append-only, no UPDATE or DELETE.
+    ("pipeline_bundle_qualifications", "SELECT", &[]),
+    ("pipeline_bundle_qualifications", "INSERT", &[]),
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline

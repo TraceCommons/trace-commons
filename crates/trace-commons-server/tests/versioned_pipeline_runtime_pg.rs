@@ -13,20 +13,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use base64::Engine;
+use ring::signature::Ed25519KeyPair;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
-    AdmissionDecision, AtomicUnits, IndexMembershipDecision, InstrumentAward, InstrumentDescriptor,
-    InstrumentId, InstrumentKind, InstrumentSettlement, InstrumentSettlementOutcome, Microcredits,
-    Phase, PhaseResult, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput,
-    ReviewRecommendation, ScoreEvidence, SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS,
-    TenantStorageRef, UnverifiedScoreDecision,
+    AdmissionDecision, AtomicUnits, BundlePackage, IndexMembershipDecision, InstrumentAward,
+    InstrumentDescriptor, InstrumentId, InstrumentKind, InstrumentSettlement,
+    InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult, ReasonCode, ReviewDecision,
+    ReviewEvaluation, ReviewEvidence, ReviewOutput, ReviewRecommendation, ScoreEvidence,
+    SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS, TenantStorageRef,
+    UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
-    Embedder, IdentifiedEmbedder, IdentifiedIndexWriter, IndexEntryKey, IndexUpsertResult,
-    IndexWriteError, ReferenceEmbedder, ReferencePerplexityScorer, SettlementAdapter,
-    SettlementError, SettlementReceipt, SettlementRequest, VectorIndexReader, VectorIndexWriter,
+    Embedder, IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter,
+    IdentifiedPerplexityScorer, IndexEntryKey, IndexSnapshot, IndexUpsertResult, IndexWriteError,
+    NearestNeighbor, PerplexityResult, PerplexityScorer, ReferenceEmbedder,
+    ReferencePerplexityScorer, SettlementAdapter, SettlementError, SettlementReceipt,
+    SettlementRequest, VectorIndexReader, VectorIndexWriter,
 };
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, DeterministicTraceRedactor, RawTraceCaptureTurn, RawTraceContribution,
@@ -69,7 +73,12 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineExportConsentScopes, PipelineExportSnapshot, PipelineProcessingStatus,
     PipelineProductStore, pipeline_control_health,
 };
-use trace_commons_server::versioned_pipeline_qualification::PipelineCheckEmitter;
+use trace_commons_server::versioned_pipeline_qualification::{
+    BundlePackageTrustStore, BundleQualificationMetadata, PACKAGE_SIGNATURE_INVALID_LABEL,
+    PACKAGE_SIGNER_UNTRUSTED_LABEL, PipelineCheckEmitter, PipelineQualificationStore,
+    ProductionAdapterKind, ProductionDependencyProfile, ProductionInfrastructureProfile,
+    sign_bundle_package, trusted_key_for_pkcs8,
+};
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
 
@@ -23681,4 +23690,593 @@ async fn compatibility_score_never_holds_two_pooled_connections() {
         .await
         .expect("a compatibility Score never waits for a second connection");
     assert_one_award_and_one_indexed_revision(&backend, &index, &tenant).await;
+}
+
+/// `sha256:` plus lowercase hex, matching
+/// `versioned_pipeline_qualification::sha256_prefixed`, which is
+/// crate-private -- this suite computes its own copy of the same digest
+/// format for the Task 6 tests below.
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+// Task 6: `pipeline_bundle_qualifications` (V103) and `PipelineQualificationStore`.
+//
+// Every double below reports a production-looking identity and content
+// descriptor (no `test`/`reference`/`synthetic`/`mock_` marker in its bytes)
+// and `production_qualified() == true`, so a package built from it both
+// passes `validate_production_package` and reports every dependency
+// qualified through `PipelineService::bundle_qualification`. Real production
+// dependencies are injected by a proprietary assembler and never live in
+// this tree; these exist only so the tests below can exercise a package and
+// a `PipelineBundleQualification` that both qualify.
+
+/// The perplexity-scorer half of the qualified-production double set. Wraps
+/// `ReferencePerplexityScorer` for its actual scoring behavior.
+struct QualifiedProductionScorer(ReferencePerplexityScorer);
+
+impl PerplexityScorer for QualifiedProductionScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        self.0.score(plaintext)
+    }
+}
+
+impl IdentifiedPerplexityScorer for QualifiedProductionScorer {
+    fn dependency_identity(&self) -> &str {
+        "qualified_production_scorer_test_only"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-production-scorer.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// The embedder half of the qualified-production double set.
+struct QualifiedProductionEmbedder(ReferenceEmbedder);
+
+impl Embedder for QualifiedProductionEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.0.embed(plaintext)
+    }
+}
+
+impl IdentifiedEmbedder for QualifiedProductionEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "qualified_production_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "qualified-production-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"trace-commons-qualified-production-embedder.v1".to_vec()
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// Wraps `IsolatedPipelineIndex` and reports production-qualified for both
+/// the reader and writer half, the way a proprietary production index would.
+struct QualifiedProductionIndex(Arc<IsolatedPipelineIndex>);
+
+impl VectorIndexReader for QualifiedProductionIndex {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<IndexSnapshot> {
+        VectorIndexReader::snapshot(self.0.as_ref(), tenant_storage_ref, index_id)
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<uuid::Uuid>,
+    ) -> anyhow::Result<Vec<NearestNeighbor>> {
+        VectorIndexReader::nearest(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            embedding,
+            k,
+            exclude_revision,
+        )
+    }
+}
+
+impl VectorIndexWriter for QualifiedProductionIndex {
+    fn upsert(
+        &self,
+        key: &IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<IndexUpsertResult, IndexWriteError> {
+        VectorIndexWriter::upsert(self.0.as_ref(), key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &TenantStorageRef,
+        index_id: &str,
+        revision_id: uuid::Uuid,
+    ) -> Result<bool, IndexWriteError> {
+        VectorIndexWriter::invalidate_revision(
+            self.0.as_ref(),
+            tenant_storage_ref,
+            index_id,
+            revision_id,
+        )
+    }
+}
+
+impl IdentifiedIndexReader for QualifiedProductionIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_production_index_reader_test_only"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+impl IdentifiedIndexWriter for QualifiedProductionIndex {
+    fn dependency_identity(&self) -> &str {
+        "qualified_production_index_writer_test_only"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A settlement adapter for the one instrument `production_compatible_config`'s
+/// package pins (`trace_credit`). Never exercised past assembly in the tests
+/// that use it.
+struct QualifiedProductionSettlementAdapter {
+    instrument_id: InstrumentId,
+}
+
+#[async_trait::async_trait]
+impl SettlementAdapter for QualifiedProductionSettlementAdapter {
+    fn instrument_id(&self) -> &InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        "qualified_production_settlement_test_only"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        request: &SettlementRequest,
+    ) -> Result<SettlementReceipt, SettlementError> {
+        SettlementReceipt::internal(request.expected_result_ref_hash())
+            .map_err(|_| SettlementError::Rejected)
+    }
+}
+
+/// An authority provider permitting any tenant unconditionally. Never
+/// exercised past assembly in the tests that use it.
+struct QualifiedProductionAuthority;
+
+impl PipelineAuthorityProvider for QualifiedProductionAuthority {
+    fn authority_for_tenant(&self, _tenant_id: &str) -> Option<SubmissionAuthority> {
+        Some(SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: None,
+            require_policy: false,
+        })
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "qualified_production_authority_test_only"
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A privacy boundary that transforms nothing and finds nothing. Never
+/// exercised past assembly in the tests that use it.
+struct QualifiedProductionPrivacy;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for QualifiedProductionPrivacy {
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    fn dependency_identity(&self) -> &str {
+        "qualified_production_privacy_test_only"
+    }
+
+    fn is_production_compatible(&self) -> bool {
+        true
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A `CompatibilityBundleConfig` with a production-looking scorer, projection
+/// and index identity (no `test`/`reference` substring), so the package
+/// `MinimalPolicyBundle::compatibility_package` builds from it passes
+/// `validate_production_package`.
+fn production_compatible_config() -> CompatibilityBundleConfig {
+    CompatibilityBundleConfig::production_compatible(
+        "qualified_production_perplexity.v1".to_string(),
+        "qualified_production_projection.v1".to_string(),
+        "qualified_production_index.v1".to_string(),
+        1_000,
+        1_000,
+        1_000,
+        50_000,
+    )
+    .expect("production-compatible config validates")
+}
+
+/// Builds a fully production-qualified pipeline service over the
+/// compatibility family: a production-looking package (so
+/// `validate_production_package` accepts it) whose scorer, embedder, index,
+/// one pinned settlement adapter (`trace_credit`), authority, and privacy
+/// all report `production_qualified() == true`. Never exercised past
+/// assembly: the qualification-store tests below only need
+/// `service.bundle_qualification` and the package's own identity, not a run
+/// through Score or Settle.
+async fn qualified_production_service(
+    backend: Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> (Arc<PipelineService>, BundlePackage) {
+    let scorer = Arc::new(QualifiedProductionScorer(ReferencePerplexityScorer::new()));
+    let embedder = Arc::new(QualifiedProductionEmbedder(ReferenceEmbedder::new()));
+    let config = production_compatible_config();
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("production-compatible bundle package builds");
+    let index = Arc::new(QualifiedProductionIndex(IsolatedPipelineIndex::new()));
+    let adapter: Arc<dyn SettlementAdapter> = Arc::new(QualifiedProductionSettlementAdapter {
+        instrument_id: InstrumentId::trace_credit(),
+    });
+    let registry =
+        SettlementAdapterRegistry::new(vec![adapter]).expect("build settlement adapter registry");
+    let service = PipelineServiceBuilder::new(
+        backend,
+        artifact_store(dir),
+        package.clone(),
+        index.clone(),
+        index,
+        registry,
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(Arc::new(QualifiedProductionAuthority))
+    .with_privacy(Arc::new(QualifiedProductionPrivacy))
+    .build()
+    .expect("build a fully qualified pipeline service");
+    (Arc::new(service), package)
+}
+
+/// Every adapter kind production, and no risky flag set: the infrastructure
+/// profile the "records an immutable identity" test wraps a fully qualified
+/// bundle in, so `ProductionDependencyProfile::blockers` is empty end to end.
+fn all_production_infrastructure() -> ProductionInfrastructureProfile {
+    ProductionInfrastructureProfile {
+        authoritative_metadata: ProductionAdapterKind::Production,
+        artifact_store: ProductionAdapterKind::Production,
+        key_wrapper: ProductionAdapterKind::Production,
+        authentication: ProductionAdapterKind::Production,
+        plaintext_fallback: false,
+        best_effort_database_mirror: false,
+        static_bearer_authentication: false,
+        hs256_bridge_authentication: false,
+        unversioned_policy_dependencies: false,
+        live_external_payout_enabled: false,
+    }
+}
+
+/// Task 6: with qualified doubles for every bundle dependency and an
+/// all-production infrastructure profile, `qualify_bundle` records an
+/// immutable, hash-only identity: a repeat call with the same inputs answers
+/// the existing row, a repeat call with different metadata is refused as a
+/// conflict, the row cannot be updated or deleted directly (even by the
+/// database owner), a different tenant cannot read it, and it cascades away
+/// with its tenant.
+#[tokio::test]
+async fn qualify_bundle_records_an_immutable_hash_only_identity() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, package) = qualified_production_service(backend.clone(), &dir).await;
+
+    let bundle = service
+        .bundle_qualification(&package)
+        .expect("the fully qualified service resolves the package cleanly");
+    let profile = ProductionDependencyProfile::new(bundle, all_production_infrastructure());
+    assert!(
+        profile.blockers().is_empty(),
+        "an all-production infrastructure profile over a fully qualified bundle has no \
+         blockers: {:?}",
+        profile.blockers()
+    );
+
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let signed = sign_bundle_package(package.clone(), "qualification-release-key", pkcs8.as_ref())
+        .expect("package signs");
+    let trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+        "qualification-release-key",
+        pkcs8.as_ref(),
+    )
+    .expect("trusted key builds")])
+    .unwrap();
+
+    let metadata = BundleQualificationMetadata {
+        corpus_digest: sha256_prefixed(b"corpus"),
+        input_digest: sha256_prefixed(b"input"),
+        configuration_digest: sha256_prefixed(b"configuration"),
+        code_revision_hash: sha256_prefixed(b"code-revision"),
+        runtime_dependency_digest: profile
+            .runtime_identity_digest()
+            .expect("runtime identity digest computes"),
+        evidence_hash: sha256_prefixed(b"evidence"),
+    };
+
+    let store = PipelineQualificationStore::new(backend.clone());
+    let tenant_a = format!("qualify-bundle-{}", uuid::Uuid::new_v4());
+
+    let record = store
+        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile)
+        .await
+        .expect("a fully qualified, trusted, production package qualifies");
+    assert_eq!(record.bundle_id, package.bundle_id);
+    assert_eq!(record.package_hash, package.package_hash().unwrap());
+    assert_eq!(record.signing_key_id, "qualification-release-key");
+    assert_eq!(
+        record.signature_hash,
+        sha256_prefixed(signed.signature.signature_base64url.as_bytes())
+    );
+    assert_eq!(record.metadata, metadata);
+
+    let repeat = store
+        .qualify_bundle(&tenant_a, &signed, &trust, &metadata, &profile)
+        .await
+        .expect("a repeat call with identical inputs answers the existing row");
+    assert_eq!(repeat, record);
+
+    let mut different_metadata = metadata.clone();
+    different_metadata.corpus_digest = sha256_prefixed(b"a-different-corpus");
+    let conflict = store
+        .qualify_bundle(&tenant_a, &signed, &trust, &different_metadata, &profile)
+        .await
+        .expect_err("a repeat call with different metadata for the same bundle is refused");
+    assert!(
+        matches!(conflict, DatabaseError::Constraint(ref label) if label == "bundle_qualification_identity_conflict"),
+        "unexpected conflict error: {conflict:?}"
+    );
+
+    // The trigger refuses a direct UPDATE, even to the database owner.
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant_a).await;
+        let update_error = tx
+            .execute(
+                "UPDATE pipeline_bundle_qualifications SET evidence_hash = $1
+                  WHERE tenant_id = $2 AND bundle_id = $3",
+                &[&sha256_prefixed(b"tampered"), &tenant_a, &package.bundle_id],
+            )
+            .await
+            .expect_err("a direct UPDATE is refused");
+        assert!(
+            db_error_message(&update_error)
+                .contains("pipeline bundle qualifications are immutable"),
+            "unexpected update error: {update_error:?}"
+        );
+    }
+
+    // The trigger refuses a direct DELETE too, in its own transaction (the
+    // failed UPDATE above already aborted its own).
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant_a).await;
+        let delete_error = tx
+            .execute(
+                "DELETE FROM pipeline_bundle_qualifications WHERE tenant_id = $1 AND bundle_id = $2",
+                &[&tenant_a, &package.bundle_id],
+            )
+            .await
+            .expect_err("a direct DELETE is refused");
+        assert!(
+            db_error_message(&delete_error)
+                .contains("pipeline bundle qualifications are immutable"),
+            "unexpected delete error: {delete_error:?}"
+        );
+    }
+
+    // Tenant B reads no row for tenant A's bundle: row-level security, not
+    // the WHERE clause, is what keeps it out. This must run as the
+    // NOBYPASSRLS runtime role, not the database owner -- a superuser
+    // connection (`owner_client`) always bypasses row-level security
+    // regardless of FORCE, so it would prove nothing here.
+    let tenant_b = format!("qualify-bundle-b-{}", uuid::Uuid::new_v4());
+    let mut cross_client = backend.trace_pool_for_test().get().await.unwrap();
+    let cross_tx = tenant_tx(&mut cross_client, &tenant_b).await;
+    let cross_count: i64 = cross_tx
+        .query_one(
+            "SELECT COUNT(*) FROM pipeline_bundle_qualifications
+              WHERE tenant_id = $1 AND bundle_id = $2",
+            &[&tenant_a, &package.bundle_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    cross_tx.commit().await.unwrap();
+    assert_eq!(
+        cross_count, 0,
+        "tenant B reads no row for tenant A's bundle"
+    );
+
+    // Deleting tenant A succeeds and removes the row along with it.
+    let mut delete_owner = owner_client().await;
+    let delete_tx = owner_tenant_tx(&mut delete_owner, &tenant_a).await;
+    delete_tx
+        .execute(
+            "DELETE FROM trace_tenants WHERE tenant_id = $1",
+            &[&tenant_a],
+        )
+        .await
+        .expect("a tenant with a qualification row can be deleted");
+    delete_tx.commit().await.unwrap();
+    assert_eq!(
+        count_tenant_rows(&tenant_a, "pipeline_bundle_qualifications").await,
+        0,
+        "the qualification cascaded away with its tenant"
+    );
+}
+
+/// Task 6: `qualify_bundle` fails closed on an untrusted signer, a tampered
+/// package, malformed metadata, a metadata dependency digest that does not
+/// match the profile, and a profile carrying a blocker -- and none of these
+/// failed calls leaves a row behind.
+#[tokio::test]
+async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, package) = qualified_production_service(backend.clone(), &dir).await;
+    let bundle = service
+        .bundle_qualification(&package)
+        .expect("the fully qualified service resolves the package cleanly");
+    let profile = ProductionDependencyProfile::new(bundle.clone(), all_production_infrastructure());
+    assert!(profile.blockers().is_empty());
+
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let signed = sign_bundle_package(package.clone(), "qualification-release-key", pkcs8.as_ref())
+        .expect("package signs");
+    let trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+        "qualification-release-key",
+        pkcs8.as_ref(),
+    )
+    .expect("trusted key builds")])
+    .unwrap();
+    let metadata = BundleQualificationMetadata {
+        corpus_digest: sha256_prefixed(b"corpus"),
+        input_digest: sha256_prefixed(b"input"),
+        configuration_digest: sha256_prefixed(b"configuration"),
+        code_revision_hash: sha256_prefixed(b"code-revision"),
+        runtime_dependency_digest: profile
+            .runtime_identity_digest()
+            .expect("runtime identity digest computes"),
+        evidence_hash: sha256_prefixed(b"evidence"),
+    };
+
+    let store = PipelineQualificationStore::new(backend.clone());
+    let tenant = format!("qualify-bundle-refuses-{}", uuid::Uuid::new_v4());
+
+    // An untrusted signer: nobody's key is registered in the trust store.
+    let empty_trust = BundlePackageTrustStore::new(std::iter::empty()).unwrap();
+    let untrusted = store
+        .qualify_bundle(&tenant, &signed, &empty_trust, &metadata, &profile)
+        .await
+        .expect_err("an untrusted signer is refused");
+    assert!(
+        matches!(untrusted, DatabaseError::Constraint(ref label) if label == PACKAGE_SIGNER_UNTRUSTED_LABEL),
+        "unexpected untrusted-signer error: {untrusted:?}"
+    );
+
+    // A tampered package: an artifact byte changed after signing.
+    let mut tampered = signed.clone();
+    tampered
+        .package
+        .artifacts
+        .values_mut()
+        .next()
+        .expect("package has artifacts")
+        .push(0);
+    let tampered_error = store
+        .qualify_bundle(&tenant, &tampered, &trust, &metadata, &profile)
+        .await
+        .expect_err("a tampered package is refused");
+    assert!(
+        matches!(tampered_error, DatabaseError::Constraint(ref label) if label == PACKAGE_SIGNATURE_INVALID_LABEL),
+        "unexpected tampered-package error: {tampered_error:?}"
+    );
+
+    // Invalid metadata: a non-sha256 digest.
+    let mut invalid_metadata = metadata.clone();
+    invalid_metadata.corpus_digest = "not-a-hash".to_string();
+    let invalid_metadata_error = store
+        .qualify_bundle(&tenant, &signed, &trust, &invalid_metadata, &profile)
+        .await
+        .expect_err("malformed metadata is refused");
+    assert!(
+        matches!(invalid_metadata_error, DatabaseError::Constraint(ref label) if label == "bundle_qualification_metadata_invalid"),
+        "unexpected invalid-metadata error: {invalid_metadata_error:?}"
+    );
+
+    // A metadata dependency digest that differs from the profile's own.
+    let mut mismatched_metadata = metadata.clone();
+    mismatched_metadata.runtime_dependency_digest =
+        sha256_prefixed(b"a-different-runtime-identity");
+    let mismatch_error = store
+        .qualify_bundle(&tenant, &signed, &trust, &mismatched_metadata, &profile)
+        .await
+        .expect_err("a runtime dependency digest that does not match the profile is refused");
+    assert!(
+        matches!(mismatch_error, DatabaseError::Constraint(ref label) if label == "runtime_dependency_identity_mismatch"),
+        "unexpected mismatch error: {mismatch_error:?}"
+    );
+
+    // A profile with a blocker: the local-test infrastructure profile is not
+    // all production (`runtime_identity_digest` is unaffected by
+    // infrastructure, so `metadata` still matches it).
+    let blocked_profile =
+        ProductionDependencyProfile::new(bundle, ProductionInfrastructureProfile::local_test());
+    let blockers = blocked_profile.blockers();
+    let first_blocker = blockers
+        .first()
+        .cloned()
+        .expect("local_test() infrastructure blocks something");
+    let blocked_error = store
+        .qualify_bundle(&tenant, &signed, &trust, &metadata, &blocked_profile)
+        .await
+        .expect_err("a profile with a blocker is refused");
+    assert!(
+        matches!(blocked_error, DatabaseError::Constraint(ref label) if *label == first_blocker),
+        "unexpected blocked error: {blocked_error:?}, expected {first_blocker}"
+    );
+
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_bundle_qualifications").await,
+        0,
+        "no row exists after every qualify_bundle call above failed"
+    );
 }
