@@ -700,10 +700,13 @@ async fn a_score_longer_than_its_lease_completes_once_with_two_workers() {
 /// A lease is renewed only up to `PIPELINE_LEASE_RENEWAL_CAP_FACTOR` times
 /// its own configured length: with a 1-second Score lease (cap 4 seconds)
 /// and a scorer that sleeps 7 seconds, the lease is never observed past the
-/// cap (plus a second of tolerance for scheduling jitter), a second worker
-/// reclaims the run once the cap passes, and A's own Score commit is
-/// refused under the lease it no longer holds -- the run ends up carrying
-/// B's lease token, not A's.
+/// cap (plus a second of tolerance for scheduling jitter), but it *is*
+/// renewed up to (within a second of) the cap -- not to some earlier point,
+/// which a too-small cap factor or a renewal task that stops early would
+/// also make this test pass. A second worker reclaims the run only once the
+/// cap has actually passed, and A's own Score commit is refused under the
+/// lease it no longer holds -- the run ends up carrying B's lease token, not
+/// A's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn renewal_stops_at_the_lease_cap() {
     let Some(backend) = runtime_backend(6).await else {
@@ -802,13 +805,17 @@ async fn renewal_stops_at_the_lease_cap() {
         max_seen
     });
 
-    // B polls until the cap has passed and it can reclaim the run.
+    // B polls until the cap has passed and it can reclaim the run. Captures
+    // the wall-clock instant of its own successful claim alongside it, so
+    // this test can assert B did not get in *before* the cap (a too-early
+    // cap, or renewal switched off entirely, would still let every other
+    // assertion here pass -- see the lower-bound checks below).
     let store_b = PgPipelineStore::new(backend.clone());
     let tenant_b = tenant.clone();
     let b_task = tokio::spawn(async move {
         loop {
             if let Some(claimed) = store_b.claim_next(&tenant_b, lease_config).await.unwrap() {
-                return claimed;
+                return (claimed, chrono::Utc::now());
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
@@ -822,17 +829,36 @@ async fn renewal_stops_at_the_lease_cap() {
         .expect("the reader task must not hang")
         .expect("the reader task must not panic")
         .expect("the lease was observed at least once");
-    let cap_with_tolerance =
-        claim_time + chrono::Duration::seconds(4) + chrono::Duration::seconds(1);
+    let cap = claim_time + chrono::Duration::seconds(4);
+    let tolerance = chrono::Duration::seconds(1);
     assert!(
-        max_seen <= cap_with_tolerance,
-        "the lease was extended past the cap plus tolerance: {max_seen} > {cap_with_tolerance}"
+        max_seen <= cap + tolerance,
+        "the lease was extended past the cap plus tolerance: {max_seen} > {}",
+        cap + tolerance
+    );
+    // The lower bound: without this, a cap factor smaller than 4 (or
+    // renewal switched off entirely, leaving A's original claim-time lease
+    // to expire on its own) would still satisfy every assertion above --
+    // `max_seen` is only ever checked against an upper bound, and B racing
+    // in early looks the same as B racing in on time. The lease must
+    // actually have been renewed up to (within tolerance of) the cap, not
+    // to some earlier point.
+    assert!(
+        max_seen >= cap - tolerance,
+        "the lease was never renewed up to the cap: {max_seen} < {}",
+        cap - tolerance
     );
 
-    let claimed_by_b = tokio::time::timeout(std::time::Duration::from_secs(10), b_task)
-        .await
-        .expect("B must reclaim the run once the cap passes")
-        .expect("B's task did not panic");
+    let (claimed_by_b, b_claim_time) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), b_task)
+            .await
+            .expect("B must reclaim the run once the cap passes")
+            .expect("B's task did not panic");
+    assert!(
+        b_claim_time >= cap - tolerance,
+        "B reclaimed the run before the cap: {b_claim_time} < {}",
+        cap - tolerance
+    );
 
     // A's own Score commit is refused: its attempt found nothing left to
     // update once B's reclaim moved the run onto a different token.
@@ -897,6 +923,58 @@ async fn a_lost_lease_is_never_renewed() {
     assert_eq!(
         current.lease_expires_at, second.lease_expires_at,
         "the stale renewal attempt must not have touched the reclaimed lease"
+    );
+}
+
+/// The other half of `renew_lease`'s fence: the token still matches (nobody
+/// has reclaimed the run), but the lease has already naturally expired on
+/// its own. `lease_expires_at > NOW()` in the `WHERE` clause refuses the
+/// update just as completely as a token mismatch does, and leaves the
+/// already-expired `lease_expires_at` exactly as it was.
+#[tokio::test]
+async fn a_naturally_expired_lease_is_never_renewed_under_its_own_still_current_token() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("expired-not-reclaimed-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_token = claimed.lease_token.unwrap();
+
+    expire_lease(&backend, &tenant, run.run_id).await;
+    let expired_expiry = store
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .lease_expires_at;
+
+    // Nobody reclaims it: the token below is still the run's current token.
+    let result = store
+        .renew_lease(
+            &tenant,
+            run.run_id,
+            lease_token,
+            chrono::Duration::seconds(1),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result, None,
+        "a lease that has already expired is never renewed, even under its own still-current token"
+    );
+
+    let current = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        current.lease_expires_at, expired_expiry,
+        "the already-expired lease_expires_at is left unchanged"
     );
 }
 

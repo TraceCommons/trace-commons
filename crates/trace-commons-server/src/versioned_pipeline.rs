@@ -5802,6 +5802,20 @@ impl PipelineServiceBuilder {
     }
 }
 
+/// Truncates to microsecond precision, the resolution a PostgreSQL
+/// `TIMESTAMPTZ` column actually stores (and what `postgres-types` round-trips
+/// on the wire). An in-memory `DateTime<Utc>` built from `Utc::now()` can
+/// carry nanoseconds (notably on Linux); comparing that untruncated value
+/// against one read back from the database can then never observe equality,
+/// even when the two represent the database's own idea of "the same instant."
+/// `PipelineLeaseRenewal::start` truncates `lease_cap` here so a capped
+/// `renew_lease` result compares equal to it and the early exit actually
+/// fires, instead of paying for a few extra no-op renewals until the lease
+/// naturally expires.
+fn truncate_to_microseconds(instant: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(instant.timestamp_micros()).unwrap_or(instant)
+}
+
 /// Renews a claim's lease while its phase runs. Stopped when the phase ends,
 /// at the cap, or when the lease is lost. The commit fences
 /// (`ensure_current_lease`, `ensure_live_lease`, every lease-checked `UPDATE`)
@@ -5826,7 +5840,8 @@ impl PipelineLeaseRenewal {
         let phase = run.next_phase?;
         let lease_token = run.lease_token?;
         let lease = config.for_phase(phase);
-        let lease_cap = Utc::now() + lease * PIPELINE_LEASE_RENEWAL_CAP_FACTOR;
+        let lease_cap =
+            truncate_to_microseconds(Utc::now() + lease * PIPELINE_LEASE_RENEWAL_CAP_FACTOR);
         let interval = std::cmp::max(lease / 3, Duration::milliseconds(100))
             .to_std()
             .ok()?;
@@ -5866,7 +5881,15 @@ impl PipelineLeaseRenewal {
     /// run.
     async fn stop(self) {
         let _ = self.stop.send(true);
-        let _ = self.join.await;
+        if self.join.await.is_err() {
+            // Label-only: never log the panic payload (or any other
+            // `JoinError` detail) -- a panic message can carry whatever the
+            // panicking code formatted into it.
+            tracing::warn!(
+                label = "pipeline_lease_renewal_task_failed",
+                "the lease renewal background task did not exit cleanly"
+            );
+        }
     }
 }
 
@@ -10785,6 +10808,24 @@ mod tests {
             pipeline_score_object_ref_id(run_id, "approved"),
             Some(run_id)
         ));
+    }
+
+    /// `truncate_to_microseconds` drops any nanosecond remainder (what a
+    /// Linux clock can hand `Utc::now()`, and what a `TIMESTAMPTZ` column
+    /// cannot store) while leaving a value already at microsecond precision
+    /// -- the shape a value read back from PostgreSQL always has -- alone,
+    /// so the two can compare equal.
+    #[test]
+    fn truncate_to_microseconds_drops_the_sub_microsecond_remainder() {
+        let with_nanos = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        let truncated = truncate_to_microseconds(with_nanos);
+        assert_eq!(truncated.timestamp_micros(), 1_700_000_000_123_456);
+        assert_eq!(truncated.timestamp_subsec_nanos(), 123_456_000);
+        assert!(truncated <= with_nanos);
+
+        // Already at microsecond precision (as anything read back from
+        // PostgreSQL is): truncating again changes nothing.
+        assert_eq!(truncate_to_microseconds(truncated), truncated);
     }
 
     /// Ruling F-M5: the payout's own result comes first. A lock release that
