@@ -205,9 +205,9 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
 # entitlement WITHOUT a profile that grants it is killed by the kernel at exec
 # -- measured, not assumed. The failure is an application that does not start,
 # which is why CI launches the signed app rather than trusting that it signed.
-cp macos/TraceCommons-DeveloperID.provisionprofile "$APP/Contents/embedded.provisionprofile"
+cp "$PACKAGE_DIR/TraceCommons-DeveloperID.provisionprofile" "$APP/Contents/embedded.provisionprofile"
 codesign --force --timestamp --options runtime \
-  --entitlements macos/entitlements.plist \
+  --entitlements "$PACKAGE_DIR/entitlements.plist" \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
