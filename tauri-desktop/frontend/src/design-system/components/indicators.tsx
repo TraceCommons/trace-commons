@@ -396,3 +396,8 @@ export function NodeCard({
     </div>
   );
 }
+
+/** A line-height placeholder while text loads. Size it with a class. */
+export function Skeleton({ className }: { className?: string }) {
+  return <div aria-hidden="true" className={cx("tc-skeleton", className)} />;
+}

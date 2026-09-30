@@ -14,6 +14,7 @@ import {
   EyebrowCard,
   FolderButton,
   GlassButton,
+  Input,
   KeyValueList,
   LegendCell,
   ListRow,
@@ -24,19 +25,25 @@ import {
   MenuSeparator,
   Modal,
   NodeCard,
+  Notice,
   Pane,
   Picker,
   PillIconButton,
   QuietCard,
+  Radio,
+  RadioGroup,
   RoundButton,
   SectionRule,
   SegmentedTabs,
+  Select,
+  Skeleton,
   StatusDot,
   StatusLabel,
   StepProgress,
   SubmitPill,
   Tag,
   TertiaryLink,
+  TextArea,
   TextField,
   Toggle,
   ToolLogo,
@@ -242,6 +249,58 @@ function ControlsDemo() {
           <MenuSeparator />
           <MenuItem disabled>Show sessions of other users</MenuItem>
         </Menu>
+      </Specimen>
+      <FormDemo />
+    </>
+  );
+}
+
+function FormDemo() {
+  const [path, setPath] = useState("ask_first");
+  return (
+    <>
+      <Specimen
+        label="Input · text area · select"
+        spec={"field fill · r8 · focus 2px purple-text\nselect: glass pill + chevron, native menu"}
+      >
+        <div className="flex w-[280px] flex-col gap-2">
+          <Input aria-label="Commons URL" placeholder="https://tracecommons.ai" />
+          <TextArea aria-label="Outcome" placeholder="What happened" rows={2} />
+          <Select aria-label="Outcome" defaultValue="worked">
+            <option value="worked">Worked</option>
+            <option value="partly">Partly</option>
+            <option value="failed">Failed</option>
+          </Select>
+        </div>
+      </Specimen>
+      <Specimen
+        label="Radio group"
+        spec={"round checkbox · arrows move the choice\nthe wrapping label names each radio"}
+      >
+        <RadioGroup aria-label="Path" value={path} onChange={setPath} className="gap-1">
+          <label className="flex items-start gap-2.5 tc-label font-normal">
+            <Radio value="ask_first" />
+            Ask me each time
+          </label>
+          <label className="flex items-start gap-2.5 tc-label font-normal">
+            <Radio value="automatic" />
+            Contribute automatically
+          </label>
+        </RadioGroup>
+      </Specimen>
+      <Specimen
+        label="Notice · skeleton"
+        spec={"quiet card · tone is the title's status dot\nno tinted fill, no coloured edge"}
+      >
+        <div className="flex w-[320px] flex-col gap-2">
+          <Notice tone="ask" title="Automatic contributing stopped">
+            orchard-api changed its settings. Nothing is sent until you look.
+          </Notice>
+          <Notice tone="outside" title="Rust core could not start">
+            Source roots remain saved.
+          </Notice>
+          <Skeleton className="h-4 w-2/3" />
+        </div>
       </Specimen>
     </>
   );
