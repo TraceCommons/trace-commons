@@ -488,6 +488,12 @@ pub struct PreviewSummary {
     /// previewed and the bytes an upload sends -- they are the same bytes.
     pub subagent_count: u32,
     pub subagents_dropped: u32,
+    /// What this build's scrub found, for the Flow 2 states: marks,
+    /// personal-detail marks, and unsure spans in the redacted body. Counts
+    /// only. Not serialized here: the surfaces that publish it do so through
+    /// `second_look::insert_fields`, which is the one spelling of it.
+    #[serde(skip)]
+    pub scrub_counts: super::second_look::ScrubCounts,
 }
 
 /// Every field a queue card needs, built without computing the envelope
@@ -522,6 +528,9 @@ pub struct PreviewCardSummary {
     pub enrolled: bool,
     pub subagent_count: u32,
     pub subagents_dropped: u32,
+    /// See [`PreviewSummary::scrub_counts`].
+    #[serde(skip)]
+    pub scrub_counts: super::second_look::ScrubCounts,
 }
 
 impl PreviewCardSummary {
@@ -546,6 +555,7 @@ impl PreviewCardSummary {
             enrolled: self.enrolled,
             subagent_count: self.subagent_count,
             subagents_dropped: self.subagents_dropped,
+            scrub_counts: self.scrub_counts,
         }
     }
 }
@@ -799,6 +809,10 @@ fn summarize_envelope(
     for (label, count) in residual_secret_labels_fail_closed(redactor, envelope) {
         *redactions.entry(label).or_insert(0) += count;
     }
+    // The Flow 2 counts, from this build's own redaction map and redacted
+    // body. The body is serialized once more here so the unsure-span
+    // detector reads exactly the string `preview_body` would serve.
+    let scrub_counts = super::second_look::ScrubCounts::of(&redactions, &body_of(envelope)?);
     let redactions_distinct = envelope.privacy.redaction_distinct_counts.clone();
     let pii_labels_present = envelope.privacy.pii_labels_present.clone();
     let consent_scopes = envelope.consent.scopes.iter().map(wire_name).collect();
@@ -822,6 +836,7 @@ fn summarize_envelope(
         enrolled,
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
+        scrub_counts,
     })
 }
 
@@ -2673,6 +2688,202 @@ mod tests {
         envelope.events.clear();
         assert_eq!(body_of(&envelope).unwrap(), "[]");
         assert!(turns_of(&envelope).unwrap().is_empty());
+    }
+
+    /// A claude-code session whose single user message is `text`, in a
+    /// project folder named `myproj`.
+    fn session_saying(text: &str) -> (tempfile::TempDir, ClaudeCodeSource, SessionRef) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("projects");
+        let project = root.join("-Users-testuser-code-myproj");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "cwd": "/Users/testuser/code/myproj",
+            "timestamp": "2026-08-08T10:00:00Z",
+            "version": "2.0.1",
+            "sessionId": "44444444-4444-4444-4444-444444444444",
+            "uuid": "a1",
+        });
+        std::fs::write(
+            project.join("44444444-4444-4444-4444-444444444444.jsonl"),
+            format!("{line}\n"),
+        )
+        .unwrap();
+        let src = ClaudeCodeSource::new(root);
+        let r = src.discover().unwrap().remove(0);
+        (dir, src, r)
+    }
+
+    #[tokio::test]
+    async fn an_email_the_scrubber_missed_is_hinted_at_its_exact_offsets() {
+        // Planted in the SESSION, before redaction: the real pipeline runs
+        // over it, takes the plain address, and leaves the bracketed one,
+        // which its email pattern (needing an `@`) does not match.
+        let survivor = "ops [at] acme [dot] io";
+        let (_d, src, r) = session_saying(&format!(
+            "key from {survivor}, not from fixture-user@example.com"
+        ));
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert!(
+            !body.contains("fixture-user@example.com"),
+            "matched one taken"
+        );
+        let spans = super::super::unsure_spans::unsure_spans_in(&body).unwrap();
+        assert_eq!(spans.len(), 1, "only the survivor: {spans:?}");
+        assert_eq!(
+            spans[0].label,
+            super::super::unsure_spans::LABEL_LOOKS_LIKE_EMAIL
+        );
+        assert_eq!(spans[0].byte_offset, body.find(survivor).unwrap());
+        assert_eq!(
+            &body[spans[0].byte_offset..spans[0].byte_offset + spans[0].byte_len],
+            survivor
+        );
+        // And the summary's counts, which the second-look predicate reads,
+        // saw it too.
+        assert_eq!(summary.scrub_counts.unsure_spans, 1);
+        assert_eq!(
+            super::super::second_look::second_look_reasons(
+                super::super::second_look::Scrub::Scrubbed(summary.scrub_counts),
+                0
+            ),
+            vec![super::super::second_look::REASON_LOOKS_UNSURE]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_only_marks_are_paths_is_nothing_matched() {
+        let (_d, src, r) = session_saying("open /Users/testuser/code/myproj/src/main.rs please");
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert!(
+            summary.scrub_counts.marks >= 1,
+            "{:?}",
+            summary.scrub_counts
+        );
+        assert_eq!(summary.scrub_counts.content_marks, 0);
+        assert_eq!(
+            super::super::second_look::second_look_reasons(
+                super::super::second_look::Scrub::Scrubbed(summary.scrub_counts),
+                0
+            ),
+            vec![super::super::second_look::REASON_NOTHING_MATCHED]
+        );
+    }
+
+    /// Every key of a serialized envelope has a named label. Walks the real
+    /// pipeline's envelope with every optional block this client can fill
+    /// filled, so a field added to the protocol -- or one this list forgot
+    /// -- fails here rather than leaving the machine unlisted.
+    #[tokio::test]
+    async fn every_envelope_key_has_a_named_label() {
+        use crate::consent_copy::*;
+        use trace_commons_protocol::trace_contribution::{
+            Decimal, SourceSessionIdentity, TokenCounts,
+        };
+        let mut envelope = envelope_with_tool_events().await;
+        envelope.conversation_id = Some("11111111-1111-1111-1111-111111111111".into());
+        envelope.source_session = Some(SourceSessionIdentity {
+            adapter: "claude-code".into(),
+            native_id: "11111111-1111-1111-1111-111111111111".into(),
+        });
+        envelope.ironclaw.model_name = Some("claude-model".into());
+        envelope.ironclaw.engine_version = Some("1".into());
+        envelope.outcome.human_correction = Some("it missed a test".into());
+        envelope.outcome.error_taxonomy = vec!["x".into()];
+        envelope.contributor.credit_account_ref = Some("credit-ref".into());
+        let mut routed = envelope.events[0].clone();
+        routed.event_type = TraceContributionEventType::RoutingDecision;
+        routed.latency_ms = Some(12);
+        routed.token_counts = Some(TokenCounts {
+            input_tokens: 3,
+            output_tokens: 4,
+        });
+        routed.cost_usd = Some(Decimal::new(12, 4));
+        routed.tool_category = Some("shell".into());
+        routed.parent_event_id = Some(uuid::Uuid::new_v4());
+        routed.success = Some(true);
+        envelope.events.push(routed);
+
+        assert_eq!(
+            unlabelled_envelope_keys(&envelope),
+            Vec::<String>::new(),
+            "every key that leaves must have a name"
+        );
+        let fields = leaves_this_mac_fields(&envelope);
+        for expected in [
+            LEAVES_CONVERSATION,
+            LEAVES_TOOL,
+            LEAVES_TOOL_VERSION,
+            LEAVES_MODEL,
+            LEAVES_TIMING,
+            LEAVES_USAGE_AND_COST,
+            LEAVES_ROUTING,
+            LEAVES_OUTCOME,
+            LEAVES_CORRECTION,
+            LEAVES_USES,
+            LEAVES_REDACTION_SUMMARY,
+            LEAVES_SESSION_ID,
+            LEAVES_TRACE_IDS,
+            LEAVES_CONTRIBUTOR_ID,
+            LEAVES_TENANT,
+            LEAVES_CREDIT_ACCOUNT,
+            LEAVES_REVOCATION_HANDLE,
+            LEAVES_FOLDER_FINGERPRINT,
+            LEAVES_REPLAY,
+            LEAVES_SCORES,
+            LEAVES_FORMAT_VERSION,
+        ] {
+            assert!(fields.contains(&expected), "{expected}: {fields:?}");
+        }
+        assert!(!fields.contains(&LEAVES_OTHER), "{fields:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unnamed_key_is_reported_as_other_never_dropped() {
+        use crate::consent_copy::*;
+        let mut envelope = envelope_with_tool_events().await;
+        envelope
+            .ironclaw
+            .feature_flags
+            .insert("a_flag_nobody_named".into(), "1".into());
+        assert_eq!(
+            unlabelled_envelope_keys(&envelope),
+            vec!["ironclaw.feature_flags.a_flag_nobody_named".to_string()]
+        );
+        assert!(leaves_this_mac_fields(&envelope).contains(&LEAVES_OTHER));
+    }
+
+    #[tokio::test]
+    async fn the_folder_name_is_detected_where_the_conversation_names_it() {
+        use crate::consent_copy::*;
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+
+        let (_d, src, r) = session_saying("cd myproj && cat ../myproj/src/main.rs");
+        let (_s, _b, named) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert_eq!(folder_named_in(&named, &["myproj"]), (false, true));
+
+        let (_d2, src2, r2) = session_saying("please list the files");
+        let (_s2, _b2, silent) = build_preview(&store, Some(&cfg), None, &src2, &r2)
+            .await
+            .unwrap();
+        assert_eq!(folder_named_in(&silent, &["myproj"]), (false, false));
+        // The metadata half of the claim is about these bytes.
+        let wire = serde_json::to_string(&silent).unwrap();
+        assert!(!wire.contains("/Users/testuser"), "the path left");
+        assert!(!wire.contains("myproj"), "the folder name left");
     }
 
     #[test]
