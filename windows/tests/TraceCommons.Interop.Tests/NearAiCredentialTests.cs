@@ -132,7 +132,7 @@ public class NearAiCredentialTests
             .Where(name => name.StartsWith("credential_", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(19, credentialFields.Count);
+        Assert.Equal(21, credentialFields.Count);
         var carriers = new HashSet<string>(StringComparer.Ordinal)
         {
             "key", "keys", "secret", "token", "prefix", "account", "email", "org", "workspace",

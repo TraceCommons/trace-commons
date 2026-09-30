@@ -27,6 +27,7 @@ final class CredentialSurfaceTests: XCTestCase {
         "credential_provider_label", "credential_provider_github", "credential_provider_google",
         "credential_provider_near", "credential_wallet_notice",
         "credential_cancel", "credential_forget", "credential_forget_explains",
+        "credential_migrate", "credential_migrate_explains",
         "credential_absent", "credential_obtaining", "credential_failed",
         "credential_cancelled", "credential_present", "credential_unknown",
         "credential_unreported", "harness_needs_credential",
@@ -147,7 +148,8 @@ final class CredentialSurfaceTests: XCTestCase {
         XCTAssertEqual(CredentialAction.fromABI(31), .obtain)
         XCTAssertEqual(CredentialAction.fromABI(32), .cancel)
         XCTAssertEqual(CredentialAction.fromABI(33), .forget)
-        for stranger: Int32 in [30, 0, 1, 21, 22, 23, 24, 29, 34, 41, -1, 99] {
+        XCTAssertEqual(CredentialAction.fromABI(34), .migrate)
+        for stranger: Int32 in [30, 0, 1, 21, 22, 23, 24, 29, 35, 41, -1, 99] {
             XCTAssertEqual(
                 CredentialAction.fromABI(stranger), .none,
                 "\(stranger) must offer nothing")

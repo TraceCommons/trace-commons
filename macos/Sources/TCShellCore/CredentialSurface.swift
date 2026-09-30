@@ -14,12 +14,16 @@ public enum CredentialAction: Equatable, Sendable {
     case obtain
     case cancel
     case forget
+    /// Copy a sign-in an earlier build kept in the login keychain into the
+    /// store this build uses. Offered only for `migration_available`.
+    case migrate
 
     public static func fromABI(_ value: Int32) -> CredentialAction {
         switch value {
         case 31: return .obtain
         case 32: return .cancel
         case 33: return .forget
+        case 34: return .migrate
         default: return .none
         }
     }
@@ -164,6 +168,7 @@ public enum CredentialSurface {
     public static let startMethod = "near_ai_credential_start"
     public static let cancelMethod = "near_ai_credential_cancel"
     public static let forgetMethod = "near_ai_credential_forget"
+    public static let migrateMethod = "near_ai_credential_migrate"
 
     // MARK: - The state
 
@@ -207,6 +212,7 @@ public enum CredentialSurface {
         case .obtain: return copy.credentialObtain
         case .cancel: return copy.credentialCancel
         case .forget: return copy.credentialForget
+        case .migrate: return copy.credentialMigrate
         }
     }
 
@@ -224,6 +230,9 @@ public enum CredentialSurface {
         switch action {
         case .obtain: return copy.credentialCost
         case .forget: return copy.credentialForgetExplains
+        // The one read of the login keychain, and the password prompt it can
+        // cause, named before the contributor presses anything.
+        case .migrate: return copy.credentialMigrateExplains
         case .cancel, .none: return nil
         }
     }

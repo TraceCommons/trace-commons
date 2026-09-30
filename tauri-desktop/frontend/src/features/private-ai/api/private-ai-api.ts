@@ -21,9 +21,18 @@ export type CredentialStatus = {
   };
   view?: {
     state_line: string;
-    action: "obtain" | "cancel" | "forget" | "none";
+    action: CredentialAction;
+    /** Present for `migrate`: the button and its warning, from the core copy. */
+    action_label?: string;
+    action_explains?: string;
   };
 };
+export type CredentialAction =
+  | "obtain"
+  | "cancel"
+  | "forget"
+  | "migrate"
+  | "none";
 export type BalanceStatus = {
   state: string;
   view?: {
@@ -164,6 +173,9 @@ export async function cancelCredential() {
 export async function forgetCredential() {
   return invokeTauriDiscardResult("forget_private_ai_credential");
 }
+export async function migrateCredential() {
+  return invokeTauriDiscardResult("migrate_private_ai_credential");
+}
 export async function setPrivateInference(enabled: boolean) {
   return invokeTauriDiscardResult("set_private_inference", { enabled });
 }
@@ -183,10 +195,14 @@ function parseBalanceView(value: unknown) {
 function parseCredentialView(value: unknown) {
   const item = record(value);
   const action = string(item, "action");
-  if (!["obtain", "cancel", "forget", "none"].includes(action))
+  if (!["obtain", "cancel", "forget", "migrate", "none"].includes(action))
     throw new Error("Invalid Private AI action");
+  const optional = (key: string) =>
+    item[key] === undefined ? undefined : string(item, key);
   return {
     state_line: string(item, "state_line"),
-    action: action as "obtain" | "cancel" | "forget" | "none",
+    action: action as CredentialAction,
+    action_label: optional("action_label"),
+    action_explains: optional("action_explains"),
   };
 }

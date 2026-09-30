@@ -200,6 +200,28 @@ impl std::fmt::Debug for NearAiSession {
     }
 }
 
+/// Why the stored Cloud credential could not be loaded at startup.
+///
+/// Each one is a different thing to tell the contributor, and the old single
+/// "unlock your credential store and restart" was false for two of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CloudStorageFailure {
+    /// The store did not answer: locked, denied, or a platform error. Unlock
+    /// and restart is the advice, and it is true.
+    #[default]
+    Unavailable,
+    /// This binary is not entitled to the store at all. Permanent for this
+    /// build; restarting changes nothing.
+    Unentitled,
+    /// macOS only: the store answered, and has nothing under the reference
+    /// settings name. A build from before the data-protection move kept it
+    /// in the legacy keychain, which is the only other place it can be. Not
+    /// confirmed by reading the legacy keychain -- that read can prompt, and
+    /// startup is not a moment the contributor chose -- so the move is
+    /// offered, and the move does the one read.
+    LegacyOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSettings {
     /// Opaque OS entry and Cloud metadata. Legacy documents omit this field.
@@ -208,6 +230,11 @@ pub struct DaemonSettings {
     /// Runtime-only failure, never a credential or a platform error string.
     #[serde(skip)]
     pub cloud_storage_unavailable: bool,
+    /// Why, when `cloud_storage_unavailable` is set. Runtime-only, like it.
+    /// The boolean stays the gate every credential use checks; this only
+    /// chooses which state, and so which sentence, a contributor is shown.
+    #[serde(skip)]
+    pub cloud_storage_failure: CloudStorageFailure,
     pub schema_version: String,
     pub poll_interval_secs: u64,
     pub quiescence_secs: u64,
@@ -745,6 +772,7 @@ impl Default for DaemonSettings {
             near_ai_session: None,
             cloud_credentials: None,
             cloud_storage_unavailable: false,
+            cloud_storage_failure: CloudStorageFailure::default(),
             claude_source: None,
             codex_source: None,
             gemini_source: None,

@@ -3380,6 +3380,10 @@ pub const TC_CREDENTIAL_ACTION_NONE: i32 = 30;
 pub const TC_CREDENTIAL_ACTION_OBTAIN: i32 = 31;
 pub const TC_CREDENTIAL_ACTION_CANCEL: i32 = 32;
 pub const TC_CREDENTIAL_ACTION_FORGET: i32 = 33;
+/// Copy a sign-in an earlier build kept in the macOS login keychain into the
+/// store this build uses: the `near_ai_credential_migrate` method. Offered
+/// only for `migration_available`, which only macOS produces.
+pub const TC_CREDENTIAL_ACTION_MIGRATE: i32 = 34;
 
 /// Why a connect control is not on offer, or the empty string.
 ///
@@ -3503,6 +3507,7 @@ pub unsafe extern "C" fn tc_near_ai_credential_action(state: *const c_char) -> i
                 CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
                 CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
                 CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
             },
         )
     })
@@ -4104,6 +4109,7 @@ pub unsafe extern "C" fn tc_near_ai_balance_action(state: *const c_char) -> i32 
                 CredentialAction::Obtain => TC_CREDENTIAL_ACTION_OBTAIN,
                 CredentialAction::Cancel => TC_CREDENTIAL_ACTION_CANCEL,
                 CredentialAction::Forget => TC_CREDENTIAL_ACTION_FORGET,
+                CredentialAction::Migrate => TC_CREDENTIAL_ACTION_MIGRATE,
             },
         )
     })
@@ -5004,6 +5010,17 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
         let copy = trace_commons_contributor::onboarding_copy::onboarding_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
+}
+
+/// Can this process reach the Cloud credential store?
+///
+/// Exists so a release pipeline can ask a *signed bundle* the question, which
+/// no unit test can answer: entitlements are a property of the code signature
+/// and `cargo test` never has one. Returns 0 reachable, 1 unentitled, 2
+/// otherwise. Reads nothing and writes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credential_store_self_check() -> i32 {
+    trace_commons_contributor::daemon::credential_store_self_check()
 }
 
 #[cfg(test)]

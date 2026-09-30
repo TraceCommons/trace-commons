@@ -180,6 +180,8 @@ struct CredentialSection: View {
             model.cancelNearAiCredential()
         case .forget:
             model.forgetNearAiCredential()
+        case .migrate:
+            model.migrateNearAiCredential()
         case .none:
             break
         }
