@@ -1,8 +1,11 @@
 # Glass for the Native macOS App — Design
 
 Date: 2026-09-30
-Status: draft for review. Nothing here is implemented, and the decisions under
-"Decisions needed" are open
+Status: draft for review. Nothing here is implemented.
+- Decided: the minimum OS.
+- Provisional, pending input from Ron (rdisandro, the brand owner): the
+  purple accent, appearance, and the near.ai alignment.
+- Open: the rest of "Decisions needed".
 Visual source: #1146, "Adopt the WYSIWYG UX and Glass design system" (open,
 changes requested), at `a15fa6addf`
 Decided context: the native macOS app is kept and built to match the WYSIWYG
@@ -70,7 +73,8 @@ the macOS app keeps `main`'s behaviour. In particular:
 
 ## Alignment with near.ai
 
-Decided 2026-09-30: the app follows near.ai's brand language, but keeps
+Provisional (2026-09-30), pending input from Ron (rdisandro), the brand
+owner: the app follows near.ai's brand language, but keeps
 #1146's purple as its accent. near.ai's own accent is a single blue; the app
 does not adopt it. Everything else below comes from the near.ai brand page
 (<https://near.ai/brand>), checked against the CSS its live site ships.
@@ -106,11 +110,12 @@ does not adopt it. Everything else below comes from the near.ai brand page
 
 ## Decisions needed
 
-1. **Appearance: decided 2026-09-30, light and dark, following the
-   system.** This matches near.ai, which ships both (see "Alignment with
+1. **Appearance: provisional (2026-09-30), pending Ron's input. Light and
+   dark, following the system.** This matches near.ai, which ships both (see "Alignment with
    near.ai"). #1146 is dark only, so the light palette is derived as set
    out in "Appearance" below and reviewed by the brand owner.
-2. **Brand: decided 2026-09-30, the macOS app moves from green to purple.**
+2. **Brand: provisional (2026-09-30), pending Ron's input. The macOS app
+   moves from green to purple.**
    #1146's purple (`#6D14F3`) replaces the current green (`#178F70`), which
    came from the community site. Whether the community site follows is
    still open.
@@ -429,6 +434,11 @@ after a trademark-use check.
 ## Implementation order
 
 Each step is a PR of its own.
+
+Steps 2 (typefaces) and 8 (light and high-contrast values), and the removal
+of the green palette in step 3, wait for Ron to confirm the provisional
+brand decisions. Step 1 does not depend on them, because it seeds only
+#1146's existing values.
 
 1. **Token source and generators.** The JSON, three generators and the CI
    drift job. The Tauri output must diff to zero against #1146's
