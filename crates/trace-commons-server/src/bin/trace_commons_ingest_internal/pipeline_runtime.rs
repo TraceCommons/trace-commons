@@ -316,6 +316,54 @@ pub(crate) async fn pipeline_readiness_handler(
     )
 }
 
+/// `POST /v1/workers/pipeline/index-rebuild`: rebuilds the injected pipeline
+/// runtime's vector index for the caller's tenant from the sealed index
+/// commands Settle already committed -- no new outcome, no policy
+/// evaluation, and no credit (`PipelineService::rebuild_index_from_authoritative_commands`).
+/// Meant for after a restore, once the pipeline's rows are back but the
+/// vector index is a fresh, empty store.
+///
+/// Sits behind the same vector worker credential as `vector_index_handler`
+/// (`/v1/workers/vector-index`) -- an admin token or a bearer token scoped
+/// `TokenRole::VectorWorker` -- and copies that route's authentication shape
+/// exactly: `authenticate_with_tenant_access_grant` then
+/// `require_vector_operator`. Without an injected pipeline runtime
+/// (`state.pipeline_service`), it returns 404, the same refusal the
+/// pipeline review routes use for the same reason: there is nothing to
+/// rebuild.
+///
+/// The tenant is the authenticated credential's own tenant, never a request
+/// field -- the same tenant-scoping rule every other pipeline route follows
+/// (Envelope tenant fields are attribution only; auth derives the tenant
+/// that is actually read and written).
+pub(crate) async fn pipeline_index_rebuild_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<PipelineIndexRebuildReport>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_vector_operator(&tenant)?;
+    let pipeline_service = require_pipeline_service(state.as_ref())?;
+    let writer = pipeline_service.index_writer();
+    let report = pipeline_service
+        .rebuild_index_from_authoritative_commands(&tenant.tenant_id, writer)
+        .await
+        .map_err(pipeline_index_rebuild_error)?;
+    Ok(Json(report))
+}
+
+/// Maps `rebuild_index_from_authoritative_commands`'s anyhow errors to their
+/// HTTP shape. `index_command_invalid` is the one safe label the call
+/// returns on its own account -- a sealed command that failed validation
+/// against its run or its own committed Score evidence -- surfaced as 409
+/// Conflict, a state of the store rather than a transient service fault.
+/// Everything else falls back to the generic hash-only internal error.
+fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    if error.to_string() == "index_command_invalid" {
+        return api_error(StatusCode::CONFLICT, "index_command_invalid");
+    }
+    internal_error(error)
+}
+
 /// Handle to the worker loop `spawn_pipeline_worker` starts. `stop` asks the
 /// loop to exit at its next check (best-effort: the loop checks between
 /// iterations, not mid-`process_one`); `join` is awaited -- bounded by the

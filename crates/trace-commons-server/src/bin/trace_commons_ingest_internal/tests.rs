@@ -39862,6 +39862,53 @@ async fn vector_index_worker_route_rejects_reviewer_tokens_before_db_check() {
     assert_eq!(error.0, StatusCode::FORBIDDEN);
 }
 
+/// Task 8: `POST /v1/workers/pipeline/index-rebuild` copies
+/// `vector_index_handler`'s authentication shape exactly -- a missing
+/// credential is 401, a credential that is neither admin nor
+/// `TokenRole::VectorWorker` is 403, both before this PostgreSQL-free test
+/// state's absent pipeline runtime is ever consulted. Every error body is a
+/// fixed label, never an echo of the request or a database detail.
+#[tokio::test]
+async fn pipeline_index_rebuild_worker_route_requires_a_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = pipeline_index_rebuild_handler(State(state), HeaderMap::new())
+        .await
+        .expect_err("a missing credential must not reach the pipeline index rebuild");
+    assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.1.0.error, "missing bearer token");
+}
+
+#[tokio::test]
+async fn pipeline_index_rebuild_worker_route_rejects_a_non_vector_worker_credential() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = pipeline_index_rebuild_handler(State(state), auth_headers("review-token-a"))
+        .await
+        .expect_err("a reviewer token must not reach the pipeline index rebuild");
+    assert_eq!(error.0, StatusCode::FORBIDDEN);
+    assert_eq!(error.1.0.error, "admin or vector worker token required");
+}
+
+/// A valid vector worker credential passes authentication and the role
+/// gate, so the only reason left for this PostgreSQL-free test state to
+/// refuse is the absent pipeline runtime -- the same 404
+/// `pipeline_review_claim_handler` and its siblings answer for the same
+/// reason.
+#[tokio::test]
+async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runtime() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state(temp.path().to_path_buf());
+
+    let error = pipeline_index_rebuild_handler(State(state), auth_headers("vector-worker-token-a"))
+        .await
+        .expect_err("no pipeline runtime is injected in this test state");
+    assert_eq!(error.0, StatusCode::NOT_FOUND);
+    assert_eq!(error.1.0.error, "pipeline runtime not configured");
+}
+
 #[tokio::test]
 async fn vector_index_worker_uses_configured_external_embedder() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {

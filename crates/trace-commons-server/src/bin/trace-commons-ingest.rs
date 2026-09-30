@@ -261,11 +261,12 @@ use trace_commons_server::trace_score_attestation::{
 };
 use trace_commons_server::versioned_pipeline::{
     PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore,
-    PipelineAdmissionLimits, PipelineFollowUps, PipelineLeaseConfig, PipelineNearPayoutControls,
-    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
-    PipelineReviewClaim, PipelineRunState, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig,
+    PipelineNearPayoutControls, PipelineNearSettlementMode, PipelineNoveltyUtilityChecks,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineRetentionAction, PipelineReviewClaim, PipelineRunState, PipelineService,
+    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
+    is_pipeline_score_object_ref,
 };
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
@@ -8809,6 +8810,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(register_stats_refresh_handler),
         )
         .route("/v1/workers/vector-index", post(vector_index_handler))
+        .route(
+            "/v1/workers/pipeline/index-rebuild",
+            post(pipeline_index_rebuild_handler),
+        )
         .route(
             "/v1/workers/gate/evaluate",
             post(gate_evaluate_worker_handler),
@@ -19599,7 +19604,8 @@ use near_provisioning::{
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
 use pipeline_runtime::{
-    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime, pipeline_readiness_handler,
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
+    pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 

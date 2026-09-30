@@ -25,7 +25,7 @@ use trace_commons_gate_api::pipeline::{
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
-    IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
+    IndexUpsertResult, IndexWriteError, SettlementError, SettlementReceipt, SettlementRequest,
 };
 use trace_commons_protocol::trace_contribution::{
     ConsentScope, ResidualPiiRisk, ResidualRiskCondition, TraceAllowedUse,
@@ -3769,6 +3769,51 @@ impl PgPipelineStore {
         rows.iter().map(pipeline_settlement_from_row).collect()
     }
 
+    /// Runs eligible for an index rebuild from their own sealed commands
+    /// (port `ef97a459` lines 618 to 655, adapted): complete, included in
+    /// the index, with a completed index write that no invalidation has
+    /// touched since, and a stored command reference and hash to rebuild
+    /// from. Joined against the same operable-submission predicate
+    /// `submission_guard_on_tx` reads (accepted, not revoked, not purged,
+    /// not expired, no `trace_withdrawals` row) rather than the port's
+    /// `trace_derived_records` join, which PR 2 replaced with the
+    /// `approved_*` columns on `pipeline_runs` itself. Ordered by
+    /// `created_at, run_id` so a rebuild applies commands in the same order
+    /// Settle originally committed them.
+    pub async fn list_rebuildable_index_runs(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT p.*
+                   FROM pipeline_runs p
+                   JOIN trace_submissions s
+                     ON s.tenant_id = p.tenant_id
+                    AND s.submission_id = p.submission_id
+                  WHERE p.tenant_id = $1
+                    AND p.state = 'complete'
+                    AND p.index_membership = 'included'
+                    AND p.index_write_state = 'complete'
+                    AND p.index_invalidation_state = 'none'
+                    AND p.index_command_ref IS NOT NULL
+                    AND p.index_command_hash IS NOT NULL
+                    AND s.status = 'accepted' AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                    AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                    AND NOT EXISTS (
+                        SELECT 1 FROM trace_withdrawals w
+                         WHERE w.tenant_id = s.tenant_id AND w.submission_id = s.submission_id
+                    )
+                  ORDER BY p.created_at, p.run_id",
+                &[&tenant_id],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter().map(pipeline_run_from_row).collect()
+    }
+
     /// The payout pass's work list (P3-D11): up to `limit` complete runs of
     /// `tenant_id` whose completed `trace_credit` leg is on the `near` rail,
     /// carries its settlement batch, and has a payout still to make
@@ -5721,6 +5766,20 @@ pub struct PipelineInspection {
     pub settlements: Vec<PipelineSettlementRecord>,
 }
 
+/// What one pass of [`PipelineService::rebuild_index_from_authoritative_commands`]
+/// did: how many sealed commands it replayed, how many entries it upserted
+/// across all of them, how many of those the writer already held
+/// (`IndexUpsertResult::Unchanged`), and a hash of the exact set of command
+/// hashes it rebuilt from -- so a caller can tell two rebuilds apart, or
+/// confirm a repeat rebuilt from the same authoritative set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PipelineIndexRebuildReport {
+    pub command_count: usize,
+    pub entry_count: usize,
+    pub unchanged_entry_count: usize,
+    pub command_set_hash: String,
+}
+
 /// Builds a [`PipelineService`]. Scorers and embedders are registered by
 /// content hash (`with_scorer`/`with_embedder`) so `PipelineService::submit`
 /// can resolve whichever one a bound bundle package names, rather than the
@@ -6291,6 +6350,15 @@ impl PipelineService {
     #[doc(hidden)]
     pub fn store(&self) -> &PgPipelineStore {
         &self.store
+    }
+
+    /// The index writer Settle's own index dispatch writes through
+    /// (`PipelineServiceBuilder::new`). Exposed so a caller -- the index
+    /// rebuild worker route -- can rebuild through the exact same writer a
+    /// live run would dispatch to, rather than a second one constructed
+    /// independently.
+    pub fn index_writer(&self) -> Arc<dyn IdentifiedIndexWriter> {
+        self.index_writer.clone()
     }
 
     pub async fn withdraw_submission(
@@ -7652,6 +7720,23 @@ impl PipelineService {
             .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
     }
 
+    /// Loads a run's committed outcome for `phase` and decodes its evidence.
+    /// Alongside `committed_decision`, which decodes the same outcome's
+    /// decision instead.
+    async fn committed_evidence<T: serde::de::DeserializeOwned>(
+        &self,
+        run: &PipelineRunRecord,
+        phase: Phase,
+    ) -> anyhow::Result<T> {
+        let outcome = self
+            .store
+            .outcome_for_phase(&run.tenant_id, run.run_id, phase)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{phase:?} outcome is missing"))?;
+        serde_json::from_value(outcome.evidence)
+            .map_err(|_| anyhow::anyhow!("{phase:?} outcome is malformed"))
+    }
+
     /// Reads and decrypts the bytes stored at `object_ref_id` for `run`,
     /// under the port's operability predicate (the submission must not be
     /// revoked/expired/purged or have a `trace_withdrawals` row, the object
@@ -7805,6 +7890,71 @@ impl PipelineService {
             "index_command_invalid"
         );
         Ok(command)
+    }
+
+    /// Rebuilds `writer`'s index for `tenant_id` from the sealed index
+    /// commands Settle already wrote and committed -- no new outcome, no
+    /// evaluation of any policy, and no credit. Meant for after a restore,
+    /// once the pipeline's own rows are back but the vector index is a
+    /// fresh, empty store: replays exactly what Settle already settled,
+    /// through the same command validation (`load_index_command`, keyed
+    /// against each run's own committed Score evidence) and the same key
+    /// derivation Settle's own index dispatch uses
+    /// (`SealedIndexCommand::keyed_entries`), so a rebuilt index matches
+    /// what the pipeline actually settled, bit for bit.
+    ///
+    /// Reads `PgPipelineStore::list_rebuildable_index_runs` for the run
+    /// list -- already scoped to a complete run, included in the index, with
+    /// a completed index write no invalidation has touched, of an operable
+    /// submission -- in `created_at, run_id` order, the same order Settle
+    /// committed them in. A run whose stored command fails validation (a
+    /// tampered `index_command_hash`, or a mismatched revision, index, or
+    /// model) fails the whole rebuild closed with `index_command_invalid`
+    /// before writing anything from that run; entries an earlier run in the
+    /// same pass already wrote are not rolled back, since a fail-closed
+    /// rebuild is meant to be re-run after the operator resolves the
+    /// tampered row, and every entry write is idempotent
+    /// (`writer.upsert`'s `Unchanged` result) so a re-run never double-counts
+    /// what an earlier attempt already applied.
+    pub async fn rebuild_index_from_authoritative_commands(
+        &self,
+        tenant_id: &str,
+        writer: Arc<dyn IdentifiedIndexWriter>,
+    ) -> anyhow::Result<PipelineIndexRebuildReport> {
+        let tenant = pipeline_tenant_storage_ref(tenant_id);
+        let runs = self.store.list_rebuildable_index_runs(tenant_id).await?;
+        let mut command_hashes = Vec::with_capacity(runs.len());
+        let mut entry_count = 0usize;
+        let mut unchanged_entry_count = 0usize;
+        for run in runs {
+            let evidence = self
+                .committed_evidence::<ScoreEvidence>(&run, Phase::Score)
+                .await?;
+            let command = self
+                .load_index_command(&run, &evidence)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+            let command_hash = run
+                .index_command_hash
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
+            for (key, entry) in command.keyed_entries(&tenant) {
+                match writer.upsert(&key, &entry.embedding, &entry.content_hash) {
+                    Ok(IndexUpsertResult::Inserted) => {}
+                    Ok(IndexUpsertResult::Unchanged) => unchanged_entry_count += 1,
+                    Err(error) => return Err(anyhow::anyhow!("index rebuild failed: {error}")),
+                }
+                entry_count += 1;
+            }
+            command_hashes.push(command_hash);
+        }
+        let command_set_hash = sha256_prefixed(serde_json::to_vec(&command_hashes)?.as_slice());
+        Ok(PipelineIndexRebuildReport {
+            command_count: command_hashes.len(),
+            entry_count,
+            unchanged_entry_count,
+            command_set_hash,
+        })
     }
 
     /// Claims the next due run for `tenant_id` and advances it one phase.

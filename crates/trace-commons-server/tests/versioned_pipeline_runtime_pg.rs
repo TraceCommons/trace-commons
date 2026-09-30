@@ -25574,3 +25574,329 @@ async fn qualify_bundle_refuses_untrusted_development_and_unqualified_inputs() {
         "no row exists after every qualify_bundle call above failed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 8: index rebuild from authoritative commands
+// (`PipelineService::rebuild_index_from_authoritative_commands`,
+// `PgPipelineStore::list_rebuildable_index_runs`).
+// ---------------------------------------------------------------------------
+
+/// Settles `run` (already at Settle, per `run_to_settle_ready`) and asserts
+/// it lands `included` with a complete index write -- the shape every Task 8
+/// test needs before it can exercise a rebuild.
+async fn settle_included(
+    service: &PipelineService,
+    tenant: &str,
+    run: &PipelineRunRecord,
+) -> PipelineRunRecord {
+    let settled = service
+        .process_run(tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.index_membership, "included");
+    assert_eq!(settled.index_write_state, "complete");
+    settled
+}
+
+/// Task 8: a rebuild replays exactly the sealed commands Settle already
+/// committed -- the same key derivation, no new outcome, settlement row, or
+/// credit ledger row -- and the index it produces matches the live index
+/// entry for entry.
+///
+/// Three runs are settled and included. The minimal Score policy chunks the
+/// *whole* submitted envelope at 256 bytes (`MINIMAL_INDEX_CHUNK_BYTES`), and
+/// even the smallest envelope this suite's fixtures build already serializes
+/// well past that (the envelope's own fixed structure -- trace card,
+/// consent, redaction receipts, schema markers -- dominates its size), so a
+/// literal two-chunk command is not reachable through `envelope`/
+/// `large_envelope`. What this test needs from "one with two chunks" --
+/// multiple runs, each contributing more than one chunk, and a rebuild whose
+/// entry count is the *sum* of every command's own chunk count, not a fixed
+/// per-run constant -- is exercised regardless: two runs from the default
+/// fixture and one from the deliberately larger one, each with its own
+/// (different) chunk count.
+#[tokio::test]
+async fn index_rebuild_uses_sealed_commands_without_new_credit_or_outcomes() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("index-rebuild-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+
+    let mut settled_runs = Vec::new();
+    let mut expected_entry_count = 0usize;
+    let mut chunk_counts = Vec::new();
+    for envelope_value in [
+        envelope(uuid::Uuid::new_v4()).await,
+        envelope(uuid::Uuid::new_v4()).await,
+        large_envelope(uuid::Uuid::new_v4()).await,
+    ] {
+        let ready = run_envelope_to_settle_ready(&service, &tenant, &envelope_value).await;
+        let outcomes = service
+            .store()
+            .list_outcomes(&tenant, ready.run_id)
+            .await
+            .unwrap();
+        let score_outcome = outcomes
+            .into_iter()
+            .find(|outcome| outcome.phase == Phase::Score)
+            .expect("Score outcome recorded");
+        let evidence: ScoreEvidence = serde_json::from_value(score_outcome.evidence).unwrap();
+        let settled = settle_included(&service, &tenant, &ready).await;
+        let command = service
+            .load_index_command(&settled, &evidence)
+            .await
+            .unwrap()
+            .expect("Score proposed a command");
+        let chunk_count = command.keyed_entries(&tenant_ref).count();
+        chunk_counts.push(chunk_count);
+        expected_entry_count += chunk_count;
+        settled_runs.push(settled);
+    }
+    assert_eq!(settled_runs.len(), 3);
+    assert!(
+        chunk_counts.iter().all(|count| *count > 1),
+        "every run's command must carry more than one chunk: {chunk_counts:?}"
+    );
+
+    let recorded_entry_set_hash = index.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID);
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        expected_entry_count
+    );
+
+    let outcomes_before = count_tenant_rows(&tenant, "phase_outcomes").await;
+    let settlements_before = count_tenant_rows(&tenant, "pipeline_run_settlements").await;
+    let ledger_before = count_tenant_rows(&tenant, "trace_credit_ledger").await;
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let report = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect("rebuild succeeds");
+    assert_eq!(report.command_count, 3);
+    assert_eq!(report.entry_count, expected_entry_count);
+    assert_eq!(report.unchanged_entry_count, 0);
+    assert_eq!(
+        rebuilt.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        recorded_entry_set_hash,
+        "a rebuilt index must match the live index entry for entry"
+    );
+
+    assert_eq!(
+        count_tenant_rows(&tenant, "phase_outcomes").await,
+        outcomes_before,
+        "a rebuild must not write a new outcome"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "pipeline_run_settlements").await,
+        settlements_before,
+        "a rebuild must not write a new settlement row"
+    );
+    assert_eq!(
+        count_tenant_rows(&tenant, "trace_credit_ledger").await,
+        ledger_before,
+        "a rebuild must not write a new credit ledger row"
+    );
+
+    // A second rebuild into the same (now populated) index reports every
+    // entry unchanged, and the same command set hash.
+    let second = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect("a second rebuild succeeds");
+    assert_eq!(second.command_count, 3);
+    assert_eq!(second.entry_count, expected_entry_count);
+    assert_eq!(second.unchanged_entry_count, expected_entry_count);
+    assert_eq!(second.command_set_hash, report.command_set_hash);
+
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_index_rebuild",
+        Some(service.default_package()),
+        serde_json::json!({
+            "command_count": report.command_count,
+            "entry_count": report.entry_count,
+            "rebuilt_matches_live": true,
+        }),
+    );
+}
+
+/// Task 8: `list_rebuildable_index_runs` (and, through it, the rebuild
+/// itself) skips a withdrawn submission's run and a run whose index write has
+/// been invalidated since -- two separate exclusions, exercised separately
+/// here -- while still rebuilding a third, ordinary included run.
+#[tokio::test]
+async fn index_rebuild_skips_withdrawn_and_invalidated_runs() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("index-rebuild-skip-{}", uuid::Uuid::new_v4());
+
+    // A withdrawn submission's run: settled, included, then withdrawn.
+    let (withdrawn_ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let withdrawn_settled = settle_included(&service, &tenant, &withdrawn_ready).await;
+    withdraw(&service, &tenant, withdrawn_settled.submission_id).await;
+
+    // A run whose index write is invalidated directly -- its submission
+    // stays accepted and operable, so only the invalidation-state predicate
+    // excludes it, never the withdrawal one.
+    let (invalidated_ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let invalidated_settled = settle_included(&service, &tenant, &invalidated_ready).await;
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_invalidation_state = 'complete', updated_at = NOW()
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &invalidated_settled.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    // An ordinary included run, kept, so the listing below is not simply
+    // empty regardless of the exclusions.
+    let (kept_ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let kept_settled = settle_included(&service, &tenant, &kept_ready).await;
+
+    let rebuildable = service
+        .store()
+        .list_rebuildable_index_runs(&tenant)
+        .await
+        .unwrap();
+    let rebuildable_ids: Vec<uuid::Uuid> = rebuildable.iter().map(|run| run.run_id).collect();
+    assert_eq!(
+        rebuildable_ids,
+        vec![kept_settled.run_id],
+        "the withdrawn and invalidated runs must not be listed"
+    );
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let report = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt)
+        .await
+        .expect("rebuild succeeds");
+    assert_eq!(report.command_count, 1);
+}
+
+/// Task 8: a tampered `index_command_hash` -- the run's own committed
+/// record of what it settled -- fails the rebuild closed with
+/// `index_command_invalid`, and writes no entry from that run.
+#[tokio::test]
+async fn index_rebuild_fails_closed_on_a_tampered_command() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("index-rebuild-tamper-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+
+    let tampered_hash = format!("sha256:{}", "f".repeat(64));
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_command_hash = $3
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id, &tampered_hash],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let rebuilt = IsolatedPipelineIndex::new();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a tampered command hash must fail the rebuild closed");
+    assert_eq!(error.to_string(), "index_command_invalid");
+    assert_eq!(
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "a fail-closed rebuild must write no entry from the tampered run"
+    );
+}
+
+/// Task 8: a rebuild is strictly tenant-scoped -- run under tenant B's id, it
+/// counts and rebuilds only tenant B's own commands, never tenant A's, even
+/// though both tenants have an included run under the same service.
+#[tokio::test]
+async fn index_rebuild_is_tenant_scoped() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant_a = format!("index-rebuild-tenant-a-{}", uuid::Uuid::new_v4());
+    let tenant_b = format!("index-rebuild-tenant-b-{}", uuid::Uuid::new_v4());
+    let tenant_ref_a = pipeline_tenant_storage_ref(&tenant_a);
+    let tenant_ref_b = pipeline_tenant_storage_ref(&tenant_b);
+
+    let (ready_a, _) = run_to_settle_ready(&service, &tenant_a).await;
+    settle_included(&service, &tenant_a, &ready_a).await;
+    let (ready_b, _) = run_to_settle_ready(&service, &tenant_b).await;
+    settle_included(&service, &tenant_b, &ready_b).await;
+
+    let rebuildable_b = service
+        .store()
+        .list_rebuildable_index_runs(&tenant_b)
+        .await
+        .unwrap();
+    assert_eq!(
+        rebuildable_b.len(),
+        1,
+        "tenant B's own listing sees only its own run"
+    );
+
+    let rebuilt_b = IsolatedPipelineIndex::new();
+    let report_b = service
+        .rebuild_index_from_authoritative_commands(&tenant_b, rebuilt_b.clone())
+        .await
+        .expect("tenant B's rebuild succeeds");
+    assert_eq!(
+        report_b.command_count, 1,
+        "tenant B's rebuild never reads tenant A's commands"
+    );
+    assert!(rebuilt_b.entry_count(&tenant_ref_b, MINIMAL_INDEX_ID) > 0);
+    assert_eq!(
+        rebuilt_b.entry_count(&tenant_ref_a, MINIMAL_INDEX_ID),
+        0,
+        "tenant B's rebuild must never write tenant A's entries"
+    );
+}
