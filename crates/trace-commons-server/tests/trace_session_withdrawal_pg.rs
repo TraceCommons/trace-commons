@@ -1244,7 +1244,7 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
         .unwrap();
     assert!(
         backend
-            .list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+            .list_incomplete_source_session_withdrawals(&tenant, Some(survivor), &[], 100)
             .await
             .unwrap()
             .is_empty(),
@@ -1334,17 +1334,23 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
     // withdrawn each. The merge joins the other side's accepted version to a
     // withdrawn session without a tombstone; the withdrawal must still win.
     let pending = backend
-        .list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+        .list_incomplete_source_session_withdrawals(&tenant, Some(survivor), &[], 100)
         .await
         .unwrap();
     assert_eq!(
         pending.len(),
         2,
-        "one representative per withdrawn session with an untombstoned version"
+        "each merge-joined version of a withdrawn session, with no withdrawal row yet"
     );
-    for representative in pending {
+    for version in pending {
+        assert!(!version.withdrawal_recorded);
         backend
-            .withdraw_trace_source_session(&tenant, survivor, representative, chrono::Utc::now())
+            .withdraw_trace_source_session(
+                &tenant,
+                survivor,
+                version.submission_id,
+                chrono::Utc::now(),
+            )
             .await
             .unwrap()
             .expect("the representative maps under the surviving account");
@@ -1371,7 +1377,7 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
     }
     assert!(
         backend
-            .list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+            .list_incomplete_source_session_withdrawals(&tenant, Some(survivor), &[], 100)
             .await
             .unwrap()
             .is_empty(),

@@ -32765,6 +32765,9 @@ async fn revocation_propagation_audit_reason_hashes_worker_purpose() {
             skipped: 1,
             pending: 1,
             next_attempt_scheduled: 0,
+            withdrawal_completions_checked: 0,
+            withdrawal_completions_completed: 0,
+            withdrawal_completions_failed: 0,
         },
     )
     .await
@@ -69400,6 +69403,9 @@ fn revocation_propagation_worker_log_fields_hash_sensitive_values() {
         skipped: 2,
         pending: 1,
         next_attempt_scheduled: 1,
+        withdrawal_completions_checked: 0,
+        withdrawal_completions_completed: 0,
+        withdrawal_completions_failed: 0,
     };
 
     let fields = revocation_propagation_worker_log_fields(&auth, &response);
@@ -102687,4 +102693,587 @@ async fn settlement_posture_handler_refuses_without_a_credential() {
         .await
         .expect_err("an unknown bearer is refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
+
+// ============================================================================
+// Account merge completes source-session withdrawals (#1155)
+//
+// When both accounts held one source session and only one side had withdrawn
+// it, the merge joins the other side's live version to a withdrawn session.
+// These drive the real submit, withdraw, merge start and HTTP merge confirm
+// paths over PostgreSQL, in both directions, and assert every surface a
+// withdrawal clears: the DB status and tombstone, the file-side tombstone and
+// records, the vector entry, the dedup cluster, the object refs and bytes,
+// and one hash-only revoke audit event. A failed completion is left to the
+// revocation-propagation worker's reconciler, keyed on actual state.
+// ============================================================================
+
+/// Gate double whose `invalidate_vector_entry` fails while `fail` is set, so
+/// a test can break the withdrawal fan-out at merge and then let the
+/// reconciler finish it.
+struct ToggleInvalidationGateService {
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TraceGateService for ToggleInvalidationGateService {
+    fn evaluate_trace(
+        &self,
+        tenant_ctx: &GateTenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &trace_commons_server::trace_artifact_kek::WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<GateDecision> {
+        InMemoryGateService::new("toggle_invalidation", "sha256:toggle_invalidation")
+            .evaluate_trace(tenant_ctx, envelope_ciphertext, wrapped_dek, object_kind)
+    }
+
+    fn invalidate_vector_entry(
+        &self,
+        _tenant_ctx: &GateTenantCtx,
+        _vector_entry_id: Uuid,
+    ) -> anyhow::Result<()> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("injected_vector_invalidation_failure");
+        }
+        Ok(())
+    }
+
+    fn safe_status(&self) -> GateServiceStatus {
+        GateServiceStatus {
+            kind: "toggle_invalidation".into(),
+            gate_policy_version: "toggle_invalidation".into(),
+            gate_version_hash: "sha256:toggle_invalidation".into(),
+            attestation_verifier_configured: false,
+        }
+    }
+}
+
+/// Which account withdrew the shared session before the merge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MergeWithdrawer {
+    /// Device B, the absorbed account. The survivor's version stays live.
+    Absorbed,
+    /// Account A, the survivor. The absorbed account's version stays live.
+    Survivor,
+}
+
+struct MergeWithdrawalFixture {
+    backend: Arc<PgBackend>,
+    state: Arc<AppState>,
+    _temp: tempfile::TempDir,
+    /// The version that is still live when the merge confirms.
+    live_version: Uuid,
+    live_vector_entry: Uuid,
+    survivor_headers: HeaderMap,
+    proposal_id: Uuid,
+    gate_fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Submit one metadata-only trace as `token` through the real submit path,
+/// which writes the file-side records and the object refs.
+async fn submit_merge_fixture_trace(state: &Arc<AppState>, token: &str, tool: &str) -> Uuid {
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_tool_name(&mut envelope, tool);
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(token),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission mirrors to DB");
+    submission_id
+}
+
+/// Give `submission_id` a live vector entry and a dedup cluster, the derived
+/// surfaces a withdrawal must evict. Returns the vector entry id.
+async fn seed_merge_fixture_derived_surfaces(
+    backend: &PgBackend,
+    tenant: &str,
+    submission_id: Uuid,
+) -> Uuid {
+    let record = backend
+        .get_trace_submission(tenant, submission_id)
+        .await
+        .expect("read submission")
+        .expect("submission exists");
+    let derived_id = Uuid::new_v4();
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id,
+            tenant_id: tenant.to_string(),
+            submission_id,
+            trace_id: record.trace_id,
+            status: StorageTraceDerivedStatus::Current,
+            worker_kind: StorageTraceWorkerKind::Summary,
+            worker_version: "test-v1".to_string(),
+            input_object_ref: None,
+            input_hash: "sha256:input".to_string(),
+            output_object_ref: None,
+            canonical_summary: None,
+            canonical_summary_hash: Some("sha256:summary".to_string()),
+            summary_model: SUMMARY_MODEL.to_string(),
+            task_success: None,
+            privacy_risk: Some("low".to_string()),
+            event_count: Some(1),
+            tool_sequence: Vec::new(),
+            tool_categories: Vec::new(),
+            coverage_tags: Vec::new(),
+            duplicate_score: None,
+            novelty_score: None,
+            cluster_id: None,
+        })
+        .await
+        .expect("derived record writes");
+    let vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: tenant.to_string(),
+            submission_id,
+            derived_id,
+            vector_entry_id,
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "test-embedder".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-08-08".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: "sha256:summary".to_string(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: Some("embedding:cluster".to_string()),
+            duplicate_score: Some(0.1),
+            novelty_score: Some(0.9),
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("vector entry writes");
+    let decision_id = Uuid::new_v4();
+    backend
+        .insert_trace_gate_decision(
+            tenant,
+            StorageTraceGateDecisionRow {
+                decision_id,
+                submission_id,
+                gate_policy_version: "test-policy".to_string(),
+                gate_version_hash: "sha256:gate".to_string(),
+                perplexity_micros: 7_000_000,
+                tail_fraction_micros: 0,
+                perplexity_passed: true,
+                novelty_score_micros: 900_000,
+                nearest_neighbor_hash: "sha256:neighbor".to_string(),
+                novelty_passed: true,
+                embedding_evidence_hash: "sha256:evidence".to_string(),
+                attestation_chain_hash: "sha256:attestation".to_string(),
+                decided_at: Utc::now(),
+                vector_entry_id: Some(vector_entry_id),
+                credit_withheld_reason: None,
+                peak_perplexity_micros: None,
+                peak_novelty_micros: None,
+                chunk_count: None,
+                total_chunk_count: None,
+                qualifying_token_fraction_micros: None,
+                agent_prose_perplexity_micros: None,
+                agent_prose_tokens: None,
+                tool_result_perplexity_micros: None,
+                tool_result_tokens: None,
+                attributed_token_fraction_micros: None,
+                chunks_capped: None,
+                composite_score_micros: None,
+                vector_index_snapshot_id: None,
+                index_cardinality_at_scoring: None,
+            },
+        )
+        .await
+        .expect("gate decision writes");
+    backend
+        .update_trace_gate_decision_dedup(
+            tenant,
+            decision_id,
+            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+                dedup_simhash: 42,
+                dedup_cluster_id: Uuid::new_v4(),
+                dedup_cluster_size: 3,
+                dedup_signal_version:
+                    trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string(),
+            },
+        )
+        .await
+        .expect("dedup assignment writes");
+    vector_entry_id
+}
+
+/// Two accounts in `tenant-a` hold one source session; `withdrawer` withdraws
+/// it through the account route; the survivor stages a merge of the other.
+async fn merge_withdrawal_fixture(withdrawer: MergeWithdrawer) -> Option<MergeWithdrawalFixture> {
+    let backend = postgres_backend_for_ingest_test().await?;
+    let tenant = "tenant-a";
+    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror),
+        None,
+        true,
+        true,
+        true,
+        true,
+    );
+    let gate_fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let state = Arc::make_mut(&mut state);
+        state.require_db_mirror_writes = true;
+        state.gate_service = Arc::new(ToggleInvalidationGateService {
+            fail: gate_fail.clone(),
+        });
+    }
+
+    // Both accounts exist and hold a session each.
+    let survivor_headers = account_session_headers(&state, "token-a").await;
+    let absorbed_headers = account_session_headers(&state, "token-a-2").await;
+    let survivor = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &static_token_principal_ref("token-a"),
+    )
+    .await;
+    let absorbed = account_id_for_principal(
+        backend.as_ref(),
+        tenant,
+        &static_token_principal_ref("token-a-2"),
+    )
+    .await;
+    assert_ne!(survivor, absorbed);
+
+    let survivor_version = submit_merge_fixture_trace(&state, "token-a", "survivor_tool").await;
+    let absorbed_version = submit_merge_fixture_trace(&state, "token-a-2", "absorbed_tool").await;
+    let digest = [0x6eu8; 32];
+    for (account, version) in [(survivor, survivor_version), (absorbed, absorbed_version)] {
+        assert_eq!(
+            backend
+                .claim_trace_source_session(tenant, account, &digest, version)
+                .await
+                .expect("claim"),
+            trace_commons_server::trace_corpus_storage::TraceSourceSessionStatus::Active
+        );
+    }
+
+    let (withdrawn_version, withdrawing_headers, live_version) = match withdrawer {
+        MergeWithdrawer::Absorbed => (absorbed_version, &absorbed_headers, survivor_version),
+        MergeWithdrawer::Survivor => (survivor_version, &survivor_headers, absorbed_version),
+    };
+    let live_vector_entry =
+        seed_merge_fixture_derived_surfaces(backend.as_ref(), tenant, live_version).await;
+    let ext = account_ctx_ext(&state, withdrawing_headers).await;
+    let _ = account_trace_withdraw_handler(State(state.clone()), ext, AxumPath(withdrawn_version))
+        .await
+        .expect("the withdrawing side withdraws its own version");
+    assert_eq!(
+        backend
+            .get_trace_submission(tenant, live_version)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        StorageTraceCorpusStatus::Accepted,
+        "before the merge the other account's version is its own, and live"
+    );
+
+    // Device B's unredeemed login link is the merge code; A stages the merge.
+    let (merge_code, account_b) =
+        mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
+    assert_eq!(account_b, absorbed);
+    let ext = account_ctx_ext(&state, &survivor_headers).await;
+    let Json(started) = account_merge_start_handler(
+        State(state.clone()),
+        ext,
+        Json(AccountMergeStartBody { merge_code }),
+    )
+    .await
+    .expect("start stages a proposal");
+    let proposal_id = started
+        .get("proposal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("proposal_id returned");
+
+    Some(MergeWithdrawalFixture {
+        backend,
+        state,
+        _temp: temp,
+        live_version,
+        live_vector_entry,
+        survivor_headers,
+        proposal_id,
+        gate_fail,
+    })
+}
+
+/// POST `/v1/account/merge/confirm` through the router, as the survivor.
+async fn confirm_merge_over_http(f: &MergeWithdrawalFixture) -> (StatusCode, serde_json::Value) {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/account/merge/confirm")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({ "proposal_id": f.proposal_id }).to_string(),
+        ))
+        .expect("request builds");
+    request.headers_mut().extend(f.survivor_headers.clone());
+    let response = app(f.state.clone())
+        .oneshot(request)
+        .await
+        .expect("merge confirm responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body reads");
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+async fn merge_fixture_count(f: &MergeWithdrawalFixture, sql: &str) -> i64 {
+    read_scalar_text(f.backend.as_ref(), "tenant-a", sql, f.live_version)
+        .await
+        .expect("count reads")
+        .parse()
+        .expect("count parses")
+}
+
+/// Every surface a withdrawal clears, asserted for the version the merge
+/// joined to the withdrawn session.
+async fn assert_merge_joined_version_is_withdrawn(f: &MergeWithdrawalFixture) {
+    let tenant = "tenant-a";
+    let id = f.live_version;
+    assert_eq!(
+        f.backend
+            .get_trace_submission(tenant, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        StorageTraceCorpusStatus::Revoked,
+        "the merge-joined version is revoked"
+    );
+    assert!(
+        f.backend
+            .get_trace_withdrawal(tenant, id)
+            .await
+            .unwrap()
+            .is_some(),
+        "it carries its own withdrawal tombstone"
+    );
+    // File side.
+    let file_tombstone = read_revocation(&f.state.root, tenant, id)
+        .expect("file tombstone reads")
+        .expect("the merge writes the file-side tombstone");
+    assert_eq!(file_tombstone.reason, TRACE_WITHDRAWAL_REASON);
+    assert_eq!(
+        read_submission_record(&f.state.root, tenant, id)
+            .expect("file record reads")
+            .expect("file record is kept, as a revocation keeps it")
+            .status,
+        TraceCorpusStatus::Revoked
+    );
+    for status in [
+        TraceCorpusStatus::Accepted,
+        TraceCorpusStatus::Quarantined,
+        TraceCorpusStatus::Revoked,
+    ] {
+        assert!(
+            !f.state
+                .root
+                .join(trace_envelope_object_key(tenant, status, id))
+                .exists(),
+            "no envelope bytes survive at the {status:?} path"
+        );
+    }
+    assert_eq!(
+        merge_fixture_count(
+            f,
+            "SELECT count(*)::TEXT FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2 AND deleted_at IS NULL",
+        )
+        .await,
+        0,
+        "every object ref is marked deleted"
+    );
+    // Derived surfaces.
+    assert_eq!(
+        read_scalar_text(
+            f.backend.as_ref(),
+            tenant,
+            "SELECT status FROM trace_vector_entries
+              WHERE tenant_id = $1 AND submission_id = $2",
+            id,
+        )
+        .await
+        .as_deref(),
+        Some("invalidated"),
+        "the vector entry is invalidated"
+    );
+    assert_eq!(
+        read_scalar_text(
+            f.backend.as_ref(),
+            tenant,
+            "SELECT dedup_cluster_id::TEXT FROM trace_gate_decisions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            id,
+        )
+        .await,
+        None,
+        "the version leaves its dedup cluster"
+    );
+    assert_eq!(
+        merge_fixture_count(
+            f,
+            "SELECT count(*)::TEXT FROM trace_derived_records
+              WHERE tenant_id = $1 AND submission_id = $2 AND status <> 'revoked'",
+        )
+        .await,
+        0,
+        "every derived record is revoked"
+    );
+    assert_eq!(
+        merge_fixture_count(
+            f,
+            "SELECT count(*)::TEXT FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2 AND action = 'revoke'",
+        )
+        .await,
+        1,
+        "one hash-only revoke event, as a withdrawal records"
+    );
+}
+
+async fn run_withdrawal_reconciler(
+    f: &MergeWithdrawalFixture,
+) -> TraceRevocationPropagationWorkerResponse {
+    let Json(run) = revocation_propagation_worker_handler(
+        State(f.state.clone()),
+        auth_headers("revocation-worker-token-a"),
+        Json(TraceRevocationPropagationWorkerRequest {
+            purpose: Some("withdrawal completion reconcile".to_string()),
+            dry_run: false,
+            limit: 100,
+        }),
+    )
+    .await
+    .expect("revocation propagation worker runs");
+    run
+}
+
+/// The absorbed account withdrew; the survivor's version joins the withdrawn
+/// session at merge and is withdrawn there, over HTTP.
+#[tokio::test]
+async fn merge_confirm_withdraws_the_survivor_version_when_the_absorbed_account_withdrew() {
+    let Some(f) = merge_withdrawal_fixture(MergeWithdrawer::Absorbed).await else {
+        return;
+    };
+    let (status, body) = confirm_merge_over_http(&f).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["merged"], serde_json::json!(true));
+    assert_eq!(
+        body["withdrawal_completion_pending"],
+        serde_json::json!(false)
+    );
+    assert_merge_joined_version_is_withdrawn(&f).await;
+    cleanup_pg_trace_tenant(f.backend.as_ref(), "tenant-a").await;
+}
+
+/// The mirror: the survivor withdrew; the absorbed account's version joins
+/// the withdrawn session at merge and is withdrawn there, over HTTP.
+#[tokio::test]
+async fn merge_confirm_withdraws_the_absorbed_version_when_the_survivor_withdrew() {
+    let Some(f) = merge_withdrawal_fixture(MergeWithdrawer::Survivor).await else {
+        return;
+    };
+    let (status, body) = confirm_merge_over_http(&f).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["merged"], serde_json::json!(true));
+    assert_eq!(
+        body["withdrawal_completion_pending"],
+        serde_json::json!(false)
+    );
+    assert_merge_joined_version_is_withdrawn(&f).await;
+    cleanup_pg_trace_tenant(f.backend.as_ref(), "tenant-a").await;
+}
+
+/// Kristi's blocking case: the fan-out fails after the merge committed. The
+/// merge still answers 200, flagged pending, and the revocation-propagation
+/// worker's reconciler finishes the withdrawal with nobody acting. A second
+/// run finds nothing.
+#[tokio::test]
+async fn a_failed_merge_withdrawal_completion_is_pending_and_the_reconciler_finishes_it() {
+    let Some(f) = merge_withdrawal_fixture(MergeWithdrawer::Absorbed).await else {
+        return;
+    };
+    f.gate_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = confirm_merge_over_http(&f).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a committed merge is not a 500: {body}"
+    );
+    assert_eq!(body["merged"], serde_json::json!(true));
+    assert_eq!(
+        body["withdrawal_completion_pending"],
+        serde_json::json!(true)
+    );
+    // The DB side landed first: the version is revoked and tombstoned, but
+    // the fan-out stopped at the gate, so its vector entry and bytes remain.
+    assert_eq!(
+        f.backend
+            .get_trace_submission("tenant-a", f.live_version)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        StorageTraceCorpusStatus::Revoked
+    );
+    assert_eq!(
+        read_scalar_text(
+            f.backend.as_ref(),
+            "tenant-a",
+            "SELECT status FROM trace_vector_entries
+              WHERE tenant_id = $1 AND submission_id = $2",
+            f.live_version,
+        )
+        .await
+        .as_deref(),
+        Some("active"),
+        "a gate failure leaves the vector entry live for the reconciler to find"
+    );
+
+    // While the gate still fails, the reconciler counts a failure and
+    // changes nothing it could not finish.
+    let failing = run_withdrawal_reconciler(&f).await;
+    assert_eq!(failing.withdrawal_completions_checked, 1);
+    assert_eq!(failing.withdrawal_completions_completed, 0);
+    assert_eq!(failing.withdrawal_completions_failed, 1);
+
+    f.gate_fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let run = run_withdrawal_reconciler(&f).await;
+    assert_eq!(run.withdrawal_completions_checked, 1);
+    assert_eq!(run.withdrawal_completions_completed, 1);
+    assert_eq!(run.withdrawal_completions_failed, 0);
+    assert_merge_joined_version_is_withdrawn(&f).await;
+    let _ = f.live_vector_entry;
+
+    let again = run_withdrawal_reconciler(&f).await;
+    assert_eq!(
+        again.withdrawal_completions_checked, 0,
+        "a second run is a no-op"
+    );
+    assert_eq!(again.withdrawal_completions_completed, 0);
+    assert_eq!(again.withdrawal_completions_failed, 0);
+    assert_merge_joined_version_is_withdrawn(&f).await;
+    cleanup_pg_trace_tenant(f.backend.as_ref(), "tenant-a").await;
 }

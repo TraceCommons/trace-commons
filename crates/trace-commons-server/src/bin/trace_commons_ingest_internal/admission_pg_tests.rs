@@ -2128,7 +2128,7 @@ async fn merge_completes_a_withdrawal_the_absorbed_account_made() {
         "it records one hash-only revoke event, as a withdrawal does"
     );
     assert!(
-        db.list_untombstoned_withdrawn_source_sessions(&tenant, survivor)
+        db.list_incomplete_source_session_withdrawals(&tenant, Some(survivor), &[], 100)
             .await
             .unwrap()
             .is_empty()
